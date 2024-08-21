@@ -1,17 +1,18 @@
-const Interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const utils = @import("../utils.zig");
 const std = @import("std");
 
-pub fn stop(ip: *Interpreter) !void {
+pub inline fn stop(ip: *Interpreter) !void {
     ip.status = .success;
 }
 
-pub fn invalid(ip: *Interpreter) !void {
+pub inline fn invalid(ip: *Interpreter) !void {
+    // TODO: cosume all gas
     ip.status = .invalid;
 }
 
 /// `RETURN` Halt the execution returning the output data
-pub fn ret(ip: *Interpreter) !void {
+pub inline fn ret(ip: *Interpreter) !void {
     const offset = try ip.stack.pop();
     const size = try ip.stack.pop();
 
@@ -29,7 +30,7 @@ pub fn ret(ip: *Interpreter) !void {
 }
 
 /// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
-pub fn revert(ip: *Interpreter) !void {
+pub inline fn revert(ip: *Interpreter) !void {
     const offset = try ip.stack.pop();
     const size = try ip.stack.pop();
 
@@ -47,7 +48,7 @@ pub fn revert(ip: *Interpreter) !void {
 }
 
 /// `CALL` Message-call into another account
-pub fn call(ip: *Interpreter) !void {
+pub inline fn call(ip: *Interpreter) !void {
     const gas = try ip.stack.pop();
     const address_word = try ip.stack.pop();
     const value = try ip.stack.pop();
@@ -100,7 +101,61 @@ pub fn call(ip: *Interpreter) !void {
     }
 }
 
-pub fn delegatecall(ip: *Interpreter) !void {
+/// `CALLCODE` Message-call into this account with alternative account’s code
+pub inline fn callcode(ip: *Interpreter) !void {
+    const gas = try ip.stack.pop();
+    const address_word = try ip.stack.pop();
+    const value = try ip.stack.pop();
+    const in_offset = try ip.stack.pop();
+    const in_size = try ip.stack.pop();
+    const out_offset = try ip.stack.pop();
+    const out_size = try ip.stack.pop();
+
+    const in_offset_usize: usize = @intCast(in_offset);
+    const in_size_usize: usize = @intCast(in_size);
+    const out_offset_usize: usize = @intCast(out_offset);
+    const out_size_usize: usize = @intCast(out_size);
+
+    std.debug.print("in {d}, {d}\n", .{ in_offset, in_size });
+
+    try ip.memory.expand(in_offset_usize, in_size_usize);
+    const data = ip.memory.readBytes(in_offset_usize, in_size_usize);
+
+    // TODO: gas
+    _ = gas;
+
+    const address: [20]u8 = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
+    const address_code = try ip.state.getCode(address);
+    var interpreter = Interpreter.init(ip.allocator, address_code, .{
+        .origin = ip.tx.origin,
+        .to = ip.tx.to,
+        .value = value,
+        .data = data,
+        .gas_price = ip.tx.gas_price,
+        .from = address,
+    }, ip.block, ip.state);
+
+    defer interpreter.deinit();
+
+    interpreter.handle();
+
+    try ip.memory.expand(out_offset_usize, out_size_usize);
+    try ip.memory.writeBytes(out_offset_usize, interpreter.return_data);
+
+    const buf = try ip.allocator.alloc(u8, interpreter.return_data.len);
+
+    @memcpy(buf, interpreter.return_data);
+
+    ip.return_data = buf;
+
+    if (interpreter.status == .success) {
+        try ip.stack.push(1);
+    } else {
+        try ip.stack.push(0);
+    }
+}
+
+pub inline fn delegatecall(ip: *Interpreter) !void {
     const gas = try ip.stack.pop();
     const address_word = try ip.stack.pop();
     const in_offset = try ip.stack.pop();
@@ -150,7 +205,7 @@ pub fn delegatecall(ip: *Interpreter) !void {
     }
 }
 
-pub fn staticcall(ip: *Interpreter) !void {
+pub inline fn staticcall(ip: *Interpreter) !void {
     const gas = try ip.stack.pop();
     const address_word = try ip.stack.pop();
     const in_offset = try ip.stack.pop();
@@ -203,7 +258,7 @@ pub fn staticcall(ip: *Interpreter) !void {
 }
 
 // create a new contract
-pub fn create(ip: *Interpreter) !void {
+pub inline fn create(ip: *Interpreter) !void {
     if (ip.is_static) {
         return error.StaticCallViolation;
     }
@@ -257,7 +312,7 @@ pub fn create(ip: *Interpreter) !void {
     }
 }
 
-pub fn selfdestruct(ip: *Interpreter) !void {
+pub inline fn selfdestruct(ip: *Interpreter) !void {
     if (ip.is_static) {
         return error.StaticCallViolation;
     }

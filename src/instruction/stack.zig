@@ -1,11 +1,11 @@
-const Interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const utils = @import("../utils.zig");
 
 pub inline fn push0(ip: *Interpreter) !void {
     try ip.stack.push(0);
 }
 
-pub inline fn push(ip: *Interpreter, comptime n: u8) !void {
+pub inline fn pushN(ip: *Interpreter, comptime n: u8) !void {
     if (n < 1 or n > 32) {
         @compileError("pushN: n must e in the range 1..32");
     }

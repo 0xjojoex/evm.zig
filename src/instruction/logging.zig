@@ -1,4 +1,4 @@
-const Interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const utils = @import("../utils.zig");
 

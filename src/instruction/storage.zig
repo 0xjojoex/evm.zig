@@ -1,4 +1,4 @@
-const Interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 
 pub inline fn sstore(ip: *Interpreter) !void {
     if (ip.is_static) {

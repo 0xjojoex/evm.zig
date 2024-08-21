@@ -30,7 +30,7 @@ pub const Opcode = enum(u8) {
     BALANCE = 0x31,
     ORIGIN = 0x32,
     CALLER = 0x33,
-    CALLVALUE2 = 0x34,
+    CALLVALUE = 0x34,
     CALLDATALOAD = 0x35,
     CALLDATASIZE = 0x36,
     CALLDATACOPY = 0x37,
@@ -41,7 +41,6 @@ pub const Opcode = enum(u8) {
     EXTCODECOPY = 0x3c,
     RETURNDATASIZE = 0x3d,
     RETURNDATACOPY = 0x3e,
-    EXTCODEHASH = 0x3f,
     BLOCKHASH = 0x40,
     COINBASE = 0x41,
     TIMESTAMP = 0x42,
@@ -157,14 +156,4 @@ pub const Opcode = enum(u8) {
     pub fn isPush(self: Opcode) bool {
         return self.toInt() >= Opcode.PUSH1.toInt() and self.toInt() <= Opcode.PUSH32.toInt();
     }
-
-    pub fn toInt(self: @This()) u8 {
-        return @intFromEnum(self);
-    }
 };
-
-const std = @import("std");
-test Opcode {
-    const add = Opcode.init(0x01);
-    try std.testing.expectEqual(add, Opcode.ADD);
-}

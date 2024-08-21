@@ -2,57 +2,16 @@ const Opcode = @import("opcode.zig").Opcode;
 const std = @import("std");
 const Interpreter = @import("./Interpreter.zig");
 
-const instruction = struct {
-    usingnamespace @import("./instruction/stack.zig");
-    usingnamespace @import("./instruction/arithmetic.zig");
-    usingnamespace @import("./instruction/flow.zig");
-    usingnamespace @import("./instruction/logic.zig");
-    usingnamespace @import("./instruction/memory.zig");
-    usingnamespace @import("./instruction/storage.zig");
-    usingnamespace @import("./instruction/logging.zig");
-    usingnamespace @import("./instruction/system.zig");
-    usingnamespace @import("./instruction/environment.zig");
+const InstructionPtr = *const fn (ip: *Interpreter) callconv(.Inline) anyerror!void;
 
-    const Self = @This();
-
-    inline fn createPushN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
-                return Self.push(ip, n);
-            }
-        }.call;
-    }
-
-    inline fn createDupN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
-                return Self.dup(ip, n);
-            }
-        }.call;
-    }
-
-    inline fn createSwapN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
-                return Self.swap(ip, n);
-            }
-        }.call;
-    }
-
-    inline fn createLogN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
-                return Self.log(ip, n);
-            }
-        }.call;
-    }
+const InstructionEntry = struct {
+    Opcode,
+    // the number of minimal gas required to execute this instruction
+    u16,
+    InstructionPtr,
 };
 
-const InstructionPtr = *const fn (ip: *Interpreter) anyerror!void;
-
-const InstructionEntry = struct { Opcode, u8, InstructionPtr };
-
-const instruction_entries: []InstructionEntry = &.{
+const instruction_entries: []const InstructionEntry = &.{
     .{ .STOP, 0, instruction.stop },
     .{ .ADD, 3, instruction.add },
     .{ .MUL, 5, instruction.mul },
@@ -104,8 +63,8 @@ const instruction_entries: []InstructionEntry = &.{
     .{ .CHAINID, 2, instruction.chainid },
     .{ .SELFBALANCE, 5, instruction.selfbalance },
     .{ .BASEFEE, 2, instruction.basefee },
-    // .{ .BLOBHASH, 3, } TODO
-    // .{ .BLOBBASEFEE, 3, } TODO
+    .{ .BLOBHASH, 3, instruction.todo }, // TODO
+    .{ .BLOBBASEFEE, 3, instruction.todo }, // TODO
     .{ .POP, 2, instruction.pop },
     .{ .MLOAD, 3, instruction.mload },
     .{ .MSTORE, 3, instruction.mstore },
@@ -117,10 +76,10 @@ const instruction_entries: []InstructionEntry = &.{
     .{ .PC, 2, instruction.pc },
     .{ .MSIZE, 2, instruction.msize },
     .{ .GAS, 2, instruction.gas },
-    .{ .JUMPDEST, 1, instruction.jumpdest },
-    // TLOAD
-    // TSTORE
-    // .{ .MCOPY, 3, instruction.mcopy },
+    .{ .JUMPDEST, 1, instruction.noop },
+    .{ .TLOAD, 100, instruction.todo }, // TLOAD
+    .{ .TSTORE, 100, instruction.todo }, // TSTORE
+    .{ .MCOPY, 3, instruction.todo },
     .{ .PUSH0, 2, instruction.push0 },
     .{ .PUSH1, 3, instruction.createPushN(1) },
     .{ .PUSH2, 3, instruction.createPushN(2) },
@@ -196,8 +155,8 @@ const instruction_entries: []InstructionEntry = &.{
     .{ .CALLCODE, 100, instruction.callcode },
     .{ .RETURN, 0, instruction.ret },
     .{ .DELEGATECALL, 100, instruction.delegatecall },
-    .{ .CREATE2, 32000, instruction.create2 },
-    .{ .STATICALL, 100, instruction.staticcall },
+    .{ .CREATE2, 32000, instruction.todo },
+    .{ .STATICCALL, 100, instruction.staticcall },
     .{ .REVERT, 0, instruction.revert },
     .{ .INVALID, 0, instruction.invalid },
     .{ .SELFDESTRUCT, 5000, instruction.selfdestruct },
@@ -206,3 +165,90 @@ const instruction_entries: []InstructionEntry = &.{
 test instruction_entries {
     try std.testing.expectEqual(@typeInfo(Opcode).Enum.fields.len, instruction_entries.len);
 }
+
+pub const Instruction = struct {
+    opcode: Opcode,
+    static_gas: u16,
+    ptr: InstructionPtr,
+};
+
+pub const InstructionTable: [256]Instruction = entries: {
+    var table: [256]Instruction = undefined;
+    for (instruction_entries) |entry| {
+        const opcode = entry[0];
+        const gas = entry[1];
+        const ptr = entry[2];
+        table[@intFromEnum(opcode)] = Instruction{
+            .opcode = opcode,
+            .static_gas = gas,
+            .ptr = ptr,
+        };
+    }
+
+    break :entries table;
+};
+
+pub fn getInstruction(opcode: Opcode) Instruction {
+    return InstructionTable[@intFromEnum(opcode)];
+}
+
+test InstructionTable {
+    try std.testing.expectEqual(getInstruction(Opcode.PUSH1).opcode, Opcode.PUSH1);
+    try std.testing.expectEqual(InstructionTable[0x60].static_gas, 3);
+}
+
+const instruction = struct {
+    usingnamespace @import("./instruction/stack.zig");
+    usingnamespace @import("./instruction/arithmetic.zig");
+    usingnamespace @import("./instruction/flow.zig");
+    usingnamespace @import("./instruction/logic.zig");
+    usingnamespace @import("./instruction/memory.zig");
+    usingnamespace @import("./instruction/storage.zig");
+    usingnamespace @import("./instruction/logging.zig");
+    usingnamespace @import("./instruction/system.zig");
+    usingnamespace @import("./instruction/environment.zig");
+
+    const Self = @This();
+
+    inline fn noop(ip: *Interpreter) anyerror!void {
+        _ = ip;
+        return;
+    }
+
+    inline fn todo(ip: *Interpreter) anyerror!void {
+        _ = ip;
+        return std.debug.panic("TODO");
+    }
+
+    inline fn createPushN(comptime n: u8) InstructionPtr {
+        return struct {
+            pub inline fn call(ip: *Interpreter) anyerror!void {
+                return Self.push(ip, n);
+            }
+        }.call;
+    }
+
+    inline fn createDupN(comptime n: u8) InstructionPtr {
+        return struct {
+            pub inline fn call(ip: *Interpreter) anyerror!void {
+                return Self.dup(ip, n);
+            }
+        }.call;
+    }
+
+    inline fn createSwapN(comptime n: u8) InstructionPtr {
+        return struct {
+            pub inline fn call(ip: *Interpreter) anyerror!void {
+                return Self.swap(ip, n);
+            }
+        }.call;
+    }
+
+    inline fn createLogN(comptime n: u8) InstructionPtr {
+        return struct {
+            pub inline fn call(ip: *Interpreter) anyerror!void {
+                return Self.log(ip, n);
+            }
+        }.call;
+    }
+};

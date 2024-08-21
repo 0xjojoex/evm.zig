@@ -1,57 +1,57 @@
 const std = @import("std");
-const Interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const utils = @import("../utils.zig");
 
-pub fn gas(ip: *Interpreter) !void {
+pub inline fn gas(ip: *Interpreter) !void {
     const gas_left = std.math.maxInt(u256); // TODO: after gas is implemented, get the actual gas left
     try ip.stack.push(gas_left);
 }
 
-pub fn address(ip: *Interpreter) !void {
+pub inline fn address(ip: *Interpreter) !void {
     try ip.stack.push(@byteSwap(@as(u160, @bitCast(ip.tx.to))));
 }
 
-pub fn caller(ip: *Interpreter) !void {
+pub inline fn caller(ip: *Interpreter) !void {
     try ip.stack.push(@byteSwap(@as(u160, @bitCast(ip.tx.from))));
 }
 
-pub fn origin(ip: *Interpreter) !void {
+pub inline fn origin(ip: *Interpreter) !void {
     try ip.stack.push(@byteSwap(@as(u160, @bitCast(ip.tx.origin))));
 }
 
-pub fn gasprice(ip: *Interpreter) !void {
+pub inline fn gasprice(ip: *Interpreter) !void {
     try ip.stack.push(ip.tx.gas_price);
 }
 
-pub fn basefee(ip: *Interpreter) !void {
+pub inline fn basefee(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.base_fee);
 }
 
-pub fn coinbase(ip: *Interpreter) !void {
+pub inline fn coinbase(ip: *Interpreter) !void {
     try ip.stack.push(@byteSwap(@as(u160, @bitCast(ip.block.coinbase))));
 }
 
-pub fn timestamp(ip: *Interpreter) !void {
+pub inline fn timestamp(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.timestamp);
 }
 
-pub fn number(ip: *Interpreter) !void {
+pub inline fn number(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.number);
 }
 
-pub fn prevrandao(ip: *Interpreter) !void {
+pub inline fn prevrandao(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.prev_randao);
 }
 
-pub fn gaslimit(ip: *Interpreter) !void {
+pub inline fn gaslimit(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.gas_limit);
 }
 
-pub fn chainid(ip: *Interpreter) !void {
+pub inline fn chainid(ip: *Interpreter) !void {
     try ip.stack.push(ip.block.chain_id);
 }
 
-pub fn blockhash(ip: *Interpreter) !void {
+pub inline fn blockhash(ip: *Interpreter) !void {
     const block_number: u256 = try ip.stack.pop();
 
     if (block_number > ip.block.number + 256) {
@@ -62,17 +62,17 @@ pub fn blockhash(ip: *Interpreter) !void {
     }
 }
 
-pub fn balance(ip: *Interpreter) !void {
+pub inline fn balance(ip: *Interpreter) !void {
     const target_address = try ip.stack.pop();
     const address_balance = try ip.state.getBalance(@bitCast(@byteSwap(@as(u160, @intCast(target_address)))));
     try ip.stack.push(address_balance);
 }
 
-pub fn callvalue(ip: *Interpreter) !void {
+pub inline fn callvalue(ip: *Interpreter) !void {
     try ip.stack.push(ip.tx.value);
 }
 
-pub fn calldataload(ip: *Interpreter) !void {
+pub inline fn calldataload(ip: *Interpreter) !void {
     const offset: usize = @intCast(try ip.stack.pop());
     var buffer: [32]u8 = [_]u8{0} ** 32;
 
@@ -85,11 +85,11 @@ pub fn calldataload(ip: *Interpreter) !void {
     try ip.stack.push(utils.bytesToU256(buffer[0..]));
 }
 
-pub fn calldatasize(ip: *Interpreter) !void {
+pub inline fn calldatasize(ip: *Interpreter) !void {
     try ip.stack.push(ip.tx.data.len);
 }
 
-pub fn calldatacopy(ip: *Interpreter) !void {
+pub inline fn calldatacopy(ip: *Interpreter) !void {
     const dest_offset: usize = @intCast(try ip.stack.pop());
     const offset: usize = @intCast(try ip.stack.pop());
     const size: usize = @intCast(try ip.stack.pop());
@@ -106,11 +106,11 @@ pub fn calldatacopy(ip: *Interpreter) !void {
     }
 }
 
-pub fn codesize(ip: *Interpreter) !void {
+pub inline fn codesize(ip: *Interpreter) !void {
     try ip.stack.push(ip.bytes.len);
 }
 
-pub fn codecopy(ip: *Interpreter) !void {
+pub inline fn codecopy(ip: *Interpreter) !void {
     const dest_offset: usize = @intCast(try ip.stack.pop());
     const offset: usize = @intCast(try ip.stack.pop());
     const size: usize = @intCast(try ip.stack.pop());
@@ -124,13 +124,13 @@ pub fn codecopy(ip: *Interpreter) !void {
     }
 }
 
-pub fn extcodesize(ip: *Interpreter) !void {
+pub inline fn extcodesize(ip: *Interpreter) !void {
     const target_address = try ip.stack.pop();
     const address_code = try ip.state.getCode(@bitCast(@byteSwap(@as(u160, @intCast(target_address)))));
     try ip.stack.push(address_code.len);
 }
 
-pub fn extcodecopy(ip: *Interpreter) !void {
+pub inline fn extcodecopy(ip: *Interpreter) !void {
     const target_address = try ip.stack.pop();
     const dest_offset: usize = @intCast(try ip.stack.pop());
     const offset: usize = @intCast(try ip.stack.pop());
@@ -152,7 +152,7 @@ pub fn extcodecopy(ip: *Interpreter) !void {
     }
 }
 
-pub fn extcodehash(ip: *Interpreter) !void {
+pub inline fn extcodehash(ip: *Interpreter) !void {
     const target_address = try ip.stack.pop();
     const address_code = try ip.state.getCode(@bitCast(@byteSwap(@as(u160, @intCast(target_address)))));
     std.debug.print("extcodehash: {d}", .{address_code.len});
@@ -167,16 +167,16 @@ pub fn extcodehash(ip: *Interpreter) !void {
     }
 }
 
-pub fn selfbalance(ip: *Interpreter) !void {
+pub inline fn selfbalance(ip: *Interpreter) !void {
     const address_balance = try ip.state.getBalance(ip.tx.to);
     try ip.stack.push(address_balance);
 }
 
-pub fn returndatasize(ip: *Interpreter) !void {
+pub inline fn returndatasize(ip: *Interpreter) !void {
     try ip.stack.push(ip.return_data.len);
 }
 
-pub fn returndatacopy(ip: *Interpreter) !void {
+pub inline fn returndatacopy(ip: *Interpreter) !void {
     const dest_offset: usize = @intCast(try ip.stack.pop());
     const offset: usize = @intCast(try ip.stack.pop());
     const size: usize = @intCast(try ip.stack.pop());
