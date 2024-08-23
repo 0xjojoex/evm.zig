@@ -1,7 +1,7 @@
 const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
-const common = @import("../common.zig");
-const Address = common.Address;
+const evmz = @import("../evm.zig");
+const Address = evmz.Address;
 
 pub fn gas(ip: *Interpreter) !void {
     const gas_left = std.math.maxInt(u256); // TODO: after gas is implemented, get the actual gas left

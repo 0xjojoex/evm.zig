@@ -1,12 +1,8 @@
 const std = @import("std");
 
 pub const Address = [20]u8;
-pub const Bytes = []u8;
-pub const Hash = [32]u8; // or u256
 
-pub const zero_address: Address = [_]u8{0} ** 20;
-
-pub const empty_code_hash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
+pub const zero_address: Address = std.mem.zeroes(Address);
 
 /// Returns 0 padding address
 pub fn addr(ess: u160) Address {

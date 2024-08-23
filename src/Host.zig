@@ -1,10 +1,10 @@
 const std = @import("std");
-const common = @import("./common.zig");
+const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 const Interpreter = @import("./Interpreter.zig");
-const addr = common.addr;
-const Address = common.Address;
-const Bytes = common.Bytes;
+const addr = evmz.addr;
+const Address = evmz.Address;
+const Bytes = evmz.Bytes;
 
 pub const Account = struct {
     balance: u256,

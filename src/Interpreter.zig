@@ -3,13 +3,13 @@ const Opcode = @import("./opcode.zig").Opcode;
 const Stack = @import("./Stack.zig");
 const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
-const common = @import("./common.zig");
+const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 
-const Address = common.Address;
-const addr = common.addr;
+const Address = evmz.Address;
+const addr = evmz.addr;
 
-const Bytes = common.Bytes;
+const Bytes = evmz.Bytes;
 const log = std.log;
 
 const InterpreterError = Stack.Error | std.mem.Allocator.Error | instruction.Error;

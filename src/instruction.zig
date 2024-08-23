@@ -22,6 +22,10 @@ const InstructionEntry = struct {
     InstructionPtr,
 };
 
+// TODO:
+// - rest todo instructions
+// - add stack height check
+// - add gas cost check
 const instruction_entries: []const InstructionEntry = &.{
     .{ .STOP, 0, instruction.stop },
     .{ .ADD, 3, instruction.add },

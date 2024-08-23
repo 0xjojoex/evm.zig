@@ -1,10 +1,10 @@
 const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
-const common = @import("../common.zig");
+const evmz = @import("../evm.zig");
 const std = @import("std");
 
-const addr = common.addr;
+const addr = evmz.addr;
 
 pub fn stop(ip: *Interpreter) !void {
     ip.status = .success;
@@ -40,9 +40,6 @@ pub fn revert(ip: *Interpreter) !void {
 
     try ip.memory.expand(offset_usize, size_usize);
     const data = ip.memory.readBytes(offset_usize, size_usize);
-
-    // const buf = try ip.allocator.alloc(u8, data.len);
-    // @memcpy(buf, data);
 
     try ip.replaceReturnData(data);
     ip.status = .revert;
