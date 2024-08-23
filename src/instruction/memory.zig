@@ -4,7 +4,7 @@ const std = @import("std");
 // TODO:
 // handle error when offset > usize
 
-pub inline fn mstore(ip: *Interpreter) !void {
+pub fn mstore(ip: *Interpreter) !void {
     const offset = try ip.stack.pop();
     const value = try ip.stack.pop();
     const offset_usize: usize = @intCast(offset);
@@ -12,7 +12,7 @@ pub inline fn mstore(ip: *Interpreter) !void {
     try ip.memory.write(offset_usize, value);
 }
 
-pub inline fn mstore8(ip: *Interpreter) !void {
+pub fn mstore8(ip: *Interpreter) !void {
     const offset = try ip.stack.pop();
     const value = try ip.stack.pop();
     const offset_usize: usize = @intCast(offset);
@@ -20,7 +20,7 @@ pub inline fn mstore8(ip: *Interpreter) !void {
     ip.memory.write8(offset_usize, value);
 }
 
-pub inline fn mload(ip: *Interpreter) !void {
+pub fn mload(ip: *Interpreter) !void {
     const offset = try ip.stack.pop();
     const offset_usize: usize = @intCast(offset);
     try ip.memory.expand(offset_usize, 32);
@@ -28,7 +28,7 @@ pub inline fn mload(ip: *Interpreter) !void {
     try ip.stack.push(value);
 }
 
-pub inline fn msize(ip: *Interpreter) !void {
+pub fn msize(ip: *Interpreter) !void {
     const size = ip.memory.len();
     try ip.stack.push(size);
 }

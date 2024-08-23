@@ -1,6 +1,10 @@
-const alias = @import("./alias.zig");
-const Address = alias.Address;
-const Bytes = alias.Bytes;
+const std = @import("std");
+const common = @import("./common.zig");
+const Opcode = @import("./opcode.zig").Opcode;
+const Interpreter = @import("./Interpreter.zig");
+const addr = common.addr;
+const Address = common.Address;
+const Bytes = common.Bytes;
 
 pub const Account = struct {
     balance: u256,
@@ -11,7 +15,53 @@ pub const AccessStatus = enum(u1) {
     warm = 1,
 };
 
+pub const Message = struct {
+    kind: CallKind,
+    gas: u256,
+    recipient: Address = addr(0),
+    sender: Address,
+    input_data: []u8,
+    value: u256,
+    is_static: bool = false,
+    real_sender: Address = addr(0),
+    code_address: Address = addr(0),
+    create2_salt: u256 = 0,
+};
+
+pub const Result = struct {
+    status: Interpreter.Status,
+    output_data: []u8,
+    gas_left: u64,
+    gas_refund: i64,
+    create_address: ?Address = null,
+};
+
+pub const CallKind = enum(u8) {
+    call = 0,
+    delegatecall = 1,
+    callcode = 2,
+    create = 3,
+    create2 = 4,
+    // eofcreate = 5,
+
+    pub fn fromOpcode(opcode: Opcode) CallKind {
+        switch (opcode) {
+            Opcode.CALL => return CallKind.call,
+            Opcode.STATICCALL => return CallKind.call,
+            Opcode.DELEGATECALL => return CallKind.delegatecall,
+            Opcode.CALLCODE => return CallKind.callcode,
+            Opcode.CREATE => return CallKind.create,
+            Opcode.CREATE2 => return CallKind.create2,
+            // Opcode.EOFCREATE => return CallKind.eofcreate,
+            inline else => {
+                unreachable;
+            },
+        }
+    }
+};
+
 pub const TxContext = struct {
+    chain_id: u256,
     gas_price: u256,
     origin: Address,
     coinbase: Address,
@@ -26,7 +76,7 @@ pub const TxContext = struct {
 // incomplete
 pub const Log = struct {
     address: Address,
-    topics: []u256,
+    topics: []const u256,
     data: Bytes,
 };
 
@@ -35,20 +85,19 @@ const Self = @This();
 ptr: *anyopaque,
 vtable: *const struct {
     accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
-    getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
+    getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) ?u256,
     setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
     getBalance: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
-    getCode: *const fn (ptr: *anyopaque, address: Address) anyerror!Bytes,
-    putCode: *const fn (ptr: *anyopaque, address: Address, code: Bytes) anyerror!void,
-    putAccount: *const fn (ptr: *anyopaque, address: Address, account: Account) anyerror!void,
-    emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []u256, data: Bytes) anyerror!void,
+    copyCode: *const fn (ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) anyerror!usize,
+    emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: Bytes) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
     getTxContext: *const fn (ptr: *anyopaque) anyerror!TxContext,
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
-    selfDestruct: *const fn (ptr: *anyopaque, address: Address) anyerror!void,
+    call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
+    selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!void,
 },
 
 pub fn accountExists(self: *Self, address: Address) !bool {
@@ -66,8 +115,8 @@ pub fn accessAccount(self: *Self, address: Address) !AccessStatus {
 pub fn accessStorage(self: *Self, address: Address, key: u256) !AccessStatus {
     return self.vtable.accessStorage(self.ptr, address, key);
 }
-pub fn getCode(self: *Self, address: Address) !Bytes {
-    return self.vtable.getCode(self.ptr, address);
+pub fn copyCode(self: *Self, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+    return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);
 }
 pub fn getCodeSize(self: *Self, address: Address) !u256 {
     return self.vtable.getCodeSize(self.ptr, address);
@@ -75,14 +124,8 @@ pub fn getCodeSize(self: *Self, address: Address) !u256 {
 pub fn getCodeHash(self: *Self, address: Address) !u256 {
     return self.vtable.getCodeHash(self.ptr, address);
 }
-pub fn putCode(self: *Self, address: Address, code: Bytes) !void {
-    return self.vtable.putCode(self.ptr, address, code);
-}
 pub fn getBalance(self: *Self, address: Address) !u256 {
     return self.vtable.getBalance(self.ptr, address);
-}
-pub fn putAccount(self: *Self, address: Address, account: Account) !void {
-    return self.vtable.putAccount(self.ptr, address, account);
 }
 pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !void {
     return self.vtable.setStorage(self.ptr, address, key, value);
@@ -91,8 +134,11 @@ pub fn getStorage(self: *Self, address: Address, key: u256) ?u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
-    return self.vtable.emitLog(self.ptr, event_log);
+    return self.vtable.emitLog(self.ptr, event_log.address, event_log.topics, event_log.data);
 }
-pub fn selfDestruct(self: *Self, address: Address) !void {
-    return self.vtable.selfDestruct(self.ptr, address);
+pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !void {
+    return self.vtable.selfDestruct(self.ptr, address, beneficiary);
+}
+pub fn call(self: *Self, msg: Message) !Result {
+    return self.vtable.call(self.ptr, msg);
 }

@@ -1,16 +1,17 @@
+const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
 
-pub inline fn sstore(ip: *Interpreter) !void {
-    if (ip.is_static) {
+pub fn sstore(ip: *Interpreter) !void {
+    if (ip.msg.is_static) {
         return error.StaticCallViolation;
     }
     const key = try ip.stack.pop();
     const value = try ip.stack.pop();
-    try ip.state.sstore(ip.tx.to, key, value);
+    try ip.host.setStorage(ip.msg.recipient, key, value);
 }
 
-pub inline fn sload(ip: *Interpreter) !void {
+pub fn sload(ip: *Interpreter) !void {
     const key = try ip.stack.pop();
-    const value = ip.state.sload(ip.tx.to, key);
+    const value = ip.host.getStorage(ip.msg.recipient, key);
     try ip.stack.push(value orelse 0);
 }

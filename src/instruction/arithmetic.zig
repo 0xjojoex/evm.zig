@@ -1,7 +1,7 @@
 const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 
-pub inline fn add(ip: *Interpreter) !void {
+pub fn add(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     const result = a +% b;
@@ -9,7 +9,7 @@ pub inline fn add(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn mul(ip: *Interpreter) !void {
+pub fn mul(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     const result = a *% b;
@@ -17,7 +17,7 @@ pub inline fn mul(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn sub(ip: *Interpreter) !void {
+pub fn sub(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     const result = a -% b;
@@ -25,7 +25,7 @@ pub inline fn sub(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn div(ip: *Interpreter) !void {
+pub fn div(ip: *Interpreter) !void {
     const top = ip.stack.peekN(2);
     const a = try ip.stack.pop();
 
@@ -36,7 +36,7 @@ pub inline fn div(ip: *Interpreter) !void {
     }
 }
 
-pub inline fn sdiv(ip: *Interpreter) !void {
+pub fn sdiv(ip: *Interpreter) !void {
     const top = ip.stack.peekN(2);
     const a = try ip.stack.pop();
 
@@ -50,7 +50,7 @@ pub inline fn sdiv(ip: *Interpreter) !void {
     }
 }
 
-pub inline fn mod(ip: *Interpreter) !void {
+pub fn mod(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     var result: u256 = undefined;
@@ -62,7 +62,7 @@ pub inline fn mod(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn smod(ip: *Interpreter) !void {
+pub fn smod(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     var result: u256 = undefined;
@@ -76,7 +76,7 @@ pub inline fn smod(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn addmod(ip: *Interpreter) !void {
+pub fn addmod(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     const c = try ip.stack.pop();
@@ -89,7 +89,7 @@ pub inline fn addmod(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn mulmod(ip: *Interpreter) !void {
+pub fn mulmod(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
     const c = try ip.stack.pop();
@@ -102,7 +102,7 @@ pub inline fn mulmod(ip: *Interpreter) !void {
     try ip.stack.push(result);
 }
 
-pub inline fn exp(ip: *Interpreter) !void {
+pub fn exp(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const exponent = try ip.stack.pop();
     const result = wrap_exp(a, exponent);
@@ -132,7 +132,7 @@ inline fn wrap_exp(a: u256, exp_: u256) u256 {
 //     try std.testing.expectEqual(result, 1);
 // }
 
-pub inline fn signextend(ip: *Interpreter) !void {
+pub fn signextend(ip: *Interpreter) !void {
     const a = try ip.stack.pop();
     const b = try ip.stack.pop();
 
@@ -150,7 +150,7 @@ pub inline fn signextend(ip: *Interpreter) !void {
     try ip.stack.push(val);
 }
 
-pub inline fn keccak256(ip: *Interpreter) !void {
+pub fn keccak256(ip: *Interpreter) !void {
     const offset: usize = @intCast(try ip.stack.pop());
     const length: usize = @intCast(try ip.stack.pop());
 

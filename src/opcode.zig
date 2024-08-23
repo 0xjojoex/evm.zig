@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const Opcode = enum(u8) {
     STOP = 0x00,
     ADD = 0x01,
@@ -41,6 +43,7 @@ pub const Opcode = enum(u8) {
     EXTCODECOPY = 0x3c,
     RETURNDATASIZE = 0x3d,
     RETURNDATACOPY = 0x3e,
+    EXTCODEHASH = 0x3f,
     BLOCKHASH = 0x40,
     COINBASE = 0x41,
     TIMESTAMP = 0x42,
@@ -148,12 +151,11 @@ pub const Opcode = enum(u8) {
     INVALID = 0xfe,
     SELFDESTRUCT = 0xff,
 
-    pub fn init(code: u8) Opcode {
-        const e: Opcode = @enumFromInt(code);
-        return e;
-    }
-
     pub fn isPush(self: Opcode) bool {
         return self.toInt() >= Opcode.PUSH1.toInt() and self.toInt() <= Opcode.PUSH32.toInt();
+    }
+
+    pub fn toInt(self: Opcode) i32 {
+        return @intFromEnum(self);
     }
 };

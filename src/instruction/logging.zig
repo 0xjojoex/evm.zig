@@ -1,8 +1,8 @@
 const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
-const utils = @import("../utils.zig");
+const Host = @import("../Host.zig");
 
-pub fn log(ip: Interpreter, comptime n: u8) !void {
+pub fn log(ip: *Interpreter, comptime n: u8) !void {
     if (n > 4) {
         @compileError("logN only supports up to 4 topics");
     }
@@ -16,17 +16,16 @@ pub fn log(ip: Interpreter, comptime n: u8) !void {
     const size_usize: usize = @intCast(size);
 
     try ip.memory.expand(offset_usize, size_usize);
-    var data = ip.memory.read(offset_usize);
-    data = @byteSwap(data);
+    const data = ip.memory.readBytes(offset_usize, size_usize);
 
     for (0..n) |i| {
         const topic = try ip.stack.pop();
         topics[i] = topic;
     }
 
-    try ip.state.emitLog(utils.Log{
-        .address = ip.tx.to,
-        .topics = topics[0..],
+    try ip.host.emitLog(Host.Log{
+        .address = ip.msg.recipient,
+        .topics = topics[0..n],
         .data = data,
     });
 }

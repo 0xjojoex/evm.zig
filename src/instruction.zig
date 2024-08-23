@@ -2,12 +2,23 @@ const Opcode = @import("opcode.zig").Opcode;
 const std = @import("std");
 const Interpreter = @import("./Interpreter.zig");
 
-const InstructionPtr = *const fn (ip: *Interpreter) callconv(.Inline) anyerror!void;
+const InstructionPtr = *const fn (ip: *Interpreter) anyerror!void;
+
+// const Gas = struct { u16 };
+const StackHeight = struct {
+    // stack height required
+    u8,
+    // stack height change
+    i8,
+};
 
 const InstructionEntry = struct {
     Opcode,
-    // the number of minimal gas required to execute this instruction
+    // the static gas cost required to execute this instruction
+    // not using gas enum because it's not very readable
     u16,
+    // StackHeight,
+    /// dynamic dispatching, TODO: can it be inline fn?
     InstructionPtr,
 };
 
@@ -54,6 +65,7 @@ const instruction_entries: []const InstructionEntry = &.{
     .{ .EXTCODECOPY, 100, instruction.extcodecopy },
     .{ .RETURNDATASIZE, 2, instruction.returndatasize },
     .{ .RETURNDATACOPY, 3, instruction.returndatacopy },
+    .{ .EXTCODEHASH, 100, instruction.extcodehash },
     .{ .BLOCKHASH, 20, instruction.blockhash },
     .{ .COINBASE, 2, instruction.coinbase },
     .{ .TIMESTAMP, 2, instruction.timestamp },
@@ -81,82 +93,82 @@ const instruction_entries: []const InstructionEntry = &.{
     .{ .TSTORE, 100, instruction.todo }, // TSTORE
     .{ .MCOPY, 3, instruction.todo },
     .{ .PUSH0, 2, instruction.push0 },
-    .{ .PUSH1, 3, instruction.createPushN(1) },
-    .{ .PUSH2, 3, instruction.createPushN(2) },
-    .{ .PUSH3, 3, instruction.createPushN(3) },
-    .{ .PUSH4, 3, instruction.createPushN(4) },
-    .{ .PUSH5, 3, instruction.createPushN(5) },
-    .{ .PUSH6, 3, instruction.createPushN(6) },
-    .{ .PUSH7, 3, instruction.createPushN(7) },
-    .{ .PUSH8, 3, instruction.createPushN(8) },
-    .{ .PUSH9, 3, instruction.createPushN(9) },
-    .{ .PUSH10, 3, instruction.createPushN(10) },
-    .{ .PUSH11, 3, instruction.createPushN(11) },
-    .{ .PUSH12, 3, instruction.createPushN(12) },
-    .{ .PUSH13, 3, instruction.createPushN(13) },
-    .{ .PUSH14, 3, instruction.createPushN(14) },
-    .{ .PUSH15, 3, instruction.createPushN(15) },
-    .{ .PUSH16, 3, instruction.createPushN(16) },
-    .{ .PUSH17, 3, instruction.createPushN(17) },
-    .{ .PUSH18, 3, instruction.createPushN(18) },
-    .{ .PUSH19, 3, instruction.createPushN(19) },
-    .{ .PUSH20, 3, instruction.createPushN(20) },
-    .{ .PUSH21, 3, instruction.createPushN(21) },
-    .{ .PUSH22, 3, instruction.createPushN(22) },
-    .{ .PUSH23, 3, instruction.createPushN(23) },
-    .{ .PUSH24, 3, instruction.createPushN(24) },
-    .{ .PUSH25, 3, instruction.createPushN(25) },
-    .{ .PUSH26, 3, instruction.createPushN(26) },
-    .{ .PUSH27, 3, instruction.createPushN(27) },
-    .{ .PUSH28, 3, instruction.createPushN(28) },
-    .{ .PUSH29, 3, instruction.createPushN(29) },
-    .{ .PUSH30, 3, instruction.createPushN(30) },
-    .{ .PUSH31, 3, instruction.createPushN(31) },
-    .{ .PUSH32, 3, instruction.createPushN(32) },
-    .{ .DUP1, 3, instruction.createDupN(1) },
-    .{ .DUP2, 3, instruction.createDupN(2) },
-    .{ .DUP3, 3, instruction.createDupN(3) },
-    .{ .DUP4, 3, instruction.createDupN(4) },
-    .{ .DUP5, 3, instruction.createDupN(5) },
-    .{ .DUP6, 3, instruction.createDupN(6) },
-    .{ .DUP7, 3, instruction.createDupN(7) },
-    .{ .DUP8, 3, instruction.createDupN(8) },
-    .{ .DUP9, 3, instruction.createDupN(9) },
-    .{ .DUP10, 3, instruction.createDupN(10) },
-    .{ .DUP11, 3, instruction.createDupN(11) },
-    .{ .DUP12, 3, instruction.createDupN(12) },
-    .{ .DUP13, 3, instruction.createDupN(13) },
-    .{ .DUP14, 3, instruction.createDupN(14) },
-    .{ .DUP15, 3, instruction.createDupN(15) },
-    .{ .DUP16, 3, instruction.createDupN(16) },
-    .{ .SWAP1, 3, instruction.createSwapN(1) },
-    .{ .SWAP2, 3, instruction.createSwapN(2) },
-    .{ .SWAP3, 3, instruction.createSwapN(3) },
-    .{ .SWAP4, 3, instruction.createSwapN(4) },
-    .{ .SWAP5, 3, instruction.createSwapN(5) },
-    .{ .SWAP6, 3, instruction.createSwapN(6) },
-    .{ .SWAP7, 3, instruction.createSwapN(7) },
-    .{ .SWAP8, 3, instruction.createSwapN(8) },
-    .{ .SWAP9, 3, instruction.createSwapN(9) },
-    .{ .SWAP10, 3, instruction.createSwapN(10) },
-    .{ .SWAP11, 3, instruction.createSwapN(11) },
-    .{ .SWAP12, 3, instruction.createSwapN(12) },
-    .{ .SWAP13, 3, instruction.createSwapN(13) },
-    .{ .SWAP14, 3, instruction.createSwapN(14) },
-    .{ .SWAP15, 3, instruction.createSwapN(15) },
-    .{ .SWAP16, 3, instruction.createSwapN(16) },
-    .{ .LOG0, 375, instruction.createLogN(0) },
-    .{ .LOG1, 375 * 2, instruction.createLogN(1) },
-    .{ .LOG2, 375 * 3, instruction.createLogN(2) },
-    .{ .LOG3, 375 * 4, instruction.createLogN(3) },
-    .{ .LOG4, 375 * 5, instruction.createLogN(4) },
+    .{ .PUSH1, 3, instruction.pushN(1) },
+    .{ .PUSH2, 3, instruction.pushN(2) },
+    .{ .PUSH3, 3, instruction.pushN(3) },
+    .{ .PUSH4, 3, instruction.pushN(4) },
+    .{ .PUSH5, 3, instruction.pushN(5) },
+    .{ .PUSH6, 3, instruction.pushN(6) },
+    .{ .PUSH7, 3, instruction.pushN(7) },
+    .{ .PUSH8, 3, instruction.pushN(8) },
+    .{ .PUSH9, 3, instruction.pushN(9) },
+    .{ .PUSH10, 3, instruction.pushN(10) },
+    .{ .PUSH11, 3, instruction.pushN(11) },
+    .{ .PUSH12, 3, instruction.pushN(12) },
+    .{ .PUSH13, 3, instruction.pushN(13) },
+    .{ .PUSH14, 3, instruction.pushN(14) },
+    .{ .PUSH15, 3, instruction.pushN(15) },
+    .{ .PUSH16, 3, instruction.pushN(16) },
+    .{ .PUSH17, 3, instruction.pushN(17) },
+    .{ .PUSH18, 3, instruction.pushN(18) },
+    .{ .PUSH19, 3, instruction.pushN(19) },
+    .{ .PUSH20, 3, instruction.pushN(20) },
+    .{ .PUSH21, 3, instruction.pushN(21) },
+    .{ .PUSH22, 3, instruction.pushN(22) },
+    .{ .PUSH23, 3, instruction.pushN(23) },
+    .{ .PUSH24, 3, instruction.pushN(24) },
+    .{ .PUSH25, 3, instruction.pushN(25) },
+    .{ .PUSH26, 3, instruction.pushN(26) },
+    .{ .PUSH27, 3, instruction.pushN(27) },
+    .{ .PUSH28, 3, instruction.pushN(28) },
+    .{ .PUSH29, 3, instruction.pushN(29) },
+    .{ .PUSH30, 3, instruction.pushN(30) },
+    .{ .PUSH31, 3, instruction.pushN(31) },
+    .{ .PUSH32, 3, instruction.pushN(32) },
+    .{ .DUP1, 3, instruction.dupN(1) },
+    .{ .DUP2, 3, instruction.dupN(2) },
+    .{ .DUP3, 3, instruction.dupN(3) },
+    .{ .DUP4, 3, instruction.dupN(4) },
+    .{ .DUP5, 3, instruction.dupN(5) },
+    .{ .DUP6, 3, instruction.dupN(6) },
+    .{ .DUP7, 3, instruction.dupN(7) },
+    .{ .DUP8, 3, instruction.dupN(8) },
+    .{ .DUP9, 3, instruction.dupN(9) },
+    .{ .DUP10, 3, instruction.dupN(10) },
+    .{ .DUP11, 3, instruction.dupN(11) },
+    .{ .DUP12, 3, instruction.dupN(12) },
+    .{ .DUP13, 3, instruction.dupN(13) },
+    .{ .DUP14, 3, instruction.dupN(14) },
+    .{ .DUP15, 3, instruction.dupN(15) },
+    .{ .DUP16, 3, instruction.dupN(16) },
+    .{ .SWAP1, 3, instruction.swapN(1) },
+    .{ .SWAP2, 3, instruction.swapN(2) },
+    .{ .SWAP3, 3, instruction.swapN(3) },
+    .{ .SWAP4, 3, instruction.swapN(4) },
+    .{ .SWAP5, 3, instruction.swapN(5) },
+    .{ .SWAP6, 3, instruction.swapN(6) },
+    .{ .SWAP7, 3, instruction.swapN(7) },
+    .{ .SWAP8, 3, instruction.swapN(8) },
+    .{ .SWAP9, 3, instruction.swapN(9) },
+    .{ .SWAP10, 3, instruction.swapN(10) },
+    .{ .SWAP11, 3, instruction.swapN(11) },
+    .{ .SWAP12, 3, instruction.swapN(12) },
+    .{ .SWAP13, 3, instruction.swapN(13) },
+    .{ .SWAP14, 3, instruction.swapN(14) },
+    .{ .SWAP15, 3, instruction.swapN(15) },
+    .{ .SWAP16, 3, instruction.swapN(16) },
+    .{ .LOG0, 375, instruction.logN(0) },
+    .{ .LOG1, 375 * 2, instruction.logN(1) },
+    .{ .LOG2, 375 * 3, instruction.logN(2) },
+    .{ .LOG3, 375 * 4, instruction.logN(3) },
+    .{ .LOG4, 375 * 5, instruction.logN(4) },
     .{ .CREATE, 32000, instruction.create },
-    .{ .CALL, 100, instruction.call },
-    .{ .CALLCODE, 100, instruction.callcode },
+    .{ .CALL, 100, instruction.call(.CALL) },
+    .{ .CALLCODE, 100, instruction.call(.CALLCODE) },
     .{ .RETURN, 0, instruction.ret },
-    .{ .DELEGATECALL, 100, instruction.delegatecall },
-    .{ .CREATE2, 32000, instruction.todo },
-    .{ .STATICCALL, 100, instruction.staticcall },
+    .{ .DELEGATECALL, 100, instruction.call(.DELEGATECALL) },
+    .{ .CREATE2, 32000, instruction.create2 },
+    .{ .STATICCALL, 100, instruction.call(.STATICCALL) },
     .{ .REVERT, 0, instruction.revert },
     .{ .INVALID, 0, instruction.invalid },
     .{ .SELFDESTRUCT, 5000, instruction.selfdestruct },
@@ -172,12 +184,20 @@ pub const Instruction = struct {
     ptr: InstructionPtr,
 };
 
-pub const InstructionTable: [256]Instruction = entries: {
-    var table: [256]Instruction = undefined;
+pub const InstructionTable = entries: {
+    const max = std.math.maxInt(u8) + 1;
+    var table: [max]Instruction = undefined;
+
+    for (0..max) |i| {
+        table[i] = Instruction{
+            .opcode = Opcode.REVERT,
+            .static_gas = 0,
+            .ptr = instruction.unknown,
+        };
+    }
+
     for (instruction_entries) |entry| {
-        const opcode = entry[0];
-        const gas = entry[1];
-        const ptr = entry[2];
+        const opcode, const gas, const ptr = entry;
         table[@intFromEnum(opcode)] = Instruction{
             .opcode = opcode,
             .static_gas = gas,
@@ -197,6 +217,10 @@ test InstructionTable {
     try std.testing.expectEqual(InstructionTable[0x60].static_gas, 3);
 }
 
+pub const Error = error{
+    UnknownOpcode,
+};
+
 const instruction = struct {
     usingnamespace @import("./instruction/stack.zig");
     usingnamespace @import("./instruction/arithmetic.zig");
@@ -210,44 +234,57 @@ const instruction = struct {
 
     const Self = @This();
 
-    inline fn noop(ip: *Interpreter) anyerror!void {
+    fn noop(ip: *Interpreter) anyerror!void {
         _ = ip;
         return;
     }
 
-    inline fn todo(ip: *Interpreter) anyerror!void {
+    fn unknown(ip: *Interpreter) anyerror!void {
         _ = ip;
-        return std.debug.panic("TODO");
+        return error.UnknownOpcode;
     }
 
-    inline fn createPushN(comptime n: u8) InstructionPtr {
+    fn todo(ip: *Interpreter) anyerror!void {
+        _ = ip;
+        return std.debug.panic("TODO", .{});
+    }
+
+    inline fn pushN(comptime n: u8) InstructionPtr {
         return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
+            pub fn call(ip: *Interpreter) anyerror!void {
                 return Self.push(ip, n);
             }
         }.call;
     }
 
-    inline fn createDupN(comptime n: u8) InstructionPtr {
+    inline fn dupN(comptime n: u8) InstructionPtr {
         return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
+            pub fn call(ip: *Interpreter) anyerror!void {
                 return Self.dup(ip, n);
             }
         }.call;
     }
 
-    inline fn createSwapN(comptime n: u8) InstructionPtr {
+    inline fn swapN(comptime n: u8) InstructionPtr {
         return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
+            pub fn call(ip: *Interpreter) anyerror!void {
                 return Self.swap(ip, n);
             }
         }.call;
     }
 
-    inline fn createLogN(comptime n: u8) InstructionPtr {
+    inline fn logN(comptime n: u8) InstructionPtr {
         return struct {
-            pub inline fn call(ip: *Interpreter) anyerror!void {
+            pub fn call(ip: *Interpreter) anyerror!void {
                 return Self.log(ip, n);
+            }
+        }.call;
+    }
+
+    inline fn call(comptime op: Opcode) InstructionPtr {
+        return struct {
+            pub fn call(ip: *Interpreter) anyerror!void {
+                return Self.callByOp(ip, op);
             }
         }.call;
     }

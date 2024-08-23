@@ -1,14 +1,14 @@
 //! Stack Machine for the EVM
 const std = @import("std");
 
+const _debug: bool = false;
+
 /// The max stack size is 1024.
 pub const capacity = 1024;
 
 /// The stack is an array of 1024 256-bit words
 stacks: [capacity]u256 = undefined,
 len: usize = 0,
-
-_debug: bool = true,
 
 const Self = @This();
 
@@ -30,6 +30,9 @@ pub fn push(self: *Self, value: u256) Error!void {
     }
     self.stacks[self.len] = value;
     self.len += 1;
+    if (_debug) {
+        self.dump();
+    }
 }
 
 pub fn pushN(self: *Self, comptime n: usize, values: [n]u256) Error!void {
@@ -39,6 +42,10 @@ pub fn pushN(self: *Self, comptime n: usize, values: [n]u256) Error!void {
     inline for (values) |value| {
         self.len += 1;
         self.stacks[self.len] = value;
+    }
+
+    if (_debug) {
+        self.dump();
     }
 }
 
@@ -80,11 +87,13 @@ pub fn peekN(self: *Self, n: usize) ?u256 {
     return self.stacks[self.len - n];
 }
 
-pub fn dump(self: *Self) void {
+pub fn dump(self: *const Self) void {
     std.debug.print("--\n", .{});
     std.debug.print("Stack ({d}):\n", .{self.len});
-    for (self.stacks[0..self.len]) |v| {
-        std.debug.print("{x}\n", .{v});
+    var i: usize = self.len;
+    while (i > 0) {
+        i -= 1;
+        std.debug.print("{x}\n", .{self.stacks[i]});
     }
     std.debug.print("--\n", .{});
 }
@@ -93,8 +102,6 @@ const testing = std.testing;
 
 test Self {
     var stack = Self.init();
-
-    stack._debug = false;
 
     try stack.push(1);
     try testing.expect(stack.len == 1);
