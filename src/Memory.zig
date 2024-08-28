@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
@@ -17,17 +18,20 @@ pub fn deinit(self: *Memory) void {
     self.* = undefined;
 }
 
-pub fn read(self: *Memory, offset: usize) u256 {
+pub fn read(self: *const Memory, offset: usize) u256 {
+    assert(offset + word_size <= self.bytes.items.len);
+
     const bytes = self.bytes.items[offset..][0..word_size];
     const value = @byteSwap(@as(u256, @bitCast(bytes.*)));
     return value;
 }
 
-pub fn readBytes(self: *Memory, offset: usize, size: usize) []u8 {
+pub fn readBytes(self: *const Memory, offset: usize, size: usize) []u8 {
+    assert(offset + size <= self.bytes.items.len);
     return self.bytes.items[offset..][0..size];
 }
 
-pub fn len(self: *Memory) usize {
+pub fn len(self: *const Memory) usize {
     return self.bytes.items.len;
 }
 
@@ -46,6 +50,7 @@ pub fn writeBytes(self: *Memory, offset: usize, value: []u8) !void {
 }
 
 pub fn write8(self: *Memory, offset: usize, value: u256) void {
+    assert(offset + 1 <= self.bytes.items.len);
     const bytes = std.mem.asBytes(&value);
     // assuming already resize upstream
     self.bytes.items[offset] = bytes[0];

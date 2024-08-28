@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const Spec = enum(u8) {
+pub const latest_spec = Spec.cancun;
+
+pub const Spec = enum(u8) {
     frontier = 0,
     frontier_thawing,
     homestead,
@@ -21,6 +23,4 @@ const Spec = enum(u8) {
     cancun,
     prague,
     prague_eof,
-
-    latest = std.math.maxValue(u8),
 };

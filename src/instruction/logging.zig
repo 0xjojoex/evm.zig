@@ -1,31 +1,39 @@
-const Interpreter = @import("../Interpreter.zig");
+const evmz = @import("../evm.zig");
+const interpreter = @import("../interpreter.zig");
 const std = @import("std");
 const Host = @import("../Host.zig");
 
-pub fn log(ip: *Interpreter, comptime n: u8) !void {
-    if (n > 4) {
-        @compileError("logN only supports up to 4 topics");
-    }
+const CallFrame = interpreter.CallFrame;
 
-    const offset = try ip.stack.pop();
-    const size = try ip.stack.pop();
+pub fn Logging(comptime spec: evmz.Spec) type {
+    _ = spec;
+    return struct {
+        pub fn log(frame: *CallFrame, comptime n: u8) !void {
+            if (n > 4) {
+                @compileError("logN only supports up to 4 topics");
+            }
 
-    var topics: [n]u256 = undefined;
+            const offset = try frame.stack.pop();
+            const size = try frame.stack.pop();
 
-    const offset_usize: usize = @intCast(offset);
-    const size_usize: usize = @intCast(size);
+            var topics: [n]u256 = undefined;
 
-    try ip.memory.expand(offset_usize, size_usize);
-    const data = ip.memory.readBytes(offset_usize, size_usize);
+            const offset_usize: usize = @intCast(offset);
+            const size_usize: usize = @intCast(size);
 
-    for (0..n) |i| {
-        const topic = try ip.stack.pop();
-        topics[i] = topic;
-    }
+            try frame.memory.expand(offset_usize, size_usize);
+            const data = frame.memory.readBytes(offset_usize, size_usize);
 
-    try ip.host.emitLog(Host.Log{
-        .address = ip.msg.recipient,
-        .topics = topics[0..n],
-        .data = data,
-    });
+            for (0..n) |i| {
+                const topic = try frame.stack.pop();
+                topics[i] = topic;
+            }
+
+            try frame.host.emitLog(Host.Log{
+                .address = frame.msg.recipient,
+                .topics = topics[0..n],
+                .data = data,
+            });
+        }
+    };
 }

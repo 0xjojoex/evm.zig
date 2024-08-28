@@ -1,166 +1,174 @@
-const Interpreter = @import("../Interpreter.zig");
+const evmz = @import("../evm.zig");
+const interpreter = @import("../interpreter.zig");
 const std = @import("std");
 
-pub fn add(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    const result = a +% b;
+const CallFrame = interpreter.CallFrame;
 
-    try ip.stack.push(result);
-}
+pub fn Arithmetic(comptime spec: evmz.Spec) type {
+    _ = spec;
+    return struct {
+        pub fn add(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            const result = a +% b;
 
-pub fn mul(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    const result = a *% b;
-
-    try ip.stack.push(result);
-}
-
-pub fn sub(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    const result = a -% b;
-
-    try ip.stack.push(result);
-}
-
-pub fn div(ip: *Interpreter) !void {
-    const top = ip.stack.peekN(2);
-    const a = try ip.stack.pop();
-
-    if (top.? != 0) {
-        const b = try ip.stack.pop();
-        const result = a / b;
-        try ip.stack.push(result);
-    }
-}
-
-pub fn sdiv(ip: *Interpreter) !void {
-    const top = ip.stack.peekN(2);
-    const a = try ip.stack.pop();
-
-    if (top.? != 0) {
-        const ia: i256 = @bitCast(a);
-        const b = try ip.stack.pop();
-        const ib: i256 = @bitCast(b);
-        const result: u256 = @bitCast(@divFloor(ia, ib));
-
-        try ip.stack.push(result);
-    }
-}
-
-pub fn mod(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    var result: u256 = undefined;
-    if (b == 0) {
-        result = 0;
-    } else {
-        result = a % b;
-    }
-    try ip.stack.push(result);
-}
-
-pub fn smod(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    var result: u256 = undefined;
-    if (b == 0) {
-        result = 0;
-    } else {
-        const ia: i256 = @bitCast(a);
-        const ib: i256 = @bitCast(b);
-        result = @bitCast(@mod(ia, ib));
-    }
-    try ip.stack.push(result);
-}
-
-pub fn addmod(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    const c = try ip.stack.pop();
-    var result: u256 = undefined;
-    if (c == 0) {
-        result = 0;
-    } else {
-        result = u256AddMod(a, b, c);
-    }
-    try ip.stack.push(result);
-}
-
-pub fn mulmod(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-    const c = try ip.stack.pop();
-    var result: u256 = undefined;
-    if (c == 0) {
-        result = 0;
-    } else {
-        result = u256MulMod(a, b, c);
-    }
-    try ip.stack.push(result);
-}
-
-pub fn exp(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const exponent = try ip.stack.pop();
-    const result = wrap_exp(a, exponent);
-    try ip.stack.push(result);
-}
-
-inline fn wrap_exp(a: u256, exp_: u256) u256 {
-    var value = a;
-    var exponent = exp_;
-    var result: u256 = 1;
-    while (exponent > 0) {
-        if ((exponent & 1) != 0) {
-            result *%= value;
+            try frame.stack.push(result);
         }
-        value *%= value;
-        exponent >>= 1;
-    }
 
-    return result;
-}
+        pub fn mul(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            const result = a *% b;
 
-// TODO: fix exp wrap
-// test exp {
-//     const a = 2;
-//     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
-//     const result = wrap_exp(a, exponent);
-//     try std.testing.expectEqual(result, 1);
-// }
-
-pub fn signextend(ip: *Interpreter) !void {
-    const a = try ip.stack.pop();
-    const b = try ip.stack.pop();
-
-    var val = b;
-    if (a < 31) {
-        const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
-        const mask = std.math.shl(u256, 1, sign_bit - a) - 1;
-        if (((b >> sign_bit) & 1) != 0) {
-            val = b | ~mask;
-        } else {
-            val = b & mask;
+            try frame.stack.push(result);
         }
-    }
 
-    try ip.stack.push(val);
-}
+        pub fn sub(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            const result = a -% b;
 
-pub fn keccak256(ip: *Interpreter) !void {
-    const offset: usize = @intCast(try ip.stack.pop());
-    const length: usize = @intCast(try ip.stack.pop());
+            try frame.stack.push(result);
+        }
 
-    try ip.memory.expand(offset, length);
-    const value = ip.memory.readBytes(offset, length);
-    var result: [32]u8 = undefined;
-    // TODO: test empty value
-    std.crypto.hash.sha3.Keccak256.hash(value, &result, .{});
-    const final_result = @byteSwap(@as(u256, @bitCast(result)));
-    try ip.stack.push(final_result);
+        pub fn div(frame: *CallFrame) !void {
+            const top = frame.stack.peekN(2);
+            const a = try frame.stack.pop();
+
+            if (top.? != 0) {
+                const b = try frame.stack.pop();
+                const result = a / b;
+                try frame.stack.push(result);
+            }
+        }
+
+        pub fn sdiv(frame: *CallFrame) !void {
+            const top = frame.stack.peekN(2);
+            const a = try frame.stack.pop();
+
+            if (top.? != 0) {
+                const ia: i256 = @bitCast(a);
+                const b = try frame.stack.pop();
+                const ib: i256 = @bitCast(b);
+                const result: u256 = @bitCast(@divFloor(ia, ib));
+
+                try frame.stack.push(result);
+            }
+        }
+
+        pub fn mod(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            var result: u256 = undefined;
+            if (b == 0) {
+                result = 0;
+            } else {
+                result = a % b;
+            }
+            try frame.stack.push(result);
+        }
+
+        pub fn smod(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            var result: u256 = undefined;
+            if (b == 0) {
+                result = 0;
+            } else {
+                const ia: i256 = @bitCast(a);
+                const ib: i256 = @bitCast(b);
+                result = @bitCast(@mod(ia, ib));
+            }
+            try frame.stack.push(result);
+        }
+
+        pub fn addmod(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            const c = try frame.stack.pop();
+            var result: u256 = undefined;
+            if (c == 0) {
+                result = 0;
+            } else {
+                result = u256AddMod(a, b, c);
+            }
+            try frame.stack.push(result);
+        }
+
+        pub fn mulmod(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+            const c = try frame.stack.pop();
+            var result: u256 = undefined;
+            if (c == 0) {
+                result = 0;
+            } else {
+                result = u256MulMod(a, b, c);
+            }
+            try frame.stack.push(result);
+        }
+
+        pub fn exp(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const exponent = try frame.stack.pop();
+            const result = wrap_exp(a, exponent);
+            try frame.stack.push(result);
+        }
+
+        inline fn wrap_exp(a: u256, exp_: u256) u256 {
+            var value = a;
+            var exponent = exp_;
+            var result: u256 = 1;
+            while (exponent > 0) {
+                if ((exponent & 1) != 0) {
+                    result *%= value;
+                }
+                value *%= value;
+                exponent >>= 1;
+            }
+
+            return result;
+        }
+
+        // TODO: fix exp wrap
+        // test exp {
+        //     const a = 2;
+        //     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+        //     const result = wrap_exp(a, exponent);
+        //     try std.testing.expectEqual(result, 1);
+        // }
+
+        pub fn signextend(frame: *CallFrame) !void {
+            const a = try frame.stack.pop();
+            const b = try frame.stack.pop();
+
+            var val = b;
+            if (a < 31) {
+                const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
+                const mask = std.math.shl(u256, 1, sign_bit - a) - 1;
+                if (((b >> sign_bit) & 1) != 0) {
+                    val = b | ~mask;
+                } else {
+                    val = b & mask;
+                }
+            }
+
+            try frame.stack.push(val);
+        }
+
+        pub fn keccak256(frame: *CallFrame) !void {
+            const offset: usize = @intCast(try frame.stack.pop());
+            const length: usize = @intCast(try frame.stack.pop());
+
+            try frame.memory.expand(offset, length);
+            const value = frame.memory.readBytes(offset, length);
+            var result: [32]u8 = undefined;
+            // TODO: test empty value
+            std.crypto.hash.sha3.Keccak256.hash(value, &result, .{});
+            const final_result = @byteSwap(@as(u256, @bitCast(result)));
+            try frame.stack.push(final_result);
+        }
+    };
 }
 
 inline fn u256AddMod(a: u256, b: u256, c: u256) u256 {
