@@ -8,17 +8,16 @@ const instruction = @import("./instruction.zig");
 
 const Address = evmz.Address;
 const addr = evmz.addr;
-
+const log = std.log.scoped(.interpreter);
 const Bytes = evmz.Bytes;
-const log = std.log;
 
-const InterpreterError = Stack.Error | std.mem.Allocator.Error | instruction.Error;
+const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
 
-pub const Status = enum(u8) { success, invalid, running, revert };
+pub const Status = enum(u8) { success, invalid, running, revert, out_of_gas };
 
 pub const Result = struct {
     status: Status,
-    gas_left: u64,
+    gas_left: i64,
     gas_refund: i64,
     output_data: []u8,
 };
@@ -32,7 +31,7 @@ pub const CallFrame = struct {
     memory: Memory,
     pc: usize = 0,
     bytes: Bytes = &.{},
-    gas_left: u64 = 0,
+    gas_left: i64 = 0,
     gas_refund: i64 = 0,
     return_data: []u8 = &.{},
     _tx_context: ?Host.TxContext = null,
@@ -52,6 +51,7 @@ pub const CallFrame = struct {
             .host = host,
             .msg = msg,
             .bytes = bytes,
+            .gas_left = msg.gas,
             .status = if (bytes.len == 0) .success else .running,
         };
     }
@@ -67,6 +67,14 @@ pub const CallFrame = struct {
         const buf = try self.allocator.alloc(u8, return_data.len);
         @memcpy(buf, return_data);
         self.return_data = buf;
+    }
+
+    pub fn track_gas(self: *Self, gas: i64) void {
+        self.gas_left -= gas;
+        if (self.gas_left < 0) {
+            self.status = .out_of_gas;
+            log.debug("OOG: {any}\n", .{self});
+        }
     }
 
     pub fn getTxContext(self: *Self) !Host.TxContext {
@@ -122,11 +130,20 @@ pub fn Interpreter(comptime instruction_table: type) type {
             const opcode_byte = self.call_frame.bytes[self.call_frame.pc];
             self.call_frame.pc += 1;
             const instr = instruction_table.data[opcode_byte];
+
+            self.call_frame.track_gas(instr.static_gas);
+
+            if (self.call_frame.status != .running) {
+                return;
+            }
+
             instr.ptr(&self.call_frame) catch |err| {
-                self.call_frame.status = .invalid;
-                log.err("Error: {any}\n", .{err});
+                if (self.call_frame.status == .running) {
+                    self.call_frame.status = .invalid;
+                    log.debug("Error: {any}\n", .{err});
+                }
             };
-            if (self.call_frame.pc >= self.call_frame.bytes.len and self.call_frame.status == Status.running) {
+            if (self.call_frame.pc >= self.call_frame.bytes.len and self.call_frame.status == .running) {
                 self.call_frame.status = .success;
             }
         }

@@ -21,7 +21,10 @@ pub fn Logging(comptime spec: evmz.Spec) type {
             const offset_usize: usize = @intCast(offset);
             const size_usize: usize = @intCast(size);
 
-            try frame.memory.expand(offset_usize, size_usize);
+            const expand_cost = try frame.memory.expand(offset_usize, size_usize);
+            const log_cost: i64 = @intCast(8 * size_usize);
+            frame.track_gas(expand_cost + log_cost);
+
             const data = frame.memory.readBytes(offset_usize, size_usize);
 
             for (0..n) |i| {

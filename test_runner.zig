@@ -9,6 +9,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const log_level: std.log.Level = .debug;
+
 const Allocator = std.mem.Allocator;
 
 const BORDER = "=" ** 80;

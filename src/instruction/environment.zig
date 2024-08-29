@@ -1,15 +1,15 @@
 const std = @import("std");
 const interpreter = @import("../interpreter.zig");
 const evmz = @import("../evm.zig");
+const instruction = evmz.instruction;
 const Address = evmz.Address;
 const CallFrame = interpreter.CallFrame;
 
 pub fn Enviroment(comptime spec: evmz.Spec) type {
-    _ = spec;
-
     return struct {
         pub fn gas(frame: *CallFrame) !void {
-            const gas_left = std.math.maxInt(u256); // TODO: after gas is implemented, get the actual gas left
+            const g: u64 = @intCast(frame.gas_left);
+            const gas_left = @as(u256, g);
             try frame.stack.push(gas_left);
         }
 
@@ -80,8 +80,12 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
         }
 
         pub fn balance(frame: *CallFrame) !void {
-            const target_address = try frame.stack.pop();
-            const address_balance = try frame.host.getBalance(@bitCast(@byteSwap(@as(u160, @intCast(target_address)))));
+            const target_address_word = try frame.stack.pop();
+            const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(target_address_word))));
+            if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
+                frame.track_gas(instruction.cold_account_access_gas);
+            }
+            const address_balance = try frame.host.getBalance(target_address);
             try frame.stack.push(address_balance);
         }
 
@@ -111,7 +115,8 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const offset: usize = @intCast(try frame.stack.pop());
             const size: usize = @intCast(try frame.stack.pop());
 
-            try frame.memory.expand(dest_offset, size);
+            const expand_cost = try frame.memory.expand(dest_offset, size);
+            frame.track_gas(expand_cost);
 
             // refactor to write bytes
             for (0..size) |i| {
@@ -132,7 +137,8 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const offset: usize = @intCast(try frame.stack.pop());
             const size: usize = @intCast(try frame.stack.pop());
 
-            try frame.memory.expand(dest_offset, size);
+            const expand_cost = try frame.memory.expand(dest_offset, size);
+            frame.track_gas(expand_cost);
 
             for (0..size) |i| {
                 if (offset + i < frame.bytes.len) {
@@ -158,8 +164,13 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             defer frame.allocator.free(buf);
             @memset(buf[0..buf.len], 0);
 
+            if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
+                frame.track_gas(instruction.cold_account_access_gas);
+            }
+
             const code_len = try frame.host.copyCode(target_address, offset, buf);
-            try frame.memory.expand(dest_offset, code_len);
+            const expand_cost = try frame.memory.expand(dest_offset, code_len);
+            frame.track_gas(expand_cost);
 
             try frame.memory.writeBytes(dest_offset, buf[0..]);
         }
@@ -167,6 +178,9 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
         pub fn extcodehash(frame: *CallFrame) !void {
             const address_word = try frame.stack.pop();
             const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
+            if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
+                frame.track_gas(instruction.cold_account_access_gas);
+            }
             const code_hash = try frame.host.getCodeHash(target_address);
             try frame.stack.push(code_hash);
         }
@@ -185,7 +199,8 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const offset: usize = @intCast(try frame.stack.pop());
             const size: usize = @intCast(try frame.stack.pop());
 
-            try frame.memory.expand(dest_offset, size);
+            const expand_cost = try frame.memory.expand(dest_offset, size);
+            frame.track_gas(expand_cost);
 
             try frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);
         }

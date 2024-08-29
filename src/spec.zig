@@ -23,4 +23,10 @@ pub const Spec = enum(u8) {
     cancun,
     prague,
     prague_eof,
+
+    const Self = @This();
+
+    pub fn isImpl(self: Self, spec: Self) bool {
+        return @intFromEnum(self) >= @intFromEnum(spec);
+    }
 };

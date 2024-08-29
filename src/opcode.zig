@@ -151,11 +151,19 @@ pub const Opcode = enum(u8) {
     INVALID = 0xfe,
     SELFDESTRUCT = 0xff,
 
-    pub fn isPush(self: Opcode) bool {
+    pub fn isPushN(self: Opcode) bool {
         return self.toInt() >= Opcode.PUSH1.toInt() and self.toInt() <= Opcode.PUSH32.toInt();
     }
 
-    pub fn toInt(self: Opcode) i32 {
+    pub fn oprand(self: Opcode) usize {
+        if (self.isPushN()) {
+            return self.toInt() - Opcode.PUSH0.toInt();
+        } else {
+            return 0;
+        }
+    }
+
+    pub fn toInt(self: Opcode) u8 {
         return @intFromEnum(self);
     }
 };

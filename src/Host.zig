@@ -15,9 +15,21 @@ pub const AccessStatus = enum(u1) {
     warm = 1,
 };
 
+pub const StorageStatus = enum(u8) {
+    assigned,
+    added,
+    deleted,
+    modified,
+    deleted_added,
+    modified_deleted,
+    deleted_restored,
+    added_deleted,
+    modified_restored,
+};
+
 pub const Message = struct {
     kind: CallKind,
-    gas: u256,
+    gas: i64,
     recipient: Address = addr(0),
     sender: Address,
     input_data: []u8,
@@ -31,7 +43,7 @@ pub const Message = struct {
 pub const Result = struct {
     status: interpreter.Status,
     output_data: []u8,
-    gas_left: u64,
+    gas_left: i64,
     gas_refund: i64,
     create_address: ?Address = null,
 };
@@ -86,7 +98,7 @@ ptr: *anyopaque,
 vtable: *const struct {
     accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) ?u256,
-    setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
+    setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
     getBalance: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
@@ -97,7 +109,7 @@ vtable: *const struct {
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
-    selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!void,
+    selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
 },
 
 pub fn accountExists(self: *Self, address: Address) !bool {
@@ -127,7 +139,7 @@ pub fn getCodeHash(self: *Self, address: Address) !u256 {
 pub fn getBalance(self: *Self, address: Address) !u256 {
     return self.vtable.getBalance(self.ptr, address);
 }
-pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !void {
+pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStatus {
     return self.vtable.setStorage(self.ptr, address, key, value);
 }
 pub fn getStorage(self: *Self, address: Address, key: u256) ?u256 {
@@ -136,7 +148,7 @@ pub fn getStorage(self: *Self, address: Address, key: u256) ?u256 {
 pub fn emitLog(self: *Self, event_log: Log) !void {
     return self.vtable.emitLog(self.ptr, event_log.address, event_log.topics, event_log.data);
 }
-pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !void {
+pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
     return self.vtable.selfDestruct(self.ptr, address, beneficiary);
 }
 pub fn call(self: *Self, msg: Message) !Result {

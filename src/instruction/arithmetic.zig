@@ -1,11 +1,10 @@
-const evmz = @import("../evm.zig");
 const interpreter = @import("../interpreter.zig");
 const std = @import("std");
+const evmz = @import("../evm.zig");
 
 const CallFrame = interpreter.CallFrame;
 
 pub fn Arithmetic(comptime spec: evmz.Spec) type {
-    _ = spec;
     return struct {
         pub fn add(frame: *CallFrame) !void {
             const a = try frame.stack.pop();
@@ -111,6 +110,12 @@ pub fn Arithmetic(comptime spec: evmz.Spec) type {
         pub fn exp(frame: *CallFrame) !void {
             const a = try frame.stack.pop();
             const exponent = try frame.stack.pop();
+
+            const exp_cost: u8 = if (spec.isImpl(.spurious_dragon)) 50 else 10;
+
+            const exponent_byte_size: i64 = countSignificantBytesSize(@intCast(exponent));
+            frame.track_gas(exp_cost * exponent_byte_size);
+
             const result = wrap_exp(a, exponent);
             try frame.stack.push(result);
         }
@@ -158,13 +163,19 @@ pub fn Arithmetic(comptime spec: evmz.Spec) type {
 
         pub fn keccak256(frame: *CallFrame) !void {
             const offset: usize = @intCast(try frame.stack.pop());
-            const length: usize = @intCast(try frame.stack.pop());
+            const size: usize = @intCast(try frame.stack.pop());
 
-            try frame.memory.expand(offset, length);
-            const value = frame.memory.readBytes(offset, length);
+            const expand_cost = try frame.memory.expand(offset, size);
+            const min_word_size = (size + 31) / 32;
+            const gas_for_word: i64 = @intCast(6 * min_word_size);
+            frame.track_gas(gas_for_word + expand_cost);
+
+            const value = frame.memory.readBytes(offset, size);
+
             var result: [32]u8 = undefined;
             // TODO: test empty value
             std.crypto.hash.sha3.Keccak256.hash(value, &result, .{});
+
             const final_result = @byteSwap(@as(u256, @bitCast(result)));
             try frame.stack.push(final_result);
         }
@@ -212,4 +223,16 @@ test u256MulMod {
     try std.testing.expectEqual(u256MulMod(std.math.pow(u256, 2, 255), std.math.pow(u256, 2, 255), max_256), 0x4000000000000000000000000000000000000000000000000000000000000000);
     try std.testing.expectEqual(u256MulMod(max_256, 1, max_256), 0);
     try std.testing.expectEqual(u256MulMod(3, 4, 5), 2);
+}
+
+inline fn countSignificantBytesSize(value: u64) u8 {
+    return (64 - @clz(value) + 7) / 8;
+}
+
+test countSignificantBytesSize {
+    try std.testing.expectEqual(countSignificantBytesSize(0), 0);
+    try std.testing.expectEqual(countSignificantBytesSize(1), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(255), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(256), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(1000), 2);
 }

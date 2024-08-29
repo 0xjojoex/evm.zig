@@ -3,6 +3,18 @@ const std = @import("std");
 const evmz = @import("./evm.zig");
 const interpreter = @import("./interpreter.zig");
 
+pub const call_value_cost = 9000;
+pub const account_creation_cost = 25000;
+
+// [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929)
+pub const cold_sload_cost = 2100;
+const cold_account_access_cost = 2600;
+pub const warm_storage_read_cost = 100;
+
+// warm_storage_read_cost is count before instruction execution
+pub const cold_account_access_gas = cold_account_access_cost - warm_storage_read_cost;
+pub const cold_sload_gas = cold_sload_cost - warm_storage_read_cost;
+
 const CallFrame = interpreter.CallFrame;
 
 pub const Error = error{
@@ -218,7 +230,7 @@ pub fn InstructionTable(comptime spec: evmz.Spec) type {
 test InstructionTable {
     const instruction_table = InstructionTable(evmz.spec.latest_spec);
 
-    // try std.testing.expectEqual(instruction_table.data[0x00].static_gas, 0);
+    try std.testing.expectEqual(instruction_table.data[0x00].static_gas, 0);
     try std.testing.expectEqual(instruction_table.data[0x60].static_gas, 3);
 }
 
@@ -286,9 +298,4 @@ pub fn Instructions(comptime spec: evmz.Spec) type {
             }.call;
         }
     };
-}
-
-test "hi" {
-    const instr = Instructions(.cancun);
-    _ = instr.system;
 }

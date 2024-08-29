@@ -56,14 +56,17 @@ pub fn write8(self: *Memory, offset: usize, value: u256) void {
     self.bytes.items[offset] = bytes[0];
 }
 
-pub fn expand(self: *Memory, offset: usize, byte_size: usize) !void {
+/// Expand the memory if needed, return the *gas cost* of the expansion.
+pub fn expand(self: *Memory, offset: usize, byte_size: usize) !i64 {
     if (byte_size == 0) {
-        return;
+        return 0;
     }
     const next_size = nextSize(offset, byte_size);
     if (self.len() < next_size) {
         try self.resize(next_size);
+        return expand_cost(next_size);
     }
+    return 0;
 }
 
 inline fn nextSize(offset: usize, byte_size: usize) usize {
@@ -79,6 +82,19 @@ test nextSize {
     try std.testing.expectEqual(64, nextSize(32, 32));
     try std.testing.expectEqual(96, nextSize(57, 32));
     try std.testing.expectEqual(256, nextSize(255, 1));
+}
+
+pub inline fn expand_cost(expand_size: u64) i64 {
+    const memory_size_word = (expand_size + 31) / 32;
+    return @intCast((memory_size_word * memory_size_word) / 512 + (3 * memory_size_word));
+}
+
+test expand_cost {
+    // const cost0 = expand_cost(expanded);
+    // try std.testing.expectEqual(3, cost0);
+
+    // try std.testing.expectEqual(3, nextSize(0, 32));
+    // try std.testing.expectEqual(6, nextSize(1, 32));
 }
 
 test Memory {

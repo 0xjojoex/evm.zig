@@ -29,7 +29,7 @@ pub fn Flow(comptime spec: evmz.Spec) type {
 
         pub fn afterJump(frame: *CallFrame) void {
             const code: Opcode = @enumFromInt(frame.bytes[frame.pc - 1]);
-            if (frame.bytes[frame.pc] != @intFromEnum(Opcode.JUMPDEST) or (code.isPush())) {
+            if (frame.bytes[frame.pc] != @intFromEnum(Opcode.JUMPDEST) or (code.isPushN())) {
                 frame.status = .invalid;
             }
         }
