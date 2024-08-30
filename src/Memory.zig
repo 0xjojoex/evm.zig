@@ -97,14 +97,6 @@ pub inline fn expand_cost(expand_size: u64) i64 {
     return @intCast((memory_size_word * memory_size_word) / 512 + (3 * memory_size_word));
 }
 
-test expand_cost {
-    // const cost0 = expand_cost(expanded);
-    // try std.testing.expectEqual(3, cost0);
-
-    // try std.testing.expectEqual(3, nextSize(0, 32));
-    // try std.testing.expectEqual(6, nextSize(1, 32));
-}
-
 test Memory {
     var memory = Memory.init(std.testing.allocator);
     defer memory.deinit();

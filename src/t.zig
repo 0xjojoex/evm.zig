@@ -1,5 +1,5 @@
 const std = @import("std");
-const evmz = @import("../evm.zig");
+const evmz = @import("./evm.zig");
 
 const Host = evmz.Host;
 const addr = evmz.addr;
@@ -42,8 +42,10 @@ pub const MockHost = struct {
                 .base_fee = 0,
                 .gas_limit = 0,
                 .gas_price = 0,
+                .coinbase = addr(0),
                 .origin = addr(0),
-                .blob_base = 0,
+                .blob_base_fee = 0,
+                .blob_hashes = &.{},
                 .chain_id = 0,
                 .number = 0,
                 .prev_randao = 0,
@@ -61,10 +63,11 @@ pub const MockHost = struct {
         });
     }
 
-    fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !void {
+    fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
-        return self.store.put(key, value);
+        try self.store.put(key, value);
+        return .assigned;
     }
 
     fn getStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
@@ -237,7 +240,23 @@ pub const MockHost = struct {
         };
     }
 
-    pub fn impl(self: *Self) Host {
+    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        _ = self;
+        _ = address;
+        _ = key;
+        return 1;
+    }
+
+    fn setTransientStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        _ = self;
+        _ = address;
+        _ = key;
+        _ = value;
+    }
+
+    pub fn host(self: *Self) Host {
         return Host{ .ptr = self, .vtable = &.{
             .call = call,
             .accountExists = accountExists,
@@ -253,6 +272,8 @@ pub const MockHost = struct {
             .accessStorage = accessStorage,
             .accessAccount = accessAccount,
             .getTxContext = getTxContext,
+            .getTransientStorage = getTransientStorage,
+            .setTransientStorage = setTransientStorage,
         } };
     }
 };
