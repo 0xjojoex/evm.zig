@@ -95,8 +95,8 @@ pub fn InstructionTable(comptime spec: evmz.Spec) type {
         .{ .CHAINID, 2, instructions.environment.chainid },
         .{ .SELFBALANCE, 5, instructions.environment.selfbalance },
         .{ .BASEFEE, 2, instructions.environment.basefee },
-        .{ .BLOBHASH, 3, instructions.todo }, // TODO
-        .{ .BLOBBASEFEE, 3, instructions.todo }, // TODO
+        .{ .BLOBHASH, 3, instructions.environment.blobhash },
+        .{ .BLOBBASEFEE, 3, instructions.environment.blobbasefee },
         .{ .POP, 2, instructions.stack.pop },
         .{ .MLOAD, 3, instructions.memory.mload },
         .{ .MSTORE, 3, instructions.memory.mstore },
@@ -109,9 +109,9 @@ pub fn InstructionTable(comptime spec: evmz.Spec) type {
         .{ .MSIZE, 2, instructions.memory.msize },
         .{ .GAS, 2, instructions.environment.gas },
         .{ .JUMPDEST, 1, instructions.noop },
-        .{ .TLOAD, 100, instructions.todo }, // TLOAD
-        .{ .TSTORE, 100, instructions.todo }, // TSTORE
-        .{ .MCOPY, 3, instructions.todo },
+        .{ .TLOAD, 100, instructions.storage.tload },
+        .{ .TSTORE, 100, instructions.storage.tstore },
+        .{ .MCOPY, 3, instructions.memory.mcopy },
         .{ .PUSH0, 2, instructions.stack.push0 },
         .{ .PUSH1, 3, instructions.pushN(1) },
         .{ .PUSH2, 3, instructions.pushN(2) },

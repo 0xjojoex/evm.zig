@@ -28,6 +28,7 @@ pub const StorageStatus = enum(u8) {
 };
 
 pub const Message = struct {
+    depth: u16,
     kind: CallKind,
     gas: i64,
     recipient: Address = addr(0),
@@ -82,7 +83,8 @@ pub const TxContext = struct {
     gas_limit: u64,
     prev_randao: u256,
     base_fee: u256,
-    blob_base: u256,
+    blob_base_fee: u256,
+    blob_hashes: []const u256,
 };
 
 // incomplete
@@ -110,6 +112,8 @@ vtable: *const struct {
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
+    getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) ?u256,
+    setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
 },
 
 pub fn accountExists(self: *Self, address: Address) !bool {
@@ -153,4 +157,10 @@ pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
 }
 pub fn call(self: *Self, msg: Message) !Result {
     return self.vtable.call(self.ptr, msg);
+}
+pub fn getTransientStorage(self: *Self, address: Address, key: u256) ?u256 {
+    return self.vtable.getTransientStorage(self.ptr, address, key);
+}
+pub fn setTransientStorage(self: *Self, address: Address, key: u256, value: u256) !void {
+    return self.vtable.setTransientStorage(self.ptr, address, key, value);
 }

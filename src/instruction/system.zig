@@ -89,6 +89,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             const data = frame.memory.readBytes(in_offset_usize, in_size_usize);
 
             var msg = Host.Message{
+                .depth = frame.msg.depth + 1,
                 .kind = Host.CallKind.fromOpcode(op),
                 .recipient = if (op == Opcode.CALL or op == Opcode.STATICCALL) address else frame.msg.recipient,
                 .is_static = op == Opcode.STATICCALL,
@@ -183,12 +184,13 @@ pub fn System(comptime spec: evmz.Spec) type {
                 break :blk cost;
             };
 
-            const init_code_cost = init_code_word_cost * evmz.wordSize(i64, @intCast(size_usize));
+            const init_code_cost = init_code_word_cost * evmz.calcWordSize(i64, @intCast(size_usize));
             frame.track_gas(init_code_cost);
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
 
             var msg = Host.Message{
+                .depth = frame.msg.depth + 1,
                 .kind = if (is_create2) .create2 else .create,
                 .input_data = init_code,
                 .gas = frame.gas_left,

@@ -28,6 +28,7 @@ pub fn read(self: *const Memory, offset: usize) u256 {
 
 pub fn readBytes(self: *const Memory, offset: usize, size: usize) []u8 {
     assert(offset + size <= self.bytes.items.len);
+
     return self.bytes.items[offset..][0..size];
 }
 
@@ -50,10 +51,17 @@ pub fn writeBytes(self: *Memory, offset: usize, value: []u8) !void {
 }
 
 pub fn write8(self: *Memory, offset: usize, value: u256) void {
+    // assuming already resize upstream
     assert(offset + 1 <= self.bytes.items.len);
     const bytes = std.mem.asBytes(&value);
-    // assuming already resize upstream
     self.bytes.items[offset] = bytes[0];
+}
+
+pub fn copy(self: *Memory, dest: usize, src: usize, size: usize) !void {
+    assert(dest + size <= self.bytes.items.len);
+    assert(src + size <= self.bytes.items.len);
+
+    @memcpy(self.readBytes(dest, size), self.readBytes(src, size));
 }
 
 /// Expand the memory if needed, return the *gas cost* of the expansion.

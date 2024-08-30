@@ -113,5 +113,30 @@ pub fn Storage(comptime spec: evmz.Spec) type {
             const value = frame.host.getStorage(frame.msg.recipient, key);
             try frame.stack.push(value orelse 0);
         }
+
+        pub fn tload(frame: *CallFrame) !void {
+            if (spec.isImpl(.cancun)) {
+                return error.UnsupportedInstruction;
+            }
+
+            const key = try frame.stack.pop();
+            const value = frame.host.getTransientStorage(frame.msg.recipient, key);
+            try frame.stack.push(value orelse 0);
+        }
+
+        pub fn tstore(frame: *CallFrame) !void {
+            if (spec.isImpl(.cancun)) {
+                return error.UnsupportedInstruction;
+            }
+
+            if (frame.msg.is_static) {
+                return error.StaticCallViolation;
+            }
+
+            const key = try frame.stack.pop();
+            const value = try frame.stack.pop();
+
+            try frame.host.setTransientStorage(frame.msg.recipient, key, value);
+        }
     };
 }

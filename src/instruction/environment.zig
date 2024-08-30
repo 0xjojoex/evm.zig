@@ -204,5 +204,22 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
 
             try frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);
         }
+
+        pub fn blobhash(frame: *CallFrame) !void {
+            const index: usize = @intCast(try frame.stack.pop());
+            const tx_context = try frame.getTxContext();
+
+            if (tx_context.blob_hashes.len < index) {
+                try frame.stack.push(0);
+                return;
+            } else {
+                try frame.stack.push(tx_context.blob_hashes[index]);
+            }
+        }
+
+        pub fn blobbasefee(frame: *CallFrame) !void {
+            const tx_context = try frame.getTxContext();
+            try frame.stack.push(tx_context.blob_base_fee);
+        }
     };
 }
