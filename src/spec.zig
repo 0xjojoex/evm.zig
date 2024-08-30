@@ -1,7 +1,5 @@
 const std = @import("std");
 
-pub const latest_spec = Spec.cancun;
-
 pub const Spec = enum(u8) {
     frontier = 0,
     frontier_thawing,
@@ -23,6 +21,8 @@ pub const Spec = enum(u8) {
     cancun,
     prague,
     prague_eof,
+
+    pub const latest = Self.cancun;
 
     const Self = @This();
 

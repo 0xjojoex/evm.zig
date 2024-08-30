@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const address = @import("./address.zig");
 pub const intrepreter = @import("./interpreter.zig");
 pub const instruction = @import("./instruction.zig");
@@ -5,6 +7,7 @@ pub const t = @import("./t.zig");
 pub const Host = @import("./Host.zig");
 pub const easm = @import("./easm.zig");
 const opcode = @import("./opcode.zig");
+
 pub const Opcode = opcode.Opcode;
 pub const Address = address.Address;
 pub const addr = address.addr;
@@ -28,3 +31,8 @@ pub fn EvmFromSpec(evm_spec: Spec) type {
 }
 
 pub const Evm = EvmFromSpec(.cancun);
+
+
+test {
+    std.testing.refAllDecls(@This());
+}

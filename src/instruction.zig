@@ -228,7 +228,7 @@ pub fn InstructionTable(comptime spec: evmz.Spec) type {
 }
 
 test InstructionTable {
-    const instruction_table = InstructionTable(evmz.spec.latest_spec);
+    const instruction_table = InstructionTable(evmz.spec.Spec.latest);
 
     try std.testing.expectEqual(instruction_table.data[0x00].static_gas, 0);
     try std.testing.expectEqual(instruction_table.data[0x60].static_gas, 3);
