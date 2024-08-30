@@ -7,7 +7,6 @@ A incomplete Zig implementation of the Ethereum Virtual Machine (EVM).
 If you are looking for more comprehensive zig ethereum projects, I recommend checkout [zabi](https://github.com/Raiden1411/zabi).
 
 ## TODO
-- opcodes 90%
+- eof
 - precompiles
-- gas measure
 - evmc connector and test integration
