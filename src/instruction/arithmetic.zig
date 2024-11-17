@@ -116,32 +116,9 @@ pub fn Arithmetic(comptime spec: evmz.Spec) type {
             const exponent_byte_size: i64 = countSignificantBytesSize(@intCast(exponent));
             frame.track_gas(exp_cost * exponent_byte_size);
 
-            const result = wrap_exp(a, exponent);
+            const result = wrapExp(a, exponent);
             try frame.stack.push(result);
         }
-
-        inline fn wrap_exp(a: u256, exp_: u256) u256 {
-            var value = a;
-            var exponent = exp_;
-            var result: u256 = 1;
-            while (exponent > 0) {
-                if ((exponent & 1) != 0) {
-                    result *%= value;
-                }
-                value *%= value;
-                exponent >>= 1;
-            }
-
-            return result;
-        }
-
-        // TODO: fix exp wrap
-        // test exp {
-        //     const a = 2;
-        //     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
-        //     const result = wrap_exp(a, exponent);
-        //     try std.testing.expectEqual(result, 1);
-        // }
 
         pub fn signextend(frame: *CallFrame) !void {
             const a = try frame.stack.pop();
@@ -197,24 +174,44 @@ test u256AddMod {
 }
 
 // can work on a better version
-// can take reference from ruint
-inline fn u256MulMod(a_: u256, b_: u256, m: u256) u256 {
-    if (m == 0) {
-        return 0;
-    }
+inline fn u256MulMod(lhs: u256, rhs: u256, mod: u256) u256 {
+    if (mod == 0) return 0;
 
     var result: u1024 = 0;
-    var a: u1024 = @intCast(a_ % m);
-    var b: u1024 = @intCast(b_);
-    while (b > 0) {
-        if ((b % 2) == 1) {
-            result = (result +% a) % m;
+    var a: u1024 = @intCast(lhs % mod);
+    var b: u1024 = @intCast(rhs);
+    while (b > 0) : (b >>= 1) {
+        if (b & 1 == 1) {
+            result = (result +% a) % mod;
         }
-        a = (a * 2) % m;
-        b = b / 2;
+        a = (a * 2) % mod;
     }
 
     return @intCast(result);
+}
+
+inline fn wrapExp(a: u256, exp: u256) u256 {
+    var value = a;
+    var exponent = exp;
+    var result: u256 = 1;
+    while (exponent > 0) : (exponent >>= 1) {
+        if ((exponent & 1) == 1) {
+            result *%= value;
+        }
+        value *%= value;
+    }
+
+    if (result == 0) return 1;
+    return result;
+}
+
+test wrapExp {
+    try std.testing.expectEqual(wrapExp(2, 2), 4);
+
+    const a = 2;
+    const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+    const result = wrapExp(a, exponent);
+    try std.testing.expectEqual(result, 1);
 }
 
 test u256MulMod {
