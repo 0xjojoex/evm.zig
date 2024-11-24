@@ -1,3 +1,5 @@
+///! Implementation of the EVMC interface for evm.zig.
+///! This is a proof of concept and not intended for production use.
 const evmc = @cImport({
     @cInclude("evmc.h");
 });

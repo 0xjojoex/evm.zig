@@ -4,7 +4,6 @@ const Opcode = @import("./opcode.zig").Opcode;
 const interpreter = @import("./interpreter.zig");
 const addr = evmz.addr;
 const Address = evmz.Address;
-const Bytes = evmz.Bytes;
 
 pub const Account = struct {
     balance: u256,
@@ -91,7 +90,7 @@ pub const TxContext = struct {
 pub const Log = struct {
     address: Address,
     topics: []const u256,
-    data: Bytes,
+    data: []const u8,
 };
 
 const Self = @This();
@@ -105,7 +104,7 @@ vtable: *const struct {
     getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     copyCode: *const fn (ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) anyerror!usize,
-    emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: Bytes) anyerror!void,
+    emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
     getTxContext: *const fn (ptr: *anyopaque) anyerror!TxContext,
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,

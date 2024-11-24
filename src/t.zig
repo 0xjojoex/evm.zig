@@ -4,7 +4,6 @@ const evmz = @import("./evm.zig");
 const Host = evmz.Host;
 const addr = evmz.addr;
 const Address = evmz.Address;
-const Bytes = evmz.Bytes;
 
 pub const allocator = std.testing.allocator;
 pub var arena = std.heap.ArenaAllocator.init(allocator);
@@ -12,7 +11,7 @@ pub var arena = std.heap.ArenaAllocator.init(allocator);
 pub const MockCall = struct {
     call_frame: evmz.intrepreter.CallFrame,
 
-    pub fn init(msg: *Host.Message, bytes: Bytes) MockCall {
+    pub fn init(msg: *Host.Message, bytes: []const u8) MockCall {
         return MockCall{
             .call_frame = evmz.intrepreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
         };
