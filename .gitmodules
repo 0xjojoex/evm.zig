@@ -1,3 +1,0 @@
-[submodule "c/evmc"]
-	path = c/evmc
-	url = git@github.com:ethereum/evmc.git

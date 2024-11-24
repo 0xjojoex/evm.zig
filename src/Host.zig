@@ -33,7 +33,7 @@ pub const Message = struct {
     gas: i64,
     recipient: Address = addr(0),
     sender: Address,
-    input_data: []u8,
+    input_data: []const u8,
     value: u256,
     is_static: bool = false,
     real_sender: Address = addr(0),
@@ -43,7 +43,7 @@ pub const Message = struct {
 
 pub const Result = struct {
     status: interpreter.Status,
-    output_data: []u8,
+    output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
     create_address: ?Address = null,

@@ -46,7 +46,7 @@ pub fn write(self: *Memory, offset: usize, value: u256) !void {
     try self.bytes.insertSlice(offset, bytes);
 }
 
-pub fn writeBytes(self: *Memory, offset: usize, value: []u8) !void {
+pub fn writeBytes(self: *Memory, offset: usize, value: []const u8) !void {
     try self.bytes.insertSlice(offset, value);
 }
 

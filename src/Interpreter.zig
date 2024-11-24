@@ -9,7 +9,6 @@ const instruction = @import("./instruction.zig");
 const Address = evmz.Address;
 const addr = evmz.addr;
 const log = std.log.scoped(.interpreter);
-const Bytes = evmz.Bytes;
 
 const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
 
@@ -30,7 +29,7 @@ pub const CallFrame = struct {
     stack: Stack,
     memory: Memory,
     pc: usize = 0,
-    bytes: Bytes = &.{},
+    bytes: []const u8 = &.{},
     gas_left: i64 = 0,
     gas_refund: i64 = 0,
     return_data: []u8 = &.{},
@@ -42,7 +41,7 @@ pub const CallFrame = struct {
         allocator: std.mem.Allocator,
         host: *Host,
         msg: *const Host.Message,
-        bytes: Bytes,
+        bytes: []const u8,
     ) Self {
         return .{
             .allocator = allocator,
@@ -62,7 +61,7 @@ pub const CallFrame = struct {
         self.* = undefined;
     }
 
-    pub fn replaceReturnData(self: *Self, return_data: Bytes) !void {
+    pub fn replaceReturnData(self: *Self, return_data: []const u8) !void {
         self.allocator.free(self.return_data);
         const buf = try self.allocator.alloc(u8, return_data.len);
         @memcpy(buf, return_data);
@@ -107,7 +106,7 @@ pub fn Interpreter(comptime instruction_table: type) type {
             allocator: std.mem.Allocator,
             host: *Host,
             msg: *const Host.Message,
-            bytes: Bytes,
+            bytes: []const u8,
         ) Self {
             return .{
                 .call_frame = CallFrame.init(allocator, host, msg, bytes),

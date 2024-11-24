@@ -4,17 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // const evmz_module = b.addModule("evmz", .{
-    //     .root_source_file = b.path("src/evm.zig"),
-    // });
+    const lib = b.addStaticLibrary(.{
+        .name = "evmz",
+        .root_source_file = b.path("src/evm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(lib);
 
-    // const lib = b.addStaticLibrary(.{
-    //     .name = "evmz",
-    //     .root_source_file = b.path("src/evm.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // .b.installArtifact(lib);
+    const static_c_lib = b.addStaticLibrary(.{
+        .name = "evmcz",
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    static_c_lib.addIncludePath(b.path("include"));
+    static_c_lib.linkLibC();
+    b.installArtifact(static_c_lib);
+    b.default_step.dependOn(&static_c_lib.step);
 
     // test
     {
@@ -26,6 +33,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .test_runner = b.path("test_runner.zig"),
         });
+
+        lib_unit_tests.addIncludePath(b.path("include"));
 
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
