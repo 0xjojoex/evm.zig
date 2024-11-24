@@ -28,7 +28,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             const size_usize: usize = @intCast(size);
 
             const expand_cost = try frame.memory.expand(offset_usize, size_usize);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
             const data = frame.memory.readBytes(offset_usize, size_usize);
 
             try frame.replaceReturnData(data);
@@ -44,7 +44,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             const size_usize: usize = @intCast(size);
 
             const expand_cost = try frame.memory.expand(offset_usize, size_usize);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
             const data = frame.memory.readBytes(offset_usize, size_usize);
 
             try frame.replaceReturnData(data);
@@ -71,16 +71,16 @@ pub fn System(comptime spec: evmz.Spec) type {
             const out_size_usize: usize = @intCast(out_size);
 
             if (spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
-                frame.track_gas(evmz.instruction.cold_sload_gas);
+                frame.trackGas(evmz.instruction.cold_sload_gas);
                 if (frame.gas_left < 0) {
                     return;
                 }
             }
 
             const expand_cost = try frame.memory.expand(in_offset_usize, in_size_usize);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
             const expand_cost_out = try frame.memory.expand(out_offset_usize, out_size_usize);
-            frame.track_gas(expand_cost_out);
+            frame.trackGas(expand_cost_out);
 
             if (frame.gas_left < 0) {
                 return;
@@ -108,7 +108,7 @@ pub fn System(comptime spec: evmz.Spec) type {
                 }
             }
 
-            frame.track_gas(cost);
+            frame.trackGas(cost);
             if (frame.gas_left < 0) {
                 return;
             }
@@ -129,7 +129,7 @@ pub fn System(comptime spec: evmz.Spec) type {
 
             const result = try frame.host.call(msg);
 
-            frame.track_gas(msg.gas - result.gas_left);
+            frame.trackGas(msg.gas - result.gas_left);
             frame.gas_refund += result.gas_left;
 
             try frame.memory.writeBytes(out_offset_usize, result.output_data);
@@ -170,7 +170,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             }
 
             const expend_cost = try frame.memory.expand(offset_usize, size_usize);
-            frame.track_gas(expend_cost);
+            frame.trackGas(expend_cost);
 
             const init_code_word_cost = blk: {
                 var cost: i64 = 0;
@@ -185,7 +185,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             };
 
             const init_code_cost = init_code_word_cost * evmz.calcWordSize(i64, @intCast(size_usize));
-            frame.track_gas(init_code_cost);
+            frame.trackGas(init_code_cost);
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
 
@@ -205,7 +205,7 @@ pub fn System(comptime spec: evmz.Spec) type {
 
             const result = try frame.host.call(msg);
 
-            frame.track_gas(msg.gas - result.gas_left);
+            frame.trackGas(msg.gas - result.gas_left);
             frame.gas_refund += result.gas_left;
 
             if (result.status == .success) {
@@ -226,7 +226,7 @@ pub fn System(comptime spec: evmz.Spec) type {
             const address: [20]u8 = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
 
             if (spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
-                frame.track_gas(evmz.instruction.cold_account_access_gas);
+                frame.trackGas(evmz.instruction.cold_account_access_gas);
 
                 if (frame.gas_left < 0) {
                     return;

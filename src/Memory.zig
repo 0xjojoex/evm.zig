@@ -72,7 +72,7 @@ pub fn expand(self: *Memory, offset: usize, byte_size: usize) !i64 {
     const next_size = nextSize(offset, byte_size);
     if (self.len() < next_size) {
         try self.resize(next_size);
-        return expand_cost(next_size);
+        return expandCost(next_size);
     }
     return 0;
 }
@@ -92,7 +92,7 @@ test nextSize {
     try std.testing.expectEqual(256, nextSize(255, 1));
 }
 
-pub inline fn expand_cost(expand_size: u64) i64 {
+pub inline fn expandCost(expand_size: u64) i64 {
     const memory_size_word = (expand_size + 31) / 32;
     return @intCast((memory_size_word * memory_size_word) / 512 + (3 * memory_size_word));
 }

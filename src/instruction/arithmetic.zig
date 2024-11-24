@@ -114,7 +114,7 @@ pub fn Arithmetic(comptime spec: evmz.Spec) type {
             const exp_cost: u8 = if (spec.isImpl(.spurious_dragon)) 50 else 10;
 
             const exponent_byte_size: i64 = countSignificantBytesSize(@intCast(exponent));
-            frame.track_gas(exp_cost * exponent_byte_size);
+            frame.trackGas(exp_cost * exponent_byte_size);
 
             const result = wrapExp(a, exponent);
             try frame.stack.push(result);
@@ -145,7 +145,7 @@ pub fn Arithmetic(comptime spec: evmz.Spec) type {
             const expand_cost = try frame.memory.expand(offset, size);
             const min_word_size = (size + 31) / 32;
             const gas_for_word: i64 = @intCast(6 * min_word_size);
-            frame.track_gas(gas_for_word + expand_cost);
+            frame.trackGas(gas_for_word + expand_cost);
 
             const value = frame.memory.readBytes(offset, size);
 
@@ -222,6 +222,7 @@ test u256MulMod {
     try std.testing.expectEqual(u256MulMod(3, 4, 5), 2);
 }
 
+/// Returns the number of significant byte size for the u64 integer, calcuate how many bytes are needed to represent the significant part of the integer.
 inline fn countSignificantBytesSize(value: u64) u8 {
     return (64 - @clz(value) + 7) / 8;
 }

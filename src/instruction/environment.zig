@@ -83,7 +83,7 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const target_address_word = try frame.stack.pop();
             const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(target_address_word))));
             if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-                frame.track_gas(instruction.cold_account_access_gas);
+                frame.trackGas(instruction.cold_account_access_gas);
             }
             const address_balance = try frame.host.getBalance(target_address);
             try frame.stack.push(address_balance);
@@ -116,7 +116,7 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const size: usize = @intCast(try frame.stack.pop());
 
             const expand_cost = try frame.memory.expand(dest_offset, size);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
 
             // refactor to write bytes
             for (0..size) |i| {
@@ -138,7 +138,7 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const size: usize = @intCast(try frame.stack.pop());
 
             const expand_cost = try frame.memory.expand(dest_offset, size);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
 
             for (0..size) |i| {
                 if (offset + i < frame.bytes.len) {
@@ -165,12 +165,12 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             @memset(buf[0..buf.len], 0);
 
             if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-                frame.track_gas(instruction.cold_account_access_gas);
+                frame.trackGas(instruction.cold_account_access_gas);
             }
 
             const code_len = try frame.host.copyCode(target_address, offset, buf);
             const expand_cost = try frame.memory.expand(dest_offset, code_len);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
 
             try frame.memory.writeBytes(dest_offset, buf[0..]);
         }
@@ -179,7 +179,7 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const address_word = try frame.stack.pop();
             const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
             if (spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-                frame.track_gas(instruction.cold_account_access_gas);
+                frame.trackGas(instruction.cold_account_access_gas);
             }
             const code_hash = try frame.host.getCodeHash(target_address);
             try frame.stack.push(code_hash);
@@ -200,7 +200,7 @@ pub fn Enviroment(comptime spec: evmz.Spec) type {
             const size: usize = @intCast(try frame.stack.pop());
 
             const expand_cost = try frame.memory.expand(dest_offset, size);
-            frame.track_gas(expand_cost);
+            frame.trackGas(expand_cost);
 
             try frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);
         }

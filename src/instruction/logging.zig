@@ -13,6 +13,10 @@ pub fn Logging(comptime spec: evmz.Spec) type {
                 @compileError("logN only supports up to 4 topics");
             }
 
+            if (frame.msg.is_static) {
+                return error.StaticCallViolation;
+            }
+
             const offset = try frame.stack.pop();
             const size = try frame.stack.pop();
 
@@ -23,7 +27,7 @@ pub fn Logging(comptime spec: evmz.Spec) type {
 
             const expand_cost = try frame.memory.expand(offset_usize, size_usize);
             const log_cost: i64 = @intCast(8 * size_usize);
-            frame.track_gas(expand_cost + log_cost);
+            frame.trackGas(expand_cost + log_cost);
 
             const data = frame.memory.readBytes(offset_usize, size_usize);
 

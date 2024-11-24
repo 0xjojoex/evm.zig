@@ -69,7 +69,7 @@ pub const CallFrame = struct {
         self.return_data = buf;
     }
 
-    pub fn track_gas(self: *Self, gas: i64) void {
+    pub fn trackGas(self: *Self, gas: i64) void {
         self.gas_left -= gas;
         if (self.gas_left < 0) {
             self.status = .out_of_gas;
@@ -131,7 +131,7 @@ pub fn Interpreter(comptime instruction_table: type) type {
             self.call_frame.pc += 1;
             const instr = instruction_table.data[opcode_byte];
 
-            self.call_frame.track_gas(instr.static_gas);
+            self.call_frame.trackGas(instr.static_gas);
 
             if (self.call_frame.status != .running) {
                 return;

@@ -80,13 +80,13 @@ pub fn Storage(comptime spec: evmz.Spec) type {
             const key = try frame.stack.pop();
             const value = try frame.stack.pop();
 
-            if (spec.isImpl(.istanbul) and frame.gas_left <= 2300) {
+            if ((comptime spec.isImpl(.istanbul)) and frame.gas_left <= 2300) {
                 frame.status = .out_of_gas;
                 return;
             }
 
-            if (spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
-                frame.track_gas(instruction.cold_sload_gas);
+            if ((comptime spec.isImpl(.berlin)) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
+                frame.trackGas(instruction.cold_sload_gas);
                 if (frame.gas_left < 0) {
                     return;
                 }
@@ -103,8 +103,8 @@ pub fn Storage(comptime spec: evmz.Spec) type {
         pub fn sload(frame: *CallFrame) !void {
             const key = try frame.stack.pop();
 
-            if (spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
-                frame.track_gas(instruction.cold_sload_gas);
+            if ((comptime spec.isImpl(.berlin)) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
+                frame.trackGas(instruction.cold_sload_gas);
                 if (frame.gas_left < 0) {
                     return;
                 }
