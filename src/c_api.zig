@@ -1,9 +1,10 @@
-///! Implementation of the EVMC interface for evm.zig.
-///! This is a proof of concept and not intended for production use.
+//! Implementation of the EVMC interface for evm.zig.
+//! This is a proof of concept and not intended for production use.
 const evmc = @cImport({
     @cInclude("evmc.h");
 });
 
+const log = std.log.scoped(.evmc);
 const evmz = @import("evm.zig");
 const Address = evmz.Address;
 const std = @import("std");
@@ -32,6 +33,12 @@ const Evmz = struct {
     }
 };
 
+fn checkRevision(rev: evmc.evmc_revision) !void {
+    if (try revToSpec(rev) != evmz.Spec.latest) {
+        return error.InvalidRevision;
+    }
+}
+
 fn destroy(vm: [*c]evmc.evmc_vm) callconv(.C) void {
     const self: *Evmz = @ptrCast(@alignCast(vm));
     std.heap.c_allocator.destroy(self);
@@ -53,6 +60,19 @@ fn execute(
 ) callconv(.C) evmc.evmc_result {
     const self: *Evmz = @ptrCast(@alignCast(vm));
     _ = self;
+
+    checkRevision(rev) catch {
+        return evmc.evmc_result{
+            .status_code = evmc.EVMC_INTERNAL_ERROR,
+            .gas_left = 0,
+            .gas_refund = 0,
+            .output_data = null,
+            .output_size = 0,
+            .create_address = std.mem.zeroes(evmc.evmc_address),
+            .release = release,
+            .padding = undefined,
+        };
+    };
 
     var host_wrapper = HostWrapper{
         .host_interfcace = host,
@@ -78,8 +98,6 @@ fn execute(
     instance.deinit();
 
     const result = instance.execute();
-
-    _ = rev;
 
     return evmc.evmc_result{
         .status_code = switch (result.status) {
@@ -111,9 +129,27 @@ fn setOption(
     name: [*c]const u8,
     value: [*c]const u8,
 ) callconv(.C) evmc.evmc_set_option_result {
+    // var self: *Evmz = @ptrCast(@alignCast(vm));
     _ = vm;
     _ = name;
     _ = value;
+
+    // const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
+    // const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
+
+    // log.debug("set_option {s} {s}", .{ name, value });
+    // if (std.mem.eql(u8, name_str, "rev")) {
+    //     const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
+    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+    //     };
+
+    //     self.spec = revToSpec(number) catch |err| {
+    //         log.err("set_option failed: {}", .{err});
+    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+    //     };
+    //     return evmc.EVMC_SET_OPTION_SUCCESS;
+    // }
+
     return evmc.EVMC_SET_OPTION_INVALID_NAME;
 }
 
@@ -206,7 +242,7 @@ const HostWrapper = struct {
         return self.host_interfcace.*.copy_code.?(self.context, &toEvmcAddress(address), code_offset, buffer_data.ptr, buffer_data.len);
     }
 
-    fn emitLog(ptr: *anyopaque, address: Address, topcis: []const u256, data: []u8) !void {
+    fn emitLog(ptr: *anyopaque, address: Address, topcis: []const u256, data: []const u8) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = self;
         _ = address;
@@ -299,3 +335,22 @@ const HostWrapper = struct {
         self.host_interfcace.*.set_transient_storage.?(self.context, &toEvmcAddress(address), toEvmcBytes32(key), toEvmcBytes32(value));
     }
 };
+
+fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
+    return switch (rev) {
+        // evmc.EVMC_FRONTIER => .frontier,
+        // evmc.EVMC_HOMESTEAD => .homestead,
+        // evmc.EVMC_TANGERINE_WHISTLE => .tangerine_whistle,
+        // evmc.EVMC_SPURIOUS_DRAGON => .spurious_dragon,
+        // evmc.EVMC_BYZANTIUM => .byzantium,
+        // evmc.EVMC_CONSTANTINOPLE => .constantinople,
+        // evmc.EVMC_PETERSBURG => .petersburg,
+        // evmc.EVMC_ISTANBUL => .istanbul,
+        // evmc.EVMC_BERLIN => .berlin,
+        // evmc.EVMC_LONDON => .london,
+        // evmc.EVMC_SHANGHAI => .shanghai,
+        evmc.EVMC_CANCUN => .cancun,
+        evmc.EVMC_PRAGUE => .prague,
+        else => return error.UnmatchedSpec,
+    };
+}
