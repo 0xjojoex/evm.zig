@@ -4,10 +4,10 @@ const evmc = @cImport({
     @cInclude("evmc.h");
 });
 
+const std = @import("std");
 const log = std.log.scoped(.evmc);
 const evmz = @import("evm.zig");
 const Address = evmz.Address;
-const std = @import("std");
 
 export fn evmc_create_evmz() ?*evmc.evmc_vm {
     const instance = std.heap.c_allocator.create(Evmz) catch return null;
@@ -17,6 +17,7 @@ export fn evmc_create_evmz() ?*evmc.evmc_vm {
 
 const Evmz = struct {
     vm: evmc.evmc_vm,
+    spec: evmz.Spec = evmz.Spec.latest,
 
     pub fn init() Evmz {
         return Evmz{
@@ -59,7 +60,6 @@ fn execute(
     code_size: usize,
 ) callconv(.C) evmc.evmc_result {
     const self: *Evmz = @ptrCast(@alignCast(vm));
-    _ = self;
 
     checkRevision(rev) catch {
         return evmc.evmc_result{
@@ -85,7 +85,6 @@ fn execute(
         .gas = msg.*.gas,
         .recipient = fromEvmcAddress(msg.*.recipient),
         .sender = fromEvmcAddress(msg.*.sender),
-        // .input_data = if (msg.*.input_data) |data| data[0..msg.*.input_size] else &[_]u8{},
         .input_data = msg.*.input_data[0..msg.*.input_size],
         .value = fromEvmcBytes32(msg.*.value),
         .is_static = msg.*.flags & evmc.EVMC_STATIC != 0,
@@ -94,7 +93,7 @@ fn execute(
 
     var host_ = host_wrapper.toHost();
 
-    var instance = evmz.Evm.init(std.heap.c_allocator, &host_, &message, code[0..code_size]);
+    var instance = evmz.Evm.init(std.heap.c_allocator, &host_, &message, code[0..code_size], self.spec);
     instance.deinit();
 
     const result = instance.execute();
@@ -129,26 +128,23 @@ fn setOption(
     name: [*c]const u8,
     value: [*c]const u8,
 ) callconv(.C) evmc.evmc_set_option_result {
-    // var self: *Evmz = @ptrCast(@alignCast(vm));
-    _ = vm;
-    _ = name;
-    _ = value;
+    var self: *Evmz = @ptrCast(@alignCast(vm));
 
-    // const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
-    // const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
+    const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
+    const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
 
-    // log.debug("set_option {s} {s}", .{ name, value });
-    // if (std.mem.eql(u8, name_str, "rev")) {
-    //     const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
-    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-    //     };
+    log.debug("set_option {s} {s}", .{ name, value });
+    if (std.mem.eql(u8, name_str, "rev")) {
+        const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
+            return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+        };
 
-    //     self.spec = revToSpec(number) catch |err| {
-    //         log.err("set_option failed: {}", .{err});
-    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-    //     };
-    //     return evmc.EVMC_SET_OPTION_SUCCESS;
-    // }
+        self.spec = revToSpec(number) catch |err| {
+            log.err("set_option failed: {}", .{err});
+            return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+        };
+        return evmc.EVMC_SET_OPTION_SUCCESS;
+    }
 
     return evmc.EVMC_SET_OPTION_INVALID_NAME;
 }
@@ -338,17 +334,17 @@ const HostWrapper = struct {
 
 fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
     return switch (rev) {
-        // evmc.EVMC_FRONTIER => .frontier,
-        // evmc.EVMC_HOMESTEAD => .homestead,
-        // evmc.EVMC_TANGERINE_WHISTLE => .tangerine_whistle,
-        // evmc.EVMC_SPURIOUS_DRAGON => .spurious_dragon,
-        // evmc.EVMC_BYZANTIUM => .byzantium,
-        // evmc.EVMC_CONSTANTINOPLE => .constantinople,
-        // evmc.EVMC_PETERSBURG => .petersburg,
-        // evmc.EVMC_ISTANBUL => .istanbul,
-        // evmc.EVMC_BERLIN => .berlin,
-        // evmc.EVMC_LONDON => .london,
-        // evmc.EVMC_SHANGHAI => .shanghai,
+        evmc.EVMC_FRONTIER => .frontier,
+        evmc.EVMC_HOMESTEAD => .homestead,
+        evmc.EVMC_TANGERINE_WHISTLE => .tangerine_whistle,
+        evmc.EVMC_SPURIOUS_DRAGON => .spurious_dragon,
+        evmc.EVMC_BYZANTIUM => .byzantium,
+        evmc.EVMC_CONSTANTINOPLE => .constantinople,
+        evmc.EVMC_PETERSBURG => .petersburg,
+        evmc.EVMC_ISTANBUL => .istanbul,
+        evmc.EVMC_BERLIN => .berlin,
+        evmc.EVMC_LONDON => .london,
+        evmc.EVMC_SHANGHAI => .shanghai,
         evmc.EVMC_CANCUN => .cancun,
         evmc.EVMC_PRAGUE => .prague,
         else => return error.UnmatchedSpec,

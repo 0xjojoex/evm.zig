@@ -27,7 +27,7 @@ fn simple() !void {
         .is_static = false,
     };
 
-    var intpr = evmz.Evm.init(gpa.allocator(), &host, &msg, bytecode);
+    var intpr = evmz.Evm.init(gpa.allocator(), &host, &msg, bytecode, .cancun);
 
     defer intpr.deinit();
 

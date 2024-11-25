@@ -33,6 +33,7 @@ pub const CallFrame = struct {
     gas_left: i64 = 0,
     gas_refund: i64 = 0,
     return_data: []u8 = &.{},
+    spec: evmz.Spec = evmz.Spec.latest,
     _tx_context: ?Host.TxContext = null,
 
     const Self = @This();
@@ -42,6 +43,7 @@ pub const CallFrame = struct {
         host: *Host,
         msg: *const Host.Message,
         bytes: []const u8,
+        spec: evmz.Spec,
     ) Self {
         return .{
             .allocator = allocator,
@@ -52,6 +54,7 @@ pub const CallFrame = struct {
             .bytes = bytes,
             .gas_left = msg.gas,
             .status = if (bytes.len == 0) .success else .running,
+            .spec = spec,
         };
     }
 
@@ -96,55 +99,54 @@ pub const CallFrame = struct {
     }
 };
 
-pub fn Interpreter(comptime instruction_table: type) type {
-    return struct {
-        call_frame: CallFrame,
+pub const Interpreter = struct {
+    call_frame: CallFrame,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn init(
-            allocator: std.mem.Allocator,
-            host: *Host,
-            msg: *const Host.Message,
-            bytes: []const u8,
-        ) Self {
-            return .{
-                .call_frame = CallFrame.init(allocator, host, msg, bytes),
-            };
+    pub fn init(
+        allocator: std.mem.Allocator,
+        host: *Host,
+        msg: *const Host.Message,
+        bytes: []const u8,
+        spec: evmz.Spec,
+    ) Self {
+        return .{
+            .call_frame = CallFrame.init(allocator, host, msg, bytes, spec),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.call_frame.deinit();
+    }
+
+    pub fn execute(self: *Self) Result {
+        while (self.call_frame.status == .running) {
+            self.step();
         }
 
-        pub fn deinit(self: *Self) void {
-            self.call_frame.deinit();
+        return self.call_frame.getResult();
+    }
+
+    fn step(self: *Self) void {
+        const opcode_byte = self.call_frame.bytes[self.call_frame.pc];
+        self.call_frame.pc += 1;
+        const instr = instruction.instruction_table.ops[opcode_byte];
+
+        self.call_frame.trackGas(instr.static_gas);
+
+        if (self.call_frame.status != .running) {
+            return;
         }
 
-        pub fn execute(self: *Self) Result {
-            while (self.call_frame.status == .running) {
-                self.step();
+        instr.ptr(&self.call_frame) catch |err| {
+            if (self.call_frame.status == .running) {
+                self.call_frame.status = .invalid;
+                log.debug("Error: {any}\n", .{err});
             }
-
-            return self.call_frame.getResult();
+        };
+        if (self.call_frame.pc >= self.call_frame.bytes.len and self.call_frame.status == .running) {
+            self.call_frame.status = .success;
         }
-
-        fn step(self: *Self) void {
-            const opcode_byte = self.call_frame.bytes[self.call_frame.pc];
-            self.call_frame.pc += 1;
-            const instr = instruction_table.data[opcode_byte];
-
-            self.call_frame.trackGas(instr.static_gas);
-
-            if (self.call_frame.status != .running) {
-                return;
-            }
-
-            instr.ptr(&self.call_frame) catch |err| {
-                if (self.call_frame.status == .running) {
-                    self.call_frame.status = .invalid;
-                    log.debug("Error: {any}\n", .{err});
-                }
-            };
-            if (self.call_frame.pc >= self.call_frame.bytes.len and self.call_frame.status == .running) {
-                self.call_frame.status = .success;
-            }
-        }
-    };
-}
+    }
+};

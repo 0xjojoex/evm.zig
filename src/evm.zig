@@ -23,13 +23,7 @@ pub fn calcWordSize(comptime T: type, size: T) T {
 pub const Spec = spec.Spec;
 pub const spec = @import("./spec.zig");
 
-pub fn EvmFromSpec(evm_spec: Spec) type {
-    const instruction_table = instruction.InstructionTable(evm_spec);
-    const Intrepreter = intrepreter.Interpreter(instruction_table);
-    return Intrepreter;
-}
-
-pub const Evm = EvmFromSpec(.cancun);
+pub const Evm = intrepreter.Interpreter;
 
 test {
     std.testing.refAllDecls(@This());
