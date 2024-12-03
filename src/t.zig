@@ -9,11 +9,11 @@ pub const allocator = std.testing.allocator;
 pub var arena = std.heap.ArenaAllocator.init(allocator);
 
 pub const MockCall = struct {
-    call_frame: evmz.intrepreter.CallFrame,
+    call_frame: evmz.interpreter.CallFrame,
 
     pub fn init(msg: *Host.Message, bytes: []const u8) MockCall {
         return MockCall{
-            .call_frame = evmz.intrepreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
+            .call_frame = evmz.interpreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
         };
     }
 };
@@ -53,7 +53,7 @@ pub const MockHost = struct {
         };
     }
 
-    fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []u8) !void {
+    fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         try self.logs.append(.{
             .address = address,
@@ -184,8 +184,6 @@ pub const MockHost = struct {
         try self.local_account.put(beneficiary, .{
             .balance = destrucing_balance + recipient_balance,
         });
-
-        std.debug.print("sd {x}\n", .{address});
 
         _ = self.local_account.remove(address);
         _ = try self.removed_account.put(address, true);

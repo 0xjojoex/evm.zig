@@ -15,7 +15,7 @@ pub const Spec = enum(u8) {
     berlin,
     london,
     arrow_glacier,
-    gray_glaicer,
+    gray_glacier,
     merge,
     shanghai,
     cancun,

@@ -7,6 +7,7 @@ const evmc = @cImport({
 const std = @import("std");
 const log = std.log.scoped(.evmc);
 const evmz = @import("evm.zig");
+const t = @import("t.zig");
 const Address = evmz.Address;
 
 export fn evmc_create_evmz() ?*evmc.evmc_vm {
@@ -15,9 +16,37 @@ export fn evmc_create_evmz() ?*evmc.evmc_vm {
     return &instance.vm;
 }
 
+export fn evmz_create_mock_host(tx_context: ?*evmc.evmc_tx_context) *evmc.evmc_host_interface {
+    var mock_host = t.MockHost.init(std.heap.c_allocator, if (tx_context) |c| fromEvmcTxContext(c.*) else null);
+    const host = mock_host.host();
+    _ = host;
+    // TODO:
+    var inter = evmc.evmc_host_interface {
+        // .account_exists = host.vtable.accountExists,
+        // .get_storage = host.vtable.getStorage,
+        // .set_storage = host.vtable.setStorage,
+        // .get_balance = host.vtable.getBalance,
+        // .get_code_size = host.vtable.getCodeSize,
+        // .get_code_hash = host.vtable.getCodeHash,
+        // .copy_code = host.vtable.copyCode,
+        // .selfdestruct = host.vtable.selfDestruct,
+        // .call = host.vtable.call,
+        // .get_tx_context = host.vtable.getTxContext,
+        // .get_block_hash = host.vtable.getBlockHash,
+        // .emit_log = host.vtable.emitLog,
+        // .access_account = host.vtable.accessAccount,
+        // .access_storage = host.vtable.accessStorage,
+        // .get_transient_storage = host.vtable.getTransientStorage,
+        // .set_transient_storage = host.vtable.setTransientStorage,
+    };
+
+    inter = inter;
+
+    return &inter;
+}
+
 const Evmz = struct {
     vm: evmc.evmc_vm,
-    spec: evmz.Spec = evmz.Spec.latest,
 
     pub fn init() Evmz {
         return Evmz{
@@ -34,14 +63,8 @@ const Evmz = struct {
     }
 };
 
-fn checkRevision(rev: evmc.evmc_revision) !void {
-    if (try revToSpec(rev) != evmz.Spec.latest) {
-        return error.InvalidRevision;
-    }
-}
-
 fn destroy(vm: [*c]evmc.evmc_vm) callconv(.C) void {
-    const self: *Evmz = @ptrCast(@alignCast(vm));
+    const self: *allowzero Evmz = @alignCast(@fieldParentPtr("vm", vm));
     std.heap.c_allocator.destroy(self);
 }
 
@@ -59,11 +82,14 @@ fn execute(
     code: [*c]const u8,
     code_size: usize,
 ) callconv(.C) evmc.evmc_result {
-    const self: *Evmz = @ptrCast(@alignCast(vm));
+    log.debug("[execute]", .{});
+    _ = vm;
+    // const self: *Evmz = @fieldParentPtr("vm", vm);
 
-    checkRevision(rev) catch {
+    const spec = revToSpec(rev) catch |err| {
+        log.err("execute failed: {}", .{err});
         return evmc.evmc_result{
-            .status_code = evmc.EVMC_INTERNAL_ERROR,
+            .status_code = evmc.EVMC_FAILURE,
             .gas_left = 0,
             .gas_refund = 0,
             .output_data = null,
@@ -76,7 +102,7 @@ fn execute(
 
     var host_wrapper = HostWrapper{
         .host_interfcace = host,
-        .context = context.?,
+        .context = context,
     };
 
     const message = evmz.Host.Message{
@@ -93,10 +119,10 @@ fn execute(
 
     var host_ = host_wrapper.toHost();
 
-    var instance = evmz.Evm.init(std.heap.c_allocator, &host_, &message, code[0..code_size], self.spec);
-    instance.deinit();
+    var interpreter = evmz.Evm.init(std.heap.c_allocator, &host_, &message, code[0..code_size], spec);
+    defer interpreter.call_frame.memory.deinit();
 
-    const result = instance.execute();
+    const result = interpreter.execute();
 
     return evmc.evmc_result{
         .status_code = switch (result.status) {
@@ -118,9 +144,15 @@ fn execute(
     };
 }
 
-// TODO: release the return data
 fn release(result: [*c]const evmc.evmc_result) callconv(.C) void {
-    _ = result;
+    // log.debug("release result {x}\n", .{result.output_data});
+    //
+    const int = @intFromPtr(result.*.output_data);
+    if (int == 0) {
+        return;
+    }
+    const data_slice = @as([*]const u8, @ptrCast(result.*.output_data))[0..result.*.output_size];
+    std.heap.c_allocator.free(data_slice);
 }
 
 fn setOption(
@@ -128,23 +160,26 @@ fn setOption(
     name: [*c]const u8,
     value: [*c]const u8,
 ) callconv(.C) evmc.evmc_set_option_result {
-    var self: *Evmz = @ptrCast(@alignCast(vm));
+    _ = vm;
+    _ = name;
+    _ = value;
+    // const self: *Evmz = @fieldParentPtr("vm", vm);
 
-    const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
-    const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
+    // const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
+    // const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
 
-    log.debug("set_option {s} {s}", .{ name, value });
-    if (std.mem.eql(u8, name_str, "rev")) {
-        const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
-            return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-        };
+    // log.debug("set_option {s} {s}", .{ name, value });
+    // if (std.mem.eql(u8, name_str, "rev")) {
+    //     const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
+    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+    //     };
 
-        self.spec = revToSpec(number) catch |err| {
-            log.err("set_option failed: {}", .{err});
-            return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-        };
-        return evmc.EVMC_SET_OPTION_SUCCESS;
-    }
+    //     self.spec = revToSpec(number) catch |err| {
+    //         log.err("set_option failed: {}", .{err});
+    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
+    //     };
+    //     return evmc.EVMC_SET_OPTION_SUCCESS;
+    // }
 
     return evmc.EVMC_SET_OPTION_INVALID_NAME;
 }
@@ -169,9 +204,26 @@ fn toEvmcBytes32(v: u256) [*c]evmc.evmc_bytes32 {
     }));
 }
 
+fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {
+    return evmz.Host.TxContext{
+        .base_fee = fromEvmcBytes32(tx_context.block_base_fee),
+        .blob_base_fee = fromEvmcBytes32(tx_context.block_base_fee),
+        // .blob_hashes = tx_context.blob_hashes.*,
+        .blob_hashes = &.{},
+        .chain_id = fromEvmcBytes32(tx_context.chain_id),
+        .coinbase = fromEvmcAddress(tx_context.block_coinbase),
+        .gas_limit = @intCast(tx_context.block_gas_limit),
+        .gas_price = fromEvmcBytes32(tx_context.tx_gas_price),
+        .number = @intCast(tx_context.block_number),
+        .origin = fromEvmcAddress(tx_context.tx_origin),
+        .prev_randao = fromEvmcBytes32(tx_context.block_prev_randao),
+        .timestamp = @intCast(tx_context.block_timestamp),
+    };
+}
+
 const HostWrapper = struct {
     host_interfcace: [*c]const evmc.evmc_host_interface,
-    context: *evmc.evmc_host_context,
+    context: ?*evmc.evmc_host_context,
 
     const Self = @This();
 
@@ -258,20 +310,7 @@ const HostWrapper = struct {
     fn getTxContext(ptr: *anyopaque) !evmz.Host.TxContext {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const context = self.host_interfcace.*.get_tx_context.?(self.context);
-        return evmz.Host.TxContext{
-            .base_fee = fromEvmcBytes32(context.block_base_fee),
-            .blob_base_fee = fromEvmcBytes32(context.block_base_fee),
-            // .blob_hashes = context.blob_hashes.*,
-            .blob_hashes = &.{},
-            .chain_id = fromEvmcBytes32(context.chain_id),
-            .coinbase = fromEvmcAddress(context.block_coinbase),
-            .gas_limit = @intCast(context.block_gas_limit),
-            .gas_price = fromEvmcBytes32(context.tx_gas_price),
-            .number = @intCast(context.block_number),
-            .origin = fromEvmcAddress(context.tx_origin),
-            .prev_randao = fromEvmcBytes32(context.block_prev_randao),
-            .timestamp = @intCast(context.block_timestamp),
-        };
+        return fromEvmcTxContext(context);
     }
 
     fn accessAccount(ptr: *anyopaque, address: Address) !evmz.Host.AccessStatus {

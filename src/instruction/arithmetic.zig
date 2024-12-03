@@ -218,7 +218,7 @@ test u256MulMod {
     try std.testing.expectEqual(u256MulMod(3, 4, 5), 2);
 }
 
-/// Returns the number of significant byte size for the u64 integer, calcuate how many bytes are needed to represent the significant part of the integer.
+/// Returns the number of significant byte size for the u64 integer, calculate how many bytes are needed to represent the significant part of the integer.
 inline fn countSignificantBytesSize(value: u64) u8 {
     return (64 - @clz(value) + 7) / 8;
 }
