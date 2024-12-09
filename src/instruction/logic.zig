@@ -1,8 +1,8 @@
 const evmz = @import("../evm.zig");
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 pub fn lt(frame: *CallFrame) !void {
     const a = try frame.stack.pop();

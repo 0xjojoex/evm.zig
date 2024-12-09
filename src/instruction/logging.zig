@@ -1,9 +1,9 @@
 const evmz = @import("../evm.zig");
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const Host = @import("../Host.zig");
 
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 pub fn log(frame: *CallFrame, comptime n: u8) !void {
     if (n > 4) {

@@ -1,10 +1,10 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
 const Host = evmz.Host;
 
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 /// https://evmc.ethereum.org/storagestatus.html
 ///

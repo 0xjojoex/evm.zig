@@ -1,9 +1,9 @@
 const std = @import("std");
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
 const instruction = evmz.instruction;
 const Address = evmz.Address;
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 pub fn gas(frame: *CallFrame) !void {
     const g: u64 = @intCast(frame.gas_left);
@@ -20,7 +20,7 @@ pub fn caller(frame: *CallFrame) !void {
 }
 
 pub fn origin(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(@byteSwap(@as(u160, @bitCast(tx_context.origin))));
 }
 
@@ -30,44 +30,44 @@ pub fn gasprice(frame: *CallFrame) !void {
 }
 
 pub fn basefee(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.base_fee);
 }
 
 pub fn coinbase(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(@byteSwap(@as(u160, @bitCast(tx_context.coinbase))));
 }
 
 pub fn timestamp(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.timestamp);
 }
 
 pub fn number(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.number);
 }
 
 pub fn prevrandao(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.prev_randao);
 }
 
 pub fn gaslimit(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.gas_limit);
 }
 
 pub fn chainid(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
     try frame.stack.push(tx_context.chain_id);
 }
 
 pub fn blockhash(frame: *CallFrame) !void {
     const block_number: u256 = try frame.stack.pop();
 
-    const tx_context = try frame.host.getTxContext();
+    const tx_context = try frame.getTxContext();
 
     if (block_number > tx_context.number + 256) {
         const block_hash = try frame.host.getBlockHash(block_number);

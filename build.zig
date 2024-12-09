@@ -4,9 +4,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("evmz", .{
-        .root_source_file = b.path("src/evm.zig")
-    });
+    _ = b.addModule("evmz", .{ .root_source_file = b.path("src/evm.zig") });
 
     const static_c_lib = b.addStaticLibrary(.{
         .name = "evmz",
@@ -63,9 +61,7 @@ pub fn build(b: *std.Build) !void {
                 .target = target,
                 .optimize = optimize,
             });
-            example.root_module.addImport("evmz", b.modules.get(
-                "evmz"
-            ).?);
+            example.root_module.addImport("evmz", b.modules.get("evmz").?);
             const run_example = b.addRunArtifact(example);
             const run_step = b.step("example", "Run the example");
             run_step.dependOn(&run_example.step);
@@ -87,11 +83,8 @@ pub fn build(b: *std.Build) !void {
                 },
             });
             example_c.linkLibrary(static_c_lib);
-            const install_step = b.addInstallArtifact(example_c, .{
-                           .dest_dir = .{ .override = .{ .custom = "example" } },
-                       });
-            b.getInstallStep().dependOn(&install_step.step);
-            const run_example = b.addRunArtifact(example_c);
+            var run_example = b.addRunArtifact(example_c);
+            run_example.has_side_effects = true;
             const run_step = b.step("example", "Run the example");
             run_step.dependOn(&run_example.step);
         }

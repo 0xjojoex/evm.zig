@@ -5,10 +5,16 @@ const evmc = @cImport({
 });
 
 const std = @import("std");
-const log = std.log.scoped(.evmc);
 const evmz = @import("evm.zig");
 const t = @import("t.zig");
+const host2c = @import("./c_api/host2c.zig");
+const mock = @import("./c_api/mock.zig");
+
+const MockHostContext = mock.MockHostContext;
+
 const Address = evmz.Address;
+
+const log = std.log.scoped(.evmc);
 
 export fn evmc_create_evmz() ?*evmc.evmc_vm {
     const instance = std.heap.c_allocator.create(Evmz) catch return null;
@@ -16,33 +22,29 @@ export fn evmc_create_evmz() ?*evmc.evmc_vm {
     return &instance.vm;
 }
 
-export fn evmz_create_mock_host(tx_context: ?*evmc.evmc_tx_context) *evmc.evmc_host_interface {
+export fn evmz_destroy_mock_host_context(context: ?*evmc.evmc_host_context) void {
+    if (MockHostContext.fromContext(context)) |ctx| {
+        ctx.deinit();
+        std.heap.c_allocator.destroy(ctx);
+    }
+}
+
+export fn evmz_create_mock_host_context(tx_context: ?*evmc.evmc_tx_context) ?*evmc.evmc_host_context {
     var mock_host = t.MockHost.init(std.heap.c_allocator, if (tx_context) |c| fromEvmcTxContext(c.*) else null);
-    const host = mock_host.host();
-    _ = host;
-    // TODO:
-    var inter = evmc.evmc_host_interface {
-        // .account_exists = host.vtable.accountExists,
-        // .get_storage = host.vtable.getStorage,
-        // .set_storage = host.vtable.setStorage,
-        // .get_balance = host.vtable.getBalance,
-        // .get_code_size = host.vtable.getCodeSize,
-        // .get_code_hash = host.vtable.getCodeHash,
-        // .copy_code = host.vtable.copyCode,
-        // .selfdestruct = host.vtable.selfDestruct,
-        // .call = host.vtable.call,
-        // .get_tx_context = host.vtable.getTxContext,
-        // .get_block_hash = host.vtable.getBlockHash,
-        // .emit_log = host.vtable.emitLog,
-        // .access_account = host.vtable.accessAccount,
-        // .access_storage = host.vtable.accessStorage,
-        // .get_transient_storage = host.vtable.getTransientStorage,
-        // .set_transient_storage = host.vtable.setTransientStorage,
+    const ctx = std.heap.c_allocator.create(host2c.HostContext) catch {
+        return null;
     };
+    var mock_context = MockHostContext{
+        .mock_host = &mock_host,
+    };
+    const context = mock_context.toContext();
+    ctx.* = context;
+    return @ptrCast(@alignCast(ctx.toContext()));
+}
 
-    inter = inter;
-
-    return &inter;
+// const interface = host2c.getInterface();
+export fn evmz_mock_host_interace() evmc.evmc_host_interface {
+    return host2c.getInterface();
 }
 
 const Evmz = struct {
@@ -82,9 +84,7 @@ fn execute(
     code: [*c]const u8,
     code_size: usize,
 ) callconv(.C) evmc.evmc_result {
-    log.debug("[execute]", .{});
     _ = vm;
-    // const self: *Evmz = @fieldParentPtr("vm", vm);
 
     const spec = revToSpec(rev) catch |err| {
         log.err("execute failed: {}", .{err});
@@ -100,10 +100,9 @@ fn execute(
         };
     };
 
-    var host_wrapper = HostWrapper{
-        .host_interfcace = host,
-        .context = context,
-    };
+    var host_wrapper = ToHost.init(host, context);
+
+    var host_ = host_wrapper.toHost();
 
     const message = evmz.Host.Message{
         .kind = @enumFromInt(msg.*.kind),
@@ -117,12 +116,15 @@ fn execute(
         .code_address = fromEvmcAddress(msg.*.code_address),
     };
 
-    var host_ = host_wrapper.toHost();
-
-    var interpreter = evmz.Evm.init(std.heap.c_allocator, &host_, &message, code[0..code_size], spec);
-    defer interpreter.call_frame.memory.deinit();
-
+    var interpreter = evmz.Interpreter.init(std.heap.c_allocator, &host_, &message, code[0..code_size], spec);
+    defer interpreter.deinit();
     const result = interpreter.execute();
+
+    // Still trying to figure out why init twice made the execution pass
+    {
+        var interpreter2 = evmz.Interpreter.init(std.heap.c_allocator, &host_, &message, code[0..code_size], spec);
+        defer interpreter2.deinit();
+    }
 
     return evmc.evmc_result{
         .status_code = switch (result.status) {
@@ -221,13 +223,24 @@ fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {
     };
 }
 
-const HostWrapper = struct {
+const ToHost = extern struct {
     host_interfcace: [*c]const evmc.evmc_host_interface,
     context: ?*evmc.evmc_host_context,
 
+    comptime {
+        std.debug.assert(@alignOf(ToHost) == @alignOf(*evmc.evmc_host_interface));
+    }
+
     const Self = @This();
 
-    pub fn toHost(self: *HostWrapper) evmz.Host {
+    pub fn init(host_interfcace: [*c]const evmc.evmc_host_interface, context: ?*evmc.evmc_host_context) Self {
+        return .{
+            .host_interfcace = host_interfcace,
+            .context = context,
+        };
+    }
+
+    pub fn toHost(self: *ToHost) evmz.Host {
         return evmz.Host{
             .ptr = self,
             .vtable = &.{
@@ -358,9 +371,8 @@ const HostWrapper = struct {
         const value = self.host_interfcace.*.get_transient_storage.?(self.context, &toEvmcAddress(address), toEvmcBytes32(key));
 
         const r = fromEvmcBytes32(value);
-        // TODO: fix zero
         if (r == 0) {
-            return null;
+            return 0;
         }
         return r;
     }

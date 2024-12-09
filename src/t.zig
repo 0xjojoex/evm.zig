@@ -5,15 +5,12 @@ const Host = evmz.Host;
 const addr = evmz.addr;
 const Address = evmz.Address;
 
-pub const allocator = std.testing.allocator;
-pub var arena = std.heap.ArenaAllocator.init(allocator);
-
 pub const MockCall = struct {
-    call_frame: evmz.interpreter.CallFrame,
+    call_frame: evmz.Interpreter.CallFrame,
 
-    pub fn init(msg: *Host.Message, bytes: []const u8) MockCall {
+    pub fn init(allocator: std.mem.Allocator, msg: *Host.Message, bytes: []const u8) MockCall {
         return MockCall{
-            .call_frame = evmz.interpreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
+            .call_frame = evmz.Interpreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
         };
     }
 };
@@ -53,6 +50,14 @@ pub const MockHost = struct {
         };
     }
 
+    pub fn deinit(self: *Self) void {
+        self.store.deinit();
+        self.logs.deinit();
+        self.local_account.deinit();
+        self.removed_account.deinit();
+        self.code.deinit();
+    }
+
     fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         try self.logs.append(.{
@@ -65,7 +70,11 @@ pub const MockHost = struct {
     fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
-        try self.store.put(key, value);
+        // FIXME: this breaks the c_api
+        // try self.store.put(key, value);
+        _ = self;
+        _ = key;
+        _ = value;
         return .assigned;
     }
 

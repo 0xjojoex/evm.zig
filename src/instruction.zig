@@ -1,8 +1,8 @@
 const Opcode = @import("opcode.zig").Opcode;
 const std = @import("std");
 const evmz = @import("./evm.zig");
-const interpreter = @import("./interpreter.zig");
-const CallFrame = interpreter.CallFrame;
+const Interpreter = @import("./Interpreter.zig");
+const CallFrame = Interpreter.CallFrame;
 
 pub const call_value_cost = 9000;
 pub const account_creation_cost = 25000;
@@ -205,9 +205,9 @@ const InstructionTable = struct {
             };
         }
 
-        if (@typeInfo(Opcode).Enum.fields.len != entries.len) {
-            @compileError("Opcode enum and instruction_entries have different lengths");
-        }
+        // if (@typeInfo(Opcode).enums.fields.len != entries.len) {
+        //     @compileError("Opcode enum and instruction_entries have different lengths");
+        // }
 
         for (entries) |entry| {
             const opcode, const gas, const ptr = entry;

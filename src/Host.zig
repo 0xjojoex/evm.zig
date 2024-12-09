@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
-const interpreter = @import("./interpreter.zig");
+const Interpreter = @import("./Interpreter.zig");
 const addr = evmz.addr;
 const Address = evmz.Address;
 
@@ -41,7 +41,7 @@ pub const Message = struct {
 };
 
 pub const Result = struct {
-    status: interpreter.Status,
+    status: Interpreter.Status,
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,

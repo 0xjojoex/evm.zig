@@ -1,4 +1,4 @@
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");
@@ -6,7 +6,7 @@ const std = @import("std");
 
 const addr = evmz.addr;
 
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 pub fn stop(frame: *CallFrame) !void {
     frame.status = .success;

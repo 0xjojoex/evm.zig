@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const address = @import("./address.zig");
-pub const interpreter = @import("./interpreter.zig");
+pub const Interpreter = @import("./Interpreter.zig");
 pub const instruction = @import("./instruction.zig");
 pub const t = @import("./t.zig");
 pub const Host = @import("./Host.zig");
@@ -23,7 +23,7 @@ pub fn calcWordSize(comptime T: type, size: T) T {
 pub const Spec = spec.Spec;
 pub const spec = @import("./spec.zig");
 
-pub const Evm = interpreter.Interpreter;
+pub const Evm = Interpreter;
 
 test {
     std.testing.refAllDecls(@This());

@@ -1,8 +1,8 @@
 const evmz = @import("../evm.zig");
-const interpreter = @import("../interpreter.zig");
+const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 
-const CallFrame = interpreter.CallFrame;
+const CallFrame = Interpreter.CallFrame;
 
 pub fn pc(frame: *CallFrame) !void {
     const current_offset = @as(u256, frame.pc - 1);
