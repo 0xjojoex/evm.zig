@@ -70,12 +70,8 @@ pub const MockHost = struct {
     fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
-        // FIXME: this breaks the c_api
-        // try self.store.put(key, value);
-        _ = self;
-        _ = key;
-        _ = value;
-        return .assigned;
+        try self.store.put(key, value);
+        return .added;
     }
 
     fn getStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
@@ -283,3 +279,54 @@ pub const MockHost = struct {
         } };
     }
 };
+
+fn defaultMessage() Host.Message {
+    return .{
+        .depth = 0,
+        .sender = addr(0),
+        .gas = 100_000,
+        .kind = Host.CallKind.call,
+        .recipient = addr(0),
+        .value = 0,
+        .input_data = &.{},
+    };
+}
+
+pub fn expectBytecodeStatus(bytecode: []const u8, spec: evmz.Spec, expected: evmz.Interpreter.Status) !void {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+
+    var interpreter = evmz.Interpreter.init(std.testing.allocator, &host, &msg, bytecode, spec);
+    defer interpreter.deinit();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(expected, result.status);
+}
+
+pub fn expectCancunBytecodeStatus(bytecode: []const u8, expected: evmz.Interpreter.Status) !void {
+    try expectBytecodeStatus(bytecode, .cancun, expected);
+}
+
+pub fn expectBytecodeStackTop(bytecode: []const u8, spec: evmz.Spec, expected: u256) !void {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+
+    var interpreter = evmz.Interpreter.init(std.testing.allocator, &host, &msg, bytecode, spec);
+    defer interpreter.deinit();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(expected, interpreter.call_frame.stack.peek().?);
+}
+
+pub fn expectCancunBytecodeStackTop(bytecode: []const u8, expected: u256) !void {
+    try expectBytecodeStackTop(bytecode, .cancun, expected);
+}
+
+test "mock host persists storage writes" {
+    try expectCancunBytecodeStackTop(&.{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x54 }, 0x2a);
+}

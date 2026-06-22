@@ -56,7 +56,7 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
 
     const gas = try frame.stack.pop();
     const address_word = try frame.stack.pop();
-    const address: [20]u8 = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
+    const address: evmz.Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
     const value = if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.pop() else 0;
     const in_offset = try frame.stack.pop();
     const in_size = try frame.stack.pop();
@@ -130,7 +130,8 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
     frame.trackGas(msg.gas - result.gas_left);
     frame.gas_refund += result.gas_left;
 
-    try frame.memory.writeBytes(out_offset_usize, result.output_data);
+    const output_size = @min(out_size_usize, result.output_data.len);
+    try frame.memory.writeBytes(out_offset_usize, result.output_data[0..output_size]);
 
     try frame.replaceReturnData(result.output_data);
 
@@ -221,7 +222,7 @@ pub fn selfdestruct(frame: *CallFrame) !void {
 
     const address_word = try frame.stack.pop();
 
-    const address: [20]u8 = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
+    const address: evmz.Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
 
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
         frame.trackGas(evmz.instruction.cold_account_access_gas);

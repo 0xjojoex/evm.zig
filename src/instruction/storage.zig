@@ -1,4 +1,3 @@
-const std = @import("std");
 const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
@@ -109,7 +108,7 @@ pub fn sload(frame: *CallFrame) !void {
 }
 
 pub fn tload(frame: *CallFrame) !void {
-    if (frame.spec.isImpl(.cancun)) {
+    if (!frame.spec.isImpl(.cancun)) {
         return error.UnsupportedInstruction;
     }
 
@@ -119,7 +118,7 @@ pub fn tload(frame: *CallFrame) !void {
 }
 
 pub fn tstore(frame: *CallFrame) !void {
-    if (frame.spec.isImpl(.cancun)) {
+    if (!frame.spec.isImpl(.cancun)) {
         return error.UnsupportedInstruction;
     }
 
@@ -131,4 +130,12 @@ pub fn tstore(frame: *CallFrame) !void {
     const value = try frame.stack.pop();
 
     try frame.host.setTransientStorage(frame.msg.recipient, key, value);
+}
+
+test "transient storage opcodes are only enabled from Cancun" {
+    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x00, 0x5c }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStackTop(&.{ 0x60, 0x00, 0x5c }, .cancun, 1);
+
+    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x01, 0x60, 0x00, 0x5d }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x01, 0x60, 0x00, 0x5d }, .cancun, .success);
 }

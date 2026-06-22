@@ -1,6 +1,5 @@
 const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
-const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -37,7 +36,7 @@ pub fn msize(frame: *CallFrame) !void {
 }
 
 pub fn mcopy(frame: *CallFrame) !void {
-    if (frame.spec.isImpl(.cancun)) {
+    if (!frame.spec.isImpl(.cancun)) {
         return error.UnsupportedInstruction;
     }
 
@@ -53,4 +52,9 @@ pub fn mcopy(frame: *CallFrame) !void {
     frame.trackGas(expand_cost + word_copied_cost);
 
     try frame.memory.copy(dest_usize, offset_usize, size_usize);
+}
+
+test "MCOPY is only enabled from Cancun" {
+    try evmz.t.expectBytecodeStatus(&.{ 0x5f, 0x5f, 0x5f, 0x5e }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatus(&.{ 0x5f, 0x5f, 0x5f, 0x5e }, .cancun, .success);
 }

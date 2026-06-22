@@ -166,11 +166,11 @@ pub fn extcodecopy(frame: *CallFrame) !void {
         frame.trackGas(instruction.cold_account_access_gas);
     }
 
-    const code_len = try frame.host.copyCode(target_address, offset, buf);
-    const expand_cost = try frame.memory.expand(dest_offset, code_len);
+    _ = try frame.host.copyCode(target_address, offset, buf);
+    const expand_cost = try frame.memory.expand(dest_offset, size);
     frame.trackGas(expand_cost);
 
-    try frame.memory.writeBytes(dest_offset, buf[0..]);
+    try frame.memory.writeBytes(dest_offset, buf);
 }
 
 pub fn extcodehash(frame: *CallFrame) !void {

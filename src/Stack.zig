@@ -35,20 +35,6 @@ pub fn push(self: *Self, value: u256) Error!void {
     }
 }
 
-pub fn pushN(self: *Self, comptime n: usize, values: [n]u256) Error!void {
-    if (self.len + values.len > capacity) {
-        return Error.StackOverflow;
-    }
-    inline for (values) |value| {
-        self.len += 1;
-        self.stacks[self.len] = value;
-    }
-
-    if (_debug) {
-        self.dump();
-    }
-}
-
 pub fn pop(self: *Self) Error!u256 {
     if (self.len == 0) {
         return Error.StackUnderflow;
@@ -58,7 +44,7 @@ pub fn pop(self: *Self) Error!u256 {
 }
 
 pub fn peek(self: *Self) ?u256 {
-    return self.stacks[self.len];
+    return self.peekN(1);
 }
 
 /// Swap the nth element from the top of the stack with the top element
@@ -100,25 +86,25 @@ pub fn dump(self: *const Self) void {
 
 const testing = std.testing;
 
-test Self {
+test "push pop and peek use the top stack slot" {
     var stack = Self.init();
 
+    try testing.expectEqual(null, stack.peek());
+
     try stack.push(1);
-    try testing.expect(stack.len == 1);
     try stack.push(2);
     try stack.push(3);
-    try stack.push(5);
-    try testing.expect(stack.len == 4);
+    try testing.expectEqual(@as(usize, 3), stack.len);
+    try testing.expectEqual(@as(u256, 3), stack.peek().?);
+    try testing.expectEqual(@as(u256, 3), stack.peekN(1).?);
+    try testing.expectEqual(@as(u256, 2), stack.peekN(2).?);
+    try testing.expectEqual(@as(u256, 1), stack.peekN(3).?);
+    try testing.expectEqual(null, stack.peekN(4));
 
-    _ = try stack.pop();
-    try testing.expect(stack.len == 3);
-
-    const values = [_]u256{ 1, 2, 3, 4, 5 };
-    try stack.pushN(5, values);
-    try testing.expect(stack.len == 8);
-
-    const last = stack.peek().?;
-    try testing.expect(last == 5);
-    const last2 = stack.peekN(1).?;
-    try testing.expect(last2 == 4);
+    try testing.expectEqual(@as(u256, 3), try stack.pop());
+    try testing.expectEqual(@as(u256, 2), try stack.pop());
+    try testing.expectEqual(@as(u256, 1), try stack.pop());
+    try testing.expectEqual(@as(usize, 0), stack.len);
+    try testing.expectEqual(null, stack.peek());
+    try testing.expectError(Error.StackUnderflow, stack.pop());
 }

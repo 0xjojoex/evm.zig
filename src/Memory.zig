@@ -42,13 +42,17 @@ fn resize(self: *Memory, size: usize) !void {
 }
 
 pub fn write(self: *Memory, offset: usize, value: u256) !void {
+    assert(offset + word_size <= self.bytes.items.len);
+
     const pad_left_value = @byteSwap(value);
     const bytes = std.mem.asBytes(&pad_left_value);
-    try self.bytes.insertSlice(self.allocator, offset, bytes);
+    @memcpy(self.bytes.items[offset..][0..word_size], bytes);
 }
 
 pub fn writeBytes(self: *Memory, offset: usize, value: []const u8) !void {
-    try self.bytes.insertSlice(self.allocator, offset, value);
+    assert(offset + value.len <= self.bytes.items.len);
+
+    @memcpy(self.bytes.items[offset..][0..value.len], value);
 }
 
 pub fn write8(self: *Memory, offset: usize, value: u256) void {
@@ -102,7 +106,7 @@ test Memory {
     var memory = Memory.init(std.testing.allocator);
     defer memory.deinit();
 
-    try memory.resize(32);
+    _ = try memory.expand(0, 64);
     try memory.write(0, 0xff);
 
     const value0 = memory.read(0);
@@ -111,8 +115,37 @@ test Memory {
     const value1 = memory.read(1);
     try std.testing.expectEqual(0xff00, value1);
 
-    try memory.resize(1024);
     try memory.write(31, 0xff);
     const value2 = memory.read(31);
     try std.testing.expectEqual(0xff, value2);
+}
+
+test "memory writes overwrite without shifting bytes" {
+    var memory = Memory.init(std.testing.allocator);
+    defer memory.deinit();
+
+    _ = try memory.expand(0, 32);
+    try std.testing.expectEqual(@as(usize, 32), memory.len());
+
+    try memory.write(0, 0xff);
+    try std.testing.expectEqual(@as(usize, 32), memory.len());
+    try std.testing.expectEqual(@as(u256, 0xff), memory.read(0));
+
+    try memory.write(0, 0xaa);
+    try std.testing.expectEqual(@as(usize, 32), memory.len());
+    try std.testing.expectEqual(@as(u256, 0xaa), memory.read(0));
+}
+
+test "memory byte slice writes overwrite without shifting bytes" {
+    var memory = Memory.init(std.testing.allocator);
+    defer memory.deinit();
+
+    _ = try memory.expand(0, 32);
+    try memory.writeBytes(0, &.{ 0xaa, 0xbb, 0xcc });
+    try std.testing.expectEqual(@as(usize, 32), memory.len());
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xcc }, memory.readBytes(0, 3));
+
+    try memory.writeBytes(1, &.{ 0x11, 0x22 });
+    try std.testing.expectEqual(@as(usize, 32), memory.len());
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0x11, 0x22 }, memory.readBytes(0, 3));
 }

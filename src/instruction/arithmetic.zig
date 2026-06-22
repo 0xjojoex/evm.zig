@@ -29,28 +29,25 @@ pub fn sub(frame: *CallFrame) !void {
 }
 
 pub fn div(frame: *CallFrame) !void {
-    const top = frame.stack.peekN(2);
     const a = try frame.stack.pop();
-
-    if (top.? != 0) {
-        const b = try frame.stack.pop();
-        const result = a / b;
-        try frame.stack.push(result);
-    }
+    const b = try frame.stack.pop();
+    const result = if (b == 0) 0 else a / b;
+    try frame.stack.push(result);
 }
 
 pub fn sdiv(frame: *CallFrame) !void {
-    const top = frame.stack.peekN(2);
     const a = try frame.stack.pop();
+    const b = try frame.stack.pop();
 
-    if (top.? != 0) {
-        const ia: i256 = @bitCast(a);
-        const b = try frame.stack.pop();
-        const ib: i256 = @bitCast(b);
-        const result: u256 = @bitCast(@divFloor(ia, ib));
-
-        try frame.stack.push(result);
+    if (b == 0) {
+        try frame.stack.push(0);
+        return;
     }
+
+    const ia: i256 = @bitCast(a);
+    const ib: i256 = @bitCast(b);
+    const result: u256 = @bitCast(@divFloor(ia, ib));
+    try frame.stack.push(result);
 }
 
 pub fn mod(frame: *CallFrame) !void {
@@ -167,6 +164,16 @@ inline fn u256AddMod(a: u256, b: u256, c: u256) u256 {
 test u256AddMod {
     const max_256 = std.math.maxInt(u256);
     try std.testing.expectEqual(u256AddMod(max_256, 1, max_256), 1);
+}
+
+test "DIV and SDIV with one operand fail as invalid instructions" {
+    try evmz.t.expectCancunBytecodeStatus(&.{ 0x60, 0x01, 0x04 }, .invalid);
+    try evmz.t.expectCancunBytecodeStatus(&.{ 0x60, 0x01, 0x05 }, .invalid);
+}
+
+test "DIV and SDIV by zero push zero" {
+    try evmz.t.expectCancunBytecodeStackTop(&.{ 0x60, 0x00, 0x60, 0x02, 0x04 }, 0);
+    try evmz.t.expectCancunBytecodeStackTop(&.{ 0x60, 0x00, 0x60, 0x02, 0x05 }, 0);
 }
 
 // can work on a better version
