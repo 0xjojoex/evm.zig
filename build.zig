@@ -25,6 +25,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(static_c_lib);
     b.default_step.dependOn(&static_c_lib.step);
 
+    const shared_c_lib = b.addLibrary(.{
+        .name = "evmz",
+        .root_module = c_lib_mod,
+        .linkage = .dynamic,
+    });
+    b.installArtifact(shared_c_lib);
+    b.default_step.dependOn(&shared_c_lib.step);
+
     // C Headers
     const c_header = b.addInstallFileWithDir(
         b.path("include/evmz.h"),
@@ -45,8 +53,50 @@ pub fn build(b: *std.Build) void {
 
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
+        const c_api_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/c_api.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        c_api_tests.root_module.addIncludePath(b.path("include"));
+        const run_c_api_tests = b.addRunArtifact(c_api_tests);
+
+        const eest_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/eest.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_eest_tests = b.addRunArtifact(eest_tests);
+
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_lib_unit_tests.step);
+        test_step.dependOn(&run_c_api_tests.step);
+        test_step.dependOn(&run_eest_tests.step);
+    }
+
+    // EEST state-test fixture subset runner
+    {
+        const eest_exe = b.addExecutable(.{
+            .name = "evmz-eest",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/eest_cli.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+
+        const run_eest = b.addRunArtifact(eest_exe);
+        if (b.args) |args| {
+            run_eest.addArgs(args);
+        }
+
+        const eest_step = b.step("eest", "Run EEST state-test fixtures");
+        eest_step.dependOn(&run_eest.step);
     }
 
     // example

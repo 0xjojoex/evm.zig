@@ -12,9 +12,13 @@ pub fn push(frame: *CallFrame, comptime n: u8) !void {
     if (n < 1 or n > 32) {
         @compileError("pushN: n must e in the range 1..32");
     }
-    const value = frame.bytes[frame.pc .. frame.pc + n];
 
-    const f = std.mem.readVarInt(u256, value, .big);
+    // PUSHn can legally run out of bytecode, missing immediate bytes are zero-padded
+    var bytes: [32]u8 = [_]u8{0} ** 32;
+    const available = if (frame.pc >= frame.bytes.len) 0 else @min(n, frame.bytes.len - frame.pc);
+    @memcpy(bytes[0..available], frame.bytes[frame.pc..][0..available]);
+
+    const f = std.mem.readVarInt(u256, bytes[0..n], .big);
     try frame.stack.push(f);
     frame.pc += n;
 }
@@ -24,10 +28,14 @@ pub fn pop(frame: *CallFrame) !void {
 }
 
 pub fn dup(frame: *CallFrame, comptime n: u8) !void {
-    if (n < 1 or n > 32) {
+    if (n < 1 or n > 16) {
         @compileError("dup: n must be in the range 1..16");
     }
     try frame.stack.dup(n);
+}
+
+test "PUSH pads missing immediate bytes with zeroes" {
+    try evmz.t.expectCancunBytecodeStackTop(&.{ 0x61, 0x01 }, 0x0100);
 }
 
 pub fn swap(frame: *CallFrame, comptime n: u8) !void {

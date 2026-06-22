@@ -1,0 +1,9 @@
+# EEST fixture download defaults.
+#
+# The live source repo is ethereum/execution-specs, but reusable generated JSON
+# fixture tarballs are still published on ethereum/execution-spec-tests releases.
+repo=ethereum/execution-spec-tests
+version=v5.4.0
+artifact=fixtures_stable.tar.gz
+url=https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz
+dest=.eest/fixtures/v5.4.0

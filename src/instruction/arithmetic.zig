@@ -134,13 +134,14 @@ pub fn signextend(frame: *CallFrame) !void {
 }
 
 pub fn keccak256(frame: *CallFrame) !void {
-    const offset: usize = @intCast(try frame.stack.pop());
-    const size: usize = @intCast(try frame.stack.pop());
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
 
-    const expand_cost = try frame.memory.expand(offset, size);
+    if (!try frame.expandMemory(offset, size)) return;
     const min_word_size = (size + 31) / 32;
     const gas_for_word: i64 = @intCast(6 * min_word_size);
-    frame.trackGas(gas_for_word + expand_cost);
+    frame.trackGas(gas_for_word);
+    if (frame.status != .running) return;
 
     const value = frame.memory.readBytes(offset, size);
 

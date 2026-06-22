@@ -7,6 +7,10 @@ const Memory = @This();
 
 const word_size = 32;
 
+pub const Error = error{
+    MemoryOverflow,
+};
+
 bytes: ArrayList(u8),
 allocator: Allocator,
 
@@ -38,7 +42,10 @@ pub fn len(self: *const Memory) usize {
 }
 
 fn resize(self: *Memory, size: usize) !void {
-    try self.bytes.appendNTimes(self.allocator, 0, size);
+    if (size <= self.len()) {
+        return;
+    }
+    try self.bytes.appendNTimes(self.allocator, 0, size - self.len());
 }
 
 pub fn write(self: *Memory, offset: usize, value: u256) !void {
@@ -66,40 +73,64 @@ pub fn copy(self: *Memory, dest: usize, src: usize, size: usize) !void {
     assert(dest + size <= self.bytes.items.len);
     assert(src + size <= self.bytes.items.len);
 
-    @memcpy(self.readBytes(dest, size), self.readBytes(src, size));
+    if (dest == src or size == 0) return;
+
+    const dest_bytes = self.bytes.items[dest..][0..size];
+    const src_bytes = self.bytes.items[src..][0..size];
+    if (dest < src) {
+        std.mem.copyForwards(u8, dest_bytes, src_bytes);
+    } else {
+        std.mem.copyBackwards(u8, dest_bytes, src_bytes);
+    }
 }
 
 /// Expand the memory if needed, return the *gas cost* of the expansion.
 pub fn expand(self: *Memory, offset: usize, byte_size: usize) !i64 {
-    if (byte_size == 0) {
-        return 0;
-    }
-    const next_size = nextSize(offset, byte_size);
+    const cost = try self.expansionCost(offset, byte_size);
+    try self.expandToFit(offset, byte_size);
+    return cost;
+}
+
+pub fn expansionCost(self: *const Memory, offset: usize, byte_size: usize) Error!i64 {
+    const next_size = try nextSize(offset, byte_size);
     if (self.len() < next_size) {
-        try self.resize(next_size);
-        return expandCost(next_size);
+        return try memoryCost(next_size) - try memoryCost(self.len());
     }
     return 0;
 }
 
-inline fn nextSize(offset: usize, byte_size: usize) usize {
-    const f: f64 = @floatFromInt(offset);
-    const byte_size_f: f64 = @floatFromInt(byte_size);
-    const base: usize = @intFromFloat(@ceil(f / byte_size_f) * byte_size_f);
-    return base + byte_size;
+pub fn expandToFit(self: *Memory, offset: usize, byte_size: usize) !void {
+    const next_size = try nextSize(offset, byte_size);
+    if (self.len() < next_size) {
+        try self.resize(next_size);
+    }
+}
+
+inline fn nextSize(offset: usize, byte_size: usize) Error!usize {
+    if (byte_size == 0) {
+        return 0;
+    }
+    const end = std.math.add(usize, offset, byte_size) catch return Error.MemoryOverflow;
+    const end_with_padding = std.math.add(usize, end, word_size - 1) catch return Error.MemoryOverflow;
+    return (end_with_padding / word_size) * word_size;
 }
 
 test nextSize {
-    try std.testing.expectEqual(32, nextSize(0, 32));
-    try std.testing.expectEqual(64, nextSize(31, 32));
-    try std.testing.expectEqual(64, nextSize(32, 32));
-    try std.testing.expectEqual(96, nextSize(57, 32));
-    try std.testing.expectEqual(256, nextSize(255, 1));
+    try std.testing.expectEqual(32, try nextSize(0, 32));
+    try std.testing.expectEqual(64, try nextSize(31, 32));
+    try std.testing.expectEqual(64, try nextSize(32, 32));
+    try std.testing.expectEqual(96, try nextSize(57, 32));
+    try std.testing.expectEqual(256, try nextSize(255, 1));
+    try std.testing.expectEqual(32, try nextSize(1, 3));
+    try std.testing.expectError(Error.MemoryOverflow, nextSize(std.math.maxInt(usize), 1));
 }
 
-pub inline fn expandCost(expand_size: u64) i64 {
+pub inline fn memoryCost(expand_size: usize) Error!i64 {
     const memory_size_word = (expand_size + 31) / 32;
-    return @intCast((memory_size_word * memory_size_word) / 512 + (3 * memory_size_word));
+    const words: u128 = memory_size_word;
+    const cost = (words * words) / 512 + (3 * words);
+    if (cost > std.math.maxInt(i64)) return Error.MemoryOverflow;
+    return @intCast(cost);
 }
 
 test Memory {
@@ -148,4 +179,17 @@ test "memory byte slice writes overwrite without shifting bytes" {
     try memory.writeBytes(1, &.{ 0x11, 0x22 });
     try std.testing.expectEqual(@as(usize, 32), memory.len());
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0x11, 0x22 }, memory.readBytes(0, 3));
+}
+
+test "memory copy is overlap safe" {
+    var memory = Memory.init(std.testing.allocator);
+    defer memory.deinit();
+
+    _ = try memory.expand(0, 32);
+    try memory.writeBytes(0, &.{ 0xaa, 0xbb, 0xcc, 0xdd });
+    try memory.copy(2, 0, 4);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xaa, 0xbb, 0xcc, 0xdd }, memory.readBytes(0, 6));
+
+    try memory.copy(0, 2, 4);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xcc, 0xdd }, memory.readBytes(0, 4));
 }

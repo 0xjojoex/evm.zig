@@ -49,12 +49,11 @@ pub fn peek(self: *Self) ?u256 {
 
 /// Swap the nth element from the top of the stack with the top element
 pub fn swap(self: *Self, comptime n: usize) Error!void {
-    const target = self.len - 1 - n;
-
-    if (self.len < target) {
+    if (self.len <= n) {
         return Error.StackUnderflow;
     }
 
+    const target = self.len - 1 - n;
     std.mem.swap(u256, &self.stacks[target], &self.stacks[self.len - 1]);
 }
 
@@ -107,4 +106,16 @@ test "push pop and peek use the top stack slot" {
     try testing.expectEqual(@as(usize, 0), stack.len);
     try testing.expectEqual(null, stack.peek());
     try testing.expectError(Error.StackUnderflow, stack.pop());
+}
+
+test "swap checks depth before computing target slot" {
+    var stack = Self.init();
+
+    try testing.expectError(Error.StackUnderflow, stack.swap(1));
+    try stack.push(1);
+    try testing.expectError(Error.StackUnderflow, stack.swap(1));
+
+    try stack.push(2);
+    try stack.swap(1);
+    try testing.expectEqual(@as(u256, 1), stack.peek().?);
 }

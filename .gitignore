@@ -1,6 +1,7 @@
 .zig-cache
 zig-out
 .DS_Store
+.eest/
 
 src/mock.json
 src/mock_test.zig

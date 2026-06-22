@@ -15,13 +15,13 @@ pub fn fromEvmcAddress(addr: evmc.evmc_address) evmz.Address {
 }
 
 pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
-    return @bitCast(b.bytes);
+    return std.mem.readInt(u256, &b.bytes, .big);
 }
 
-pub fn toEvmcBytes32(value: ?u256) [*c]evmc.evmc_bytes32 {
-    return @ptrCast(@constCast(&evmc.evmc_bytes32{
-        .bytes = if (value) |v| @bitCast(v) else std.mem.zeroes([32]u8),
-    }));
+pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
+    var result = std.mem.zeroes(evmc.evmc_bytes32);
+    std.mem.writeInt(u256, &result.bytes, value orelse 0, .big);
+    return result;
 }
 
 pub fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {

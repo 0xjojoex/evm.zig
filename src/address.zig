@@ -13,6 +13,10 @@ pub fn addr(ess: u160) Address {
     return bytes;
 }
 
+pub fn fromWord(word: u256) Address {
+    return addr(@truncate(word));
+}
+
 test addr {
     const address0 = addr(0);
     try std.testing.expectEqual(zero_address, address0);
@@ -20,4 +24,12 @@ test addr {
     const address1 = addr(1);
     a[19] = 1;
     try std.testing.expectEqual(a, address1);
+}
+
+test fromWord {
+    const word = (@as(u256, 1) << 160) | 0x1234;
+    var expected = [_]u8{0} ** 20;
+    expected[18] = 0x12;
+    expected[19] = 0x34;
+    try std.testing.expectEqual(expected, fromWord(word));
 }

@@ -6,8 +6,6 @@ const Host = @import("./Host.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 
-const Address = evmz.Address;
-const addr = evmz.addr;
 const log = std.log.scoped(.interpreter);
 
 const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
@@ -52,6 +50,11 @@ pub fn execute(self: *Interpreter) Result {
 }
 
 fn step(self: *Interpreter) void {
+    if (self.call_frame.pc >= self.call_frame.bytes.len) {
+        self.call_frame.status = .success;
+        return;
+    }
+
     const opcode_byte = self.call_frame.bytes[self.call_frame.pc];
     self.call_frame.pc += 1;
     const instr = instruction.instruction_table.ops[opcode_byte];
@@ -125,8 +128,33 @@ pub const CallFrame = struct {
         self.gas_left -= gas;
         if (self.gas_left < 0) {
             self.status = .out_of_gas;
-            log.debug("OOG: {any}\n", .{self});
         }
+    }
+
+    pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
+        return self.wordToIntOrStatus(usize, value, .out_of_gas);
+    }
+
+    pub fn wordToIntOrStatus(self: *CallFrame, comptime T: type, value: u256, status: Status) ?T {
+        return std.math.cast(T, value) orelse {
+            self.status = status;
+            return null;
+        };
+    }
+
+    pub fn expandMemory(self: *CallFrame, offset: usize, byte_size: usize) !bool {
+        const expand_cost = self.memory.expansionCost(offset, byte_size) catch |err| switch (err) {
+            Memory.Error.MemoryOverflow => {
+                self.status = .out_of_gas;
+                return false;
+            },
+        };
+        self.trackGas(expand_cost);
+        if (self.status != .running) {
+            return false;
+        }
+        try self.memory.expandToFit(offset, byte_size);
+        return true;
     }
 
     pub fn getTxContext(self: *CallFrame) !Host.TxContext {

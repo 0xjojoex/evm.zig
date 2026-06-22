@@ -66,7 +66,7 @@ fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc
 
 fn getStorage(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address, key: [*c]const evmc.evmc_bytes32) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*))).*;
+    return toEvmcBytes32(host.getStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)));
 }
 
 fn setStorage(
@@ -85,7 +85,7 @@ fn setStorage(
 fn getBalance(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
     const b = host.getBalance(fromEvmcAddress(address.*)) catch 0;
-    return toEvmcBytes32(b).*;
+    return toEvmcBytes32(b);
 }
 
 fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) usize {
@@ -93,7 +93,7 @@ fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_a
     return @intCast(host.getCodeSize(fromEvmcAddress(address.*)) catch 0);
 }
 
-fn getCodeHash(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) [*c]evmc.evmc_bytes32 {
+fn getCodeHash(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
     return toEvmcBytes32(host.getCodeHash(fromEvmcAddress(address.*)) catch 0);
 }
@@ -130,7 +130,7 @@ fn call(
         .gas = msg.*.gas,
         .recipient = fromEvmcAddress(msg.*.recipient),
         .sender = fromEvmcAddress(msg.*.sender),
-        .input_data = msg.*.input_data[0..msg.*.input_size],
+        .input_data = if (msg.*.input_size == 0) &.{} else msg.*.input_data[0..msg.*.input_size],
         .value = fromEvmcBytes32(msg.*.value),
         .is_static = msg.*.flags & evmc.EVMC_STATIC != 0,
         .code_address = fromEvmcAddress(msg.*.code_address),
@@ -170,21 +170,21 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
     };
 
     return evmc.evmc_tx_context{
-        .block_base_fee = toEvmcBytes32(tx_context.base_fee).*,
+        .block_base_fee = toEvmcBytes32(tx_context.base_fee),
         .block_coinbase = toEvmcAddress(tx_context.coinbase),
         .block_gas_limit = @intCast(tx_context.gas_limit),
         .block_number = @intCast(tx_context.number),
-        .block_prev_randao = toEvmcBytes32(tx_context.prev_randao).*,
+        .block_prev_randao = toEvmcBytes32(tx_context.prev_randao),
         .block_timestamp = @intCast(tx_context.timestamp),
-        .chain_id = toEvmcBytes32(tx_context.chain_id).*,
-        .tx_gas_price = toEvmcBytes32(tx_context.gas_price).*,
+        .chain_id = toEvmcBytes32(tx_context.chain_id),
+        .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
         .tx_origin = toEvmcAddress(tx_context.origin),
     };
 }
 
 fn getBlockHash(context: ?*evmc.evmc_host_context, number: i64) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getBlockHash(@intCast(number)) catch 0).*;
+    return toEvmcBytes32(host.getBlockHash(@intCast(number)) catch 0);
 }
 
 fn emitLog(
@@ -233,7 +233,7 @@ fn getTransientStorage(
     key: [*c]const evmc.evmc_bytes32,
 ) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getTransientStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*))).*;
+    return toEvmcBytes32(host.getTransientStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)));
 }
 
 fn setTransientStorage(

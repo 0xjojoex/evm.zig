@@ -2,7 +2,6 @@ const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
 const instruction = evmz.instruction;
-const Address = evmz.Address;
 const CallFrame = Interpreter.CallFrame;
 
 pub fn gas(frame: *CallFrame) !void {
@@ -79,9 +78,10 @@ pub fn blockhash(frame: *CallFrame) !void {
 
 pub fn balance(frame: *CallFrame) !void {
     const target_address_word = try frame.stack.pop();
-    const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(target_address_word))));
+    const target_address = evmz.address.fromWord(target_address_word);
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
         frame.trackGas(instruction.cold_account_access_gas);
+        if (frame.status != .running) return;
     }
     const address_balance = try frame.host.getBalance(target_address);
     try frame.stack.push(address_balance);
@@ -92,13 +92,12 @@ pub fn callvalue(frame: *CallFrame) !void {
 }
 
 pub fn calldataload(frame: *CallFrame) !void {
-    const offset: usize = @intCast(try frame.stack.pop());
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
     var buffer: [32]u8 = [_]u8{0} ** 32;
 
-    for (0..32) |i| {
-        if (offset + i < frame.msg.input_data.len) {
-            buffer[i] = frame.msg.input_data[offset + i];
-        }
+    if (offset < frame.msg.input_data.len) {
+        const available = @min(buffer.len, frame.msg.input_data.len - offset);
+        @memcpy(buffer[0..available], frame.msg.input_data[offset..][0..available]);
     }
 
     try frame.stack.push(@byteSwap(@as(u256, @bitCast(buffer))));
@@ -109,20 +108,15 @@ pub fn calldatasize(frame: *CallFrame) !void {
 }
 
 pub fn calldatacopy(frame: *CallFrame) !void {
-    const dest_offset: usize = @intCast(try frame.stack.pop());
-    const offset: usize = @intCast(try frame.stack.pop());
-    const size: usize = @intCast(try frame.stack.pop());
+    const dest_offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
 
-    const expand_cost = try frame.memory.expand(dest_offset, size);
-    frame.trackGas(expand_cost);
+    if (!try frame.expandMemory(dest_offset, size)) return;
 
-    // refactor to write bytes
-    for (0..size) |i| {
-        if (offset + i < frame.msg.input_data.len) {
-            frame.memory.bytes.items[dest_offset + i] = frame.msg.input_data[offset + i];
-        } else {
-            frame.memory.bytes.items[dest_offset + i] = 0;
-        }
+    if (offset < frame.msg.input_data.len) {
+        const available = @min(size, frame.msg.input_data.len - offset);
+        try frame.memory.writeBytes(dest_offset, frame.msg.input_data[offset..][0..available]);
     }
 }
 
@@ -131,53 +125,52 @@ pub fn codesize(frame: *CallFrame) !void {
 }
 
 pub fn codecopy(frame: *CallFrame) !void {
-    const dest_offset: usize = @intCast(try frame.stack.pop());
-    const offset: usize = @intCast(try frame.stack.pop());
-    const size: usize = @intCast(try frame.stack.pop());
+    const dest_offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
 
-    const expand_cost = try frame.memory.expand(dest_offset, size);
-    frame.trackGas(expand_cost);
+    if (!try frame.expandMemory(dest_offset, size)) return;
 
-    for (0..size) |i| {
-        if (offset + i < frame.bytes.len) {
-            frame.memory.bytes.items[dest_offset + i] = frame.bytes[offset + i];
-        }
+    if (offset < frame.bytes.len) {
+        const available = @min(size, frame.bytes.len - offset);
+        try frame.memory.writeBytes(dest_offset, frame.bytes[offset..][0..available]);
     }
 }
 
 pub fn extcodesize(frame: *CallFrame) !void {
     const target_address = try frame.stack.pop();
-    const size = try frame.host.getCodeSize(@bitCast(@byteSwap(@as(u160, @intCast(target_address)))));
+    const size = try frame.host.getCodeSize(evmz.address.fromWord(target_address));
     try frame.stack.push(size);
 }
 
 pub fn extcodecopy(frame: *CallFrame) !void {
     const address_word = try frame.stack.pop();
-    const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
-    const dest_offset: usize = @intCast(try frame.stack.pop());
-    const offset: usize = @intCast(try frame.stack.pop());
-    const size: usize = @intCast(try frame.stack.pop());
+    const target_address = evmz.address.fromWord(address_word);
+    const dest_offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+
+    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
+        frame.trackGas(instruction.cold_account_access_gas);
+        if (frame.status != .running) return;
+    }
+
+    if (!try frame.expandMemory(dest_offset, size)) return;
 
     const buf = try frame.allocator.alloc(u8, size);
     defer frame.allocator.free(buf);
     @memset(buf[0..buf.len], 0);
 
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(instruction.cold_account_access_gas);
-    }
-
     _ = try frame.host.copyCode(target_address, offset, buf);
-    const expand_cost = try frame.memory.expand(dest_offset, size);
-    frame.trackGas(expand_cost);
-
     try frame.memory.writeBytes(dest_offset, buf);
 }
 
 pub fn extcodehash(frame: *CallFrame) !void {
     const address_word = try frame.stack.pop();
-    const target_address: Address = @bitCast(@byteSwap(@as(u160, @intCast(address_word))));
+    const target_address = evmz.address.fromWord(address_word);
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
         frame.trackGas(instruction.cold_account_access_gas);
+        if (frame.status != .running) return;
     }
     const code_hash = try frame.host.getCodeHash(target_address);
     try frame.stack.push(code_hash);
@@ -193,26 +186,28 @@ pub fn returndatasize(frame: *CallFrame) !void {
 }
 
 pub fn returndatacopy(frame: *CallFrame) !void {
-    const dest_offset: usize = @intCast(try frame.stack.pop());
-    const offset: usize = @intCast(try frame.stack.pop());
-    const size: usize = @intCast(try frame.stack.pop());
+    const dest_offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
 
-    const expand_cost = try frame.memory.expand(dest_offset, size);
-    frame.trackGas(expand_cost);
+    if (!try frame.expandMemory(dest_offset, size)) return;
 
+    if (offset > frame.return_data.len or size > frame.return_data.len - offset) {
+        frame.status = .invalid;
+        return;
+    }
     try frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);
 }
 
 pub fn blobhash(frame: *CallFrame) !void {
-    const index: usize = @intCast(try frame.stack.pop());
+    const index = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
     const tx_context = try frame.getTxContext();
 
-    if (tx_context.blob_hashes.len < index) {
+    if (index >= tx_context.blob_hashes.len) {
         try frame.stack.push(0);
         return;
-    } else {
-        try frame.stack.push(tx_context.blob_hashes[index]);
     }
+    try frame.stack.push(tx_context.blob_hashes[index]);
 }
 
 pub fn blobbasefee(frame: *CallFrame) !void {
