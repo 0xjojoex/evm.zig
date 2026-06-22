@@ -138,8 +138,13 @@ pub fn codecopy(frame: *CallFrame) !void {
 }
 
 pub fn extcodesize(frame: *CallFrame) !void {
-    const target_address = try frame.stack.pop();
-    const size = try frame.host.getCodeSize(evmz.address.fromWord(target_address));
+    const target_address_word = try frame.stack.pop();
+    const target_address = evmz.address.fromWord(target_address_word);
+    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
+        frame.trackGas(instruction.cold_account_access_gas);
+        if (frame.status != .running) return;
+    }
+    const size = try frame.host.getCodeSize(target_address);
     try frame.stack.push(size);
 }
 

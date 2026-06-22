@@ -9,7 +9,7 @@ pub const account_creation_cost = 25000;
 
 // [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929)
 pub const cold_sload_cost = 2100;
-const cold_account_access_cost = 2600;
+pub const cold_account_access_cost = 2600;
 pub const warm_storage_read_cost = 100;
 
 // warm_storage_read_cost is count before instruction execution
@@ -88,7 +88,7 @@ const instruction_entries: []const InstructionEntry = &.{
     .{ .SELFBALANCE, 5, Instructions.environment.selfbalance },
     .{ .BASEFEE, 2, Instructions.environment.basefee },
     .{ .BLOBHASH, 3, Instructions.environment.blobhash },
-    .{ .BLOBBASEFEE, 3, Instructions.environment.blobbasefee },
+    .{ .BLOBBASEFEE, 2, Instructions.environment.blobbasefee },
     .{ .POP, 2, Instructions.stack.pop },
     .{ .MLOAD, 3, Instructions.memory.mload },
     .{ .MSTORE, 3, Instructions.memory.mstore },
@@ -175,12 +175,12 @@ const instruction_entries: []const InstructionEntry = &.{
     .{ .LOG3, 375 * 4, Instructions.logN(3) },
     .{ .LOG4, 375 * 5, Instructions.logN(4) },
     .{ .CREATE, 32000, Instructions.system.create },
-    .{ .CALL, 100, Instructions.call(.CALL) },
-    .{ .CALLCODE, 100, Instructions.call(.CALLCODE) },
+    .{ .CALL, 40, Instructions.call(.CALL) },
+    .{ .CALLCODE, 40, Instructions.call(.CALLCODE) },
     .{ .RETURN, 0, Instructions.system.ret },
-    .{ .DELEGATECALL, 100, Instructions.call(.DELEGATECALL) },
+    .{ .DELEGATECALL, 40, Instructions.call(.DELEGATECALL) },
     .{ .CREATE2, 32000, Instructions.system.create2 },
-    .{ .STATICCALL, 100, Instructions.call(.STATICCALL) },
+    .{ .STATICCALL, 40, Instructions.call(.STATICCALL) },
     .{ .REVERT, 0, Instructions.system.revert },
     .{ .INVALID, 0, Instructions.system.invalid },
     .{ .SELFDESTRUCT, 5000, Instructions.system.selfdestruct },
@@ -244,10 +244,6 @@ const Instructions = struct {
 
     fn noop(_: *CallFrame) anyerror!void {
         return;
-    }
-
-    fn todo(_: *CallFrame) anyerror!void {
-        return std.debug.panic("TODO", .{});
     }
 
     inline fn pushN(comptime n: u8) InstructionPtr {

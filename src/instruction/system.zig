@@ -8,9 +8,16 @@ const addr = evmz.addr;
 
 const CallFrame = Interpreter.CallFrame;
 const max_call_depth = 1024;
+const call_static_gas_floor = 40;
 
 fn wordToGas(word: u256) i64 {
     return std.math.cast(i64, word) orelse std.math.maxInt(i64);
+}
+
+fn callBaseGas(spec: evmz.Spec) i64 {
+    if (spec.isImpl(.berlin)) return 100;
+    if (spec.isImpl(.tangerine_whistle)) return 700;
+    return call_static_gas_floor;
 }
 
 fn nextDepth(depth: u16) u16 {
@@ -70,13 +77,16 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
     const out_offset = try frame.stack.pop();
     const out_size = try frame.stack.pop();
 
-    const in_offset_usize = frame.wordToUsizeOrOog(in_offset) orelse return;
     const in_size_usize = frame.wordToUsizeOrOog(in_size) orelse return;
-    const out_offset_usize = frame.wordToUsizeOrOog(out_offset) orelse return;
     const out_size_usize = frame.wordToUsizeOrOog(out_size) orelse return;
+    const in_offset_usize = if (in_size_usize == 0) 0 else frame.wordToUsizeOrOog(in_offset) orelse return;
+    const out_offset_usize = if (out_size_usize == 0) 0 else frame.wordToUsizeOrOog(out_offset) orelse return;
+
+    frame.trackGas(callBaseGas(frame.spec) - call_static_gas_floor);
+    if (frame.status != .running) return;
 
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
-        frame.trackGas(evmz.instruction.cold_sload_gas);
+        frame.trackGas(evmz.instruction.cold_account_access_gas);
         if (frame.status != .running) return;
     }
 
@@ -240,7 +250,7 @@ pub fn selfdestruct(frame: *CallFrame) !void {
     const address = evmz.address.fromWord(address_word);
 
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
-        frame.trackGas(evmz.instruction.cold_account_access_gas);
+        frame.trackGas(evmz.instruction.cold_account_access_cost);
 
         if (frame.gas_left < 0) {
             return;

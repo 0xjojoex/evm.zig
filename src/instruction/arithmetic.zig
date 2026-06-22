@@ -108,8 +108,8 @@ pub fn exp(frame: *CallFrame) !void {
 
     const exp_cost: u8 = if (frame.spec.isImpl(.spurious_dragon)) 50 else 10;
 
-    const exponent_byte_size: i64 = countSignificantBytesSize(@intCast(exponent));
-    frame.trackGas(exp_cost * exponent_byte_size);
+    const exponent_byte_size = countSignificantBytesSize(exponent);
+    frame.trackGas(@as(i64, exp_cost) * exponent_byte_size);
 
     const result = wrapExp(a, exponent);
     try frame.stack.push(result);
@@ -205,7 +205,6 @@ inline fn wrapExp(a: u256, expo: u256) u256 {
         value *%= value;
     }
 
-    if (result == 0) return 1;
     return result;
 }
 
@@ -215,7 +214,7 @@ test wrapExp {
     const a = 2;
     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
     const result = wrapExp(a, exponent);
-    try std.testing.expectEqual(result, 1);
+    try std.testing.expectEqual(@as(u256, 0), result);
 }
 
 test u256MulMod {
@@ -226,9 +225,9 @@ test u256MulMod {
     try std.testing.expectEqual(u256MulMod(3, 4, 5), 2);
 }
 
-/// Returns the number of significant byte size for the u64 integer, calculate how many bytes are needed to represent the significant part of the integer.
-inline fn countSignificantBytesSize(value: u64) u8 {
-    return (64 - @clz(value) + 7) / 8;
+/// Returns how many bytes are needed to represent the significant part of a 256-bit integer.
+inline fn countSignificantBytesSize(value: u256) i64 {
+    return @divFloor(256 - @as(i64, @intCast(@clz(value))) + 7, 8);
 }
 
 test countSignificantBytesSize {
@@ -237,4 +236,5 @@ test countSignificantBytesSize {
     try std.testing.expectEqual(countSignificantBytesSize(255), 1);
     try std.testing.expectEqual(countSignificantBytesSize(256), 2);
     try std.testing.expectEqual(countSignificantBytesSize(1000), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(std.math.maxInt(u256)), 32);
 }

@@ -219,6 +219,8 @@ fn runVector(
     const result = interpreter.execute();
     if (executionRolledBack(result.status)) {
         try host.restore(&pre_execution_state);
+    } else {
+        host.finalizeTransaction();
     }
 
     var compared_fields: usize = 0;
@@ -368,6 +370,7 @@ const FixtureHost = struct {
     warm_accounts: std.AutoHashMap(Address, void),
     warm_storage: std.AutoHashMap(StorageKey, void),
     transient_storage: std.AutoHashMap(StorageKey, u256),
+    selfdestructed_accounts: std.AutoHashMap(Address, void),
     logs: std.ArrayList(Host.Log),
     tx_context: Host.TxContext,
     spec: evmz.Spec,
@@ -389,6 +392,7 @@ const FixtureHost = struct {
             .warm_accounts = std.AutoHashMap(Address, void).init(allocator),
             .warm_storage = std.AutoHashMap(StorageKey, void).init(allocator),
             .transient_storage = std.AutoHashMap(StorageKey, u256).init(allocator),
+            .selfdestructed_accounts = std.AutoHashMap(Address, void).init(allocator),
             .logs = .empty,
             .tx_context = tx_context,
             .spec = spec,
@@ -422,6 +426,7 @@ const FixtureHost = struct {
         self.warm_accounts.deinit();
         self.warm_storage.deinit();
         self.transient_storage.deinit();
+        self.selfdestructed_accounts.deinit();
         self.logs.deinit(self.allocator);
         self.allocator.free(self.last_call_output);
     }
@@ -455,6 +460,7 @@ const FixtureHost = struct {
         var result = Snapshot{
             .accounts = std.AutoHashMap(Address, AccountState).init(self.allocator),
             .transient_storage = std.AutoHashMap(StorageKey, u256).init(self.allocator),
+            .selfdestructed_accounts = std.AutoHashMap(Address, void).init(self.allocator),
             .logs_len = self.logs.items.len,
         };
         errdefer result.deinit(self.allocator);
@@ -471,12 +477,18 @@ const FixtureHost = struct {
             try result.transient_storage.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        var selfdestruct_it = self.selfdestructed_accounts.keyIterator();
+        while (selfdestruct_it.next()) |address| {
+            try result.selfdestructed_accounts.put(address.*, {});
+        }
+
         return result;
     }
 
     fn restore(self: *Self, snapshot_state: *Snapshot) !void {
         self.clearAccounts();
         self.transient_storage.clearRetainingCapacity();
+        self.selfdestructed_accounts.clearRetainingCapacity();
         self.logs.items.len = snapshot_state.logs_len;
 
         var account_it = snapshot_state.accounts.iterator();
@@ -490,6 +502,11 @@ const FixtureHost = struct {
         while (transient_it.next()) |entry| {
             try self.transient_storage.put(entry.key_ptr.*, entry.value_ptr.*);
         }
+
+        var selfdestruct_it = snapshot_state.selfdestructed_accounts.keyIterator();
+        while (selfdestruct_it.next()) |address| {
+            try self.selfdestructed_accounts.put(address.*, {});
+        }
     }
 
     fn clearAccounts(self: *Self) void {
@@ -498,6 +515,19 @@ const FixtureHost = struct {
             account.deinit(self.allocator);
         }
         self.accounts.clearRetainingCapacity();
+    }
+
+    fn finalizeTransaction(self: *Self) void {
+        if (self.spec.isImpl(.cancun)) return;
+
+        var it = self.selfdestructed_accounts.keyIterator();
+        while (it.next()) |address| {
+            if (self.accounts.fetchRemove(address.*)) |removed| {
+                var account = removed.value;
+                account.deinit(self.allocator);
+            }
+        }
+        self.selfdestructed_accounts.clearRetainingCapacity();
     }
 
     fn getCode(self: *Self, address: Address) []const u8 {
@@ -626,12 +656,14 @@ const FixtureHost = struct {
     fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const balance = try getBalance(ptr, address);
-        const beneficiary_account = try self.getOrCreateAccount(beneficiary);
-        beneficiary_account.balance += balance;
-        if (self.accounts.fetchRemove(address)) |removed| {
-            var account = removed.value;
-            account.deinit(self.allocator);
+        if (balance > 0 and !std.mem.eql(u8, &address, &beneficiary)) {
+            const beneficiary_account = try self.getOrCreateAccount(beneficiary);
+            beneficiary_account.balance += balance;
         }
+        if (self.accounts.getPtr(address)) |account| {
+            account.balance = 0;
+        }
+        try self.selfdestructed_accounts.put(address, {});
         return false;
     }
 
@@ -660,6 +692,7 @@ const FixtureHost = struct {
     const Snapshot = struct {
         accounts: std.AutoHashMap(Address, AccountState),
         transient_storage: std.AutoHashMap(StorageKey, u256),
+        selfdestructed_accounts: std.AutoHashMap(Address, void),
         logs_len: usize,
 
         fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
@@ -669,6 +702,7 @@ const FixtureHost = struct {
             }
             self.accounts.deinit();
             self.transient_storage.deinit();
+            self.selfdestructed_accounts.deinit();
         }
     };
 };
