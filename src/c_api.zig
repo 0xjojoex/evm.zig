@@ -1,14 +1,11 @@
 //! Implementation of the EVMC interface for evm.zig.
 //! This is a proof of concept and not intended for production use.
-const evmc = @cImport({
-    @cInclude("evmc.h");
-});
-
 const std = @import("std");
 const evmz = @import("evm.zig");
 const t = @import("t.zig");
 const host2c = @import("./c_api/host2c.zig");
 const mock = @import("./c_api/mock.zig");
+const evmc = @import("./c_api/common.zig").evmc;
 
 const MockHostContext = mock.MockHostContext;
 
@@ -65,12 +62,12 @@ const Evmz = struct {
     }
 };
 
-fn destroy(vm: [*c]evmc.evmc_vm) callconv(.C) void {
+fn destroy(vm: [*c]evmc.evmc_vm) callconv(.c) void {
     const self: *allowzero Evmz = @alignCast(@fieldParentPtr("vm", vm));
     std.heap.c_allocator.destroy(self);
 }
 
-fn getCapabilities(vm: [*c]evmc.struct_evmc_vm) callconv(.C) evmc.evmc_capabilities {
+fn getCapabilities(vm: [*c]evmc.struct_evmc_vm) callconv(.c) evmc.evmc_capabilities {
     _ = vm;
     return evmc.EVMC_CAPABILITY_EVM1;
 }
@@ -83,7 +80,7 @@ fn execute(
     msg: [*c]const evmc.evmc_message,
     code: [*c]const u8,
     code_size: usize,
-) callconv(.C) evmc.evmc_result {
+) callconv(.c) evmc.evmc_result {
     _ = vm;
 
     const spec = revToSpec(rev) catch |err| {
@@ -146,7 +143,7 @@ fn execute(
     };
 }
 
-fn release(result: [*c]const evmc.evmc_result) callconv(.C) void {
+fn release(result: [*c]const evmc.evmc_result) callconv(.c) void {
     // log.debug("release result {x}\n", .{result.output_data});
     //
     const int = @intFromPtr(result.*.output_data);
@@ -161,7 +158,7 @@ fn setOption(
     vm: [*c]evmc.evmc_vm,
     name: [*c]const u8,
     value: [*c]const u8,
-) callconv(.C) evmc.evmc_set_option_result {
+) callconv(.c) evmc.evmc_set_option_result {
     _ = vm;
     _ = name;
     _ = value;

@@ -1,4 +1,4 @@
-const evmc = @cImport({
+pub const evmc = @cImport({
     @cInclude("evmc.h");
 });
 const std = @import("std");

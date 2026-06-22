@@ -8,13 +8,14 @@ const Memory = @This();
 const word_size = 32;
 
 bytes: ArrayList(u8),
+allocator: Allocator,
 
 pub fn init(allocator: Allocator) Memory {
-    return .{ .bytes = ArrayList(u8).init(allocator) };
+    return .{ .bytes = .empty, .allocator = allocator };
 }
 
 pub fn deinit(self: *Memory) void {
-    self.bytes.deinit();
+    self.bytes.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -37,17 +38,17 @@ pub fn len(self: *const Memory) usize {
 }
 
 fn resize(self: *Memory, size: usize) !void {
-    try self.bytes.appendNTimes(0, size);
+    try self.bytes.appendNTimes(self.allocator, 0, size);
 }
 
 pub fn write(self: *Memory, offset: usize, value: u256) !void {
     const pad_left_value = @byteSwap(value);
     const bytes = std.mem.asBytes(&pad_left_value);
-    try self.bytes.insertSlice(offset, bytes);
+    try self.bytes.insertSlice(self.allocator, offset, bytes);
 }
 
 pub fn writeBytes(self: *Memory, offset: usize, value: []const u8) !void {
-    try self.bytes.insertSlice(offset, value);
+    try self.bytes.insertSlice(self.allocator, offset, value);
 }
 
 pub fn write8(self: *Memory, offset: usize, value: u256) void {

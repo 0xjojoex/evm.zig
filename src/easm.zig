@@ -54,13 +54,12 @@ pub fn disassembleIter(bytecode: []const u8) DisassembleIterator {
 }
 
 pub fn disassemblePrint(bytecode: []const u8, opts: PrintOption) void {
-    const stdout = std.io.getStdOut().writer();
     var iter = disassembleIter(bytecode);
     while (iter.next()) |instr| {
         if (opts.show_offset) {
-            stdout.print("{x:0>6} {}\n", .{ instr.offset, instr }) catch return;
+            std.debug.print("{x:0>6} {}\n", .{ instr.offset, instr });
         } else {
-            stdout.print("{}\n", .{instr}) catch return;
+            std.debug.print("{}\n", .{instr});
         }
     }
 }
@@ -77,7 +76,4 @@ test "easm disassemble" {
 
     try testing.expectEqual(5, iter.pc);
     try testing.expectEqual(evmz.Opcode.PUSH4, n.?.instruction.opcode);
-
-    const bytecode1 = try std.fmt.hexToBytes(&buf, "604260005260206000F3");
-    disassemblePrint(bytecode1, .{});
 }

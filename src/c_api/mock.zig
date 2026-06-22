@@ -1,9 +1,7 @@
-const evmc = @cImport({
-    @cInclude("evmc.h");
-});
 const std = @import("std");
 const t = @import("../t.zig");
 const host2c = @import("host2c.zig");
+const evmc = @import("common.zig").evmc;
 
 pub const MockHostContext = extern struct {
     mock_host: *t.MockHost,

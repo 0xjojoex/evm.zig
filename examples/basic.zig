@@ -4,7 +4,7 @@ const evmz = @import("evmz");
 const Host = evmz.Host;
 
 pub fn main() void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
 
     const bytecode: []const u8 = "\x43\x60\x00\x55\x43\x60\x00\x52\x59\x60\x00\xf3";
     const input: []const u8 = "Hello World!";

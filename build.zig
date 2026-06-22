@@ -1,20 +1,27 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) !void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("evmz", .{ .root_source_file = b.path("src/evm.zig") });
+    const evmz_mod = b.addModule("evmz", .{
+        .root_source_file = b.path("src/evm.zig"),
+        .target = target,
+    });
 
-    const static_c_lib = b.addStaticLibrary(.{
-        .name = "evmz",
+    const c_lib_mod = b.createModule(.{
         .root_source_file = b.path("src/c_api.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
-    static_c_lib.addIncludePath(b.path("include"));
-    _ = static_c_lib.getEmittedH();
-    static_c_lib.linkLibC();
+    c_lib_mod.addIncludePath(b.path("include"));
+
+    const static_c_lib = b.addLibrary(.{
+        .name = "evmz",
+        .root_module = c_lib_mod,
+        .linkage = .static,
+    });
     b.installArtifact(static_c_lib);
     b.default_step.dependOn(&static_c_lib.step);
 
@@ -29,10 +36,11 @@ pub fn build(b: *std.Build) !void {
     // test
     {
         const lib_unit_tests = b.addTest(.{
-            .root_source_file = b.path("src/evm.zig"),
-            .target = target,
-            .optimize = optimize,
-            .test_runner = b.path("test_runner.zig"),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/evm.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
 
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -50,30 +58,36 @@ pub fn build(b: *std.Build) !void {
         ) orelse "basic.zig";
 
         const is_zig = std.mem.endsWith(u8, example_name, ".zig");
-        const path = try std.fmt.allocPrint(b.allocator, "examples/{s}", .{example_name});
-        defer b.allocator.free(path);
+        const path = b.fmt("examples/{s}", .{example_name});
         const root_source_file = b.path(path);
 
         if (is_zig) {
             const example = b.addExecutable(.{
                 .name = example_name,
-                .root_source_file = root_source_file,
-                .target = target,
-                .optimize = optimize,
+                .root_module = b.createModule(.{
+                    .root_source_file = root_source_file,
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "evmz", .module = evmz_mod },
+                    },
+                }),
             });
-            example.root_module.addImport("evmz", b.modules.get("evmz").?);
             const run_example = b.addRunArtifact(example);
             const run_step = b.step("example", "Run the example");
             run_step.dependOn(&run_example.step);
         } else {
             const example_c = b.addExecutable(.{
                 .name = example_name,
-                .target = target,
-                .optimize = optimize,
+                .root_module = b.createModule(.{
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                }),
             });
 
-            example_c.addIncludePath(b.path("include"));
-            example_c.addCSourceFile(.{
+            example_c.root_module.addIncludePath(b.path("include"));
+            example_c.root_module.addCSourceFile(.{
                 .file = b.path(path),
                 .flags = &[_][]const u8{
                     "-Wall",
@@ -82,7 +96,7 @@ pub fn build(b: *std.Build) !void {
                     "-std=c99",
                 },
             });
-            example_c.linkLibrary(static_c_lib);
+            example_c.root_module.linkLibrary(static_c_lib);
             var run_example = b.addRunArtifact(example_c);
             run_example.has_side_effects = true;
             const run_step = b.step("example", "Run the example");

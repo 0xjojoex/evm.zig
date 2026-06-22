@@ -30,7 +30,7 @@ pub const MockHost = struct {
         return Self{
             .alloc = alloc,
             .store = std.AutoHashMap(u256, u256).init(alloc),
-            .logs = std.ArrayList(Host.Log).init(alloc),
+            .logs = .empty,
             .local_account = std.AutoHashMap(Address, Host.Account).init(alloc),
             .removed_account = std.AutoHashMap(Address, bool).init(alloc),
             .code = std.AutoHashMap(Address, []u8).init(alloc),
@@ -52,7 +52,7 @@ pub const MockHost = struct {
 
     pub fn deinit(self: *Self) void {
         self.store.deinit();
-        self.logs.deinit();
+        self.logs.deinit(self.alloc);
         self.local_account.deinit();
         self.removed_account.deinit();
         self.code.deinit();
@@ -60,7 +60,7 @@ pub const MockHost = struct {
 
     fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        try self.logs.append(.{
+        try self.logs.append(self.alloc, .{
             .address = address,
             .topics = topics,
             .data = data,

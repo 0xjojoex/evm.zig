@@ -25,7 +25,7 @@
       devShells = forEachSupportedSystem ({ pkgs }: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            zigpkgs."0.13.0"
+            zigpkgs."0.16.0"
           ];
 
           shellHook = ''
