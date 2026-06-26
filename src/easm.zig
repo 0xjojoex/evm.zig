@@ -1,7 +1,6 @@
 const std = @import("std");
 const evmz = @import("evm.zig");
 const instruction = evmz.instruction;
-const instruction_table = instruction.instruction_table;
 
 const InstructionDetail = struct {
     instruction: instruction.Instruction,
@@ -27,16 +26,21 @@ pub const DisassembleIterator = struct {
         if (self.pc >= self.bytecode.len) {
             return null;
         }
-        const instr = instruction_table.ops[self.bytecode[self.pc]];
-
-        const oprand = instr.opcode.oprand();
+        const instr = instruction.decode(self.bytecode[self.pc]) orelse instruction.Instruction{
+            .opcode = .INVALID,
+            .static_gas = 0,
+        };
 
         const offset = self.pc;
+        const oprand = instr.opcode.oprand();
+        const data_start = offset + 1;
+        const next_pc = data_start + oprand;
+        const data_end = @min(next_pc, self.bytecode.len);
 
-        self.pc += oprand + 1;
+        self.pc = next_pc;
         return .{
             .instruction = instr,
-            .data = if (oprand > 0) self.bytecode[offset + oprand .. self.pc] else &.{},
+            .data = if (oprand > 0) self.bytecode[data_start..data_end] else &.{},
             .offset = offset,
         };
     }
@@ -76,4 +80,16 @@ test "easm disassemble" {
 
     try testing.expectEqual(5, iter.pc);
     try testing.expectEqual(evmz.Opcode.PUSH4, n.?.instruction.opcode);
+    try testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33, 0x44 }, n.?.data);
+}
+
+test "easm disassemble truncated PUSH operand" {
+    var iter = disassembleIter(&.{ 0x63, 0x11 });
+
+    const n = iter.next().?;
+
+    try testing.expectEqual(5, iter.pc);
+    try testing.expectEqual(evmz.Opcode.PUSH4, n.instruction.opcode);
+    try testing.expectEqualSlices(u8, &.{0x11}, n.data);
+    try testing.expectEqual(null, iter.next());
 }

@@ -20,9 +20,9 @@ pub const Spec = enum(u8) {
     shanghai,
     cancun,
     prague,
-    prague_eof,
+    osaka,
 
-    pub const latest = Self.cancun;
+    pub const latest = Self.osaka;
 
     const Self = @This();
 
@@ -30,3 +30,9 @@ pub const Spec = enum(u8) {
         return @intFromEnum(self) >= @intFromEnum(spec);
     }
 };
+
+test "linear fork checks" {
+    try std.testing.expect(Spec.osaka.isImpl(.prague));
+    try std.testing.expect(Spec.prague.isImpl(.cancun));
+    try std.testing.expect(!Spec.prague.isImpl(.osaka));
+}

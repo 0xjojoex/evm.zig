@@ -104,7 +104,16 @@ fn execute(
         .code_address = fromEvmcAddress(msg.*.code_address),
     };
 
-    var interpreter = evmz.Interpreter.init(std.heap.c_allocator, &host_, &message, code[0..code_size], spec);
+    var interpreter: evmz.Interpreter = undefined;
+    interpreter.init(std.heap.c_allocator, .{
+        .host = &host_,
+        .msg = &message,
+        .code = code[0..code_size],
+        .spec = spec,
+    }) catch |err| {
+        log.err("execute failed: {}", .{err});
+        return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+    };
     defer interpreter.deinit();
     const result = interpreter.execute();
 
@@ -170,7 +179,6 @@ fn statusToEvmc(status: evmz.Interpreter.Status) evmc.evmc_status_code {
         .revert => evmc.EVMC_REVERT,
         .invalid => evmc.EVMC_INVALID_INSTRUCTION,
         .out_of_gas => evmc.EVMC_OUT_OF_GAS,
-        .running => evmc.EVMC_FAILURE,
     };
 }
 
@@ -290,6 +298,7 @@ const ToHost = extern struct {
                 .getTxContext = getTxContext,
                 .accessAccount = accessAccount,
                 .accessStorage = accessStorage,
+                .accessDelegatedAccount = accessDelegatedAccount,
                 .call = call,
                 .selfDestruct = selfDestruct,
                 .getTransientStorage = getTransientStorage,
@@ -304,7 +313,7 @@ const ToHost = extern struct {
         return self.host_interfcace.*.account_exists.?(self.context, &evmc_address);
     }
 
-    fn getStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
+    fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const evmc_address = toEvmcAddress(address);
         const evmc_key = toEvmcBytes32(key);
@@ -393,6 +402,12 @@ const ToHost = extern struct {
         return @enumFromInt(status);
     }
 
+    fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?evmz.Host.AccessStatus {
+        _ = ptr;
+        _ = address;
+        return null;
+    }
+
     fn call(ptr: *anyopaque, msg: evmz.Host.Message) !evmz.Host.Result {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const recipient = toEvmcAddress(msg.recipient);
@@ -415,12 +430,15 @@ const ToHost = extern struct {
         });
 
         const output_data = if (result.output_data == null) &.{} else result.output_data[0..result.output_size];
-        return evmz.Host.Result{
+        const common = evmz.Host.CallResult{
             .status = statusFromEvmc(result.status_code),
             .gas_left = result.gas_left,
             .output_data = output_data,
-            .create_address = fromEvmcAddress(result.create_address),
             .gas_refund = result.gas_refund,
+        };
+        return switch (msg.kind) {
+            .create, .create2 => evmz.Host.Result.fromCreate(fromEvmcAddress(result.create_address), common),
+            else => evmz.Host.Result.fromCall(common),
         };
     }
 
@@ -431,7 +449,7 @@ const ToHost = extern struct {
         return self.host_interfcace.*.selfdestruct.?(self.context, &evmc_address, &evmc_beneficiary);
     }
 
-    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
+    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const evmc_address = toEvmcAddress(address);
         const evmc_key = toEvmcBytes32(key);
@@ -468,6 +486,7 @@ fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
         evmc.EVMC_SHANGHAI => .shanghai,
         evmc.EVMC_CANCUN => .cancun,
         evmc.EVMC_PRAGUE => .prague,
+        evmc.EVMC_OSAKA => .osaka,
         else => return error.UnmatchedSpec,
     };
 }

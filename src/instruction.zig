@@ -20,269 +20,719 @@ pub const Error = error{
     UnknownOpcode,
 };
 
-pub const instruction_table = InstructionTable.init(instruction_entries);
-
-const InstructionPtr = *const fn (ip: *CallFrame) anyerror!void;
-
-const InstructionEntry = struct {
-    Opcode,
-    // the static gas cost required to execute this instruction
-    // not using gas enum because it's not very readable
-    u16,
-    // StackHeight,
-    // dynamic dispatching
-    InstructionPtr,
-};
-
-const instruction_entries: []const InstructionEntry = &.{
-    .{ .STOP, 0, Instructions.system.stop },
-    .{ .ADD, 3, Instructions.arithmetic.add },
-    .{ .MUL, 5, Instructions.arithmetic.mul },
-    .{ .SUB, 3, Instructions.arithmetic.sub },
-    .{ .DIV, 5, Instructions.arithmetic.div },
-    .{ .SDIV, 5, Instructions.arithmetic.sdiv },
-    .{ .MOD, 5, Instructions.arithmetic.mod },
-    .{ .SMOD, 5, Instructions.arithmetic.smod },
-    .{ .ADDMOD, 8, Instructions.arithmetic.addmod },
-    .{ .MULMOD, 8, Instructions.arithmetic.mulmod },
-    .{ .EXP, 10, Instructions.arithmetic.exp },
-    .{ .SIGNEXTEND, 5, Instructions.arithmetic.signextend },
-    .{ .LT, 3, Instructions.logic.lt },
-    .{ .GT, 3, Instructions.logic.gt },
-    .{ .SLT, 3, Instructions.logic.slt },
-    .{ .SGT, 3, Instructions.logic.sgt },
-    .{ .EQ, 3, Instructions.logic.eq },
-    .{ .ISZERO, 3, Instructions.logic.iszero },
-    .{ .AND, 3, Instructions.logic.bitAnd },
-    .{ .OR, 3, Instructions.logic.bitOr },
-    .{ .XOR, 3, Instructions.logic.bitXor },
-    .{ .NOT, 3, Instructions.logic.bitNot },
-    .{ .BYTE, 3, Instructions.logic.byte },
-    .{ .SHL, 3, Instructions.logic.shl },
-    .{ .SHR, 3, Instructions.logic.shr },
-    .{ .SAR, 3, Instructions.logic.sar },
-    .{ .KECCAK256, 30, Instructions.arithmetic.keccak256 },
-    .{ .ADDRESS, 2, Instructions.environment.address },
-    .{ .BALANCE, 100, Instructions.environment.balance },
-    .{ .ORIGIN, 2, Instructions.environment.origin },
-    .{ .CALLER, 2, Instructions.environment.caller },
-    .{ .CALLVALUE, 2, Instructions.environment.callvalue },
-    .{ .CALLDATALOAD, 3, Instructions.environment.calldataload },
-    .{ .CALLDATASIZE, 2, Instructions.environment.calldatasize },
-    .{ .CALLDATACOPY, 3, Instructions.environment.calldatacopy },
-    .{ .CODESIZE, 2, Instructions.environment.codesize },
-    .{ .CODECOPY, 3, Instructions.environment.codecopy },
-    .{ .GASPRICE, 2, Instructions.environment.gasprice },
-    .{ .EXTCODESIZE, 100, Instructions.environment.extcodesize },
-    .{ .EXTCODECOPY, 100, Instructions.environment.extcodecopy },
-    .{ .RETURNDATASIZE, 2, Instructions.environment.returndatasize },
-    .{ .RETURNDATACOPY, 3, Instructions.environment.returndatacopy },
-    .{ .EXTCODEHASH, 100, Instructions.environment.extcodehash },
-    .{ .BLOCKHASH, 20, Instructions.environment.blockhash },
-    .{ .COINBASE, 2, Instructions.environment.coinbase },
-    .{ .TIMESTAMP, 2, Instructions.environment.timestamp },
-    .{ .NUMBER, 2, Instructions.environment.number },
-    .{ .PREVRANDAO, 2, Instructions.environment.prevrandao },
-    .{ .GASLIMIT, 2, Instructions.environment.gaslimit },
-    .{ .CHAINID, 2, Instructions.environment.chainid },
-    .{ .SELFBALANCE, 5, Instructions.environment.selfbalance },
-    .{ .BASEFEE, 2, Instructions.environment.basefee },
-    .{ .BLOBHASH, 3, Instructions.environment.blobhash },
-    .{ .BLOBBASEFEE, 2, Instructions.environment.blobbasefee },
-    .{ .POP, 2, Instructions.stack.pop },
-    .{ .MLOAD, 3, Instructions.memory.mload },
-    .{ .MSTORE, 3, Instructions.memory.mstore },
-    .{ .MSTORE8, 3, Instructions.memory.mstore8 },
-    .{ .SLOAD, 100, Instructions.storage.sload },
-    .{ .SSTORE, 100, Instructions.storage.sstore },
-    .{ .JUMP, 8, Instructions.flow.jump },
-    .{ .JUMPI, 10, Instructions.flow.jumpi },
-    .{ .PC, 2, Instructions.flow.pc },
-    .{ .MSIZE, 2, Instructions.memory.msize },
-    .{ .GAS, 2, Instructions.environment.gas },
-    .{ .JUMPDEST, 1, Instructions.noop },
-    .{ .TLOAD, 100, Instructions.storage.tload },
-    .{ .TSTORE, 100, Instructions.storage.tstore },
-    .{ .MCOPY, 3, Instructions.memory.mcopy },
-    .{ .PUSH0, 2, Instructions.stack.push0 },
-    .{ .PUSH1, 3, Instructions.pushN(1) },
-    .{ .PUSH2, 3, Instructions.pushN(2) },
-    .{ .PUSH3, 3, Instructions.pushN(3) },
-    .{ .PUSH4, 3, Instructions.pushN(4) },
-    .{ .PUSH5, 3, Instructions.pushN(5) },
-    .{ .PUSH6, 3, Instructions.pushN(6) },
-    .{ .PUSH7, 3, Instructions.pushN(7) },
-    .{ .PUSH8, 3, Instructions.pushN(8) },
-    .{ .PUSH9, 3, Instructions.pushN(9) },
-    .{ .PUSH10, 3, Instructions.pushN(10) },
-    .{ .PUSH11, 3, Instructions.pushN(11) },
-    .{ .PUSH12, 3, Instructions.pushN(12) },
-    .{ .PUSH13, 3, Instructions.pushN(13) },
-    .{ .PUSH14, 3, Instructions.pushN(14) },
-    .{ .PUSH15, 3, Instructions.pushN(15) },
-    .{ .PUSH16, 3, Instructions.pushN(16) },
-    .{ .PUSH17, 3, Instructions.pushN(17) },
-    .{ .PUSH18, 3, Instructions.pushN(18) },
-    .{ .PUSH19, 3, Instructions.pushN(19) },
-    .{ .PUSH20, 3, Instructions.pushN(20) },
-    .{ .PUSH21, 3, Instructions.pushN(21) },
-    .{ .PUSH22, 3, Instructions.pushN(22) },
-    .{ .PUSH23, 3, Instructions.pushN(23) },
-    .{ .PUSH24, 3, Instructions.pushN(24) },
-    .{ .PUSH25, 3, Instructions.pushN(25) },
-    .{ .PUSH26, 3, Instructions.pushN(26) },
-    .{ .PUSH27, 3, Instructions.pushN(27) },
-    .{ .PUSH28, 3, Instructions.pushN(28) },
-    .{ .PUSH29, 3, Instructions.pushN(29) },
-    .{ .PUSH30, 3, Instructions.pushN(30) },
-    .{ .PUSH31, 3, Instructions.pushN(31) },
-    .{ .PUSH32, 3, Instructions.pushN(32) },
-    .{ .DUP1, 3, Instructions.dupN(1) },
-    .{ .DUP2, 3, Instructions.dupN(2) },
-    .{ .DUP3, 3, Instructions.dupN(3) },
-    .{ .DUP4, 3, Instructions.dupN(4) },
-    .{ .DUP5, 3, Instructions.dupN(5) },
-    .{ .DUP6, 3, Instructions.dupN(6) },
-    .{ .DUP7, 3, Instructions.dupN(7) },
-    .{ .DUP8, 3, Instructions.dupN(8) },
-    .{ .DUP9, 3, Instructions.dupN(9) },
-    .{ .DUP10, 3, Instructions.dupN(10) },
-    .{ .DUP11, 3, Instructions.dupN(11) },
-    .{ .DUP12, 3, Instructions.dupN(12) },
-    .{ .DUP13, 3, Instructions.dupN(13) },
-    .{ .DUP14, 3, Instructions.dupN(14) },
-    .{ .DUP15, 3, Instructions.dupN(15) },
-    .{ .DUP16, 3, Instructions.dupN(16) },
-    .{ .SWAP1, 3, Instructions.swapN(1) },
-    .{ .SWAP2, 3, Instructions.swapN(2) },
-    .{ .SWAP3, 3, Instructions.swapN(3) },
-    .{ .SWAP4, 3, Instructions.swapN(4) },
-    .{ .SWAP5, 3, Instructions.swapN(5) },
-    .{ .SWAP6, 3, Instructions.swapN(6) },
-    .{ .SWAP7, 3, Instructions.swapN(7) },
-    .{ .SWAP8, 3, Instructions.swapN(8) },
-    .{ .SWAP9, 3, Instructions.swapN(9) },
-    .{ .SWAP10, 3, Instructions.swapN(10) },
-    .{ .SWAP11, 3, Instructions.swapN(11) },
-    .{ .SWAP12, 3, Instructions.swapN(12) },
-    .{ .SWAP13, 3, Instructions.swapN(13) },
-    .{ .SWAP14, 3, Instructions.swapN(14) },
-    .{ .SWAP15, 3, Instructions.swapN(15) },
-    .{ .SWAP16, 3, Instructions.swapN(16) },
-    .{ .LOG0, 375, Instructions.logN(0) },
-    .{ .LOG1, 375 * 2, Instructions.logN(1) },
-    .{ .LOG2, 375 * 3, Instructions.logN(2) },
-    .{ .LOG3, 375 * 4, Instructions.logN(3) },
-    .{ .LOG4, 375 * 5, Instructions.logN(4) },
-    .{ .CREATE, 32000, Instructions.system.create },
-    .{ .CALL, 40, Instructions.call(.CALL) },
-    .{ .CALLCODE, 40, Instructions.call(.CALLCODE) },
-    .{ .RETURN, 0, Instructions.system.ret },
-    .{ .DELEGATECALL, 40, Instructions.call(.DELEGATECALL) },
-    .{ .CREATE2, 32000, Instructions.system.create2 },
-    .{ .STATICCALL, 40, Instructions.call(.STATICCALL) },
-    .{ .REVERT, 0, Instructions.system.revert },
-    .{ .INVALID, 0, Instructions.system.invalid },
-    .{ .SELFDESTRUCT, 5000, Instructions.system.selfdestruct },
-};
+pub const arithmetic = @import("./instruction/arithmetic.zig");
+pub const environment = @import("./instruction/environment.zig");
+pub const flow = @import("./instruction/flow.zig");
+pub const logging = @import("./instruction/logging.zig");
+pub const stack = @import("./instruction/stack.zig");
+pub const storage = @import("./instruction/storage.zig");
+pub const system = @import("./instruction/system.zig");
+pub const memory = @import("./instruction/memory.zig");
+pub const logic = @import("./instruction/logic.zig");
 
 pub const Instruction = struct {
     opcode: Opcode,
     static_gas: u16,
-    ptr: InstructionPtr,
 };
 
-const InstructionTable = struct {
-    ops: [256]Instruction,
-
-    pub fn init(entries: []const InstructionEntry) InstructionTable {
-        var table: [256]Instruction = undefined;
-        for (0..256) |i| {
-            table[i] = Instruction{
-                .opcode = Opcode.REVERT,
-                .static_gas = 0,
-                .ptr = Instructions.unknown,
-            };
-        }
-
-        // if (@typeInfo(Opcode).enums.fields.len != entries.len) {
-        //     @compileError("Opcode enum and instruction_entries have different lengths");
-        // }
-
-        for (entries) |entry| {
-            const opcode, const gas, const ptr = entry;
-            table[@intFromEnum(opcode)] = Instruction{
-                .opcode = opcode,
-                .static_gas = gas,
-                .ptr = ptr,
-            };
-        }
-
-        return InstructionTable{ .ops = table };
-    }
-};
-
-test InstructionTable {
-    try std.testing.expectEqual(instruction_table.ops[0x00].static_gas, 0);
-    try std.testing.expectEqual(instruction_table.ops[0x60].static_gas, 3);
+pub fn decode(opcode_byte: u8) ?Instruction {
+    const opcode = std.enums.fromInt(Opcode, opcode_byte) orelse return null;
+    return .{ .opcode = opcode, .static_gas = staticGas(opcode) };
 }
 
-const Instructions = struct {
-    pub const arithmetic = @import("./instruction/arithmetic.zig");
-    pub const environment = @import("./instruction/environment.zig");
-    pub const flow = @import("./instruction/flow.zig");
-    pub const logging = @import("./instruction/logging.zig");
-    pub const stack = @import("./instruction/stack.zig");
-    pub const storage = @import("./instruction/storage.zig");
-    pub const system = @import("./instruction/system.zig");
-    pub const memory = @import("./instruction/memory.zig");
-    pub const logic = @import("./instruction/logic.zig");
+test decode {
+    try std.testing.expectEqual(@as(u16, 0), decode(0x00).?.static_gas);
+    try std.testing.expectEqual(@as(u16, 3), decode(0x60).?.static_gas);
+    try std.testing.expectEqual(null, decode(0x0c));
+}
 
-    fn unknown(_: *CallFrame) anyerror!void {
-        return error.UnknownOpcode;
-    }
+pub fn staticGas(opcode: Opcode) u16 {
+    return switch (opcode) {
+        .STOP => 0,
+        .ADD => 3,
+        .MUL => 5,
+        .SUB => 3,
+        .DIV => 5,
+        .SDIV => 5,
+        .MOD => 5,
+        .SMOD => 5,
+        .ADDMOD => 8,
+        .MULMOD => 8,
+        .EXP => 10,
+        .SIGNEXTEND => 5,
+        .LT => 3,
+        .GT => 3,
+        .SLT => 3,
+        .SGT => 3,
+        .EQ => 3,
+        .ISZERO => 3,
+        .AND => 3,
+        .OR => 3,
+        .XOR => 3,
+        .NOT => 3,
+        .BYTE => 3,
+        .SHL => 3,
+        .SHR => 3,
+        .SAR => 3,
+        .CLZ => 5,
+        .KECCAK256 => 30,
+        .ADDRESS => 2,
+        .BALANCE => 100,
+        .ORIGIN => 2,
+        .CALLER => 2,
+        .CALLVALUE => 2,
+        .CALLDATALOAD => 3,
+        .CALLDATASIZE => 2,
+        .CALLDATACOPY => 3,
+        .CODESIZE => 2,
+        .CODECOPY => 3,
+        .GASPRICE => 2,
+        .EXTCODESIZE => 100,
+        .EXTCODECOPY => 100,
+        .RETURNDATASIZE => 2,
+        .RETURNDATACOPY => 3,
+        .EXTCODEHASH => 100,
+        .BLOCKHASH => 20,
+        .COINBASE => 2,
+        .TIMESTAMP => 2,
+        .NUMBER => 2,
+        .PREVRANDAO => 2,
+        .GASLIMIT => 2,
+        .CHAINID => 2,
+        .SELFBALANCE => 5,
+        .BASEFEE => 2,
+        .BLOBHASH => 3,
+        .BLOBBASEFEE => 2,
+        .POP => 2,
+        .MLOAD => 3,
+        .MSTORE => 3,
+        .MSTORE8 => 3,
+        .SLOAD => 100,
+        .SSTORE => 0,
+        .JUMP => 8,
+        .JUMPI => 10,
+        .PC => 2,
+        .MSIZE => 2,
+        .GAS => 2,
+        .JUMPDEST => 1,
+        .TLOAD => 100,
+        .TSTORE => 100,
+        .MCOPY => 3,
+        .PUSH0 => 2,
+        .PUSH1, .PUSH2, .PUSH3, .PUSH4, .PUSH5, .PUSH6, .PUSH7, .PUSH8, .PUSH9, .PUSH10, .PUSH11, .PUSH12, .PUSH13, .PUSH14, .PUSH15, .PUSH16, .PUSH17, .PUSH18, .PUSH19, .PUSH20, .PUSH21, .PUSH22, .PUSH23, .PUSH24, .PUSH25, .PUSH26, .PUSH27, .PUSH28, .PUSH29, .PUSH30, .PUSH31, .PUSH32 => 3,
+        .DUP1, .DUP2, .DUP3, .DUP4, .DUP5, .DUP6, .DUP7, .DUP8, .DUP9, .DUP10, .DUP11, .DUP12, .DUP13, .DUP14, .DUP15, .DUP16 => 3,
+        .SWAP1, .SWAP2, .SWAP3, .SWAP4, .SWAP5, .SWAP6, .SWAP7, .SWAP8, .SWAP9, .SWAP10, .SWAP11, .SWAP12, .SWAP13, .SWAP14, .SWAP15, .SWAP16 => 3,
+        .LOG0 => 375,
+        .LOG1 => 375 * 2,
+        .LOG2 => 375 * 3,
+        .LOG3 => 375 * 4,
+        .LOG4 => 375 * 5,
+        .CREATE => 32000,
+        .CALL => 40,
+        .CALLCODE => 40,
+        .RETURN => 0,
+        .DELEGATECALL => 40,
+        .CREATE2 => 32000,
+        .STATICCALL => 40,
+        .REVERT => 0,
+        .INVALID => 0,
+        .SELFDESTRUCT => 5000,
+    };
+}
 
-    fn noop(_: *CallFrame) anyerror!void {
-        return;
-    }
+pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
+    return switch (opcode_byte) {
+        @intFromEnum(Opcode.STOP) => system.stop(frame),
+        @intFromEnum(Opcode.ADD) => {
+            if (!chargeStaticGas(frame, .ADD)) return;
+            return arithmetic.add(frame);
+        },
+        @intFromEnum(Opcode.MUL) => {
+            if (!chargeStaticGas(frame, .MUL)) return;
+            return arithmetic.mul(frame);
+        },
+        @intFromEnum(Opcode.SUB) => {
+            if (!chargeStaticGas(frame, .SUB)) return;
+            return arithmetic.sub(frame);
+        },
+        @intFromEnum(Opcode.DIV) => {
+            if (!chargeStaticGas(frame, .DIV)) return;
+            return arithmetic.div(frame);
+        },
+        @intFromEnum(Opcode.SDIV) => {
+            if (!chargeStaticGas(frame, .SDIV)) return;
+            return arithmetic.sdiv(frame);
+        },
+        @intFromEnum(Opcode.MOD) => {
+            if (!chargeStaticGas(frame, .MOD)) return;
+            return arithmetic.mod(frame);
+        },
+        @intFromEnum(Opcode.SMOD) => {
+            if (!chargeStaticGas(frame, .SMOD)) return;
+            return arithmetic.smod(frame);
+        },
+        @intFromEnum(Opcode.ADDMOD) => {
+            if (!chargeStaticGas(frame, .ADDMOD)) return;
+            return arithmetic.addmod(frame);
+        },
+        @intFromEnum(Opcode.MULMOD) => {
+            if (!chargeStaticGas(frame, .MULMOD)) return;
+            return arithmetic.mulmod(frame);
+        },
+        @intFromEnum(Opcode.EXP) => {
+            if (!chargeStaticGas(frame, .EXP)) return;
+            return arithmetic.exp(frame);
+        },
+        @intFromEnum(Opcode.SIGNEXTEND) => {
+            if (!chargeStaticGas(frame, .SIGNEXTEND)) return;
+            return arithmetic.signextend(frame);
+        },
+        @intFromEnum(Opcode.LT) => {
+            if (!chargeStaticGas(frame, .LT)) return;
+            return logic.lt(frame);
+        },
+        @intFromEnum(Opcode.GT) => {
+            if (!chargeStaticGas(frame, .GT)) return;
+            return logic.gt(frame);
+        },
+        @intFromEnum(Opcode.SLT) => {
+            if (!chargeStaticGas(frame, .SLT)) return;
+            return logic.slt(frame);
+        },
+        @intFromEnum(Opcode.SGT) => {
+            if (!chargeStaticGas(frame, .SGT)) return;
+            return logic.sgt(frame);
+        },
+        @intFromEnum(Opcode.EQ) => {
+            if (!chargeStaticGas(frame, .EQ)) return;
+            return logic.eq(frame);
+        },
+        @intFromEnum(Opcode.ISZERO) => {
+            if (!chargeStaticGas(frame, .ISZERO)) return;
+            return logic.iszero(frame);
+        },
+        @intFromEnum(Opcode.AND) => {
+            if (!chargeStaticGas(frame, .AND)) return;
+            return logic.bitAnd(frame);
+        },
+        @intFromEnum(Opcode.OR) => {
+            if (!chargeStaticGas(frame, .OR)) return;
+            return logic.bitOr(frame);
+        },
+        @intFromEnum(Opcode.XOR) => {
+            if (!chargeStaticGas(frame, .XOR)) return;
+            return logic.bitXor(frame);
+        },
+        @intFromEnum(Opcode.NOT) => {
+            if (!chargeStaticGas(frame, .NOT)) return;
+            return logic.bitNot(frame);
+        },
+        @intFromEnum(Opcode.BYTE) => {
+            if (!chargeStaticGas(frame, .BYTE)) return;
+            return logic.byte(frame);
+        },
+        @intFromEnum(Opcode.SHL) => {
+            if (!chargeStaticGas(frame, .SHL)) return;
+            return logic.shl(frame);
+        },
+        @intFromEnum(Opcode.SHR) => {
+            if (!chargeStaticGas(frame, .SHR)) return;
+            return logic.shr(frame);
+        },
+        @intFromEnum(Opcode.SAR) => {
+            if (!chargeStaticGas(frame, .SAR)) return;
+            return logic.sar(frame);
+        },
+        @intFromEnum(Opcode.CLZ) => {
+            if (!chargeStaticGas(frame, .CLZ)) return;
+            return logic.clz(frame);
+        },
+        @intFromEnum(Opcode.KECCAK256) => {
+            if (!chargeStaticGas(frame, .KECCAK256)) return;
+            return arithmetic.keccak256(frame);
+        },
+        @intFromEnum(Opcode.ADDRESS) => {
+            if (!chargeStaticGas(frame, .ADDRESS)) return;
+            return environment.address(frame);
+        },
+        @intFromEnum(Opcode.BALANCE) => {
+            if (!chargeStaticGas(frame, .BALANCE)) return;
+            return environment.balance(frame);
+        },
+        @intFromEnum(Opcode.ORIGIN) => {
+            if (!chargeStaticGas(frame, .ORIGIN)) return;
+            return environment.origin(frame);
+        },
+        @intFromEnum(Opcode.CALLER) => {
+            if (!chargeStaticGas(frame, .CALLER)) return;
+            return environment.caller(frame);
+        },
+        @intFromEnum(Opcode.CALLVALUE) => {
+            if (!chargeStaticGas(frame, .CALLVALUE)) return;
+            return environment.callvalue(frame);
+        },
+        @intFromEnum(Opcode.CALLDATALOAD) => {
+            if (!chargeStaticGas(frame, .CALLDATALOAD)) return;
+            return environment.calldataload(frame);
+        },
+        @intFromEnum(Opcode.CALLDATASIZE) => {
+            if (!chargeStaticGas(frame, .CALLDATASIZE)) return;
+            return environment.calldatasize(frame);
+        },
+        @intFromEnum(Opcode.CALLDATACOPY) => {
+            if (!chargeStaticGas(frame, .CALLDATACOPY)) return;
+            return environment.calldatacopy(frame);
+        },
+        @intFromEnum(Opcode.CODESIZE) => {
+            if (!chargeStaticGas(frame, .CODESIZE)) return;
+            return environment.codesize(frame);
+        },
+        @intFromEnum(Opcode.CODECOPY) => {
+            if (!chargeStaticGas(frame, .CODECOPY)) return;
+            return environment.codecopy(frame);
+        },
+        @intFromEnum(Opcode.GASPRICE) => {
+            if (!chargeStaticGas(frame, .GASPRICE)) return;
+            return environment.gasprice(frame);
+        },
+        @intFromEnum(Opcode.EXTCODESIZE) => {
+            if (!chargeStaticGas(frame, .EXTCODESIZE)) return;
+            return environment.extcodesize(frame);
+        },
+        @intFromEnum(Opcode.EXTCODECOPY) => {
+            if (!chargeStaticGas(frame, .EXTCODECOPY)) return;
+            return environment.extcodecopy(frame);
+        },
+        @intFromEnum(Opcode.RETURNDATASIZE) => {
+            if (!chargeStaticGas(frame, .RETURNDATASIZE)) return;
+            return environment.returndatasize(frame);
+        },
+        @intFromEnum(Opcode.RETURNDATACOPY) => {
+            if (!chargeStaticGas(frame, .RETURNDATACOPY)) return;
+            return environment.returndatacopy(frame);
+        },
+        @intFromEnum(Opcode.EXTCODEHASH) => {
+            if (!chargeStaticGas(frame, .EXTCODEHASH)) return;
+            return environment.extcodehash(frame);
+        },
+        @intFromEnum(Opcode.BLOCKHASH) => {
+            if (!chargeStaticGas(frame, .BLOCKHASH)) return;
+            return environment.blockhash(frame);
+        },
+        @intFromEnum(Opcode.COINBASE) => {
+            if (!chargeStaticGas(frame, .COINBASE)) return;
+            return environment.coinbase(frame);
+        },
+        @intFromEnum(Opcode.TIMESTAMP) => {
+            if (!chargeStaticGas(frame, .TIMESTAMP)) return;
+            return environment.timestamp(frame);
+        },
+        @intFromEnum(Opcode.NUMBER) => {
+            if (!chargeStaticGas(frame, .NUMBER)) return;
+            return environment.number(frame);
+        },
+        @intFromEnum(Opcode.PREVRANDAO) => {
+            if (!chargeStaticGas(frame, .PREVRANDAO)) return;
+            return environment.prevrandao(frame);
+        },
+        @intFromEnum(Opcode.GASLIMIT) => {
+            if (!chargeStaticGas(frame, .GASLIMIT)) return;
+            return environment.gaslimit(frame);
+        },
+        @intFromEnum(Opcode.CHAINID) => {
+            if (!chargeStaticGas(frame, .CHAINID)) return;
+            return environment.chainid(frame);
+        },
+        @intFromEnum(Opcode.SELFBALANCE) => {
+            if (!chargeStaticGas(frame, .SELFBALANCE)) return;
+            return environment.selfbalance(frame);
+        },
+        @intFromEnum(Opcode.BASEFEE) => {
+            if (!chargeStaticGas(frame, .BASEFEE)) return;
+            return environment.basefee(frame);
+        },
+        @intFromEnum(Opcode.BLOBHASH) => {
+            if (!chargeStaticGas(frame, .BLOBHASH)) return;
+            return environment.blobhash(frame);
+        },
+        @intFromEnum(Opcode.BLOBBASEFEE) => {
+            if (!chargeStaticGas(frame, .BLOBBASEFEE)) return;
+            return environment.blobbasefee(frame);
+        },
+        @intFromEnum(Opcode.POP) => {
+            if (!chargeStaticGas(frame, .POP)) return;
+            return stack.pop(frame);
+        },
+        @intFromEnum(Opcode.MLOAD) => {
+            if (!chargeStaticGas(frame, .MLOAD)) return;
+            return memory.mload(frame);
+        },
+        @intFromEnum(Opcode.MSTORE) => {
+            if (!chargeStaticGas(frame, .MSTORE)) return;
+            return memory.mstore(frame);
+        },
+        @intFromEnum(Opcode.MSTORE8) => {
+            if (!chargeStaticGas(frame, .MSTORE8)) return;
+            return memory.mstore8(frame);
+        },
+        @intFromEnum(Opcode.SLOAD) => {
+            if (!chargeStaticGas(frame, .SLOAD)) return;
+            return storage.sload(frame);
+        },
+        @intFromEnum(Opcode.SSTORE) => storage.sstore(frame),
+        @intFromEnum(Opcode.JUMP) => {
+            if (!chargeStaticGas(frame, .JUMP)) return;
+            return flow.jump(frame);
+        },
+        @intFromEnum(Opcode.JUMPI) => {
+            if (!chargeStaticGas(frame, .JUMPI)) return;
+            return flow.jumpi(frame);
+        },
+        @intFromEnum(Opcode.PC) => {
+            if (!chargeStaticGas(frame, .PC)) return;
+            return flow.pc(frame);
+        },
+        @intFromEnum(Opcode.MSIZE) => {
+            if (!chargeStaticGas(frame, .MSIZE)) return;
+            return memory.msize(frame);
+        },
+        @intFromEnum(Opcode.GAS) => {
+            if (!chargeStaticGas(frame, .GAS)) return;
+            return environment.gas(frame);
+        },
+        @intFromEnum(Opcode.JUMPDEST) => {
+            _ = chargeStaticGas(frame, .JUMPDEST);
+            return;
+        },
+        @intFromEnum(Opcode.TLOAD) => {
+            if (!chargeStaticGas(frame, .TLOAD)) return;
+            return storage.tload(frame);
+        },
+        @intFromEnum(Opcode.TSTORE) => {
+            if (!chargeStaticGas(frame, .TSTORE)) return;
+            return storage.tstore(frame);
+        },
+        @intFromEnum(Opcode.MCOPY) => {
+            if (!chargeStaticGas(frame, .MCOPY)) return;
+            return memory.mcopy(frame);
+        },
+        @intFromEnum(Opcode.PUSH0) => {
+            if (!chargeStaticGas(frame, .PUSH0)) return;
+            return stack.push0(frame);
+        },
+        @intFromEnum(Opcode.PUSH1) => {
+            if (!chargeStaticGas(frame, .PUSH1)) return;
+            return stack.push(frame, 1);
+        },
+        @intFromEnum(Opcode.PUSH2) => {
+            if (!chargeStaticGas(frame, .PUSH2)) return;
+            return stack.push(frame, 2);
+        },
+        @intFromEnum(Opcode.PUSH3) => {
+            if (!chargeStaticGas(frame, .PUSH3)) return;
+            return stack.push(frame, 3);
+        },
+        @intFromEnum(Opcode.PUSH4) => {
+            if (!chargeStaticGas(frame, .PUSH4)) return;
+            return stack.push(frame, 4);
+        },
+        @intFromEnum(Opcode.PUSH5) => {
+            if (!chargeStaticGas(frame, .PUSH5)) return;
+            return stack.push(frame, 5);
+        },
+        @intFromEnum(Opcode.PUSH6) => {
+            if (!chargeStaticGas(frame, .PUSH6)) return;
+            return stack.push(frame, 6);
+        },
+        @intFromEnum(Opcode.PUSH7) => {
+            if (!chargeStaticGas(frame, .PUSH7)) return;
+            return stack.push(frame, 7);
+        },
+        @intFromEnum(Opcode.PUSH8) => {
+            if (!chargeStaticGas(frame, .PUSH8)) return;
+            return stack.push(frame, 8);
+        },
+        @intFromEnum(Opcode.PUSH9) => {
+            if (!chargeStaticGas(frame, .PUSH9)) return;
+            return stack.push(frame, 9);
+        },
+        @intFromEnum(Opcode.PUSH10) => {
+            if (!chargeStaticGas(frame, .PUSH10)) return;
+            return stack.push(frame, 10);
+        },
+        @intFromEnum(Opcode.PUSH11) => {
+            if (!chargeStaticGas(frame, .PUSH11)) return;
+            return stack.push(frame, 11);
+        },
+        @intFromEnum(Opcode.PUSH12) => {
+            if (!chargeStaticGas(frame, .PUSH12)) return;
+            return stack.push(frame, 12);
+        },
+        @intFromEnum(Opcode.PUSH13) => {
+            if (!chargeStaticGas(frame, .PUSH13)) return;
+            return stack.push(frame, 13);
+        },
+        @intFromEnum(Opcode.PUSH14) => {
+            if (!chargeStaticGas(frame, .PUSH14)) return;
+            return stack.push(frame, 14);
+        },
+        @intFromEnum(Opcode.PUSH15) => {
+            if (!chargeStaticGas(frame, .PUSH15)) return;
+            return stack.push(frame, 15);
+        },
+        @intFromEnum(Opcode.PUSH16) => {
+            if (!chargeStaticGas(frame, .PUSH16)) return;
+            return stack.push(frame, 16);
+        },
+        @intFromEnum(Opcode.PUSH17) => {
+            if (!chargeStaticGas(frame, .PUSH17)) return;
+            return stack.push(frame, 17);
+        },
+        @intFromEnum(Opcode.PUSH18) => {
+            if (!chargeStaticGas(frame, .PUSH18)) return;
+            return stack.push(frame, 18);
+        },
+        @intFromEnum(Opcode.PUSH19) => {
+            if (!chargeStaticGas(frame, .PUSH19)) return;
+            return stack.push(frame, 19);
+        },
+        @intFromEnum(Opcode.PUSH20) => {
+            if (!chargeStaticGas(frame, .PUSH20)) return;
+            return stack.push(frame, 20);
+        },
+        @intFromEnum(Opcode.PUSH21) => {
+            if (!chargeStaticGas(frame, .PUSH21)) return;
+            return stack.push(frame, 21);
+        },
+        @intFromEnum(Opcode.PUSH22) => {
+            if (!chargeStaticGas(frame, .PUSH22)) return;
+            return stack.push(frame, 22);
+        },
+        @intFromEnum(Opcode.PUSH23) => {
+            if (!chargeStaticGas(frame, .PUSH23)) return;
+            return stack.push(frame, 23);
+        },
+        @intFromEnum(Opcode.PUSH24) => {
+            if (!chargeStaticGas(frame, .PUSH24)) return;
+            return stack.push(frame, 24);
+        },
+        @intFromEnum(Opcode.PUSH25) => {
+            if (!chargeStaticGas(frame, .PUSH25)) return;
+            return stack.push(frame, 25);
+        },
+        @intFromEnum(Opcode.PUSH26) => {
+            if (!chargeStaticGas(frame, .PUSH26)) return;
+            return stack.push(frame, 26);
+        },
+        @intFromEnum(Opcode.PUSH27) => {
+            if (!chargeStaticGas(frame, .PUSH27)) return;
+            return stack.push(frame, 27);
+        },
+        @intFromEnum(Opcode.PUSH28) => {
+            if (!chargeStaticGas(frame, .PUSH28)) return;
+            return stack.push(frame, 28);
+        },
+        @intFromEnum(Opcode.PUSH29) => {
+            if (!chargeStaticGas(frame, .PUSH29)) return;
+            return stack.push(frame, 29);
+        },
+        @intFromEnum(Opcode.PUSH30) => {
+            if (!chargeStaticGas(frame, .PUSH30)) return;
+            return stack.push(frame, 30);
+        },
+        @intFromEnum(Opcode.PUSH31) => {
+            if (!chargeStaticGas(frame, .PUSH31)) return;
+            return stack.push(frame, 31);
+        },
+        @intFromEnum(Opcode.PUSH32) => {
+            if (!chargeStaticGas(frame, .PUSH32)) return;
+            return stack.push(frame, 32);
+        },
+        @intFromEnum(Opcode.DUP1) => {
+            if (!chargeStaticGas(frame, .DUP1)) return;
+            return stack.dup(frame, 1);
+        },
+        @intFromEnum(Opcode.DUP2) => {
+            if (!chargeStaticGas(frame, .DUP2)) return;
+            return stack.dup(frame, 2);
+        },
+        @intFromEnum(Opcode.DUP3) => {
+            if (!chargeStaticGas(frame, .DUP3)) return;
+            return stack.dup(frame, 3);
+        },
+        @intFromEnum(Opcode.DUP4) => {
+            if (!chargeStaticGas(frame, .DUP4)) return;
+            return stack.dup(frame, 4);
+        },
+        @intFromEnum(Opcode.DUP5) => {
+            if (!chargeStaticGas(frame, .DUP5)) return;
+            return stack.dup(frame, 5);
+        },
+        @intFromEnum(Opcode.DUP6) => {
+            if (!chargeStaticGas(frame, .DUP6)) return;
+            return stack.dup(frame, 6);
+        },
+        @intFromEnum(Opcode.DUP7) => {
+            if (!chargeStaticGas(frame, .DUP7)) return;
+            return stack.dup(frame, 7);
+        },
+        @intFromEnum(Opcode.DUP8) => {
+            if (!chargeStaticGas(frame, .DUP8)) return;
+            return stack.dup(frame, 8);
+        },
+        @intFromEnum(Opcode.DUP9) => {
+            if (!chargeStaticGas(frame, .DUP9)) return;
+            return stack.dup(frame, 9);
+        },
+        @intFromEnum(Opcode.DUP10) => {
+            if (!chargeStaticGas(frame, .DUP10)) return;
+            return stack.dup(frame, 10);
+        },
+        @intFromEnum(Opcode.DUP11) => {
+            if (!chargeStaticGas(frame, .DUP11)) return;
+            return stack.dup(frame, 11);
+        },
+        @intFromEnum(Opcode.DUP12) => {
+            if (!chargeStaticGas(frame, .DUP12)) return;
+            return stack.dup(frame, 12);
+        },
+        @intFromEnum(Opcode.DUP13) => {
+            if (!chargeStaticGas(frame, .DUP13)) return;
+            return stack.dup(frame, 13);
+        },
+        @intFromEnum(Opcode.DUP14) => {
+            if (!chargeStaticGas(frame, .DUP14)) return;
+            return stack.dup(frame, 14);
+        },
+        @intFromEnum(Opcode.DUP15) => {
+            if (!chargeStaticGas(frame, .DUP15)) return;
+            return stack.dup(frame, 15);
+        },
+        @intFromEnum(Opcode.DUP16) => {
+            if (!chargeStaticGas(frame, .DUP16)) return;
+            return stack.dup(frame, 16);
+        },
+        @intFromEnum(Opcode.SWAP1) => {
+            if (!chargeStaticGas(frame, .SWAP1)) return;
+            return stack.swap(frame, 1);
+        },
+        @intFromEnum(Opcode.SWAP2) => {
+            if (!chargeStaticGas(frame, .SWAP2)) return;
+            return stack.swap(frame, 2);
+        },
+        @intFromEnum(Opcode.SWAP3) => {
+            if (!chargeStaticGas(frame, .SWAP3)) return;
+            return stack.swap(frame, 3);
+        },
+        @intFromEnum(Opcode.SWAP4) => {
+            if (!chargeStaticGas(frame, .SWAP4)) return;
+            return stack.swap(frame, 4);
+        },
+        @intFromEnum(Opcode.SWAP5) => {
+            if (!chargeStaticGas(frame, .SWAP5)) return;
+            return stack.swap(frame, 5);
+        },
+        @intFromEnum(Opcode.SWAP6) => {
+            if (!chargeStaticGas(frame, .SWAP6)) return;
+            return stack.swap(frame, 6);
+        },
+        @intFromEnum(Opcode.SWAP7) => {
+            if (!chargeStaticGas(frame, .SWAP7)) return;
+            return stack.swap(frame, 7);
+        },
+        @intFromEnum(Opcode.SWAP8) => {
+            if (!chargeStaticGas(frame, .SWAP8)) return;
+            return stack.swap(frame, 8);
+        },
+        @intFromEnum(Opcode.SWAP9) => {
+            if (!chargeStaticGas(frame, .SWAP9)) return;
+            return stack.swap(frame, 9);
+        },
+        @intFromEnum(Opcode.SWAP10) => {
+            if (!chargeStaticGas(frame, .SWAP10)) return;
+            return stack.swap(frame, 10);
+        },
+        @intFromEnum(Opcode.SWAP11) => {
+            if (!chargeStaticGas(frame, .SWAP11)) return;
+            return stack.swap(frame, 11);
+        },
+        @intFromEnum(Opcode.SWAP12) => {
+            if (!chargeStaticGas(frame, .SWAP12)) return;
+            return stack.swap(frame, 12);
+        },
+        @intFromEnum(Opcode.SWAP13) => {
+            if (!chargeStaticGas(frame, .SWAP13)) return;
+            return stack.swap(frame, 13);
+        },
+        @intFromEnum(Opcode.SWAP14) => {
+            if (!chargeStaticGas(frame, .SWAP14)) return;
+            return stack.swap(frame, 14);
+        },
+        @intFromEnum(Opcode.SWAP15) => {
+            if (!chargeStaticGas(frame, .SWAP15)) return;
+            return stack.swap(frame, 15);
+        },
+        @intFromEnum(Opcode.SWAP16) => {
+            if (!chargeStaticGas(frame, .SWAP16)) return;
+            return stack.swap(frame, 16);
+        },
+        @intFromEnum(Opcode.LOG0) => {
+            if (!chargeStaticGas(frame, .LOG0)) return;
+            return logging.log(frame, 0);
+        },
+        @intFromEnum(Opcode.LOG1) => {
+            if (!chargeStaticGas(frame, .LOG1)) return;
+            return logging.log(frame, 1);
+        },
+        @intFromEnum(Opcode.LOG2) => {
+            if (!chargeStaticGas(frame, .LOG2)) return;
+            return logging.log(frame, 2);
+        },
+        @intFromEnum(Opcode.LOG3) => {
+            if (!chargeStaticGas(frame, .LOG3)) return;
+            return logging.log(frame, 3);
+        },
+        @intFromEnum(Opcode.LOG4) => {
+            if (!chargeStaticGas(frame, .LOG4)) return;
+            return logging.log(frame, 4);
+        },
+        @intFromEnum(Opcode.CREATE) => {
+            if (!chargeStaticGas(frame, .CREATE)) return;
+            return system.create(frame);
+        },
+        @intFromEnum(Opcode.CALL) => {
+            if (!chargeStaticGas(frame, .CALL)) return;
+            return system.callByOp(frame, .CALL);
+        },
+        @intFromEnum(Opcode.CALLCODE) => {
+            if (!chargeStaticGas(frame, .CALLCODE)) return;
+            return system.callByOp(frame, .CALLCODE);
+        },
+        @intFromEnum(Opcode.RETURN) => system.ret(frame),
+        @intFromEnum(Opcode.DELEGATECALL) => {
+            if (!chargeStaticGas(frame, .DELEGATECALL)) return;
+            return system.callByOp(frame, .DELEGATECALL);
+        },
+        @intFromEnum(Opcode.CREATE2) => {
+            if (!chargeStaticGas(frame, .CREATE2)) return;
+            return system.create2(frame);
+        },
+        @intFromEnum(Opcode.STATICCALL) => {
+            if (!chargeStaticGas(frame, .STATICCALL)) return;
+            return system.callByOp(frame, .STATICCALL);
+        },
+        @intFromEnum(Opcode.REVERT) => system.revert(frame),
+        @intFromEnum(Opcode.INVALID) => system.invalid(frame),
+        @intFromEnum(Opcode.SELFDESTRUCT) => {
+            if (!chargeStaticGas(frame, .SELFDESTRUCT)) return;
+            return system.selfdestruct(frame);
+        },
+        else => error.UnknownOpcode,
+    };
+}
 
-    inline fn pushN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub fn call(frame: *CallFrame) anyerror!void {
-                return stack.push(frame, n);
-            }
-        }.call;
-    }
-
-    inline fn dupN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub fn call(frame: *CallFrame) anyerror!void {
-                return stack.dup(frame, n);
-            }
-        }.call;
-    }
-
-    inline fn swapN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub fn call(frame: *CallFrame) anyerror!void {
-                return stack.swap(frame, n);
-            }
-        }.call;
-    }
-
-    inline fn logN(comptime n: u8) InstructionPtr {
-        return struct {
-            pub fn call(frame: *CallFrame) anyerror!void {
-                return logging.log(frame, n);
-            }
-        }.call;
-    }
-
-    inline fn call(comptime op: Opcode) InstructionPtr {
-        return struct {
-            pub fn call(frame: *CallFrame) anyerror!void {
-                return system.callByOp(frame, op);
-            }
-        }.call;
-    }
-};
+inline fn chargeStaticGas(frame: *CallFrame, comptime opcode: Opcode) bool {
+    const gas: i64 = comptime @intCast(staticGas(opcode));
+    frame.trackGas(gas);
+    return frame.status == .running;
+}

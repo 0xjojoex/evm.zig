@@ -14,18 +14,17 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
         return error.StaticCallViolation;
     }
 
-    const offset = try frame.stack.pop();
-    const size = try frame.stack.pop();
+    const offset, const size = try frame.stack.popN(2);
 
     var topics: [n]u256 = undefined;
 
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
+    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
     const log_cost = std.math.mul(i64, 8, size_i64) catch {
-        frame.status = .out_of_gas;
+        frame.failWithStatus(.out_of_gas);
         return;
     };
     frame.trackGas(log_cost);

@@ -5,13 +5,70 @@ const Host = evmz.Host;
 const addr = evmz.addr;
 const Address = evmz.Address;
 
+fn bytecode(comptime items: anytype) [bytecodeLen(items)]u8 {
+    if (@typeInfo(@TypeOf(items)) == .pointer) {
+        return bytecode(items.*);
+    }
+
+    var bytes: [bytecodeLen(items)]u8 = undefined;
+    inline for (items, 0..) |item, i| {
+        bytes[i] = bytecodeByte(item);
+    }
+    return bytes;
+}
+
+fn bytecodeLen(comptime items: anytype) comptime_int {
+    const T = @TypeOf(items);
+    return switch (@typeInfo(T)) {
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .array => |array| array.len,
+            .@"struct" => |info| blk: {
+                if (!info.is_tuple) @compileError("bytecode pointer items must point to an array or tuple literal");
+                break :blk info.fields.len;
+            },
+            else => @compileError("bytecode pointer items must point to an array or tuple literal"),
+        },
+        .array => |array| array.len,
+        .@"struct" => |info| blk: {
+            if (!info.is_tuple) @compileError("bytecode struct items must be a tuple literal");
+            break :blk info.fields.len;
+        },
+        else => @compileError("bytecode items must be an array, pointer to array, or tuple literal"),
+    };
+}
+
+fn bytecodeByte(comptime item: anytype) u8 {
+    const T = @TypeOf(item);
+    return switch (@typeInfo(T)) {
+        .enum_literal => blk: {
+            const opcode: evmz.Opcode = item;
+            break :blk opcode.toInt();
+        },
+        .@"enum" => blk: {
+            if (T != evmz.Opcode) @compileError("bytecode enum items must be evmz.Opcode");
+            break :blk item.toInt();
+        },
+        .comptime_int => blk: {
+            if (item < 0 or item > std.math.maxInt(u8)) @compileError("bytecode integer items must fit in u8");
+            break :blk @intCast(item);
+        },
+        .int => std.math.cast(u8, item) orelse @compileError("bytecode integer items must fit in u8"),
+        else => @compileError("bytecode items must be opcode tags or u8 bytes"),
+    };
+}
+
 pub const MockCall = struct {
     call_frame: evmz.Interpreter.CallFrame,
 
-    pub fn init(allocator: std.mem.Allocator, msg: *Host.Message, bytes: []const u8) MockCall {
-        return MockCall{
-            .call_frame = evmz.Interpreter.CallFrame.init(allocator, MockHost.init(allocator), msg, bytes),
-        };
+    pub fn init(allocator: std.mem.Allocator, host: *Host, msg: *const Host.Message, code: []const u8, spec: evmz.Spec) !MockCall {
+        var self: MockCall = undefined;
+        try self.call_frame.init(allocator, .{
+            .host = host,
+            .msg = msg,
+            .code = code,
+            .spec = spec,
+        });
+        return self;
     }
 };
 
@@ -22,6 +79,7 @@ pub const MockHost = struct {
     store: std.AutoHashMap(u256, u256),
     logs: std.ArrayList(Host.Log),
     tx_context: Host.TxContext,
+    tx_context_reads: u64,
     code: std.AutoHashMap(Address, []u8),
     local_account: std.AutoHashMap(Address, Host.Account),
     removed_account: std.AutoHashMap(Address, bool),
@@ -34,6 +92,7 @@ pub const MockHost = struct {
             .local_account = std.AutoHashMap(Address, Host.Account).init(alloc),
             .removed_account = std.AutoHashMap(Address, bool).init(alloc),
             .code = std.AutoHashMap(Address, []u8).init(alloc),
+            .tx_context_reads = 0,
             .tx_context = if (tx_context) |ctx| ctx else Host.TxContext{
                 .base_fee = 0,
                 .gas_limit = 0,
@@ -74,10 +133,10 @@ pub const MockHost = struct {
         return .added;
     }
 
-    fn getStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
+    fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
-        return self.store.get(key);
+        return self.store.get(key) orelse 0;
     }
 
     fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {
@@ -114,10 +173,11 @@ pub const MockHost = struct {
         const local = self.code.get(address);
 
         if (local) |code| {
-            const min = @min(code.len, buffer_data.len);
-            @memcpy(buffer_data[0..min], code[code_offset .. code_offset + min]);
+            if (code_offset >= code.len) return 0;
+            const copied = @min(buffer_data.len, code.len - code_offset);
+            @memcpy(buffer_data[0..copied], code[code_offset..][0..copied]);
 
-            return code.len;
+            return copied;
         }
 
         return 0;
@@ -169,7 +229,7 @@ pub const MockHost = struct {
         }
         var result: [32]u8 = undefined;
         std.crypto.hash.sha3.Keccak256.hash(code, &result, .{});
-        const final_result = @byteSwap(@as(u256, @bitCast(result)));
+        const final_result = evmz.uint256.fromBytes32(&result);
 
         return final_result;
     }
@@ -215,8 +275,15 @@ pub const MockHost = struct {
         return .cold;
     }
 
+    fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
+        _ = ptr;
+        _ = address;
+        return null;
+    }
+
     fn getTxContext(ptr: *anyopaque) !Host.TxContext {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        self.tx_context_reads += 1;
         return self.tx_context;
     }
 
@@ -233,16 +300,15 @@ pub const MockHost = struct {
     fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
         _ = ptr;
         _ = msg;
-        return Host.Result{
-            .create_address = addr(0),
+        return Host.Result.fromCall(.{
             .gas_left = 0,
             .gas_refund = 0,
             .output_data = &.{},
             .status = .success,
-        };
+        });
     }
 
-    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) ?u256 {
+    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = self;
         _ = address;
@@ -272,6 +338,7 @@ pub const MockHost = struct {
             .getBlockHash = getBlockHash,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
+            .accessDelegatedAccount = accessDelegatedAccount,
             .accessAccount = accessAccount,
             .getTxContext = getTxContext,
             .getTransientStorage = getTransientStorage,
@@ -292,30 +359,44 @@ fn defaultMessage() Host.Message {
     };
 }
 
-pub fn expectBytecodeStatus(bytecode: []const u8, spec: evmz.Spec, expected: evmz.Interpreter.Status) !void {
+pub fn expectBytecodeStatusBySpec(comptime items: anytype, spec: evmz.Spec, expected: evmz.Interpreter.Status) !void {
+    const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var interpreter = evmz.Interpreter.init(std.testing.allocator, &host, &msg, bytecode, spec);
+    var interpreter: evmz.Interpreter = undefined;
+    try interpreter.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &bytecode_bytes,
+        .spec = spec,
+    });
     defer interpreter.deinit();
 
     const result = interpreter.execute();
     try std.testing.expectEqual(expected, result.status);
 }
 
-pub fn expectCancunBytecodeStatus(bytecode: []const u8, expected: evmz.Interpreter.Status) !void {
-    try expectBytecodeStatus(bytecode, .cancun, expected);
+pub fn expectLatestForkBytecodeStatus(comptime items: anytype, expected: evmz.Interpreter.Status) !void {
+    try expectBytecodeStatusBySpec(items, .latest, expected);
 }
 
-pub fn expectBytecodeStackTop(bytecode: []const u8, spec: evmz.Spec, expected: u256) !void {
+pub fn expectBytecodeStackTopBySpec(comptime items: anytype, spec: evmz.Spec, expected: u256) !void {
+    const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var interpreter = evmz.Interpreter.init(std.testing.allocator, &host, &msg, bytecode, spec);
+    var interpreter: evmz.Interpreter = undefined;
+    try interpreter.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &bytecode_bytes,
+        .spec = spec,
+    });
     defer interpreter.deinit();
 
     const result = interpreter.execute();
@@ -323,10 +404,31 @@ pub fn expectBytecodeStackTop(bytecode: []const u8, spec: evmz.Spec, expected: u
     try std.testing.expectEqual(expected, interpreter.call_frame.stack.peek().?);
 }
 
-pub fn expectCancunBytecodeStackTop(bytecode: []const u8, expected: u256) !void {
-    try expectBytecodeStackTop(bytecode, .cancun, expected);
+pub fn expectLatestForkBytecodeStackTop(comptime items: anytype, expected: u256) !void {
+    try expectBytecodeStackTopBySpec(items, .latest, expected);
 }
 
 test "mock host persists storage writes" {
-    try expectCancunBytecodeStackTop(&.{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x54 }, 0x2a);
+    try expectLatestForkBytecodeStackTop(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, 0x2a);
+}
+
+test "environment opcodes delegate every tx context access to host" {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+
+    var interpreter: evmz.Interpreter = undefined;
+    try interpreter.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &bytecode(.{ .ORIGIN, .GASPRICE }),
+        .spec = .latest,
+    });
+    defer interpreter.deinit();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+
+    try std.testing.expectEqual(@as(u64, 2), mock_host.tx_context_reads);
 }

@@ -1,0 +1,3 @@
+handrolled VM-loop fixture: 1000 loop iterations, 32 ADD/POP pairs per loop
+host: null
+runtime bytes: 206

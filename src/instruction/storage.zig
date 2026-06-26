@@ -2,6 +2,7 @@ const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
 const Host = evmz.Host;
+const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -70,26 +71,24 @@ pub fn sstore(frame: *CallFrame) !void {
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
     }
-    const key = try frame.stack.pop();
-    const value = try frame.stack.pop();
+    const key, const value = try frame.stack.popN(2);
 
     if (frame.spec.isImpl(.istanbul) and frame.gas_left <= 2300) {
-        frame.status = .out_of_gas;
+        frame.failWithStatus(.out_of_gas);
         return;
     }
 
     if (frame.spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
-        frame.trackGas(instruction.cold_sload_gas);
-        if (frame.gas_left < 0) {
-            return;
-        }
+        frame.trackGas(instruction.cold_sload_cost);
+        if (frame.status != .running) return;
     }
 
     const status = try frame.host.setStorage(frame.msg.recipient, key, value);
 
     const cost = StorageCost.getCost(frame.spec, status);
 
-    frame.gas_left -= cost.cost;
+    frame.trackGas(cost.cost);
+    if (frame.status != .running) return;
     frame.gas_refund += cost.refund;
 }
 
@@ -98,13 +97,11 @@ pub fn sload(frame: *CallFrame) !void {
 
     if (frame.spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
         frame.trackGas(instruction.cold_sload_gas);
-        if (frame.gas_left < 0) {
-            return;
-        }
+        if (frame.status != .running) return;
     }
 
-    const value = frame.host.getStorage(frame.msg.recipient, key);
-    try frame.stack.push(value orelse 0);
+    const value = try frame.host.getStorage(frame.msg.recipient, key);
+    frame.stack.pushUnchecked(value);
 }
 
 pub fn tload(frame: *CallFrame) !void {
@@ -113,8 +110,8 @@ pub fn tload(frame: *CallFrame) !void {
     }
 
     const key = try frame.stack.pop();
-    const value = frame.host.getTransientStorage(frame.msg.recipient, key);
-    try frame.stack.push(value orelse 0);
+    const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
+    frame.stack.pushUnchecked(value);
 }
 
 pub fn tstore(frame: *CallFrame) !void {
@@ -126,16 +123,44 @@ pub fn tstore(frame: *CallFrame) !void {
         return error.StaticCallViolation;
     }
 
-    const key = try frame.stack.pop();
-    const value = try frame.stack.pop();
+    const key, const value = try frame.stack.popN(2);
 
     try frame.host.setTransientStorage(frame.msg.recipient, key, value);
 }
 
 test "transient storage opcodes are only enabled from Cancun" {
-    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x00, 0x5c }, .shanghai, .invalid);
-    try evmz.t.expectBytecodeStackTop(&.{ 0x60, 0x00, 0x5c }, .cancun, 1);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x00, .TLOAD }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStackTopBySpec(.{ .PUSH1, 0x00, .TLOAD }, .cancun, 1);
 
-    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x01, 0x60, 0x00, 0x5d }, .shanghai, .invalid);
-    try evmz.t.expectBytecodeStatus(&.{ 0x60, 0x01, 0x60, 0x00, 0x5d }, .cancun, .success);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x01, .PUSH1, 0x00, .TSTORE }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x01, .PUSH1, 0x00, .TSTORE }, .cancun, .success);
+}
+
+test "cold SSTORE charges full cold SLOAD cost from Berlin" {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .sender = evmz.addr(0),
+        .gas = 100_000,
+        .kind = Host.CallKind.call,
+        .recipient = evmz.addr(0),
+        .value = 0,
+        .input_data = &.{},
+    };
+    const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+
+    var interpreter: evmz.Interpreter = undefined;
+    try interpreter.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = bytecode,
+        .spec = .berlin,
+    });
+    defer interpreter.deinit();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
 }

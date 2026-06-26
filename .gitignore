@@ -1,7 +1,8 @@
 .zig-cache
 zig-out
+zig-pkg/
 .DS_Store
 .eest/
-
-src/mock.json
-src/mock_test.zig
+bench/revm/target/
+output/
+.kraft/

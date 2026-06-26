@@ -29,37 +29,34 @@ pub fn stop(frame: *CallFrame) !void {
 }
 
 pub fn invalid(frame: *CallFrame) !void {
-    // TODO: cosume all gas
-    frame.status = .invalid;
+    frame.failWithStatus(.invalid);
 }
 
 /// `RETURN` Halt the execution returning the output data
 pub fn ret(frame: *CallFrame) !void {
-    const offset = try frame.stack.pop();
-    const size = try frame.stack.pop();
+    const offset, const size = try frame.stack.popN(2);
 
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
+    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     const data = frame.memory.readBytes(offset_usize, size_usize);
 
-    try frame.replaceReturnData(data);
+    try frame.replaceOutputData(data);
     frame.status = .success;
 }
 
 /// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
 pub fn revert(frame: *CallFrame) !void {
-    const offset = try frame.stack.pop();
-    const size = try frame.stack.pop();
+    const offset, const size = try frame.stack.popN(2);
 
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
+    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     const data = frame.memory.readBytes(offset_usize, size_usize);
 
-    try frame.replaceReturnData(data);
+    try frame.replaceOutputData(data);
     frame.status = .revert;
 }
 
@@ -68,19 +65,20 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
         @compileError("Invalid opcode for " ++ @tagName(op));
     }
 
-    const gas = try frame.stack.pop();
-    const address_word = try frame.stack.pop();
+    const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size = if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
+        const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);
+        break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
+    };
     const address = evmz.address.fromWord(address_word);
-    const value = if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.pop() else 0;
-    const in_offset = try frame.stack.pop();
-    const in_size = try frame.stack.pop();
-    const out_offset = try frame.stack.pop();
-    const out_size = try frame.stack.pop();
 
     const in_size_usize = frame.wordToUsizeOrOog(in_size) orelse return;
     const out_size_usize = frame.wordToUsizeOrOog(out_size) orelse return;
     const in_offset_usize = if (in_size_usize == 0) 0 else frame.wordToUsizeOrOog(in_offset) orelse return;
     const out_offset_usize = if (out_size_usize == 0) 0 else frame.wordToUsizeOrOog(out_offset) orelse return;
+
+    if (frame.msg.is_static and op == Opcode.CALL and value > 0) {
+        return error.StaticCallViolation;
+    }
 
     frame.trackGas(callBaseGas(frame.spec) - call_static_gas_floor);
     if (frame.status != .running) return;
@@ -99,7 +97,7 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
         .depth = nextDepth(frame.msg.depth),
         .kind = Host.CallKind.fromOpcode(op),
         .recipient = if (op == Opcode.CALL or op == Opcode.STATICCALL) address else frame.msg.recipient,
-        .is_static = op == Opcode.STATICCALL,
+        .is_static = frame.msg.is_static or op == Opcode.STATICCALL,
         .code_address = address,
         .sender = if (op == Opcode.DELEGATECALL) frame.msg.sender else frame.msg.recipient,
         .value = if (op == Opcode.DELEGATECALL) frame.msg.value else value,
@@ -118,17 +116,25 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
     frame.trackGas(cost);
     if (frame.status != .running) return;
 
+    if (frame.msg.depth >= max_call_depth) {
+        frame.stack.pushUnchecked(0);
+        return;
+    }
+
+    if (try frame.host.accessDelegatedAccount(address)) |delegated_access_status| {
+        const delegated_access_cost: i64 = switch (delegated_access_status) {
+            .cold => evmz.instruction.cold_account_access_cost,
+            .warm => evmz.instruction.warm_storage_read_cost,
+        };
+        frame.trackGas(delegated_access_cost);
+        if (frame.status != .running) return;
+    }
+
     // EIP-150
     if (frame.spec.isImpl(.tangerine_whistle)) {
         msg.gas = @min(msg.gas, frame.gas_left - @divFloor(frame.gas_left, 64));
     } else if (msg.gas > frame.gas_left) {
-        // out of gas
-        frame.status = .out_of_gas;
-        return;
-    }
-
-    if (frame.msg.depth >= max_call_depth) {
-        try frame.stack.push(0);
+        frame.failWithStatus(.out_of_gas);
         return;
     }
 
@@ -137,22 +143,21 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
         frame.gas_left += 2300;
     }
 
-    const result = try frame.host.call(msg);
+    const result = (try frame.host.call(msg)).expectCall();
 
     const child_gas_left = @max(result.gas_left, 0);
     frame.trackGas(msg.gas - child_gas_left);
-    frame.gas_refund += child_gas_left;
     if (frame.status != .running) return;
 
     const output_size = @min(out_size_usize, result.output_data.len);
-    try frame.memory.writeBytes(out_offset_usize, result.output_data[0..output_size]);
+    frame.memory.writeBytes(out_offset_usize, result.output_data[0..output_size]);
 
     try frame.replaceReturnData(result.output_data);
 
     if (result.status == .success) {
-        try frame.stack.push(1);
+        frame.stack.pushUnchecked(1);
     } else {
-        try frame.stack.push(0);
+        frame.stack.pushUnchecked(0);
     }
 }
 
@@ -165,20 +170,23 @@ pub fn create2(frame: *CallFrame) !void {
 }
 
 pub inline fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
+    if (is_create2 and !frame.spec.isImpl(.constantinople)) {
+        return error.UnsupportedInstruction;
+    }
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
     }
 
-    const value = try frame.stack.pop();
-    const offset = try frame.stack.pop();
-    const size = try frame.stack.pop();
-    const salt = if (is_create2) try frame.stack.pop() else 0;
+    const value, const offset, const size, const salt = if (is_create2) try frame.stack.popN(4) else blk: {
+        const value, const offset, const size = try frame.stack.popN(3);
+        break :blk .{ value, offset, size, 0 };
+    };
 
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
+    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (frame.spec.isImpl(.shanghai) and size_usize > 0xC000) {
-        frame.status = .out_of_gas;
+        frame.failWithStatus(.out_of_gas);
         return;
     }
 
@@ -198,7 +206,7 @@ pub inline fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
 
     const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
     const init_code_cost = std.math.mul(i64, init_code_word_cost, evmz.calcWordSize(i64, size_i64)) catch {
-        frame.status = .out_of_gas;
+        frame.failWithStatus(.out_of_gas);
         return;
     };
     frame.trackGas(init_code_cost);
@@ -221,22 +229,22 @@ pub inline fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
     }
 
     if (frame.msg.depth >= max_call_depth) {
-        try frame.stack.push(0);
+        frame.stack.pushUnchecked(0);
         return;
     }
 
-    const result = try frame.host.call(msg);
+    const result = (try frame.host.call(msg)).expectCreate();
 
     const child_gas_left = @max(result.gas_left, 0);
     frame.trackGas(msg.gas - child_gas_left);
-    frame.gas_refund += child_gas_left;
     if (frame.status != .running) return;
 
     if (result.status == .success) {
-        try frame.replaceReturnData(result.output_data);
-        try frame.stack.push(@byteSwap(@as(u160, @bitCast(result.create_address.?))));
+        try frame.replaceReturnData(&.{});
+        frame.stack.pushUnchecked(evmz.address.toU256(result.address));
     } else {
-        try frame.stack.push(0);
+        try frame.replaceReturnData(result.output_data);
+        frame.stack.pushUnchecked(0);
     }
 }
 
@@ -249,12 +257,14 @@ pub fn selfdestruct(frame: *CallFrame) !void {
 
     const address = evmz.address.fromWord(address_word);
 
+    if (frame.spec.isImpl(.tangerine_whistle) and try frame.host.getBalance(frame.msg.recipient) > 0 and !try frame.host.accountExists(address)) {
+        frame.trackGas(evmz.instruction.account_creation_cost);
+        if (frame.status != .running) return;
+    }
+
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(address) == .cold) {
         frame.trackGas(evmz.instruction.cold_account_access_cost);
-
-        if (frame.gas_left < 0) {
-            return;
-        }
+        if (frame.status != .running) return;
     }
 
     const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
@@ -264,4 +274,27 @@ pub fn selfdestruct(frame: *CallFrame) !void {
     }
 
     frame.status = .success;
+}
+
+test "RETURN zero length ignores oversized offset" {
+    try evmz.t.expectLatestForkBytecodeStatus(.{
+        .PUSH0,  .PUSH32,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        0xff,    0xff,
+        .RETURN,
+    }, .success);
 }

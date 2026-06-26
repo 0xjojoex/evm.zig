@@ -1,0 +1,26 @@
+.{
+    .name = .evmz_eest,
+    .version = "0.0.0",
+    .fingerprint = 0x71c78220c019d8dc, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .evmz = .{
+            .path = "..",
+        },
+        .evmone = .{
+            .url = "https://github.com/ethereum/evmone/archive/v0.21.0.tar.gz",
+            .hash = "N-V-__8AAEoAGQDVR2HlZeJCH3NaRFATldXVpE69rTye9H73",
+        },
+        .intx = .{
+            .url = "https://github.com/chfast/intx/archive/v0.15.0.tar.gz",
+            .hash = "N-V-__8AAGrRAwDs_VApdcu4nRtzxUL6Yqr_lyqvRxgkkAm9",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "scripts",
+        "src",
+    },
+}

@@ -1,0 +1,3 @@
+handrolled VM-loop fixture: 1000 loop iterations, 8 SSTORE operations per loop
+host: mock
+runtime bytes: 54

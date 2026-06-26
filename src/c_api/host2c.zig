@@ -1,5 +1,6 @@
 const std = @import("std");
 const Host = @import("../Host.zig");
+const Interpreter = @import("../Interpreter.zig");
 
 const common = @import("common.zig");
 const evmc = common.evmc;
@@ -17,6 +18,16 @@ pub const HostContext = extern struct {
     vtable: *const struct {
         deinit: *const fn (ptr: *anyopaque) void,
     },
+
+    pub fn borrowed(host: *Host) HostContext {
+        return .{
+            .ptr = host,
+            .host = host,
+            .vtable = &.{
+                .deinit = borrowedDeinit,
+            },
+        };
+    }
 
     pub fn deinit(self: *HostContext) void {
         return self.vtable.deinit(self.ptr);
@@ -38,6 +49,10 @@ pub const HostContext = extern struct {
         if (ctx == null) return null;
         return @ptrCast(@alignCast(ctx));
     }
+
+    fn borrowedDeinit(ptr: *anyopaque) void {
+        _ = ptr;
+    }
 };
 
 pub fn getInterface() evmc.evmc_host_interface {
@@ -47,6 +62,7 @@ pub fn getInterface() evmc.evmc_host_interface {
         .set_storage = setStorage,
         .get_balance = getBalance,
         .get_code_size = getCodeSize,
+        .get_code_hash = getCodeHash,
         .copy_code = copyCode,
         .selfdestruct = selfDestruct,
         .call = call,
@@ -66,7 +82,7 @@ fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc
 
 fn getStorage(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address, key: [*c]const evmc.evmc_bytes32) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)));
+    return toEvmcBytes32(host.getStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)) catch 0);
 }
 
 fn setStorage(
@@ -134,6 +150,7 @@ fn call(
         .value = fromEvmcBytes32(msg.*.value),
         .is_static = msg.*.flags & evmc.EVMC_STATIC != 0,
         .code_address = fromEvmcAddress(msg.*.code_address),
+        .create2_salt = fromEvmcBytes32(msg.*.create2_salt),
     };
 
     const result = host.call(message) catch return evmc.evmc_result{
@@ -147,13 +164,19 @@ fn call(
         .padding = undefined,
     };
 
+    const output_data = result.outputData();
+    const create_address = switch (result) {
+        .call => std.mem.zeroes(evmc.evmc_address),
+        .create => |create| toEvmcAddress(create.address),
+    };
+
     return evmc.evmc_result{
-        .status_code = @intFromEnum(result.status),
-        .gas_left = result.gas_left,
-        .gas_refund = result.gas_refund,
-        .output_data = result.output_data.ptr,
-        .output_size = result.output_data.len,
-        .create_address = toEvmcAddress(result.create_address),
+        .status_code = statusToEvmc(result.status()),
+        .gas_left = result.gasLeft(),
+        .gas_refund = result.gasRefund(),
+        .output_data = if (output_data.len == 0) null else output_data.ptr,
+        .output_size = output_data.len,
+        .create_address = create_address,
         .release = null,
         .padding = undefined,
     };
@@ -179,6 +202,16 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
         .chain_id = toEvmcBytes32(tx_context.chain_id),
         .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
         .tx_origin = toEvmcAddress(tx_context.origin),
+        .blob_base_fee = toEvmcBytes32(tx_context.blob_base_fee),
+    };
+}
+
+fn statusToEvmc(status: Interpreter.Status) evmc.evmc_status_code {
+    return switch (status) {
+        .success => evmc.EVMC_SUCCESS,
+        .revert => evmc.EVMC_REVERT,
+        .out_of_gas => evmc.EVMC_OUT_OF_GAS,
+        .invalid => evmc.EVMC_INVALID_INSTRUCTION,
     };
 }
 
@@ -233,7 +266,7 @@ fn getTransientStorage(
     key: [*c]const evmc.evmc_bytes32,
 ) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getTransientStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)));
+    return toEvmcBytes32(host.getTransientStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)) catch 0);
 }
 
 fn setTransientStorage(

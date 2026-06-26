@@ -8,29 +8,32 @@ usage: scripts/classify-eest-fixtures.sh [options] [fixture-root]
 Runs EEST state-test JSON files one-by-one with a timeout and prints a coverage
 classification summary.
 
+Prefer `zig build eest-classify -- --exclude-static` for fast local iteration.
+Use this script when per-file timeout or crash isolation matters.
+
 Options:
   --exclude-static       skip paths containing /static/
   --limit N              stop after N JSON files
   --timeout SECONDS      per-file timeout, default: 3
-  --out PATH             raw output path, default: .eest/reports/state-tests.raw.txt
+  --out PATH             raw output path, default: ../.eest/reports/state-tests.raw.txt
   -h, --help             show this help
 
 Environment:
   EEST_FIXTURE_ROOT      default fixture root
-  EEST_RUNNER            compiled runner path, default: .eest/bin/evmz-eest
+  EEST_RUNNER            compiled runner path, default: ../.eest/bin/evmz-eest
   EEST_TIMEOUT_BIN       timeout binary override
 
 Examples:
   scripts/classify-eest-fixtures.sh --exclude-static
-  scripts/classify-eest-fixtures.sh .eest/fixtures/v5.4.0/fixtures/state_tests/cancun
+  scripts/classify-eest-fixtures.sh ../.eest/fixtures/v5.4.0/fixtures/state_tests/cancun
   scripts/classify-eest-fixtures.sh --limit 50 --timeout 5
 USAGE
 }
 
-root="${EEST_FIXTURE_ROOT:-.eest/fixtures/v5.4.0/fixtures/state_tests}"
-runner="${EEST_RUNNER:-.eest/bin/evmz-eest}"
+root="${EEST_FIXTURE_ROOT:-../.eest/fixtures/v5.4.0/fixtures/state_tests}"
+runner="${EEST_RUNNER:-../.eest/bin/evmz-eest}"
 timeout_seconds=3
-out=".eest/reports/state-tests.raw.txt"
+out="../.eest/reports/state-tests.raw.txt"
 exclude_static=0
 limit=0
 
@@ -88,7 +91,11 @@ fi
 mkdir -p "$(dirname "$runner")" "$(dirname "$out")"
 
 printf 'Building %s\n' "$runner" >&2
-zig build-exe -O ReleaseFast src/eest_cli.zig -femit-bin="$runner"
+zig build -Doptimize=ReleaseFast --prefix ../.eest
+default_runner="../.eest/bin/evmz-eest"
+if [[ "$runner" != "$default_runner" ]]; then
+  cp "$default_runner" "$runner"
+fi
 
 : > "$out"
 count=0
@@ -142,7 +149,7 @@ line_re = re.compile(
     r"^(?P<path>.*?): fixtures=(?P<fixtures>\d+) vectors=(?P<vectors>\d+) "
     r"passed=(?P<passed>\d+) failed=(?P<failed>\d+) skipped=(?P<skipped>\d+) unchecked=(?P<unchecked>\d+)$"
 )
-reason_re = re.compile(r"^  (?P<kind>fail|skip|unchecked)\.(?P<reason>[^=]+)=(?P<count>\d+)$")
+reason_re = re.compile(r"^  (?P<kind>fail|unchecked)\.(?P<reason>[^=]+)=(?P<count>\d+)$")
 timeout_re = re.compile(r"^(?P<path>.*?): timeout=(?P<timeout>.+)$")
 crash_re = re.compile(r"^(?P<path>.*?): crash_rc=(?P<rc>\d+)$")
 
@@ -170,9 +177,7 @@ totals = empty_stats()
 by_fork = collections.defaultdict(empty_stats)
 by_group = collections.defaultdict(empty_stats)
 fail_reasons = collections.Counter()
-skip_reasons = collections.Counter()
 fail_by_group = collections.Counter()
-skip_by_group = collections.Counter()
 failed_files = []
 timeouts = []
 crashes = []
@@ -203,9 +208,6 @@ with open(raw_path, "r", encoding="utf-8") as f:
             if match.group("kind") == "fail":
                 fail_reasons[reason] += count
                 fail_by_group[(group, reason)] += count
-            elif match.group("kind") == "skip":
-                skip_reasons[reason] += count
-                skip_by_group[(group, reason)] += count
             continue
 
         if match := timeout_re.match(line):
@@ -258,16 +260,6 @@ for reason, count in fail_reasons.most_common():
 print()
 print("fail_reasons_by_cluster:")
 for (group, reason), count in sorted(fail_by_group.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))[:30]:
-    print(f"{count:8d} {group:<32} {reason}")
-
-print()
-print("skip_reasons:")
-for reason, count in skip_reasons.most_common():
-    print(f"{reason:<36} {count:8d}")
-
-print()
-print("skip_reasons_by_cluster:")
-for (group, reason), count in sorted(skip_by_group.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))[:30]:
     print(f"{count:8d} {group:<32} {reason}")
 
 print()

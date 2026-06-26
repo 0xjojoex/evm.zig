@@ -40,12 +40,80 @@ pub const Message = struct {
     create2_salt: u256 = 0,
 };
 
-pub const Result = struct {
+pub const CallResult = struct {
     status: Interpreter.Status,
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
-    create_address: ?Address = null,
+};
+
+pub const CreateResult = struct {
+    status: Interpreter.Status,
+    output_data: []const u8,
+    gas_left: i64,
+    gas_refund: i64,
+    address: Address,
+};
+
+pub const Result = union(enum) {
+    call: CallResult,
+    create: CreateResult,
+
+    pub fn fromCall(result: CallResult) Result {
+        return .{ .call = result };
+    }
+
+    pub fn fromCreate(address: Address, result: CallResult) Result {
+        return .{ .create = .{
+            .status = result.status,
+            .output_data = result.output_data,
+            .gas_left = result.gas_left,
+            .gas_refund = result.gas_refund,
+            .address = address,
+        } };
+    }
+
+    pub fn status(self: Result) Interpreter.Status {
+        return switch (self) {
+            .call => |result| result.status,
+            .create => |result| result.status,
+        };
+    }
+
+    pub fn outputData(self: Result) []const u8 {
+        return switch (self) {
+            .call => |result| result.output_data,
+            .create => |result| result.output_data,
+        };
+    }
+
+    pub fn gasLeft(self: Result) i64 {
+        return switch (self) {
+            .call => |result| result.gas_left,
+            .create => |result| result.gas_left,
+        };
+    }
+
+    pub fn gasRefund(self: Result) i64 {
+        return switch (self) {
+            .call => |result| result.gas_refund,
+            .create => |result| result.gas_refund,
+        };
+    }
+
+    pub fn expectCall(self: Result) CallResult {
+        return switch (self) {
+            .call => |result| result,
+            .create => unreachable,
+        };
+    }
+
+    pub fn expectCreate(self: Result) CreateResult {
+        return switch (self) {
+            .call => unreachable,
+            .create => |result| result,
+        };
+    }
 };
 
 pub const CallKind = enum(u8) {
@@ -98,7 +166,7 @@ const Self = @This();
 ptr: *anyopaque,
 vtable: *const struct {
     accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
-    getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) ?u256,
+    getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
     getBalance: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
@@ -109,9 +177,10 @@ vtable: *const struct {
     getTxContext: *const fn (ptr: *anyopaque) anyerror!TxContext,
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
+    accessDelegatedAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?AccessStatus,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
-    getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) ?u256,
+    getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
 },
 
@@ -130,6 +199,9 @@ pub fn accessAccount(self: *Self, address: Address) !AccessStatus {
 pub fn accessStorage(self: *Self, address: Address, key: u256) !AccessStatus {
     return self.vtable.accessStorage(self.ptr, address, key);
 }
+pub fn accessDelegatedAccount(self: *Self, address: Address) !?AccessStatus {
+    return self.vtable.accessDelegatedAccount(self.ptr, address);
+}
 pub fn copyCode(self: *Self, address: Address, code_offset: usize, buffer_data: []u8) !usize {
     return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);
 }
@@ -145,7 +217,7 @@ pub fn getBalance(self: *Self, address: Address) !u256 {
 pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStatus {
     return self.vtable.setStorage(self.ptr, address, key, value);
 }
-pub fn getStorage(self: *Self, address: Address, key: u256) ?u256 {
+pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
@@ -157,7 +229,7 @@ pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
 pub fn call(self: *Self, msg: Message) !Result {
     return self.vtable.call(self.ptr, msg);
 }
-pub fn getTransientStorage(self: *Self, address: Address, key: u256) ?u256 {
+pub fn getTransientStorage(self: *Self, address: Address, key: u256) !u256 {
     return self.vtable.getTransientStorage(self.ptr, address, key);
 }
 pub fn setTransientStorage(self: *Self, address: Address, key: u256, value: u256) !void {

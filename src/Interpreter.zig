@@ -1,16 +1,42 @@
 const std = @import("std");
-const Opcode = @import("./opcode.zig").Opcode;
 const Stack = @import("./Stack.zig");
 const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
+const JumpDestCache = @import("./jumpdest/Cache.zig");
+const JumpDestState = @import("./jumpdest/State.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 
-const log = std.log.scoped(.interpreter);
-
 const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
 
-pub const Status = enum(u8) { success, invalid, running, revert, out_of_gas };
+pub const Status = enum(u8) { success, invalid, revert, out_of_gas };
+
+pub const FrameStatus = enum(u8) {
+    running,
+    success,
+    invalid,
+    revert,
+    out_of_gas,
+
+    pub fn fromResult(status: Status) FrameStatus {
+        return switch (status) {
+            .success => .success,
+            .invalid => .invalid,
+            .revert => .revert,
+            .out_of_gas => .out_of_gas,
+        };
+    }
+
+    pub fn toResult(self: FrameStatus) Status {
+        return switch (self) {
+            .success => .success,
+            .invalid => .invalid,
+            .revert => .revert,
+            .out_of_gas => .out_of_gas,
+            .running => unreachable,
+        };
+    }
+};
 
 pub const Result = struct {
     status: Status,
@@ -23,18 +49,20 @@ call_frame: CallFrame,
 
 const Interpreter = @This();
 
-pub fn init(
-    allocator: std.mem.Allocator,
+pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
-    bytes: []const u8,
+    code: []const u8,
     spec: evmz.Spec,
-) Interpreter {
-    const callframe = CallFrame.init(allocator, host, msg, bytes, spec);
+    jumpdest_cache: ?*JumpDestCache = null,
+};
 
-    return .{
-        .call_frame = callframe,
-    };
+pub fn init(
+    self: *Interpreter,
+    allocator: std.mem.Allocator,
+    options: Init,
+) !void {
+    try self.call_frame.init(allocator, options);
 }
 
 pub fn deinit(self: *Interpreter) void {
@@ -49,85 +77,101 @@ pub fn execute(self: *Interpreter) Result {
     return self.call_frame.getResult();
 }
 
-fn step(self: *Interpreter) void {
-    if (self.call_frame.pc >= self.call_frame.bytes.len) {
+inline fn step(self: *Interpreter) void {
+    if (self.call_frame.pc >= self.call_frame.code.len) {
         self.call_frame.status = .success;
         return;
     }
 
-    const opcode_byte = self.call_frame.bytes[self.call_frame.pc];
+    const opcode_byte = self.call_frame.code[self.call_frame.pc];
     self.call_frame.pc += 1;
-    const instr = instruction.instruction_table.ops[opcode_byte];
 
-    self.call_frame.trackGas(instr.static_gas);
-
-    if (self.call_frame.status != .running) {
-        return;
-    }
-
-    instr.ptr(&self.call_frame) catch |err| {
+    instruction.execute(opcode_byte, &self.call_frame) catch {
         if (self.call_frame.status == .running) {
-            self.call_frame.status = .invalid;
-            log.debug("Error: {any}\n", .{err});
+            self.call_frame.failWithStatus(.invalid);
         }
     };
-    if (self.call_frame.pc >= self.call_frame.bytes.len and self.call_frame.status == .running) {
+    if (self.call_frame.pc >= self.call_frame.code.len and self.call_frame.status == .running) {
         self.call_frame.status = .success;
     }
 }
 
 pub const CallFrame = struct {
-    status: Status,
+    status: FrameStatus,
     allocator: std.mem.Allocator,
     host: *Host,
     msg: *const Host.Message,
     stack: Stack,
     memory: Memory,
     pc: usize = 0,
-    bytes: []const u8 = &.{},
+    code: []const u8 = &.{},
     gas_left: i64 = 0,
     gas_refund: i64 = 0,
     return_data: []u8 = &.{},
+    output_data: []u8 = &.{},
+    jumpdests: JumpDestState = .empty,
     spec: evmz.Spec = evmz.Spec.latest,
-    _tx_context: ?Host.TxContext = null,
 
     pub fn init(
+        self: *CallFrame,
         allocator: std.mem.Allocator,
-        host: *Host,
-        msg: *const Host.Message,
-        bytes: []const u8,
-        spec: evmz.Spec,
-    ) CallFrame {
-        return .{
-            .allocator = allocator,
-            .stack = Stack.init(),
-            .memory = Memory.init(allocator),
-            .host = host,
-            .msg = msg,
-            .bytes = bytes,
-            .gas_left = msg.gas,
-            .status = if (bytes.len == 0) .success else .running,
-            .spec = spec,
-        };
+        options: Init,
+    ) !void {
+        const jumpdests = try JumpDestState.init(options.jumpdest_cache, options.code);
+
+        self.allocator = allocator;
+        self.host = options.host;
+        self.msg = options.msg;
+        self.stack = undefined;
+        self.stack.len = 0;
+        self.memory = Memory.init(allocator);
+        self.pc = 0;
+        self.code = options.code;
+        self.gas_left = options.msg.gas;
+        self.gas_refund = 0;
+        self.return_data = &.{};
+        self.output_data = &.{};
+        self.jumpdests = jumpdests;
+        self.status = if (options.code.len == 0) .success else .running;
+        self.spec = options.spec;
     }
 
     pub fn deinit(self: *CallFrame) void {
         self.memory.deinit();
         self.allocator.free(self.return_data);
+        self.allocator.free(self.output_data);
+        self.jumpdests.deinit(self.allocator);
         self.* = undefined;
     }
 
+    fn replaceOwnedBytes(self: *CallFrame, target: *[]u8, bytes: []const u8) !void {
+        self.allocator.free(target.*);
+        const buf = try self.allocator.alloc(u8, bytes.len);
+        @memcpy(buf, bytes);
+        target.* = buf;
+    }
+
     pub fn replaceReturnData(self: *CallFrame, return_data: []const u8) !void {
-        self.allocator.free(self.return_data);
-        const buf = try self.allocator.alloc(u8, return_data.len);
-        @memcpy(buf, return_data);
-        self.return_data = buf;
+        try self.replaceOwnedBytes(&self.return_data, return_data);
+    }
+
+    pub fn replaceOutputData(self: *CallFrame, output_data: []const u8) !void {
+        try self.replaceOwnedBytes(&self.output_data, output_data);
     }
 
     pub fn trackGas(self: *CallFrame, gas: i64) void {
+        if (gas > self.gas_left) {
+            self.failWithStatus(.out_of_gas);
+            return;
+        }
         self.gas_left -= gas;
-        if (self.gas_left < 0) {
-            self.status = .out_of_gas;
+    }
+
+    pub fn failWithStatus(self: *CallFrame, status: Status) void {
+        self.status = FrameStatus.fromResult(status);
+        switch (status) {
+            .invalid, .out_of_gas => self.gas_left = 0,
+            .success, .revert => {},
         }
     }
 
@@ -135,45 +179,46 @@ pub const CallFrame = struct {
         return self.wordToIntOrStatus(usize, value, .out_of_gas);
     }
 
+    pub fn memoryOffsetToUsizeOrOog(self: *CallFrame, offset: u256, byte_size: usize) ?usize {
+        if (byte_size == 0) return 0;
+        return self.wordToUsizeOrOog(offset);
+    }
+
     pub fn wordToIntOrStatus(self: *CallFrame, comptime T: type, value: u256, status: Status) ?T {
         return std.math.cast(T, value) orelse {
-            self.status = status;
+            self.failWithStatus(status);
             return null;
         };
     }
 
     pub fn expandMemory(self: *CallFrame, offset: usize, byte_size: usize) !bool {
-        const expand_cost = self.memory.expansionCost(offset, byte_size) catch |err| switch (err) {
-            Memory.Error.MemoryOverflow => {
-                self.status = .out_of_gas;
+        if (byte_size == 0) return true;
+        const end = std.math.add(usize, offset, byte_size) catch {
+            self.failWithStatus(.out_of_gas);
+            return false;
+        };
+        if (end <= self.memory.len()) return true;
+
+        const expansion = self.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.failWithStatus(.out_of_gas);
                 return false;
             },
         };
-        self.trackGas(expand_cost);
+        self.trackGas(expansion.cost);
         if (self.status != .running) {
             return false;
         }
-        try self.memory.expandToFit(offset, byte_size);
+        try self.memory.expandPrepared(expansion);
         return true;
-    }
-
-    pub fn getTxContext(self: *CallFrame) !Host.TxContext {
-        if (self._tx_context) |tx_context| {
-            return tx_context;
-        }
-
-        const tx_context = try self.host.getTxContext();
-        self._tx_context = tx_context;
-
-        return self._tx_context orelse error.MissingTxContext;
     }
 
     pub fn getResult(self: *const CallFrame) Result {
         return Result{
             .gas_left = self.gas_left,
             .gas_refund = self.gas_refund,
-            .output_data = self.return_data,
-            .status = self.status,
+            .output_data = self.output_data,
+            .status = self.status.toResult(),
         };
     }
 };

@@ -1,8 +1,6 @@
 //! Stack Machine for the EVM
 const std = @import("std");
 
-const _debug: bool = false;
-
 /// The max stack size is 1024.
 pub const capacity = 1024;
 
@@ -10,32 +8,47 @@ pub const capacity = 1024;
 stacks: [capacity]u256 = undefined,
 len: usize = 0,
 
-const Self = @This();
+const Stack = @This();
+
+fn PopN(comptime n: usize) type {
+    if (n == 0) {
+        @compileError("PopN requires at least one value");
+    }
+    return std.meta.Tuple(&([_]type{u256} ** n));
+}
 
 pub const Error = error{
     StackOverflow,
     StackUnderflow,
 };
 
-pub fn init() Self {
-    return .{
-        .stacks = undefined,
-        .len = 0,
-    };
-}
-
-pub fn push(self: *Self, value: u256) Error!void {
+pub fn push(self: *Stack, value: u256) Error!void {
     if (self.len >= capacity) {
         return Error.StackOverflow;
     }
     self.stacks[self.len] = value;
     self.len += 1;
-    if (_debug) {
-        self.dump();
-    }
 }
 
-pub fn pop(self: *Self) Error!u256 {
+pub inline fn pushUnchecked(self: *Stack, value: u256) void {
+    std.debug.assert(self.len < capacity);
+    self.stacks[self.len] = value;
+    self.len += 1;
+}
+
+pub inline fn replaceTop(self: *Stack, value: u256) Error!void {
+    if (self.len == 0) {
+        return Error.StackUnderflow;
+    }
+    self.replaceTopUnchecked(value);
+}
+
+pub inline fn replaceTopUnchecked(self: *Stack, value: u256) void {
+    std.debug.assert(self.len != 0);
+    self.stacks[self.len - 1] = value;
+}
+
+pub inline fn pop(self: *Stack) Error!u256 {
     if (self.len == 0) {
         return Error.StackUnderflow;
     }
@@ -43,12 +56,25 @@ pub fn pop(self: *Self) Error!u256 {
     return self.stacks[self.len];
 }
 
-pub fn peek(self: *Self) ?u256 {
+pub inline fn popN(self: *Stack, comptime n: usize) Error!PopN(n) {
+    if (self.len < n) {
+        return Error.StackUnderflow;
+    }
+    self.len -= n;
+
+    var values: PopN(n) = undefined;
+    inline for (0..n) |i| {
+        values[i] = self.stacks[self.len + n - 1 - i];
+    }
+    return values;
+}
+
+pub fn peek(self: *Stack) ?u256 {
     return self.peekN(1);
 }
 
 /// Swap the nth element from the top of the stack with the top element
-pub fn swap(self: *Self, comptime n: usize) Error!void {
+pub fn swap(self: *Stack, comptime n: usize) Error!void {
     if (self.len <= n) {
         return Error.StackUnderflow;
     }
@@ -58,21 +84,21 @@ pub fn swap(self: *Self, comptime n: usize) Error!void {
 }
 
 /// Duplicate the nth element from the top of the stack
-pub fn dup(self: *Self, comptime n: usize) Error!void {
+pub fn dup(self: *Stack, comptime n: usize) Error!void {
     if (self.len < n) {
         return Error.StackUnderflow;
     }
     try self.push(self.stacks[self.len - n]);
 }
 
-pub fn peekN(self: *Self, n: usize) ?u256 {
+pub fn peekN(self: *Stack, n: usize) ?u256 {
     if (self.len < n) {
         return null;
     }
     return self.stacks[self.len - n];
 }
 
-pub fn dump(self: *const Self) void {
+pub fn dump(self: *const Stack) void {
     std.debug.print("--\n", .{});
     std.debug.print("Stack ({d}):\n", .{self.len});
     var i: usize = self.len;
@@ -86,7 +112,7 @@ pub fn dump(self: *const Self) void {
 const testing = std.testing;
 
 test "push pop and peek use the top stack slot" {
-    var stack = Self.init();
+    var stack = Stack{};
 
     try testing.expectEqual(null, stack.peek());
 
@@ -108,8 +134,91 @@ test "push pop and peek use the top stack slot" {
     try testing.expectError(Error.StackUnderflow, stack.pop());
 }
 
+test "replaceTop updates the current top slot" {
+    var stack = Stack{};
+
+    try testing.expectError(Error.StackUnderflow, stack.replaceTop(1));
+
+    try stack.push(1);
+    try stack.push(2);
+    try stack.replaceTop(3);
+
+    try testing.expectEqual(@as(usize, 2), stack.len);
+    try testing.expectEqual(@as(u256, 3), stack.peek().?);
+    try testing.expectEqual(@as(u256, 1), stack.peekN(2).?);
+}
+
+test "popN checks underflow and preserves repeated-pop operand order" {
+    {
+        var stack = Stack{};
+
+        try testing.expectError(Error.StackUnderflow, stack.popN(2));
+
+        try stack.push(1);
+        try testing.expectError(Error.StackUnderflow, stack.popN(2));
+
+        try stack.push(2);
+        try stack.push(3);
+
+        const top, const next = try stack.popN(2);
+        try testing.expectEqual(@as(u256, 3), top);
+        try testing.expectEqual(@as(u256, 2), next);
+        try testing.expectEqual(@as(usize, 1), stack.len);
+        try testing.expectEqual(@as(u256, 1), stack.peek().?);
+    }
+
+    {
+        var stack = Stack{};
+
+        try testing.expectError(Error.StackUnderflow, stack.popN(3));
+
+        try stack.push(1);
+        try stack.push(2);
+        try testing.expectError(Error.StackUnderflow, stack.popN(3));
+
+        try stack.push(3);
+        try stack.push(4);
+        try stack.push(5);
+
+        const top, const next, const third = try stack.popN(3);
+        try testing.expectEqual(@as(u256, 5), top);
+        try testing.expectEqual(@as(u256, 4), next);
+        try testing.expectEqual(@as(u256, 3), third);
+        try testing.expectEqual(@as(usize, 2), stack.len);
+        try testing.expectEqual(@as(u256, 2), stack.peek().?);
+    }
+
+    {
+        var stack = Stack{};
+
+        for (1..8) |value| {
+            try stack.push(@intCast(value));
+        }
+
+        const p4_0, const p4_1, const p4_2, const p4_3 = try stack.popN(4);
+        try testing.expectEqual(@as(u256, 7), p4_0);
+        try testing.expectEqual(@as(u256, 6), p4_1);
+        try testing.expectEqual(@as(u256, 5), p4_2);
+        try testing.expectEqual(@as(u256, 4), p4_3);
+        try testing.expectEqual(@as(usize, 3), stack.len);
+
+        try stack.push(4);
+        try stack.push(5);
+        try stack.push(6);
+
+        const p6_0, const p6_1, const p6_2, const p6_3, const p6_4, const p6_5 = try stack.popN(6);
+        try testing.expectEqual(@as(u256, 6), p6_0);
+        try testing.expectEqual(@as(u256, 5), p6_1);
+        try testing.expectEqual(@as(u256, 4), p6_2);
+        try testing.expectEqual(@as(u256, 3), p6_3);
+        try testing.expectEqual(@as(u256, 2), p6_4);
+        try testing.expectEqual(@as(u256, 1), p6_5);
+        try testing.expectEqual(@as(usize, 0), stack.len);
+    }
+}
+
 test "swap checks depth before computing target slot" {
-    var stack = Self.init();
+    var stack = Stack{};
 
     try testing.expectError(Error.StackUnderflow, stack.swap(1));
     try stack.push(1);

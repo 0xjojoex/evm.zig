@@ -1,110 +1,64 @@
 const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const evmz = @import("../evm.zig");
+const uint256 = @import("../uint256.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
 pub fn add(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
+    const a, const b = try frame.stack.popN(2);
     const result = a +% b;
 
-    try frame.stack.push(result);
+    frame.stack.pushUnchecked(result);
 }
 
 pub fn mul(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
+    const a, const b = try frame.stack.popN(2);
     const result = a *% b;
 
-    try frame.stack.push(result);
+    frame.stack.pushUnchecked(result);
 }
 
 pub fn sub(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
+    const a, const b = try frame.stack.popN(2);
     const result = a -% b;
 
-    try frame.stack.push(result);
+    frame.stack.pushUnchecked(result);
 }
 
 pub fn div(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
-    const result = if (b == 0) 0 else a / b;
-    try frame.stack.push(result);
+    const a, const b = try frame.stack.popN(2);
+    frame.stack.pushUnchecked(uint256.div(a, b));
 }
 
 pub fn sdiv(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
+    const a, const b = try frame.stack.popN(2);
 
-    if (b == 0) {
-        try frame.stack.push(0);
-        return;
-    }
-
-    const ia: i256 = @bitCast(a);
-    const ib: i256 = @bitCast(b);
-    const result: u256 = @bitCast(@divFloor(ia, ib));
-    try frame.stack.push(result);
+    frame.stack.pushUnchecked(uint256.sdiv(a, b));
 }
 
 pub fn mod(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
-    var result: u256 = undefined;
-    if (b == 0) {
-        result = 0;
-    } else {
-        result = a % b;
-    }
-    try frame.stack.push(result);
+    const a, const b = try frame.stack.popN(2);
+    frame.stack.pushUnchecked(uint256.mod(a, b));
 }
 
 pub fn smod(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
-    var result: u256 = undefined;
-    if (b == 0) {
-        result = 0;
-    } else {
-        const ia: i256 = @bitCast(a);
-        const ib: i256 = @bitCast(b);
-        result = @bitCast(@mod(ia, ib));
-    }
-    try frame.stack.push(result);
+    const a, const b = try frame.stack.popN(2);
+    frame.stack.pushUnchecked(uint256.smod(a, b));
 }
 
 pub fn addmod(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
-    const c = try frame.stack.pop();
-    var result: u256 = undefined;
-    if (c == 0) {
-        result = 0;
-    } else {
-        result = u256AddMod(a, b, c);
-    }
-    try frame.stack.push(result);
+    const a, const b, const c = try frame.stack.popN(3);
+    frame.stack.pushUnchecked(uint256.addMod(a, b, c));
 }
 
 pub fn mulmod(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
-    const c = try frame.stack.pop();
-    var result: u256 = undefined;
-    if (c == 0) {
-        result = 0;
-    } else {
-        result = u256MulMod(a, b, c);
-    }
-    try frame.stack.push(result);
+    const a, const b, const c = try frame.stack.popN(3);
+    frame.stack.pushUnchecked(uint256.mulMod(a, b, c));
 }
 
 pub fn exp(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const exponent = try frame.stack.pop();
+    const a, const exponent = try frame.stack.popN(2);
 
     const exp_cost: u8 = if (frame.spec.isImpl(.spurious_dragon)) 50 else 10;
 
@@ -112,17 +66,16 @@ pub fn exp(frame: *CallFrame) !void {
     frame.trackGas(@as(i64, exp_cost) * exponent_byte_size);
 
     const result = wrapExp(a, exponent);
-    try frame.stack.push(result);
+    frame.stack.pushUnchecked(result);
 }
 
 pub fn signextend(frame: *CallFrame) !void {
-    const a = try frame.stack.pop();
-    const b = try frame.stack.pop();
+    const a, const b = try frame.stack.popN(2);
 
     var val = b;
-    if (a < 31) {
+    if (a < 32) {
         const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
-        const mask = std.math.shl(u256, 1, sign_bit - a) - 1;
+        const mask = std.math.shl(u256, 1, sign_bit) - 1;
         if (((b >> sign_bit) & 1) != 0) {
             val = b | ~mask;
         } else {
@@ -130,12 +83,13 @@ pub fn signextend(frame: *CallFrame) !void {
         }
     }
 
-    try frame.stack.push(val);
+    frame.stack.pushUnchecked(val);
 }
 
 pub fn keccak256(frame: *CallFrame) !void {
-    const offset = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
-    const size = frame.wordToUsizeOrOog(try frame.stack.pop()) orelse return;
+    const offset_word, const size_word = try frame.stack.popN(2);
+    const size = frame.wordToUsizeOrOog(size_word) orelse return;
+    const offset = frame.memoryOffsetToUsizeOrOog(offset_word, size) orelse return;
 
     if (!try frame.expandMemory(offset, size)) return;
     const min_word_size = (size + 31) / 32;
@@ -146,55 +100,41 @@ pub fn keccak256(frame: *CallFrame) !void {
     const value = frame.memory.readBytes(offset, size);
 
     var result: [32]u8 = undefined;
-    // TODO: test empty value
     std.crypto.hash.sha3.Keccak256.hash(value, &result, .{});
 
-    const final_result = @byteSwap(@as(u256, @bitCast(result)));
-    try frame.stack.push(final_result);
-}
-
-inline fn u256AddMod(a: u256, b: u256, c: u256) u256 {
-    const r, const sum = @addWithOverflow(a, b);
-    if (sum != 0) {
-        return sum % c;
-    } else {
-        return r % c;
-    }
-}
-
-test u256AddMod {
-    const max_256 = std.math.maxInt(u256);
-    try std.testing.expectEqual(u256AddMod(max_256, 1, max_256), 1);
+    const final_result = evmz.uint256.fromBytes32(&result);
+    frame.stack.pushUnchecked(final_result);
 }
 
 test "DIV and SDIV with one operand fail as invalid instructions" {
-    try evmz.t.expectCancunBytecodeStatus(&.{ 0x60, 0x01, 0x04 }, .invalid);
-    try evmz.t.expectCancunBytecodeStatus(&.{ 0x60, 0x01, 0x05 }, .invalid);
+    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x01, .DIV }, .invalid);
+    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x01, .SDIV }, .invalid);
 }
 
 test "DIV and SDIV by zero push zero" {
-    try evmz.t.expectCancunBytecodeStackTop(&.{ 0x60, 0x00, 0x60, 0x02, 0x04 }, 0);
-    try evmz.t.expectCancunBytecodeStackTop(&.{ 0x60, 0x00, 0x60, 0x02, 0x05 }, 0);
+    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH1, 0x02, .DIV }, 0);
+    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH1, 0x02, .SDIV }, 0);
 }
 
-// can work on a better version
-inline fn u256MulMod(lhs: u256, rhs: u256, modulo: u256) u256 {
-    if (modulo == 0) return 0;
-
-    var result: u1024 = 0;
-    var a: u1024 = @intCast(lhs % modulo);
-    var b: u1024 = @intCast(rhs);
-    while (b > 0) : (b >>= 1) {
-        if (b & 1 == 1) {
-            result = (result +% a) % modulo;
-        }
-        a = (a * 2) % modulo;
-    }
-
-    return @intCast(result);
+test "KECCAK256 of empty input returns the empty hash" {
+    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH0, .KECCAK256 }, evmz.empty_code_hash);
 }
 
 inline fn wrapExp(a: u256, expo: u256) u256 {
+    if (expo == 0) return 1;
+    if (a == 0) return 0;
+    if (a == 1) return 1;
+    if (a == 2) {
+        if (expo >= 256) return 0;
+        return std.math.shl(u256, 1, @as(u16, @intCast(expo)));
+    }
+
+    const trailing_zero_bits: u16 = @intCast(@ctz(a));
+    if (trailing_zero_bits != 0) {
+        const zero_threshold = std.math.divCeil(u16, 256, trailing_zero_bits) catch unreachable;
+        if (expo >= zero_threshold) return 0;
+    }
+
     var value = a;
     var exponent = expo;
     var result: u256 = 1;
@@ -209,20 +149,18 @@ inline fn wrapExp(a: u256, expo: u256) u256 {
 }
 
 test wrapExp {
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(0, 0));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(0, 3));
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(1, std.math.maxInt(u256)));
     try std.testing.expectEqual(wrapExp(2, 2), 4);
+    try std.testing.expectEqual(@as(u256, 1) << 255, wrapExp(2, 255));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(2, 256));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(4, 128));
 
     const a = 2;
     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
     const result = wrapExp(a, exponent);
     try std.testing.expectEqual(@as(u256, 0), result);
-}
-
-test u256MulMod {
-    const max_256 = std.math.maxInt(u256);
-
-    try std.testing.expectEqual(u256MulMod(std.math.pow(u256, 2, 255), std.math.pow(u256, 2, 255), max_256), 0x4000000000000000000000000000000000000000000000000000000000000000);
-    try std.testing.expectEqual(u256MulMod(max_256, 1, max_256), 0);
-    try std.testing.expectEqual(u256MulMod(3, 4, 5), 2);
 }
 
 /// Returns how many bytes are needed to represent the significant part of a 256-bit integer.

@@ -1,0 +1,3 @@
+handrolled VM-loop fixture: 1000 loop iterations, 8 SLOAD/POP operations per loop
+host: mock
+runtime bytes: 46

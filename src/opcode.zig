@@ -27,6 +27,7 @@ pub const Opcode = enum(u8) {
     SHL = 0x1b,
     SHR = 0x1c,
     SAR = 0x1d,
+    CLZ = 0x1e,
     KECCAK256 = 0x20,
     ADDRESS = 0x30,
     BALANCE = 0x31,
@@ -163,7 +164,7 @@ pub const Opcode = enum(u8) {
         }
     }
 
-    pub fn toInt(self: Opcode) u8 {
+    pub inline fn toInt(self: Opcode) u8 {
         return @intFromEnum(self);
     }
 };

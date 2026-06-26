@@ -1,0 +1,3 @@
+handrolled VM-loop fixture: 1000 loop iterations, 32 MSTOREs at offset 0 per loop
+host: null
+runtime bytes: 174

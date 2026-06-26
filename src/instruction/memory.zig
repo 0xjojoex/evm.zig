@@ -1,20 +1,39 @@
 const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
+const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
 
 pub fn mstore(frame: *CallFrame) !void {
-    const offset = try frame.stack.pop();
-    const value = try frame.stack.pop();
+    const offset, const value = try frame.stack.popN(2);
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
+    const end = std.math.add(usize, offset_usize, 32) catch {
+        frame.failWithStatus(.out_of_gas);
+        return;
+    };
+
+    if (end <= frame.memory.len()) {
+        frame.memory.write(offset_usize, value);
+        return;
+    }
+
     if (!try frame.expandMemory(offset_usize, 32)) return;
-    try frame.memory.write(offset_usize, value);
+    frame.memory.write(offset_usize, value);
 }
 
 pub fn mstore8(frame: *CallFrame) !void {
-    const offset = try frame.stack.pop();
-    const value = try frame.stack.pop();
+    const offset, const value = try frame.stack.popN(2);
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
+    const end = std.math.add(usize, offset_usize, 1) catch {
+        frame.failWithStatus(.out_of_gas);
+        return;
+    };
+
+    if (end <= frame.memory.len()) {
+        frame.memory.write8(offset_usize, value);
+        return;
+    }
+
     if (!try frame.expandMemory(offset_usize, 1)) return;
     frame.memory.write8(offset_usize, value);
 }
@@ -22,9 +41,32 @@ pub fn mstore8(frame: *CallFrame) !void {
 pub fn mload(frame: *CallFrame) !void {
     const offset = try frame.stack.pop();
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
+    const end = std.math.add(usize, offset_usize, 32) catch {
+        frame.failWithStatus(.out_of_gas);
+        return;
+    };
+
+    if (end <= frame.memory.len()) {
+        const value = frame.memory.read(offset_usize);
+        frame.stack.pushUnchecked(value);
+        return;
+    }
+
     if (!try frame.expandMemory(offset_usize, 32)) return;
     const value = frame.memory.read(offset_usize);
-    try frame.stack.push(value);
+    frame.stack.pushUnchecked(value);
+}
+
+test "MSTORE overwrites already expanded memory" {
+    try evmz.t.expectLatestForkBytecodeStackTop(.{
+        .PUSH1,  0xaa,
+        .PUSH1,  0x00,
+        .MSTORE, .PUSH1,
+        0xbb,    .PUSH1,
+        0x00,    .MSTORE,
+        .PUSH1,  0x00,
+        .MLOAD,
+    }, 0xbb);
 }
 
 pub fn msize(frame: *CallFrame) !void {
@@ -37,9 +79,7 @@ pub fn mcopy(frame: *CallFrame) !void {
         return error.UnsupportedInstruction;
     }
 
-    const dest = try frame.stack.pop();
-    const offset = try frame.stack.pop();
-    const size = try frame.stack.pop();
+    const dest, const offset, const size = try frame.stack.popN(3);
     if (size == 0) return;
 
     const dest_usize = frame.wordToUsizeOrOog(dest) orelse return;
@@ -53,21 +93,34 @@ pub fn mcopy(frame: *CallFrame) !void {
     frame.trackGas(word_copied_cost);
     if (frame.status != .running) return;
 
-    try frame.memory.copy(dest_usize, offset_usize, size_usize);
+    frame.memory.copy(dest_usize, offset_usize, size_usize);
 }
 
 test "MCOPY is only enabled from Cancun" {
-    try evmz.t.expectBytecodeStatus(&.{ 0x5f, 0x5f, 0x5f, 0x5e }, .shanghai, .invalid);
-    try evmz.t.expectBytecodeStatus(&.{ 0x5f, 0x5f, 0x5f, 0x5e }, .cancun, .success);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .cancun, .success);
 }
 
 test "MCOPY expands destination" {
-    try evmz.t.expectCancunBytecodeStatus(&.{ 0x60, 0x01, 0x5f, 0x60, 0x20, 0x5e }, .success);
+    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x01, .PUSH0, .PUSH1, 0x20, .MCOPY }, .success);
 }
 
 test "MCOPY zero length ignores out of bounds offsets" {
-    try evmz.t.expectCancunBytecodeStatus(
-        &.{ 0x5f, 0x5f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x5e },
+    try evmz.t.expectLatestForkBytecodeStatus(
+        .{
+            .PUSH0, .PUSH0, .PUSH32,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   0xff,
+            0xff,   0xff,   .MCOPY,
+        },
         .success,
     );
 }
