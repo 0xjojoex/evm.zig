@@ -35,6 +35,8 @@ const ResolvedOptions = struct {
 
 const Engine = enum {
     evmz,
+    evmz_jumpdest,
+    evmz_advanced,
     evmone_baseline,
     evmone_advanced,
 };
@@ -127,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     const call_data = try common.decodeHexAlloc(allocator, resolved.call_data_hex);
     defer allocator.free(call_data);
 
-    var evmone_runner: ?vm_loop_evmone.Runner = if (resolved.engine == .evmz)
+    var evmone_runner: ?vm_loop_evmone.Runner = if (isEvmzEngine(resolved.engine))
         null
     else
         try vm_loop_evmone.Runner.init(evmoneMode(resolved.engine));
@@ -194,7 +196,7 @@ fn printUsage() void {
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
         \\  --spec <name>                 fork spec, default latest
-        \\  --engine <name>               evmz, evmone-baseline, evmone-advanced, evmone
+        \\  --engine <name>               evmz, evmz-jumpdest, evmz-advanced, evmone-baseline, evmone-advanced, evmone
         \\  --host-profile <null|mock>    host boundary, default null
         \\  --summary                     print host callback counts to stderr
         \\
@@ -249,8 +251,29 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
+        .evmz_jumpdest => "evmz-jumpdest",
+        .evmz_advanced => "evmz-advanced",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
+    };
+}
+
+fn isEvmzEngine(engine: Engine) bool {
+    return switch (engine) {
+        .evmz,
+        .evmz_jumpdest,
+        .evmz_advanced,
+        => true,
+        .evmone_baseline, .evmone_advanced => false,
+    };
+}
+
+fn evmzConfig(engine: Engine) evmz.Config {
+    return switch (engine) {
+        .evmz => .base,
+        .evmz_jumpdest => .advanced_jumpdest_only,
+        .evmz_advanced => .advanced,
+        .evmone_baseline, .evmone_advanced => unreachable,
     };
 }
 
@@ -296,7 +319,7 @@ fn deployRuntime(
     spec: evmz.Spec,
     engine: Engine,
 ) ![]u8 {
-    if (engine != .evmz) {
+    if (!isEvmzEngine(engine)) {
         return vm_loop_evmone.deployRuntime(allocator, host, contract_code, spec, evmoneMode(engine));
     }
 
@@ -317,6 +340,7 @@ fn deployRuntime(
         .msg = &msg,
         .code = contract_code,
         .spec = spec,
+        .config = evmzConfig(engine),
     });
     defer interpreter.deinit();
 
@@ -333,7 +357,7 @@ fn timeRuntimeCall(
     spec: evmz.Spec,
     engine: Engine,
 ) !u64 {
-    if (engine != .evmz) {
+    if (!isEvmzEngine(engine)) {
         return vm_loop_evmone.timeRuntimeCall(allocator, host, runtime_code, call_data, spec, evmoneMode(engine));
     }
 
@@ -354,6 +378,7 @@ fn timeRuntimeCall(
         .msg = &msg,
         .code = runtime_code,
         .spec = spec,
+        .config = evmzConfig(engine),
     });
     errdefer interpreter.deinit();
 
@@ -368,7 +393,10 @@ fn timeRuntimeCall(
 
 fn evmoneMode(engine: Engine) vm_loop_evmone.Mode {
     return switch (engine) {
-        .evmz => unreachable,
+        .evmz,
+        .evmz_jumpdest,
+        .evmz_advanced,
+        => unreachable,
         .evmone_baseline => .baseline,
         .evmone_advanced => .advanced,
     };
@@ -376,6 +404,8 @@ fn evmoneMode(engine: Engine) vm_loop_evmone.Mode {
 
 test "engine parser accepts aliases" {
     try std.testing.expectEqual(Engine.evmz, parseEngine("evmz").?);
+    try std.testing.expectEqual(Engine.evmz_jumpdest, parseEngine("evmz-jumpdest").?);
+    try std.testing.expectEqual(Engine.evmz_advanced, parseEngine("evmz-advanced").?);
     try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
     try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
 }

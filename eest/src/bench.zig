@@ -277,7 +277,10 @@ const BenchmarkRunner = struct {
         return .{
             .allocator = allocator,
             .backend = backend,
-            .executor = Executor.initWithBackend(allocator, emptyTxContext(), spec, backend.backend()),
+            .executor = Executor.init(allocator, .{
+                .spec = spec,
+                .backend = backend.backend(),
+            }),
             .engine = engine,
         };
     }
@@ -304,8 +307,11 @@ const BenchmarkRunner = struct {
             const block = asObject(block_value) orelse return error.MalformedFixture;
             if (block.get("expectException") != null) return error.ExpectedException;
             const header = asObject(block.get("blockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-            self.executor.tx_context = try parseBlockTxContext(self.executor.spec, &header);
-            try evmz.Executor.system_contracts.applyBlockStart(&self.executor, try parseBlockHeader(&header));
+            try evmz.Executor.system_contracts.applyBlockStart(
+                &self.executor,
+                try parseBlockTxContext(self.executor.spec, &header),
+                try parseBlockHeader(&header),
+            );
             const txs = asArray(block.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
             for (txs.items) |tx_value| {
                 const tx = asObject(tx_value) orelse return error.MalformedFixture;
@@ -336,8 +342,8 @@ const BenchmarkRunner = struct {
         const blob_hashes = try parseBlobHashes(self.allocator, tx);
         defer self.allocator.free(blob_hashes);
 
-        self.executor.tx_context = try parseTxContext(self.executor.spec, header, tx, sender, blob_hashes);
-        try self.executor.beginTransaction(sender, recipient);
+        const tx_context = try parseTxContext(self.executor.spec, header, tx, sender, blob_hashes);
+        try self.executor.beginTransaction(tx_context, sender, recipient);
 
         const access_list_counts = try accessListCounts(tx);
         const authorization_count = authorizationListLen(tx);
@@ -527,22 +533,6 @@ fn parseBlockHeader(header: *const std.json.ObjectMap) !evmz.Executor.system_con
 fn parseBlobBaseFee(spec: evmz.Spec, header: *const std.json.ObjectMap) !u256 {
     const excess_blob_gas = if (header.get("excessBlobGas")) |value| try parseU256FromValue(value) else return 0;
     return transaction.blobBaseFeeForSpec(spec, excess_blob_gas) orelse error.Overflow;
-}
-
-fn emptyTxContext() Host.TxContext {
-    return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = evmz.addr(0),
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 0,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    };
 }
 
 fn accessListCounts(tx: *const std.json.ObjectMap) !transaction.AccessListCounts {

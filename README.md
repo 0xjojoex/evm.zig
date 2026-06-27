@@ -61,8 +61,12 @@ Use the package from Zig code:
 ```zig
 const evmz = @import("evmz");
 
-var executor = evmz.Executor.init(allocator, tx_context, .cancun);
+var executor = evmz.Executor.init(allocator, .{
+    .spec = .cancun,
+});
 defer executor.deinit();
+
+try executor.beginTransaction(tx_context, sender, recipient);
 ```
 
 See `examples/basic.zig` for a complete in-memory call transaction.
@@ -170,4 +174,9 @@ reports stay under ignored `output/`.
 
 ## License
 
-MIT.
+evm.zig source is licensed under MIT.
+
+This repository also builds against third-party components that retain their own
+licenses. In particular, evmone/EVMC precompile code is licensed under
+Apache-2.0. Binary and source distributions should include the relevant
+third-party license notices.

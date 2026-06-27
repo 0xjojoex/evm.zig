@@ -12,8 +12,11 @@ pub fn main() !void {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const gas_limit: u64 = 100_000;
+    const tx_context = txContext(sender, gas_limit);
 
-    var executor = Executor.init(allocator, txContext(sender, gas_limit), .cancun);
+    var executor = Executor.init(allocator, .{
+        .spec = .cancun,
+    });
     defer executor.deinit();
 
     const sender_account = try executor.getOrCreateAccount(sender);
@@ -32,7 +35,7 @@ pub fn main() !void {
         0xf3, // RETURN
     });
 
-    try executor.beginTransaction(sender, contract);
+    try executor.beginTransaction(tx_context, sender, contract);
     var pre_execution = try executor.snapshot();
     defer pre_execution.deinit(allocator);
 

@@ -426,7 +426,7 @@ fn messageInput(message: *const evmc.evmc_message) []const u8 {
 
 fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_context {
     const executor = Context.fromContext(context).executor;
-    const tx_context = executor.tx_context;
+    const tx_context = executor.tx_context orelse return std.mem.zeroes(evmc.evmc_tx_context);
     return .{
         .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
         .tx_origin = toEvmcAddress(tx_context.origin),

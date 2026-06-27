@@ -78,6 +78,19 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const code_analysis_mod = benchModule(b, "src/code_analysis.zig", target, optimize, evmz_mod);
+        const code_analysis = b.addExecutable(.{
+            .name = "evmz-code-analysis",
+            .root_module = code_analysis_mod,
+        });
+        b.installArtifact(code_analysis);
+
+        const run_code_analysis = b.addRunArtifact(code_analysis);
+        if (b.args) |args| run_code_analysis.addArgs(args);
+        b.step("code-analysis", "Run code-analysis morphology and timing report").dependOn(&run_code_analysis.step);
+    }
+
+    {
         const run_revm_kernel = b.addSystemCommand(&.{
             "cargo",
             "run",
@@ -167,12 +180,16 @@ pub fn build(b: *std.Build) void {
                 break :blk kernel_test_mod;
             },
         });
+        const code_analysis_tests = b.addTest(.{
+            .root_module = benchModule(b, "src/code_analysis.zig", target, optimize, evmz_mod),
+        });
         const test_step = b.step("test", "Run benchmark sidecar tests");
         test_step.dependOn(&b.addRunArtifact(common_tests).step);
         test_step.dependOn(&b.addRunArtifact(vm_loop_tests).step);
         test_step.dependOn(&b.addRunArtifact(host_boundary_tests).step);
         test_step.dependOn(&b.addRunArtifact(host_matrix_tests).step);
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
+        test_step.dependOn(&b.addRunArtifact(code_analysis_tests).step);
     }
 }
 

@@ -30,7 +30,7 @@ pub fn jumpi(frame: *CallFrame) !void {
 }
 
 pub fn afterJump(frame: *CallFrame) !void {
-    if (!try frame.jumpdests.isValid(frame.allocator, frame.code, frame.pc)) {
+    if (!try frame.analysis.isValidJumpDest(frame.allocator, frame.code, frame.pc)) {
         frame.failWithStatus(.invalid);
     }
 }

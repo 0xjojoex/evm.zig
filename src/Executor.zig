@@ -5,7 +5,6 @@ const Address = evmz.Address;
 const AccountState = evmz.state.AccountState;
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
-const JumpDestCache = @import("./jumpdest/Cache.zig");
 const StateOverlay = evmz.state.Overlay;
 const StorageKey = evmz.state.StorageKey;
 const StateBackend = evmz.state.Backend;
@@ -35,58 +34,62 @@ pub const AuthorizationTuple = struct {
 
 allocator: std.mem.Allocator,
 state: StateOverlay,
-tx_context: Host.TxContext,
+tx_context: ?Host.TxContext = null,
 spec: evmz.Spec,
-jumpdest_cache: JumpDestCache,
+config: evmz.Config,
 last_call_output: []u8 = &.{},
 
-pub fn init(allocator: std.mem.Allocator, tx_context: Host.TxContext, spec: evmz.Spec) Executor {
-    return .{
-        .allocator = allocator,
-        .state = StateOverlay.init(allocator),
-        .tx_context = tx_context,
-        .spec = spec,
-        .jumpdest_cache = JumpDestCache.init(allocator),
-    };
-}
+pub const Init = struct {
+    spec: evmz.Spec,
+    backend: ?StateBackend = null,
+    config: evmz.Config = .base,
+};
 
-pub fn initWithBackend(allocator: std.mem.Allocator, tx_context: Host.TxContext, spec: evmz.Spec, backend: StateBackend) Executor {
+pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
     return .{
         .allocator = allocator,
-        .state = StateOverlay.initWithBackend(allocator, backend),
-        .tx_context = tx_context,
-        .spec = spec,
-        .jumpdest_cache = JumpDestCache.init(allocator),
+        .state = if (options.backend) |backend|
+            StateOverlay.initWithBackend(allocator, backend)
+        else
+            StateOverlay.init(allocator),
+        .spec = options.spec,
+        .config = options.config,
     };
 }
 
 pub fn deinit(self: *Executor) void {
     self.state.deinit();
-    self.jumpdest_cache.deinit();
     self.allocator.free(self.last_call_output);
 }
 
-fn warmTransactionAccesses(self: *Executor, sender: Address, recipient: ?Address) !void {
+fn currentTxContext(self: *const Executor) !Host.TxContext {
+    return self.tx_context orelse error.MissingTxContext;
+}
+
+fn warmTransactionAccesses(self: *Executor, tx_context: Host.TxContext, sender: Address, recipient: ?Address) !void {
     try self.warmAccessListAddress(sender);
     if (recipient) |address| {
         try self.warmAccessListAddress(address);
     }
     if (self.spec.isImpl(.shanghai)) {
-        try self.warmAccessListAddress(self.tx_context.coinbase);
+        try self.warmAccessListAddress(tx_context.coinbase);
     }
 }
 
-pub fn beginTransaction(self: *Executor, sender: Address, recipient: Address) !void {
+pub fn beginTransaction(self: *Executor, tx_context: Host.TxContext, sender: Address, recipient: Address) !void {
+    self.tx_context = tx_context;
     self.state.beginTransaction();
-    try self.warmTransactionAccesses(sender, recipient);
+    try self.warmTransactionAccesses(tx_context, sender, recipient);
 }
 
-pub fn beginCreateTransaction(self: *Executor, sender: Address) !void {
+pub fn beginCreateTransaction(self: *Executor, tx_context: Host.TxContext, sender: Address) !void {
+    self.tx_context = tx_context;
     self.state.beginTransaction();
-    try self.warmTransactionAccesses(sender, null);
+    try self.warmTransactionAccesses(tx_context, sender, null);
 }
 
-fn beginSystemCall(self: *Executor) !void {
+fn beginSystemCall(self: *Executor, tx_context: Host.TxContext) !void {
+    self.tx_context = tx_context;
     self.state.beginTransaction();
 }
 
@@ -169,6 +172,7 @@ pub fn executeCallTransaction(
     value: u256,
 ) !Interpreter.Result {
     self.clearLastOutput();
+    _ = try self.currentTxContext();
     if (!try self.transferValue(sender, recipient, value)) {
         return .{
             .status = .invalid,
@@ -198,7 +202,7 @@ pub fn executeCallTransaction(
         .msg = &message,
         .code = code,
         .spec = self.spec,
-        .jumpdest_cache = &self.jumpdest_cache,
+        .config = self.config,
     });
     defer interpreter.deinit();
 
@@ -221,6 +225,7 @@ pub fn executeCreateTransaction(
     value: u256,
 ) !Host.Result {
     self.clearLastOutput();
+    _ = try self.currentTxContext();
     return self.createContract(.{
         .depth = 0,
         .kind = .create,
@@ -233,12 +238,13 @@ pub fn executeCreateTransaction(
 
 pub fn executeSystemCall(
     self: *Executor,
+    tx_context: Host.TxContext,
     sender: Address,
     recipient: Address,
     input: []const u8,
     gas: u64,
 ) !Interpreter.Result {
-    try self.beginSystemCall();
+    try self.beginSystemCall(tx_context);
     defer self.state.transient_storage.clearRetainingCapacity();
 
     self.clearLastOutput();
@@ -265,7 +271,7 @@ pub fn executeSystemCall(
         .msg = &message,
         .code = code,
         .spec = self.spec,
-        .jumpdest_cache = &self.jumpdest_cache,
+        .config = self.config,
     });
     defer interpreter.deinit();
 
@@ -308,11 +314,12 @@ pub fn incrementNonce(self: *Executor, address: Address) !void {
 }
 
 pub fn chargeTransactionCosts(self: *Executor, sender: Address, gas_limit: u64, value: u256) !bool {
+    const tx_context = try self.currentTxContext();
     const upfront_cost = transaction.prepaymentCost(
         gas_limit,
-        self.tx_context.gas_price,
-        self.tx_context.blob_base_fee,
-        self.tx_context.blob_hashes.len,
+        tx_context.gas_price,
+        tx_context.blob_base_fee,
+        tx_context.blob_hashes.len,
     ) orelse return false;
     const required_balance = uint256.checkedAdd(upfront_cost, value) orelse return false;
     const sender_account = try self.state.getAccountOrLoad(sender) orelse return false;
@@ -324,7 +331,8 @@ pub fn chargeTransactionCosts(self: *Executor, sender: Address, gas_limit: u64, 
 pub fn applyAuthorizationTuple(self: *Executor, auth: AuthorizationTuple) !void {
     if (!self.spec.isImpl(.prague)) return;
     if (!eip7702.authorizationSignatureShapeValid(auth.y_parity, auth.legacy_v, auth.r, auth.s)) return;
-    if (auth.chain_id != 0 and auth.chain_id != self.tx_context.chain_id) return;
+    const tx_context = try self.currentTxContext();
+    if (auth.chain_id != 0 and auth.chain_id != tx_context.chain_id) return;
 
     try self.state.warmAccount(auth.signer);
 
@@ -439,7 +447,7 @@ fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {
 
 fn getTxContext(ptr: *anyopaque) !Host.TxContext {
     const self: *Executor = @ptrCast(@alignCast(ptr));
-    return self.tx_context;
+    return self.currentTxContext();
 }
 
 fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
@@ -547,7 +555,7 @@ fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
         .msg = &msg,
         .code = code,
         .spec = self.spec,
-        .jumpdest_cache = &self.jumpdest_cache,
+        .config = self.config,
     });
     defer interpreter.deinit();
     const result = interpreter.execute();
@@ -617,7 +625,7 @@ fn createContract(self: *Executor, msg: Host.Message) !Host.Result {
         .msg = &child_msg,
         .code = msg.input_data,
         .spec = self.spec,
-        .jumpdest_cache = &self.jumpdest_cache,
+        .config = self.config,
     });
     defer interpreter.deinit();
 
@@ -746,21 +754,38 @@ fn setTransientStorage(ptr: *anyopaque, address: Address, key: u256, value: u256
     try self.state.setTransientStorage(address, key, value);
 }
 
+test "executor init options retain code analysis config" {
+    var executor = Executor.init(std.testing.allocator, .{
+        .spec = .latest,
+        .config = .advanced,
+    });
+    defer executor.deinit();
+
+    try std.testing.expectEqual(evmz.Config.Preprocessing.full, executor.config.preprocessing);
+}
+
+test "top-level transaction execution requires begin tx context" {
+    var executor = Executor.init(std.testing.allocator, .{
+        .spec = .berlin,
+    });
+    defer executor.deinit();
+
+    try std.testing.expectError(
+        error.MissingTxContext,
+        executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, 100_000, 0),
+    );
+    try std.testing.expectError(
+        error.MissingTxContext,
+        executor.executeCreateTransaction(evmz.addr(0xaaaa), &.{}, 100_000, 0),
+    );
+}
+
 test "executor executes top-level create transaction" {
     const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = sender,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .berlin);
+        .spec = .berlin,
+    });
     defer executor.deinit();
 
     var sender_account = AccountState.init(std.testing.allocator);
@@ -770,7 +795,7 @@ test "executor executes top-level create transaction" {
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
 
-    try executor.beginCreateTransaction(sender);
+    try executor.beginCreateTransaction(tx_context, sender);
     const result = (try executor.executeCreateTransaction(sender, init_code, 100_000, 0)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -781,26 +806,17 @@ test "executor executes top-level create transaction" {
 
 test "create warms created address from Berlin" {
     const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = sender,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .berlin);
+        .spec = .berlin,
+    });
     defer executor.deinit();
 
     var sender_account = AccountState.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
     try executor.state.accounts.put(sender, sender_account);
 
-    try executor.beginCreateTransaction(sender);
+    try executor.beginCreateTransaction(tx_context, sender);
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
@@ -813,19 +829,10 @@ test "create warms created address from Berlin" {
 test "callcode with insufficient balance fails without executing target code" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(caller, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = caller,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .berlin);
+        .spec = .berlin,
+    });
     defer executor.deinit();
 
     var caller_account = AccountState.init(std.testing.allocator);
@@ -836,7 +843,7 @@ test "callcode with insufficient balance fails without executing target code" {
     try target_account.setCode(std.testing.allocator, &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
     try executor.state.accounts.put(target, target_account);
 
-    try executor.beginTransaction(caller, caller);
+    try executor.beginTransaction(tx_context, caller, caller);
     const result = (try call(&executor, .{
         .depth = 1,
         .kind = .callcode,
@@ -856,19 +863,10 @@ test "callcode with insufficient balance fails without executing target code" {
 test "exceptional child call burns forwarded gas" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(caller, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = caller,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .berlin);
+        .spec = .berlin,
+    });
     defer executor.deinit();
 
     var caller_account = AccountState.init(std.testing.allocator);
@@ -879,7 +877,7 @@ test "exceptional child call burns forwarded gas" {
     try target_account.setCode(std.testing.allocator, &.{0xfe});
     try executor.state.accounts.put(target, target_account);
 
-    try executor.beginTransaction(caller, caller);
+    try executor.beginTransaction(tx_context, caller, caller);
     const result = (try call(&executor, .{
         .depth = 1,
         .kind = .call,
@@ -897,26 +895,17 @@ test "exceptional child call burns forwarded gas" {
 
 test "contract creation rejects EF-prefixed runtime code from London" {
     const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = sender,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .london);
+        .spec = .london,
+    });
     defer executor.deinit();
 
     var sender_account = AccountState.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
     try executor.state.accounts.put(sender, sender_account);
 
-    try executor.beginCreateTransaction(sender);
+    try executor.beginCreateTransaction(tx_context, sender);
 
     const init_code = &.{ 0x60, 0xef, 0x60, 0x00, 0x53, 0x60, 0x10, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
@@ -930,19 +919,10 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 test "selfdestruct charges new-account cost for nonzero balance" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(sender, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = sender,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .cancun);
+        .spec = .cancun,
+    });
     defer executor.deinit();
 
     var sender_account = AccountState.init(std.testing.allocator);
@@ -954,7 +934,7 @@ test "selfdestruct charges new-account cost for nonzero balance" {
     try contract_account.setCode(std.testing.allocator, &.{ 0x5f, 0xff });
     try executor.state.accounts.put(contract, contract_account);
 
-    try executor.beginTransaction(sender, contract);
+    try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, 100_000, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -964,23 +944,29 @@ test "selfdestruct charges new-account cost for nonzero balance" {
 test "active precompiles are warm but not existing state accounts" {
     const precompile_address = evmz.addr(2);
     var executor = Executor.init(std.testing.allocator, .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = evmz.addr(0),
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, .berlin);
+        .spec = .berlin,
+    });
     defer executor.deinit();
 
     var host_iface = executor.host();
     try std.testing.expect(!try host_iface.accountExists(precompile_address));
     try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(precompile_address));
+}
+
+fn testTxContext(origin: Address, gas_limit: u64) Host.TxContext {
+    return .{
+        .chain_id = 1,
+        .gas_price = 0,
+        .origin = origin,
+        .coinbase = evmz.addr(0),
+        .number = 0,
+        .timestamp = 0,
+        .gas_limit = gas_limit,
+        .prev_randao = 0,
+        .base_fee = 0,
+        .blob_base_fee = 0,
+        .blob_hashes = &.{},
+    };
 }
 
 test {

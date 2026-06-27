@@ -2,13 +2,15 @@ const std = @import("std");
 
 pub const address = @import("./address.zig");
 pub const Interpreter = @import("./Interpreter.zig");
-pub const jumpdest = struct {
-    pub const Cache = @import("./jumpdest/Cache.zig");
-    pub const Map = @import("./jumpdest/Map.zig");
-    pub const State = @import("./jumpdest/State.zig");
+pub const Config = @import("./Config.zig");
+pub const code = struct {
+    pub const Analysis = @import("./code/Analysis.zig");
+    pub const JumpDestMap = @import("./code/JumpDestMap.zig");
+    pub const State = @import("./code/State.zig");
 };
-pub const JumpDestCache = jumpdest.Cache;
-pub const JumpDestMap = jumpdest.Map;
+pub const JumpDestMap = code.JumpDestMap;
+pub const CodeAnalysis = code.Analysis;
+pub const CodeAnalysisState = code.State;
 pub const instruction = @import("./instruction.zig");
 pub const t = @import("./t.zig");
 pub const Host = @import("./Host.zig");

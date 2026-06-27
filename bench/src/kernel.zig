@@ -52,7 +52,11 @@ const KernelTier = enum {
 
 const Engine = enum {
     evmz,
+    evmz_jumpdest,
+    evmz_advanced,
     evmz_call_total,
+    evmz_jumpdest_call_total,
+    evmz_advanced_call_total,
     evmone_baseline,
     evmone_advanced,
 };
@@ -204,7 +208,7 @@ fn printUsage() void {
         \\Options:
         \\  --case <name>           case filter; repeatable, default all cases
         \\  --tier <name>           small, edge, large, branch, all; repeatable
-        \\  --engine <name>         evmz, evmz-call-total, evmone, evmone-baseline, evmone-advanced
+        \\  --engine <name>         evmz, evmz-jumpdest, evmz-advanced, evmz-call-total, evmz-jumpdest-call-total, evmz-advanced-call-total, evmone, evmone-baseline, evmone-advanced
         \\  --iterations, -n <n>    repeated opcode pattern count, default 100000
         \\  --repeats <n>           printed samples per case, default 5
         \\  --warmups <n>           unprinted samples before repeats, default 1
@@ -235,8 +239,12 @@ fn measure(
     defer allocator.free(code);
 
     return switch (engine) {
-        .evmz => try measureEvmz(allocator, code, spec, .execute_only),
-        .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total),
+        .evmz => try measureEvmz(allocator, code, spec, .execute_only, .base),
+        .evmz_jumpdest => try measureEvmz(allocator, code, spec, .execute_only, .advanced_jumpdest_only),
+        .evmz_advanced => try measureEvmz(allocator, code, spec, .execute_only, .advanced),
+        .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total, .base),
+        .evmz_jumpdest_call_total => try measureEvmz(allocator, code, spec, .call_total, .advanced_jumpdest_only),
+        .evmz_advanced_call_total => try measureEvmz(allocator, code, spec, .call_total, .advanced),
         .evmone_baseline => blk: {
             const measurement = try kernel_evmone.measure(code, spec, .baseline);
             break :blk .{
@@ -263,6 +271,7 @@ fn measureEvmz(
     code: []const u8,
     spec: evmz.Spec,
     scope: EvmzMeasureScope,
+    config: evmz.Config,
 ) !Measurement {
     var counting_host = common.CountingHost.init(allocator, .null);
     defer counting_host.deinit();
@@ -286,6 +295,7 @@ fn measureEvmz(
         .msg = &msg,
         .code = code,
         .spec = spec,
+        .config = config,
     });
     errdefer interpreter.deinit();
 
@@ -441,7 +451,11 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
+        .evmz_jumpdest => "evmz-jumpdest",
+        .evmz_advanced => "evmz-advanced",
         .evmz_call_total => "evmz-call-total",
+        .evmz_jumpdest_call_total => "evmz-jumpdest-call-total",
+        .evmz_advanced_call_total => "evmz-advanced-call-total",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
     };
@@ -491,6 +505,10 @@ test "engine parser accepts evmone aliases" {
     try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
     try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
     try std.testing.expectEqual(Engine.evmz_call_total, parseEngine("evmz-call-total").?);
+    try std.testing.expectEqual(Engine.evmz_jumpdest, parseEngine("evmz-jumpdest").?);
+    try std.testing.expectEqual(Engine.evmz_jumpdest_call_total, parseEngine("evmz-jumpdest-call-total").?);
+    try std.testing.expectEqual(Engine.evmz_advanced, parseEngine("evmz-advanced").?);
+    try std.testing.expectEqual(Engine.evmz_advanced_call_total, parseEngine("evmz-advanced-call-total").?);
 }
 
 test "kernel bytecode repeats pattern and stops" {
@@ -523,5 +541,10 @@ test "branch kernels touch no host" {
 
 test "call total scope touches no host" {
     const measurement = try measure(std.testing.io, std.testing.allocator, .evmz_call_total, .jumpdest_dense, 2, .latest, default_fixtures_dir);
+    try std.testing.expectEqual(@as(u64, 0), measurement.host_calls);
+}
+
+test "advanced evmz kernel scope touches no host" {
+    const measurement = try measure(std.testing.io, std.testing.allocator, .evmz_advanced_call_total, .jumpdest_dense, 2, .latest, default_fixtures_dir);
     try std.testing.expectEqual(@as(u64, 0), measurement.host_calls);
 }

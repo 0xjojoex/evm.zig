@@ -1,11 +1,11 @@
 const std = @import("std");
-const Stack = @import("./Stack.zig");
 const Memory = @import("./Memory.zig");
+const Config = @import("./Config.zig");
 const Host = @import("./Host.zig");
-const JumpDestCache = @import("./jumpdest/Cache.zig");
-const JumpDestState = @import("./jumpdest/State.zig");
+const CodeAnalysisState = @import("./code/State.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
+const Stack = @import("./Stack.zig");
 
 const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
 
@@ -54,7 +54,7 @@ pub const Init = struct {
     msg: *const Host.Message,
     code: []const u8,
     spec: evmz.Spec,
-    jumpdest_cache: ?*JumpDestCache = null,
+    config: Config = .base,
 };
 
 pub fn init(
@@ -77,7 +77,7 @@ pub fn execute(self: *Interpreter) Result {
     return self.call_frame.getResult();
 }
 
-inline fn step(self: *Interpreter) void {
+fn step(self: *Interpreter) void {
     if (self.call_frame.pc >= self.call_frame.code.len) {
         self.call_frame.status = .success;
         return;
@@ -109,7 +109,8 @@ pub const CallFrame = struct {
     gas_refund: i64 = 0,
     return_data: []u8 = &.{},
     output_data: []u8 = &.{},
-    jumpdests: JumpDestState = .empty,
+    analysis: CodeAnalysisState = .empty,
+    config: Config = .base,
     spec: evmz.Spec = evmz.Spec.latest,
 
     pub fn init(
@@ -117,7 +118,7 @@ pub const CallFrame = struct {
         allocator: std.mem.Allocator,
         options: Init,
     ) !void {
-        const jumpdests = try JumpDestState.init(options.jumpdest_cache, options.code);
+        const analysis = try CodeAnalysisState.init(options.code, options.config);
 
         self.allocator = allocator;
         self.host = options.host;
@@ -131,7 +132,8 @@ pub const CallFrame = struct {
         self.gas_refund = 0;
         self.return_data = &.{};
         self.output_data = &.{};
-        self.jumpdests = jumpdests;
+        self.analysis = analysis;
+        self.config = options.config;
         self.status = if (options.code.len == 0) .success else .running;
         self.spec = options.spec;
     }
@@ -140,7 +142,7 @@ pub const CallFrame = struct {
         self.memory.deinit();
         self.allocator.free(self.return_data);
         self.allocator.free(self.output_data);
-        self.jumpdests.deinit(self.allocator);
+        self.analysis.deinit(self.allocator);
         self.* = undefined;
     }
 

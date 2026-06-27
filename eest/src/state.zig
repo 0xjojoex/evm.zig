@@ -502,13 +502,16 @@ const FixtureHost = struct {
 
         try seedMemoryBackend(allocator, backend, pre);
 
-        var executor = Executor.initWithBackend(allocator, tx_context, spec, backend.backend());
+        var executor = Executor.init(allocator, .{
+            .spec = spec,
+            .backend = backend.backend(),
+        });
         errdefer executor.deinit();
 
         if (recipient) |address| {
-            try executor.beginTransaction(sender, address);
+            try executor.beginTransaction(tx_context, sender, address);
         } else {
-            try executor.beginCreateTransaction(sender);
+            try executor.beginCreateTransaction(tx_context, sender);
         }
 
         return .{

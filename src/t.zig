@@ -5,7 +5,7 @@ const Host = evmz.Host;
 const addr = evmz.addr;
 const Address = evmz.Address;
 
-fn bytecode(comptime items: anytype) [bytecodeLen(items)]u8 {
+pub fn bytecode(comptime items: anytype) [bytecodeLen(items)]u8 {
     if (@typeInfo(@TypeOf(items)) == .pointer) {
         return bytecode(items.*);
     }

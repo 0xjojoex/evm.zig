@@ -119,21 +119,26 @@ pub fn build(b: *std.Build) void {
     }
 
     const bench_optimize_name = @tagName(bench_optimize);
-    addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", null);
-    addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", null);
-    addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", null);
-    addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", null);
-    addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", null);
-    addEestDelegate(b, "bench", "Run EEST benchmark blockchain-test fixtures", "bench", bench_optimize_name);
-    addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null);
-    addBenchDelegate(b, "bench-vm-loop", "Run evmz VM-loop fixture runner", "vm-loop", bench_optimize_name);
-    addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null);
-    addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name);
-    addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name);
-    addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name);
-    addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null);
-    addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name);
-    addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter);
+    if (pathExists(b, "eest/build.zig")) {
+        addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", null);
+        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", null);
+        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", null);
+        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", null);
+        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", null);
+        addEestDelegate(b, "bench", "Run EEST benchmark blockchain-test fixtures", "bench", bench_optimize_name);
+    }
+    if (pathExists(b, "bench/build.zig")) {
+        addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null);
+        addBenchDelegate(b, "bench-vm-loop", "Run evmz VM-loop fixture runner", "vm-loop", bench_optimize_name);
+        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null);
+        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name);
+        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name);
+        addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name);
+        addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name);
+        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null);
+        addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name);
+        addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter);
+    }
 
     // example
     {
@@ -196,6 +201,11 @@ pub fn build(b: *std.Build) void {
             run_step.dependOn(&run_example.step);
         }
     }
+}
+
+fn pathExists(b: *std.Build, sub_path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(b.graph.io, b.pathFromRoot(sub_path), .{}) catch return false;
+    return true;
 }
 
 fn addEestDelegate(
