@@ -2,12 +2,11 @@ const std = @import("std");
 const evmz = @import("evmz");
 
 const evmc = @cImport({
-    @cInclude("evmc.h");
+    @cInclude("evmc/evmc.h");
 });
 
 const Address = evmz.Address;
-const AccountState = evmz.state.AccountState;
-const Executor = evmz.Executor;
+const Executor = evmz.executor;
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 
@@ -79,6 +78,43 @@ pub const Runner = struct {
         message.code_address = toEvmcAddress(recipient);
 
         return try self.executeMessage(&message, code);
+    }
+
+    pub fn executeCreateTransaction(
+        self: *Runner,
+        sender: Address,
+        init_code: []const u8,
+        gas: u64,
+        value: u256,
+    ) !Interpreter.Result {
+        const executor = self.context.executor;
+        executor.clearLastOutput();
+
+        var message = std.mem.zeroes(evmc.evmc_message);
+        message.kind = evmc.EVMC_CREATE;
+        message.gas = std.math.cast(i64, gas) orelse std.math.maxInt(i64);
+        message.sender = toEvmcAddress(sender);
+        message.input_data = if (init_code.len == 0) null else init_code.ptr;
+        message.input_size = init_code.len;
+        message.value = toEvmcBytes32(value);
+
+        var result = try executeCreate(&self.context, self.context.toContext(), message);
+        defer releaseResult(&result);
+
+        const output = if (hasOutput(result.status_code) and result.output_size > 0)
+            result.output_data[0..result.output_size]
+        else
+            &.{};
+        const output_copy = try executor.allocator.dupe(u8, output);
+        executor.clearLastOutput();
+        executor.last_call_output = output_copy;
+
+        return .{
+            .status = statusFromEvmc(result.status_code),
+            .gas_left = result.gas_left,
+            .gas_refund = result.gas_refund,
+            .output_data = executor.last_call_output,
+        };
     }
 
     fn executeMessage(self: *Runner, message: *const evmc.evmc_message, code: []const u8) !Interpreter.Result {
@@ -212,17 +248,20 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
     }
 
     const value = fromEvmcBytes32(message.*.value);
-    var pre_call_state = executor.snapshot() catch return failureResult(evmc.EVMC_FAILURE, 0);
-    defer pre_call_state.deinit(executor.allocator);
+    const checkpoint_state = executor.state.checkpoint();
 
     if (message.*.kind == evmc.EVMC_CALL and value > 0) {
         if (!(executor.transferValue(fromEvmcAddress(message.*.sender), fromEvmcAddress(message.*.recipient), value) catch false)) {
+            executor.state.revertToCheckpoint(checkpoint_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
             return failureResult(evmc.EVMC_INSUFFICIENT_BALANCE, 0);
         }
     }
 
     const code_address = fromEvmcAddress(message.*.code_address);
-    const code = executor.dupeExecutionCode(code_address) catch return failureResult(evmc.EVMC_FAILURE, 0);
+    const code = executor.dupeExecutionCode(code_address) catch {
+        executor.state.revertToCheckpoint(checkpoint_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
+        return failureResult(evmc.EVMC_FAILURE, 0);
+    };
     defer executor.allocator.free(code);
 
     const code_ptr: [*c]const u8 = if (code.len == 0) null else code.ptr;
@@ -241,9 +280,14 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         result.output_data[0..result.output_size]
     else
         &.{};
-    executor.last_call_output = executor.allocator.dupe(u8, output) catch return failureResult(evmc.EVMC_OUT_OF_MEMORY, 0);
+    executor.last_call_output = executor.allocator.dupe(u8, output) catch {
+        executor.state.revertToCheckpoint(checkpoint_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
+        return failureResult(evmc.EVMC_OUT_OF_MEMORY, 0);
+    };
     if (result.status_code != evmc.EVMC_SUCCESS) {
-        executor.restoreRevertible(&pre_call_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
+        executor.state.revertToCheckpoint(checkpoint_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
+    } else {
+        executor.state.commitCheckpoint(checkpoint_state);
     }
 
     return .{
@@ -274,28 +318,32 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         try executor.warmAccessListAddress(create_address);
     }
 
-    caller.nonce = std.math.add(u64, caller.nonce, 1) catch {
+    const next_nonce = std.math.add(u64, caller.nonce, 1) catch {
         return failureResultWithCreate(evmc.EVMC_FAILURE, message.gas, create_address);
     };
-    const caller_balance = caller.balance;
+    try executor.state.setNonce(sender, next_nonce);
+    const checkpoint_state = executor.state.checkpoint();
+    var checkpoint_open = true;
+    errdefer {
+        if (checkpoint_open) executor.state.revertToCheckpoint(checkpoint_state) catch {};
+    }
 
     if (caller.balance < value) {
+        executor.state.commitCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_INSUFFICIENT_BALANCE, message.gas, create_address);
     }
     if (try createCollision(executor, create_address)) {
+        executor.state.commitCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_FAILURE, 0, create_address);
     }
 
-    const was_created_in_tx = executor.state.created_contracts.contains(create_address);
-    var previous_created = if (try executor.getAccountOrLoad(create_address)) |account| try account.clone(allocator) else null;
-    defer if (previous_created) |*account| account.deinit(allocator);
-
-    caller.balance -= value;
-    const created = try executor.getOrCreateAccount(create_address);
-    created.balance += value;
-    created.nonce = if (executor.spec.isImpl(.spurious_dragon)) 1 else 0;
-    created.clearCode(allocator);
-    try executor.state.created_contracts.put(create_address, {});
+    _ = try executor.state.subtractBalance(sender, value);
+    try executor.state.addBalance(create_address, value);
+    try executor.state.setNonce(create_address, if (executor.spec.isImpl(.spurious_dragon)) 1 else 0);
+    try executor.state.clearCode(create_address);
+    try executor.state.markCreatedContract(create_address);
 
     var child_message = std.mem.zeroes(evmc.evmc_message);
     child_message.kind = message.kind;
@@ -325,7 +373,8 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         &.{};
 
     if (child_result.status_code != evmc.EVMC_SUCCESS) {
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         executor.clearLastOutput();
         executor.last_call_output = try allocator.dupe(u8, child_output);
         return .{
@@ -341,24 +390,30 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
     }
 
     if (executor.spec.isImpl(.spurious_dragon) and child_output.len > Executor.max_code_size) {
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
     }
     if (executor.spec.isImpl(.london) and child_output.len > 0 and child_output[0] == 0xef) {
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_INVALID_INSTRUCTION, 0, create_address);
     }
 
     const runtime_size = std.math.cast(i64, child_output.len) orelse {
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
     };
     const deposit_cost = std.math.mul(i64, runtime_size, Executor.code_deposit_gas) catch {
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
     };
     if (child_result.gas_left < deposit_cost) {
         if (!executor.spec.isImpl(.homestead)) {
+            executor.state.commitCheckpoint(checkpoint_state);
+            checkpoint_open = false;
             return .{
                 .status_code = evmc.EVMC_SUCCESS,
                 .gas_left = child_result.gas_left,
@@ -370,12 +425,14 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
                 .padding = undefined,
             };
         }
-        try restoreCreateAttempt(executor, sender, caller_balance, create_address, &previous_created, was_created_in_tx);
+        try executor.state.revertToCheckpoint(checkpoint_state);
+        checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
     }
 
-    const installed = (try executor.getAccountOrLoad(create_address)).?;
-    try installed.setCode(allocator, child_output);
+    try executor.state.setCode(create_address, child_output);
+    executor.state.commitCheckpoint(checkpoint_state);
+    checkpoint_open = false;
 
     return .{
         .status_code = evmc.EVMC_SUCCESS,
@@ -387,30 +444,6 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         .create_address = toEvmcAddress(create_address),
         .padding = undefined,
     };
-}
-
-fn restoreCreateAttempt(
-    executor: *Executor,
-    caller_address: Address,
-    caller_balance: u256,
-    create_address: Address,
-    previous_created: *?AccountState,
-    was_created_in_tx: bool,
-) !void {
-    if (try executor.getAccountOrLoad(caller_address)) |caller| {
-        caller.balance = caller_balance;
-    }
-    if (executor.state.accounts.fetchRemove(create_address)) |removed| {
-        var account = removed.value;
-        account.deinit(executor.allocator);
-    }
-    if (previous_created.*) |account| {
-        try executor.state.accounts.put(create_address, account);
-        previous_created.* = null;
-    }
-    if (!was_created_in_tx) {
-        _ = executor.state.created_contracts.remove(create_address);
-    }
 }
 
 fn createCollision(executor: *Executor, address: Address) !bool {

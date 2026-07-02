@@ -11,10 +11,9 @@ pub const JumpDestStrategy = enum {
     simd_bitmask,
 };
 
-preprocessing: Preprocessing = .none,
+preprocessing: Preprocessing = .jumpdest,
 
-pub const base = Config{ .preprocessing = .none };
-pub const advanced_jumpdest_only = Config{ .preprocessing = .jumpdest };
+pub const base = Config{ .preprocessing = .jumpdest };
 pub const advanced = Config{ .preprocessing = .full };
 
 pub fn jumpDestStrategy(self: Config) JumpDestStrategy {
@@ -28,12 +27,14 @@ pub fn buildsFullAnalysis(self: Config) bool {
     return self.preprocessing == .full;
 }
 
-test "jumpdest preprocessing config uses SIMD jumpdest without full analysis" {
-    try @import("std").testing.expectEqual(JumpDestStrategy.simd_bitmask, Config.advanced_jumpdest_only.jumpDestStrategy());
-    try @import("std").testing.expect(!Config.advanced_jumpdest_only.buildsFullAnalysis());
+const testing = @import("std").testing;
+
+test "base config uses SIMD jumpdest without full analysis" {
+    try testing.expectEqual(JumpDestStrategy.simd_bitmask, Config.base.jumpDestStrategy());
+    try testing.expect(!Config.base.buildsFullAnalysis());
 }
 
 test "advanced config keeps full analysis slot and SIMD jumpdest seed" {
-    try @import("std").testing.expectEqual(JumpDestStrategy.simd_bitmask, Config.advanced.jumpDestStrategy());
-    try @import("std").testing.expect(Config.advanced.buildsFullAnalysis());
+    try testing.expectEqual(JumpDestStrategy.simd_bitmask, Config.advanced.jumpDestStrategy());
+    try testing.expect(Config.advanced.buildsFullAnalysis());
 }

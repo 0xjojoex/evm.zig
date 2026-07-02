@@ -8,15 +8,15 @@ usage: scripts/fetch-eest-benchmarks.sh
 Downloads generated EEST benchmark JSON fixtures into ../.eest/, which is gitignored.
 
 Environment overrides:
-  EEST_REPO               default: ethereum/execution-spec-tests
-  EEST_BENCHMARK_VERSION  default: benchmark@v0.0.7
+  EEST_REPO               default: ethereum/execution-specs
+  EEST_BENCHMARK_VERSION  default: tests-benchmark@v0.0.9
   EEST_BENCHMARK_ARTIFACT default: fixtures_benchmark.tar.gz
-  EEST_BENCHMARK_DEST     default: ../.eest/benchmarks/benchmark-v0.0.7
+  EEST_BENCHMARK_DEST     default: ../.eest/benchmarks/tests-benchmark-v0.0.9
   EEST_CACHE              default: ../.eest/cache
 
 Example:
   scripts/fetch-eest-benchmarks.sh
-  zig build bench -- ../.eest/benchmarks/benchmark-v0.0.7/fixtures/blockchain_tests/benchmark/compute
+  zig build bench -- ../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures/blockchain_tests/benchmark/compute
 USAGE
 }
 
@@ -27,8 +27,8 @@ case "${1:-}" in
     ;;
 esac
 
-repo="${EEST_REPO:-ethereum/execution-spec-tests}"
-version="${EEST_BENCHMARK_VERSION:-benchmark@v0.0.7}"
+repo="${EEST_REPO:-ethereum/execution-specs}"
+version="${EEST_BENCHMARK_VERSION:-tests-benchmark@v0.0.9}"
 artifact="${EEST_BENCHMARK_ARTIFACT:-fixtures_benchmark.tar.gz}"
 version_slug="${version//@/-}"
 url_version="${version//@/%40}"

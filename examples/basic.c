@@ -1,4 +1,4 @@
-#include "../include/evmz.h"
+#include <evmz/evmc.h>
 #include <stdio.h>
 
 int main(void) {
@@ -38,7 +38,7 @@ int main(void) {
   printf("Executing EVM bytecode...\n");
 
   struct evmc_result result =
-      vm->execute(vm, &host, ctx, EVMC_HOMESTEAD, &msg, code, code_size);
+      vm->execute(vm, &host, ctx, EVMC_OSAKA, &msg, code, code_size);
 
   printf("Executed EVM bytecode...\n");
 

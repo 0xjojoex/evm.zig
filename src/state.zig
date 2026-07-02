@@ -1,20 +1,26 @@
 //! State module.
 //!
-//! - `Backend`: client/database read interface.
-//! - `Overlay`: executor-owned execution cache; future journal belongs here.
-//! - `MemoryBackend`: in-memory `Backend` implementation for seeded pre-state.
+//! - `StateReader`: client/database read interface.
+//! - `Overlay`: executor-owned execution cache and journal owner.
+//! - `Changeset`: final state delta to commit into an upstream store.
+//! - `Committer`: integration-owned sink for final changesets.
+//! - `MemoryStore`: in-memory store for seeded pre-state and test/demo commits.
 
 const std = @import("std");
 
 pub const Account = @import("./state/Account.zig");
-pub const Storage = @import("./state/Storage.zig");
-pub const Backend = @import("./state/Backend.zig");
+pub const storage = @import("./state/storage.zig");
+pub const StateReader = @import("./state/StateReader.zig");
+pub const Backend = StateReader;
+pub const Changeset = @import("./state/Changeset.zig");
+pub const Committer = @import("./state/Committer.zig");
+pub const Journal = @import("./state/Journal.zig");
 pub const Overlay = @import("./state/Overlay.zig");
-pub const MemoryBackend = @import("./state/MemoryBackend.zig");
+pub const MemoryStore = @import("./state/MemoryStore.zig");
 
 pub const AccountState = Account;
-pub const StorageKey = Storage.Key;
-pub const storageStatus = Storage.status;
+pub const StorageKey = storage.Key;
+pub const storageStatus = storage.status;
 
 test {
     std.testing.refAllDecls(@This());

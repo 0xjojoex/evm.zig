@@ -52,10 +52,8 @@ const KernelTier = enum {
 
 const Engine = enum {
     evmz,
-    evmz_jumpdest,
     evmz_advanced,
     evmz_call_total,
-    evmz_jumpdest_call_total,
     evmz_advanced_call_total,
     evmone_baseline,
     evmone_advanced,
@@ -208,7 +206,7 @@ fn printUsage() void {
         \\Options:
         \\  --case <name>           case filter; repeatable, default all cases
         \\  --tier <name>           small, edge, large, branch, all; repeatable
-        \\  --engine <name>         evmz, evmz-jumpdest, evmz-advanced, evmz-call-total, evmz-jumpdest-call-total, evmz-advanced-call-total, evmone, evmone-baseline, evmone-advanced
+        \\  --engine <name>         evmz, evmz-advanced, evmz-call-total, evmz-advanced-call-total, evmone, evmone-baseline, evmone-advanced
         \\  --iterations, -n <n>    repeated opcode pattern count, default 100000
         \\  --repeats <n>           printed samples per case, default 5
         \\  --warmups <n>           unprinted samples before repeats, default 1
@@ -240,10 +238,8 @@ fn measure(
 
     return switch (engine) {
         .evmz => try measureEvmz(allocator, code, spec, .execute_only, .base),
-        .evmz_jumpdest => try measureEvmz(allocator, code, spec, .execute_only, .advanced_jumpdest_only),
         .evmz_advanced => try measureEvmz(allocator, code, spec, .execute_only, .advanced),
         .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total, .base),
-        .evmz_jumpdest_call_total => try measureEvmz(allocator, code, spec, .call_total, .advanced_jumpdest_only),
         .evmz_advanced_call_total => try measureEvmz(allocator, code, spec, .call_total, .advanced),
         .evmone_baseline => blk: {
             const measurement = try kernel_evmone.measure(code, spec, .baseline);
@@ -287,23 +283,31 @@ fn measureEvmz(
         .code_address = common.contract_address,
     };
 
-    var interpreter: Interpreter = undefined;
     counting_host.resetCounters();
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
-    try interpreter.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
         .spec = spec,
         .config = config,
     });
-    errdefer interpreter.deinit();
+    errdefer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    switch (config.preprocessing) {
+        .none => {},
+        .jumpdest => try interpreter.call_frame.analysis.jumpdests.analyze(allocator, code),
+        .full => {
+            _ = try interpreter.call_frame.analysis.ensureAnalyzed(allocator, code);
+        },
+    }
 
     const start_ns = if (scope == .execute_only) try common.monotonicNowNs() else total_start_ns;
     const result = interpreter.execute();
     const end_ns = try common.monotonicNowNs();
     const host_calls = counting_host.counters.total();
-    interpreter.deinit();
+    frame.deinit();
 
     try common.rejectNullHostTouches(.null, counting_host.counters);
     if (result.status != .success) return error.KernelFailed;
@@ -451,10 +455,8 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
-        .evmz_jumpdest => "evmz-jumpdest",
         .evmz_advanced => "evmz-advanced",
         .evmz_call_total => "evmz-call-total",
-        .evmz_jumpdest_call_total => "evmz-jumpdest-call-total",
         .evmz_advanced_call_total => "evmz-advanced-call-total",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
@@ -505,8 +507,6 @@ test "engine parser accepts evmone aliases" {
     try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
     try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
     try std.testing.expectEqual(Engine.evmz_call_total, parseEngine("evmz-call-total").?);
-    try std.testing.expectEqual(Engine.evmz_jumpdest, parseEngine("evmz-jumpdest").?);
-    try std.testing.expectEqual(Engine.evmz_jumpdest_call_total, parseEngine("evmz-jumpdest-call-total").?);
     try std.testing.expectEqual(Engine.evmz_advanced, parseEngine("evmz-advanced").?);
     try std.testing.expectEqual(Engine.evmz_advanced_call_total, parseEngine("evmz-advanced-call-total").?);
 }

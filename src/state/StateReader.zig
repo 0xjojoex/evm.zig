@@ -8,7 +8,7 @@ const std = @import("std");
 const Address = @import("../address.zig").Address;
 const AccountState = @import("./Account.zig");
 
-const Backend = @This();
+const StateReader = @This();
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -20,25 +20,25 @@ pub const VTable = struct {
     accountHasStorage: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
 };
 
-pub fn accountExists(self: Backend, address: Address) !bool {
+pub fn accountExists(self: StateReader, address: Address) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
 
 /// Returns an owned account snapshot. The caller owns any code buffer and the
 /// returned account's storage map.
-pub fn loadAccount(self: Backend, allocator: std.mem.Allocator, address: Address) !?AccountState {
+pub fn loadAccount(self: StateReader, allocator: std.mem.Allocator, address: Address) !?AccountState {
     return self.vtable.loadAccount(self.ptr, allocator, address);
 }
 
-pub fn getStorage(self: Backend, address: Address, key: u256) !u256 {
+pub fn getStorage(self: StateReader, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
 
-pub fn accountHasStorage(self: Backend, address: Address) !bool {
+pub fn accountHasStorage(self: StateReader, address: Address) !bool {
     return self.vtable.accountHasStorage(self.ptr, address);
 }
 
-pub fn empty() Backend {
+pub fn empty() StateReader {
     return .{ .ptr = &empty_context, .vtable = &empty_vtable };
 }
 
@@ -77,10 +77,11 @@ fn emptyAccountHasStorage(ptr: *anyopaque, address: Address) !bool {
     return false;
 }
 
-test "empty backend returns empty state" {
-    const backend = Backend.empty();
-    try std.testing.expect(!try backend.accountExists(@import("../address.zig").addr(1)));
-    try std.testing.expectEqual(@as(?AccountState, null), try backend.loadAccount(std.testing.allocator, @import("../address.zig").addr(1)));
-    try std.testing.expectEqual(@as(u256, 0), try backend.getStorage(@import("../address.zig").addr(1), 1));
-    try std.testing.expect(!try backend.accountHasStorage(@import("../address.zig").addr(1)));
+test "empty state reader returns empty state" {
+    const addr = @import("../address.zig").addr;
+    const reader = StateReader.empty();
+    try std.testing.expect(!try reader.accountExists(addr(1)));
+    try std.testing.expectEqual(@as(?AccountState, null), try reader.loadAccount(std.testing.allocator, addr(1)));
+    try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(addr(1), 1));
+    try std.testing.expect(!try reader.accountHasStorage(addr(1)));
 }

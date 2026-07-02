@@ -5,10 +5,10 @@ const uint256 = @import("uint256.zig");
 const ckzg = @import("ckzg");
 const kzg_trusted_setup = @import("kzg_trusted_setup");
 const bn254_native = @cImport({
-    @cInclude("precompile_bn254.h");
+    @cInclude("bn254.h");
 });
 const bls12_native = @cImport({
-    @cInclude("precompile_bls12.h");
+    @cInclude("bls12.h");
 });
 
 const Address = address.Address;

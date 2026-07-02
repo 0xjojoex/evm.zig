@@ -7,11 +7,19 @@ pub const Host = evmz.Host;
 pub const caller_address = evmz.addr(0x1000000000000000000000000000000000000001);
 pub const contract_address = evmz.addr(0x2000000000000000000000000000000000000002);
 pub const max_gas = std.math.maxInt(i64);
+pub const allocator_env_var = "EVMZ_BENCH_ALLOCATOR";
 
 pub const HostProfile = enum {
     null,
     mock,
 };
+
+pub fn benchmarkAllocator(init: std.process.Init) !std.mem.Allocator {
+    const value = init.environ_map.get(allocator_env_var) orelse return init.gpa;
+    if (std.mem.eql(u8, value, "gpa")) return init.gpa;
+    if (std.mem.eql(u8, value, "smp")) return std.heap.smp_allocator;
+    return error.InvalidAllocator;
+}
 
 const StorageKey = struct {
     address: Address,
@@ -169,7 +177,12 @@ pub const CountingHost = struct {
         self.counters.storage_write += 1;
 
         const storage_key = StorageKey{ .address = address, .key = key };
-        const previous = self.storage.get(storage_key) orelse 0;
+        const stored = self.storage.get(storage_key);
+        const previous = stored orelse 0;
+        if (previous == value) {
+            if (stored == null) try self.storage.put(storage_key, value);
+            return .assigned;
+        }
         try self.storage.put(storage_key, value);
         if (previous == 0 and value != 0) return .added;
         if (previous != 0 and value == 0) return .deleted;
@@ -252,6 +265,18 @@ pub const CountingHost = struct {
         self.counters.transient_write += 1;
     }
 };
+
+test "counting host classifies same-value storage writes as assigned" {
+    var counting_host = CountingHost.init(std.testing.allocator, .mock);
+    defer counting_host.deinit();
+    var host = counting_host.host();
+
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 0));
+    try std.testing.expectEqual(Host.StorageStatus.added, try host.setStorage(contract_address, 0, 1));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 1));
+    try std.testing.expectEqual(Host.StorageStatus.deleted, try host.setStorage(contract_address, 0, 0));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 0));
+}
 
 pub fn monotonicNowNs() !u64 {
     var ts: std.posix.timespec = undefined;

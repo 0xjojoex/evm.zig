@@ -4,12 +4,87 @@ const evmz = @import("evmz");
 pub const JsonValue = std.json.Value;
 pub const Address = evmz.Address;
 pub const AccountState = evmz.state.AccountState;
-pub const MemoryBackend = evmz.state.MemoryBackend;
+pub const MemoryStore = evmz.state.MemoryStore;
 
 pub const AccessListEntry = struct {
     address: Address,
     storage_keys: std.json.Array,
 };
+
+pub const ParsedAccessList = struct {
+    entries: []evmz.transaction.AccessListEntry = &.{},
+
+    pub fn deinit(self: *ParsedAccessList, allocator: std.mem.Allocator) void {
+        for (self.entries) |entry| {
+            if (entry.storage_keys.len > 0) allocator.free(@constCast(entry.storage_keys));
+        }
+        if (self.entries.len > 0) allocator.free(self.entries);
+        self.* = .{};
+    }
+};
+
+pub const AuthorizationListMode = enum {
+    ignore_malformed_list,
+    error_malformed_list,
+};
+
+pub const ParsedAuthorizationList = struct {
+    entries: []evmz.transaction.AuthorizationTuple = &.{},
+    count: usize = 0,
+
+    pub fn deinit(self: *ParsedAuthorizationList, allocator: std.mem.Allocator) void {
+        if (self.entries.len > 0) allocator.free(self.entries);
+        self.* = .{};
+    }
+};
+
+pub fn lockedFixturePath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    track: []const u8,
+) ![]u8 {
+    const dest = try lockedPathValue(io, allocator, "dest");
+    return if (track.len == 0)
+        try std.fs.path.join(allocator, &.{ dest, "fixtures" })
+    else
+        try std.fs.path.join(allocator, &.{ dest, "fixtures", track });
+}
+
+fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
+    const locations = [_]struct {
+        lock_path: []const u8,
+        relative_prefix: []const u8,
+    }{
+        .{ .lock_path = "../eest.lock", .relative_prefix = ".." },
+        .{ .lock_path = "eest.lock", .relative_prefix = "" },
+    };
+
+    for (locations) |location| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, location.lock_path, allocator, .limited(64 * 1024)) catch |err| {
+            if (err == error.FileNotFound) continue;
+            return err;
+        };
+        const raw_value = parseLockValue(bytes, key) orelse return error.MissingEestLockKey;
+        if (std.fs.path.isAbsolute(raw_value)) return raw_value;
+        if (location.relative_prefix.len == 0) return raw_value;
+        return std.fs.path.join(allocator, &.{ location.relative_prefix, raw_value });
+    }
+
+    return error.MissingEestLock;
+}
+
+fn parseLockValue(bytes: []const u8, key: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const line_key = std.mem.trim(u8, line[0..equals], " \t");
+        if (!std.mem.eql(u8, line_key, key)) continue;
+        return std.mem.trim(u8, line[equals + 1 ..], " \t");
+    }
+    return null;
+}
 
 pub fn asObject(value: JsonValue) ?std.json.ObjectMap {
     return switch (value) {
@@ -31,6 +106,17 @@ pub fn jsonString(value: JsonValue) ?[]const u8 {
         .number_string => |string| string,
         else => null,
     };
+}
+
+pub fn rejectUnknownKeys(object: *const std.json.ObjectMap, allowed_keys: []const []const u8) !void {
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        for (allowed_keys) |allowed| {
+            if (std.mem.eql(u8, entry.key_ptr.*, allowed)) break;
+        } else {
+            return error.UnsupportedFixtureKey;
+        }
+    }
 }
 
 pub fn parseAddressFromValue(value: JsonValue) !Address {
@@ -102,6 +188,8 @@ pub fn strip0x(string: []const u8) []const u8 {
 }
 
 pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.ObjectMap) !AccountState {
+    try rejectUnknownKeys(account, &.{ "balance", "nonce", "code", "storage" });
+
     var self = AccountState.init(allocator);
     errdefer self.deinit(allocator);
 
@@ -126,7 +214,7 @@ pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.Ob
     return self;
 }
 
-pub fn seedMemoryBackend(allocator: std.mem.Allocator, backend: *MemoryBackend, pre: *const std.json.ObjectMap) !void {
+pub fn seedMemoryStore(allocator: std.mem.Allocator, store: *MemoryStore, pre: *const std.json.ObjectMap) !void {
     var account_it = pre.iterator();
     while (account_it.next()) |entry| {
         const address = try parseAddress(entry.key_ptr.*);
@@ -135,13 +223,14 @@ pub fn seedMemoryBackend(allocator: std.mem.Allocator, backend: *MemoryBackend, 
         var account_owned = true;
         errdefer if (account_owned) account.deinit(allocator);
 
-        try backend.putAccount(address, account);
+        try store.putAccount(address, account);
         account_owned = false;
     }
 }
 
 pub fn parseAccessListEntry(value: JsonValue) !AccessListEntry {
     if (asObject(value)) |entry| {
+        try rejectUnknownKeys(&entry, &.{ "address", "storageKeys" });
         return .{
             .address = try parseAddressFromValue(entry.get("address") orelse return error.MalformedFixture),
             .storage_keys = asArray(entry.get("storageKeys") orelse return error.MalformedFixture) orelse return error.MalformedFixture,
@@ -157,10 +246,89 @@ pub fn parseAccessListEntry(value: JsonValue) !AccessListEntry {
     return error.MalformedFixture;
 }
 
-pub fn authorizationListLen(tx: *const std.json.ObjectMap) usize {
-    const value = tx.get("authorizationList") orelse return 0;
-    const list = asArray(value) orelse return 0;
-    return list.items.len;
+pub fn parseTransactionAccessList(allocator: std.mem.Allocator, list: std.json.Array) !ParsedAccessList {
+    var entries: std.ArrayList(evmz.transaction.AccessListEntry) = .empty;
+    errdefer {
+        for (entries.items) |entry| {
+            if (entry.storage_keys.len > 0) allocator.free(@constCast(entry.storage_keys));
+        }
+        entries.deinit(allocator);
+    }
+
+    for (list.items) |item| {
+        const entry = try parseAccessListEntry(item);
+        var storage_keys_owned = false;
+        const storage_keys = if (entry.storage_keys.items.len == 0)
+            &.{}
+        else blk: {
+            const keys = try allocator.alloc(u256, entry.storage_keys.items.len);
+            for (entry.storage_keys.items, 0..) |key_value, i| {
+                keys[i] = try parseU256FromValue(key_value);
+            }
+            storage_keys_owned = true;
+            break :blk keys;
+        };
+        errdefer if (storage_keys_owned) allocator.free(@constCast(storage_keys));
+        try entries.append(allocator, .{
+            .address = entry.address,
+            .storage_keys = storage_keys,
+        });
+        storage_keys_owned = false;
+    }
+
+    return .{ .entries = try entries.toOwnedSlice(allocator) };
+}
+
+pub fn parseTransactionAccessListFromValue(
+    allocator: std.mem.Allocator,
+    value: ?JsonValue,
+) !ParsedAccessList {
+    const list_value = value orelse return .{};
+    const list = asArray(list_value) orelse return error.MalformedFixture;
+    return parseTransactionAccessList(allocator, list);
+}
+
+pub fn parseTransactionAuthorizationList(
+    allocator: std.mem.Allocator,
+    tx: *const std.json.ObjectMap,
+    mode: AuthorizationListMode,
+) !ParsedAuthorizationList {
+    const list_value = tx.get("authorizationList") orelse return .{};
+    const list = asArray(list_value) orelse switch (mode) {
+        .ignore_malformed_list => return .{},
+        .error_malformed_list => return error.MalformedFixture,
+    };
+    var entries: std.ArrayList(evmz.transaction.AuthorizationTuple) = .empty;
+    errdefer entries.deinit(allocator);
+
+    for (list.items) |item| {
+        const auth = asObject(item) orelse continue;
+        const y_parity = parseU256FromValue(auth.get("yParity") orelse auth.get("v") orelse continue) catch continue;
+        const legacy_v = if (auth.get("v")) |value| parseU256FromValue(value) catch continue else null;
+        const r = parseU256FromValue(auth.get("r") orelse continue) catch continue;
+        const s = parseU256FromValue(auth.get("s") orelse continue) catch continue;
+        const chain_id = parseU256FromValue(auth.get("chainId") orelse continue) catch continue;
+        const target = parseAddressFromValue(auth.get("address") orelse continue) catch continue;
+        const signer = parseAddressFromValue(auth.get("signer") orelse continue) catch continue;
+        const nonce_value = parseU256FromValue(auth.get("nonce") orelse continue) catch continue;
+        const nonce = std.math.cast(u64, nonce_value) orelse continue;
+
+        try entries.append(allocator, .{
+            .chain_id = chain_id,
+            .target = target,
+            .signer = signer,
+            .nonce = nonce,
+            .y_parity = y_parity,
+            .legacy_v = legacy_v,
+            .r = r,
+            .s = s,
+        });
+    }
+
+    return .{
+        .entries = try entries.toOwnedSlice(allocator),
+        .count = list.items.len,
+    };
 }
 
 pub fn parseBlobHashes(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap) ![]u256 {

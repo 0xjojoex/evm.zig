@@ -1,17 +1,18 @@
 # EEST fixture download defaults.
 #
-# The live source repo is ethereum/execution-specs, but reusable generated JSON
-# fixture tarballs are still published on ethereum/execution-spec-tests releases.
+# The live source repo is ethereum/execution-specs. v5.4.0 remains the latest
+# final stable Osaka fixture snapshot on the legacy execution-spec-tests release
+# page; moving tests-* fixture releases are now published by execution-specs.
 repo=ethereum/execution-spec-tests
 version=v5.4.0
 artifact=fixtures_stable.tar.gz
 url=https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz
 dest=.eest/fixtures/v5.4.0
 
-# Benchmark fixture download defaults. Benchmark fixtures are published on a
-# separate release track from stable fixtures.
-benchmark_repo=ethereum/execution-spec-tests
-benchmark_version=benchmark@v0.0.7
+# Benchmark fixture download defaults. Benchmark fixtures are published on the
+# tests-benchmark release track in ethereum/execution-specs.
+benchmark_repo=ethereum/execution-specs
+benchmark_version=tests-benchmark@v0.0.9
 benchmark_artifact=fixtures_benchmark.tar.gz
-benchmark_url=https://github.com/ethereum/execution-spec-tests/releases/download/benchmark%40v0.0.7/fixtures_benchmark.tar.gz
-benchmark_dest=.eest/benchmarks/benchmark-v0.0.7
+benchmark_url=https://github.com/ethereum/execution-specs/releases/download/tests-benchmark%40v0.0.9/fixtures_benchmark.tar.gz
+benchmark_dest=.eest/benchmarks/tests-benchmark-v0.0.9

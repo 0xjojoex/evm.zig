@@ -2,11 +2,11 @@ const std = @import("std");
 const common = @import("common.zig");
 const evmz = @import("evmz");
 
-const Analysis = evmz.CodeAnalysis;
+const Analysis = evmz.code.Analysis;
 const Config = evmz.Config;
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
-const JumpDestMap = evmz.JumpDestMap;
+const JumpDestMap = evmz.code.JumpDestMap;
 const Opcode = evmz.Opcode;
 
 const max_code_hex_bytes = 128 * 1024 * 1024;
@@ -45,8 +45,13 @@ const Morphology = struct {
     real_push: usize,
     raw_jumpdest: usize,
     real_jumpdest: usize,
-    pattern_windows: usize,
-    pattern_counts: Analysis.PatternCensus,
+    blocks: usize,
+    static_safe_blocks: usize,
+    static_safe_instructions: usize,
+    max_static_safe_block_len: usize,
+    metered_flat_blocks: usize,
+    metered_flat_instructions: usize,
+    max_metered_flat_block_len: usize,
 };
 
 const Timing = struct {
@@ -138,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (!options.no_header) {
         try stdout.print(
-            "source,name,bytes,instructions,raw_push,real_push,raw_jumpdest,real_jumpdest,pattern_windows,pattern_coverage_pct,push_pop,push_mload,push_push_mstore,push_push_mstore8,push_push_binary,push_jump,push_jumpi,batch,legacy_jumpdest_ns_per_byte,simd_jumpdest_ns_per_byte,simd_jumpdest_delta_pct,base_analysis_ns_per_instr,advanced_analysis_ns_per_instr,advanced_analysis_delta_pct\n",
+            "source,name,bytes,instructions,raw_push,real_push,raw_jumpdest,real_jumpdest,blocks,static_safe_blocks,static_safe_instructions,static_safe_instruction_pct,max_static_safe_block_len,metered_flat_blocks,metered_flat_instructions,metered_flat_instruction_pct,max_metered_flat_block_len,batch,legacy_jumpdest_ns_per_byte,simd_jumpdest_ns_per_byte,simd_jumpdest_delta_pct,base_analysis_ns_per_instr,advanced_analysis_ns_per_instr,advanced_analysis_delta_pct\n",
             .{},
         );
     }
@@ -278,14 +283,14 @@ fn deployRuntime(allocator: std.mem.Allocator, init_code: []const u8, spec: evmz
         .code_address = common.contract_address,
     };
 
-    var interpreter: Interpreter = undefined;
-    try interpreter.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = init_code,
         .spec = spec,
     });
-    defer interpreter.deinit();
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
     const result = interpreter.execute();
     if (result.status != .success) return error.DeployFailed;
@@ -340,11 +345,14 @@ fn analyzeMorphology(allocator: std.mem.Allocator, code: []const u8) !Morphology
         .real_push = 0,
         .raw_jumpdest = 0,
         .real_jumpdest = 0,
-        .pattern_windows = 0,
-        .pattern_counts = .{},
+        .blocks = analysis.blocks.len,
+        .static_safe_blocks = 0,
+        .static_safe_instructions = 0,
+        .max_static_safe_block_len = 0,
+        .metered_flat_blocks = 0,
+        .metered_flat_instructions = 0,
+        .max_metered_flat_block_len = 0,
     };
-    morphology.pattern_counts = analysis.patternCensus();
-    morphology.pattern_windows = morphology.pattern_counts.total();
 
     for (code) |byte| {
         morphology.raw_push += @intFromBool(isPush(byte));
@@ -354,7 +362,26 @@ fn analyzeMorphology(allocator: std.mem.Allocator, code: []const u8) !Morphology
         morphology.real_push += @intFromBool(meta.isPush());
     }
     morphology.real_jumpdest = analysis.metadata.jumpdest.count();
+    analyzeBlocks(analysis, &morphology);
     return morphology;
+}
+
+fn analyzeBlocks(analysis: Analysis, morphology: *Morphology) void {
+    for (analysis.blocks) |block| {
+        const block_len = @as(usize, @intCast(block.last_instruction - block.first_instruction));
+
+        if (block.isStaticSafe()) {
+            morphology.static_safe_blocks += 1;
+            morphology.static_safe_instructions += block_len;
+            morphology.max_static_safe_block_len = @max(morphology.max_static_safe_block_len, block_len);
+        }
+
+        if (block.isMeteredFlatSafe()) {
+            morphology.metered_flat_blocks += 1;
+            morphology.metered_flat_instructions += block_len;
+            morphology.max_metered_flat_block_len = @max(morphology.max_metered_flat_block_len, block_len);
+        }
+    }
 }
 
 fn measureTimings(
@@ -442,14 +469,15 @@ fn printRow(
     timing: Timing,
     batch: usize,
 ) !void {
-    const pattern_coverage_pct = pct(morphology.pattern_windows, morphology.instructions);
+    const static_safe_instruction_pct = pct(morphology.static_safe_instructions, morphology.instructions);
+    const metered_flat_instruction_pct = pct(morphology.metered_flat_instructions, morphology.instructions);
     const legacy_jumpdest_ns_per_byte = nsPer(timing.legacy_jumpdest_ns, batch, morphology.bytes);
     const simd_jumpdest_ns_per_byte = nsPer(timing.simd_jumpdest_ns, batch, morphology.bytes);
     const base_analysis_ns_per_instr = nsPer(timing.base_analysis_ns, batch, morphology.instructions);
     const advanced_analysis_ns_per_instr = nsPer(timing.advanced_analysis_ns, batch, morphology.instructions);
 
     try stdout.print(
-        "{s},{s},{d},{d},{d},{d},{d},{d},{d},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}\n",
+        "{s},{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d:.3},{d},{d},{d},{d:.3},{d},{d},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}\n",
         .{
             @tagName(input.kind),
             input.name,
@@ -459,15 +487,15 @@ fn printRow(
             morphology.real_push,
             morphology.raw_jumpdest,
             morphology.real_jumpdest,
-            morphology.pattern_windows,
-            pattern_coverage_pct,
-            morphology.pattern_counts.push_pop,
-            morphology.pattern_counts.push_mload,
-            morphology.pattern_counts.push_push_mstore,
-            morphology.pattern_counts.push_push_mstore8,
-            morphology.pattern_counts.push_push_binary,
-            morphology.pattern_counts.push_jump,
-            morphology.pattern_counts.push_jumpi,
+            morphology.blocks,
+            morphology.static_safe_blocks,
+            morphology.static_safe_instructions,
+            static_safe_instruction_pct,
+            morphology.max_static_safe_block_len,
+            morphology.metered_flat_blocks,
+            morphology.metered_flat_instructions,
+            metered_flat_instruction_pct,
+            morphology.max_metered_flat_block_len,
             batch,
             legacy_jumpdest_ns_per_byte,
             simd_jumpdest_ns_per_byte,
@@ -504,7 +532,7 @@ fn defaultBatch(bytes_len: usize) usize {
 }
 
 fn isPush(opcode: u8) bool {
-    return opcode >= @intFromEnum(Opcode.PUSH1) and opcode <= @intFromEnum(Opcode.PUSH32);
+    return opcode >= @intFromEnum(Opcode.PUSH0) and opcode <= @intFromEnum(Opcode.PUSH32);
 }
 
 fn parseUsize(value: []const u8) !usize {

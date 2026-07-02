@@ -60,9 +60,9 @@ test "code analysis state keeps jumpdest validation lazy" {
     try std.testing.expect(!state.isAnalyzed());
 }
 
-test "jumpdest preprocessing state keeps full analysis lazy" {
+test "base state keeps full analysis lazy" {
     const bytecode = t.bytecode(.{ .STOP, .JUMPDEST });
-    var state = try State.init(&bytecode, .advanced_jumpdest_only);
+    var state = try State.init(&bytecode, .base);
     defer state.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(Config.JumpDestStrategy.simd_bitmask, state.jumpdests.strategy);
@@ -96,10 +96,10 @@ test "full preprocessing state keeps execution lazy but can force instruction me
 }
 
 test "full preprocessing state remains local per call frame" {
-    var bytecode = [_]u8{Opcode.JUMPDEST.toInt()} ** 64;
-    bytecode[0] = Opcode.PUSH0.toInt();
-    bytecode[1] = Opcode.POP.toInt();
-    bytecode[2] = Opcode.STOP.toInt();
+    var bytecode = [_]u8{Opcode.JUMPDEST.toByte()} ** 64;
+    bytecode[0] = Opcode.PUSH0.toByte();
+    bytecode[1] = Opcode.POP.toByte();
+    bytecode[2] = Opcode.STOP.toByte();
 
     var first = try State.init(&bytecode, .advanced);
     defer first.deinit(std.testing.allocator);

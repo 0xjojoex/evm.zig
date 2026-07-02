@@ -2,7 +2,7 @@ const std = @import("std");
 const bench = @import("bench.zig");
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    const allocator = try benchmarkAllocator(init);
     const arena = init.arena.allocator();
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
@@ -72,6 +72,15 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+const allocator_env_var = "EVMZ_BENCH_ALLOCATOR";
+
+fn benchmarkAllocator(init: std.process.Init) !std.mem.Allocator {
+    const value = init.environ_map.get(allocator_env_var) orelse return init.gpa;
+    if (std.mem.eql(u8, value, "gpa")) return init.gpa;
+    if (std.mem.eql(u8, value, "smp")) return std.heap.smp_allocator;
+    return error.InvalidAllocator;
+}
+
 fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: bench.Options, limit: *bench.SelectionLimit) !bench.Summary {
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir => return bench.runFileLimited(io, allocator, path, options, limit),
@@ -117,12 +126,13 @@ fn printUsage() void {
         \\  - engines: evmz, evmone, evmone-advanced, evmone-baseline
         \\  - repeated --match filters are ANDed against fixture/test names
         \\  - --max-tests caps matched fixtures globally across all paths
+        \\  - EVMZ_BENCH_ALLOCATOR=smp opts into std.heap.smp_allocator for allocator probes
         \\
         \\Example:
         \\  scripts/fetch-eest-benchmarks.sh
-        \\  zig build bench -- ../.eest/benchmarks/benchmark-v0.0.7/fixtures/blockchain_tests/benchmark/compute
-        \\  zig build bench -- --list --match opcode_MSTORE --match offset_0 ../.eest/benchmarks/benchmark-v0.0.7/fixtures/blockchain_tests/benchmark/compute/instruction/memory/memory_access.json
-        \\  zig build bench -- --match opcode_MSTORE --match offset_0 --max-tests 1 ../.eest/benchmarks/benchmark-v0.0.7/fixtures/blockchain_tests/benchmark/compute/instruction/memory/memory_access.json
+        \\  zig build bench -- ../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures/blockchain_tests/benchmark/compute
+        \\  zig build bench -- --list --match opcode_MSTORE --match offset_0 ../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures/blockchain_tests/benchmark/compute/instruction/memory/memory_access.json
+        \\  zig build bench -- --match opcode_MSTORE --match offset_0 --max-tests 1 ../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures/blockchain_tests/benchmark/compute/instruction/memory/memory_access.json
         \\
     , .{});
 }

@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -Iinclude
+    - -Izig-out/include
+    - -I../include
+    - -I../zig-out/include

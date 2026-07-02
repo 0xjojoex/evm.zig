@@ -1,5 +1,6 @@
 const std = @import("std");
 const eest = @import("state.zig");
+const fixture_common = @import("fixture.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -48,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (mode == .scope) {
         if (paths.items.len == 0) {
-            try paths.append(allocator, "../.eest/fixtures/v5.4.0/fixtures");
+            try paths.append(allocator, try fixture_common.lockedFixturePath(init.io, arena, ""));
         }
         try printScopeReport(init.io, allocator, paths.items);
         return;
@@ -56,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (mode == .classify) {
         if (paths.items.len == 0) {
-            try paths.append(allocator, "../.eest/fixtures/v5.4.0/fixtures/state_tests");
+            try paths.append(allocator, try fixture_common.lockedFixturePath(init.io, arena, "state_tests"));
         }
         classify_options.run_options = options;
         var classification = Classification.init(allocator);
@@ -69,13 +70,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (paths.items.len == 0) {
-        printUsage();
-        return error.MissingFixturePath;
+        try paths.append(allocator, try fixture_common.lockedFixturePath(init.io, arena, "state_tests"));
     }
 
     var total = eest.Summary{};
     for (paths.items) |path| {
-        const summary = try eest.runFile(init.io, allocator, path, options);
+        const summary = try runPath(init.io, allocator, path, options);
         total.add(summary);
         printSummary(path, summary);
     }
@@ -94,6 +94,32 @@ const Mode = enum {
     classify,
     scope,
 };
+
+fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: eest.Options) !eest.Summary {
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir => return eest.runFile(io, allocator, path, options),
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var total = eest.Summary{};
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        const child = try std.fs.path.join(allocator, &.{ path, entry.name });
+        defer allocator.free(child);
+
+        switch (entry.kind) {
+            .directory => total.add(try runPath(io, allocator, child, options)),
+            .file => {
+                if (std.mem.endsWith(u8, entry.name, ".json")) {
+                    total.add(try eest.runFile(io, allocator, child, options));
+                }
+            },
+            else => {},
+        }
+    }
+    return total;
+}
 
 const ClassifyOptions = struct {
     run_options: eest.Options = .{},
@@ -298,7 +324,7 @@ const Classification = struct {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build eest -- [--fork Cancun] [--test name-substring] <state-test.json>...
+        \\usage: zig build eest -- [--fork Cancun] [--test name-substring] [state-test.json-or-dir...]
         \\       zig build eest -- --classify [--exclude-static] [--limit N] [--root state_tests_dir]
         \\       zig build eest -- --scope [fixtures_dir]
         \\
@@ -306,6 +332,8 @@ fn printUsage() void {
         \\  - pre accounts, code, storage, tx env
         \\  - CALL and create transactions
         \\  - post.state code/storage comparisons
+        \\
+        \\With no paths, the runner uses eest.lock dest + fixtures/state_tests.
         \\
         \\Failed/unchecked vectors are reported separately.
         \\
@@ -543,7 +571,7 @@ fn printScopeReport(io: std.Io, allocator: std.mem.Allocator, roots: []const []c
         }
     }
 
-    const benchmark_root = "../.eest/benchmarks/benchmark-v0.0.7/fixtures";
+    const benchmark_root = "../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures";
     const benchmark_count = try countJsonFilesIfPresent(io, benchmark_root);
     if (benchmark_count > 0) {
         std.debug.print("\nEEST benchmark scope: {s}\n", .{benchmark_root});

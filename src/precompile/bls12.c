@@ -1,4 +1,4 @@
-#include "precompile_bls12.h"
+#include "bls12.h"
 
 #include "blst.h"
 

@@ -1,10 +1,10 @@
 const std = @import("std");
 const evmz = @import("evmz");
 const common = @import("common.zig");
-const vm_loop_evmone = @import("vm_loop_evmone.zig");
 
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
+const Executor = evmz.executor;
 const CountingHost = common.CountingHost;
 const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;
@@ -35,14 +35,85 @@ const ResolvedOptions = struct {
 
 const Engine = enum {
     evmz,
-    evmz_jumpdest,
-    evmz_advanced,
-    evmone_baseline,
-    evmone_advanced,
+    evmz_executor,
+    evmz_executor_yielding,
+};
+
+const ExecutorRuntimeRunner = struct {
+    allocator: std.mem.Allocator,
+    executor: Executor,
+    bytecode: evmz.Bytecode,
+    baseline: Executor.Snapshot,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        runtime_code: []const u8,
+        spec: evmz.Spec,
+    ) !ExecutorRuntimeRunner {
+        var executor = Executor.init(allocator, .{
+            .spec = spec,
+            .config = .base,
+        });
+        errdefer executor.deinit();
+
+        const sender = try executor.getOrCreateAccount(common.caller_address);
+        sender.balance = std.math.maxInt(u256);
+
+        const contract = try executor.getOrCreateAccount(common.contract_address);
+        try contract.setCode(allocator, runtime_code);
+
+        var bytecode = try executor.prepareBytecode(runtime_code);
+        errdefer bytecode.deinit(allocator);
+
+        var baseline = try executor.snapshot();
+        errdefer baseline.deinit(allocator);
+
+        return .{
+            .allocator = allocator,
+            .executor = executor,
+            .bytecode = bytecode,
+            .baseline = baseline,
+        };
+    }
+
+    fn deinit(self: *ExecutorRuntimeRunner) void {
+        self.baseline.deinit(self.allocator);
+        self.bytecode.deinit(self.allocator);
+        self.executor.deinit();
+    }
+
+    fn timeRuntimeCall(self: *ExecutorRuntimeRunner, call_data: []const u8) !u64 {
+        try self.executor.restore(&self.baseline);
+        try self.executor.beginTransaction(executorTxContext(), common.caller_address, common.contract_address);
+
+        var pre_execution = try self.executor.snapshot();
+        defer pre_execution.deinit(self.allocator);
+
+        const start_ns = try common.monotonicNowNs();
+        const call_options = Executor.PreparedCallTransaction{
+            .bytecode = &self.bytecode,
+            .sender = common.caller_address,
+            .recipient = common.contract_address,
+            .input = call_data,
+            .gas = @intCast(common.max_gas),
+            .value = 0,
+        };
+        const result = try self.executor.executePreparedCallTransaction(call_options);
+        const end_ns = try common.monotonicNowNs();
+
+        if (Executor.executionRolledBack(result.status)) {
+            try self.executor.restore(&pre_execution);
+        } else {
+            try self.executor.finalizeTransaction();
+        }
+        if (result.status != .success) return error.CallFailed;
+
+        return end_ns - start_ns;
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    const allocator = try common.benchmarkAllocator(init);
     const arena = init.arena.allocator();
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -129,23 +200,20 @@ pub fn main(init: std.process.Init) !void {
     const call_data = try common.decodeHexAlloc(allocator, resolved.call_data_hex);
     defer allocator.free(call_data);
 
-    var evmone_runner: ?vm_loop_evmone.Runner = if (isEvmzEngine(resolved.engine))
-        null
-    else
-        try vm_loop_evmone.Runner.init(evmoneMode(resolved.engine));
-    defer {
-        if (evmone_runner) |*runner| runner.deinit();
-    }
-
     var deploy_host = CountingHost.init(allocator, resolved.host_profile);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime_code = if (evmone_runner) |*runner|
-        try runner.deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec)
-    else
-        try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec, resolved.engine);
+    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec, resolved.engine);
     defer allocator.free(runtime_code);
     try common.rejectNullHostTouches(resolved.host_profile, deploy_host.counters);
+
+    var executor_runner: ?ExecutorRuntimeRunner = if (isExecutorEngine(resolved.engine))
+        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.spec)
+    else
+        null;
+    defer {
+        if (executor_runner) |*runner| runner.deinit();
+    }
 
     var timed_counters = HostCounters{};
     var run_index: usize = 0;
@@ -154,8 +222,8 @@ pub fn main(init: std.process.Init) !void {
         defer run_host.deinit();
         var run_host_iface = run_host.host();
 
-        const elapsed_ns = if (evmone_runner) |*runner|
-            try runner.timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.spec)
+        const elapsed_ns = if (executor_runner) |*runner|
+            try runner.timeRuntimeCall(call_data)
         else
             try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.spec, resolved.engine);
         try common.rejectNullHostTouches(resolved.host_profile, run_host.counters);
@@ -168,10 +236,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (resolved.summary) {
         std.debug.print(
-            "fixture={s} engine={s} host_profile={s} spec={s} runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
+            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
             .{
                 resolved.fixture_dir orelse "",
                 engineName(resolved.engine),
+                measureScopeName(resolved.engine),
                 @tagName(resolved.host_profile),
                 @tagName(resolved.spec),
                 runtime_code.len,
@@ -196,9 +265,15 @@ fn printUsage() void {
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
         \\  --spec <name>                 fork spec, default latest
-        \\  --engine <name>               evmz, evmz-jumpdest, evmz-advanced, evmone-baseline, evmone-advanced, evmone
+        \\  --engine <name>               evmz, evmz-executor, evmz-executor-yielding
         \\  --host-profile <null|mock>    host boundary, default null
         \\  --summary                     print host callback counts to stderr
+        \\  EVMZ_BENCH_ALLOCATOR=smp      opt into std.heap.smp_allocator for allocator probes
+        \\
+        \\Scopes:
+        \\  evmz times direct Interpreter.execute with metadata prepared before timing
+        \\  evmz-executor is the default transaction/executor diagnostic with tx setup/reset outside timing
+        \\  evmz-executor-yielding is a compatibility alias for the iterative executor path
         \\
     , .{});
 }
@@ -241,7 +316,6 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
 }
 
 fn parseEngine(value: []const u8) ?Engine {
-    if (std.mem.eql(u8, value, "evmone")) return .evmone_advanced;
     inline for (std.meta.fields(Engine)) |field| {
         if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
     }
@@ -251,29 +325,45 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
-        .evmz_jumpdest => "evmz-jumpdest",
-        .evmz_advanced => "evmz-advanced",
-        .evmone_baseline => "evmone-baseline",
-        .evmone_advanced => "evmone-advanced",
+        .evmz_executor => "evmz-executor",
+        .evmz_executor_yielding => "evmz-executor-yielding",
     };
 }
 
-fn isEvmzEngine(engine: Engine) bool {
+fn isExecutorEngine(engine: Engine) bool {
     return switch (engine) {
-        .evmz,
-        .evmz_jumpdest,
-        .evmz_advanced,
-        => true,
-        .evmone_baseline, .evmone_advanced => false,
+        .evmz_executor, .evmz_executor_yielding => true,
+        else => false,
     };
 }
 
 fn evmzConfig(engine: Engine) evmz.Config {
     return switch (engine) {
-        .evmz => .base,
-        .evmz_jumpdest => .advanced_jumpdest_only,
-        .evmz_advanced => .advanced,
-        .evmone_baseline, .evmone_advanced => unreachable,
+        .evmz, .evmz_executor, .evmz_executor_yielding => .base,
+    };
+}
+
+fn measureScopeName(engine: Engine) []const u8 {
+    return switch (engine) {
+        .evmz => "interpreter-prepared-execute",
+        .evmz_executor => "executor-prepared-call",
+        .evmz_executor_yielding => "executor-prepared-call",
+    };
+}
+
+fn executorTxContext() Host.TxContext {
+    return .{
+        .chain_id = 1,
+        .gas_price = 0,
+        .origin = common.caller_address,
+        .coinbase = evmz.addr(0),
+        .number = 0,
+        .timestamp = 0,
+        .gas_limit = @intCast(common.max_gas),
+        .prev_randao = 0,
+        .base_fee = 0,
+        .blob_base_fee = 0,
+        .blob_hashes = &.{},
     };
 }
 
@@ -319,10 +409,6 @@ fn deployRuntime(
     spec: evmz.Spec,
     engine: Engine,
 ) ![]u8 {
-    if (!isEvmzEngine(engine)) {
-        return vm_loop_evmone.deployRuntime(allocator, host, contract_code, spec, evmoneMode(engine));
-    }
-
     const msg = Host.Message{
         .depth = 0,
         .kind = .create,
@@ -334,15 +420,15 @@ fn deployRuntime(
         .code_address = common.contract_address,
     };
 
-    var interpreter: Interpreter = undefined;
-    try interpreter.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
         .code = contract_code,
         .spec = spec,
         .config = evmzConfig(engine),
     });
-    defer interpreter.deinit();
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
     const result = interpreter.execute();
     if (result.status != .success) return error.DeployFailed;
@@ -357,10 +443,6 @@ fn timeRuntimeCall(
     spec: evmz.Spec,
     engine: Engine,
 ) !u64 {
-    if (!isEvmzEngine(engine)) {
-        return vm_loop_evmone.timeRuntimeCall(allocator, host, runtime_code, call_data, spec, evmoneMode(engine));
-    }
-
     const msg = Host.Message{
         .depth = 0,
         .kind = .call,
@@ -372,42 +454,55 @@ fn timeRuntimeCall(
         .code_address = common.contract_address,
     };
 
-    var interpreter: Interpreter = undefined;
-    try interpreter.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
         .code = runtime_code,
         .spec = spec,
         .config = evmzConfig(engine),
     });
-    errdefer interpreter.deinit();
+    errdefer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    try prepareTimedMetadata(allocator, &interpreter, runtime_code, engine);
 
     const start_ns = try common.monotonicNowNs();
     const result = interpreter.execute();
     const end_ns = try common.monotonicNowNs();
-    interpreter.deinit();
+    frame.deinit();
 
     if (result.status != .success) return error.CallFailed;
     return end_ns - start_ns;
 }
 
-fn evmoneMode(engine: Engine) vm_loop_evmone.Mode {
+fn prepareTimedMetadata(
+    allocator: std.mem.Allocator,
+    interpreter: *Interpreter,
+    runtime_code: []const u8,
+    engine: Engine,
+) !void {
     return switch (engine) {
-        .evmz,
-        .evmz_jumpdest,
-        .evmz_advanced,
-        => unreachable,
-        .evmone_baseline => .baseline,
-        .evmone_advanced => .advanced,
+        .evmz => try interpreter.call_frame.analysis.jumpdests.analyze(allocator, runtime_code),
+
+        .evmz_executor, .evmz_executor_yielding => unreachable,
     };
 }
 
 test "engine parser accepts aliases" {
     try std.testing.expectEqual(Engine.evmz, parseEngine("evmz").?);
-    try std.testing.expectEqual(Engine.evmz_jumpdest, parseEngine("evmz-jumpdest").?);
-    try std.testing.expectEqual(Engine.evmz_advanced, parseEngine("evmz-advanced").?);
-    try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
-    try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
+    try std.testing.expectEqual(Engine.evmz_executor, parseEngine("evmz-executor").?);
+    try std.testing.expectEqual(Engine.evmz_executor_yielding, parseEngine("evmz-executor-yielding").?);
+    try std.testing.expect(parseEngine("evmone") == null);
+    try std.testing.expect(parseEngine("evmone-baseline") == null);
+    try std.testing.expect(parseEngine("evmz-call-total") == null);
+    try std.testing.expect(parseEngine("evmz-advanced") == null);
+    try std.testing.expect(parseEngine("evmz-advanced-executor") == null);
+}
+
+test "engine scope names make benchmark boundary explicit" {
+    try std.testing.expectEqualStrings("interpreter-prepared-execute", measureScopeName(.evmz));
+    try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.evmz_executor));
+    try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.evmz_executor_yielding));
 }
 
 test "deploys runtime and runs empty bytecode under null host" {
@@ -426,6 +521,10 @@ test "deploys runtime and runs empty bytecode under null host" {
     var run_host_iface = run_host.host();
     _ = try timeRuntimeCall(std.testing.allocator, &run_host_iface, runtime, &.{}, .latest, .evmz);
     try std.testing.expectEqual(@as(u64, 0), run_host.counters.total());
+
+    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, .latest);
+    defer executor_runner.deinit();
+    _ = try executor_runner.timeRuntimeCall(&.{});
 }
 
 test "resolves fixture defaults with CLI overrides" {

@@ -1,8 +1,14 @@
 pub const evmc = @cImport({
-    @cInclude("evmc.h");
+    @cInclude("evmc/evmc.h");
 });
 const std = @import("std");
 const evmz = @import("../evm.zig");
+
+comptime {
+    if (evmc.EVMC_ABI_VERSION != 12) {
+        @compileError("EVMC ABI changed; update the evmz EVMC adapter");
+    }
+}
 
 pub fn toEvmcAddress(addr: ?evmz.Address) evmc.evmc_address {
     return evmc.evmc_address{

@@ -3,14 +3,7 @@ const std = @import("std");
 pub const address = @import("./address.zig");
 pub const Interpreter = @import("./Interpreter.zig");
 pub const Config = @import("./Config.zig");
-pub const code = struct {
-    pub const Analysis = @import("./code/Analysis.zig");
-    pub const JumpDestMap = @import("./code/JumpDestMap.zig");
-    pub const State = @import("./code/State.zig");
-};
-pub const JumpDestMap = code.JumpDestMap;
-pub const CodeAnalysis = code.Analysis;
-pub const CodeAnalysisState = code.State;
+pub const code = @import("./code.zig");
 pub const instruction = @import("./instruction.zig");
 pub const t = @import("./t.zig");
 pub const Host = @import("./Host.zig");
@@ -21,14 +14,22 @@ pub const transaction_envelope = @import("./transaction_envelope.zig");
 pub const uint256 = @import("./uint256.zig");
 pub const rlp = @import("./rlp.zig");
 pub const state = @import("./state.zig");
-pub const Executor = @import("./Executor.zig");
-pub const c_api = struct {
-    pub const common = @import("./c_api/common.zig");
-    pub const evmc = common.evmc;
-    pub const host2c = @import("./c_api/host2c.zig");
-};
+pub const trace = @import("./trace.zig");
+pub const executor = @import("./executor.zig");
+pub const Vm = @import("./vm.zig");
+pub const eip7702 = executor.eip7702;
+pub const StateReader = Vm.StateReader;
+pub const Env = Vm.Env;
+pub const Transaction = Vm.Transaction;
+pub const TxStatus = Vm.TxStatus;
+pub const TxResult = Vm.TxResult;
+pub const SystemCall = Vm.SystemCall;
+pub const Committer = Vm.Committer;
+pub const AccountView = Vm.AccountView;
+pub const c_api = @import("./c_api.zig");
 const opcode = @import("./opcode.zig");
 
+pub const Bytecode = code.Bytecode;
 pub const Opcode = opcode.Opcode;
 pub const Address = address.Address;
 pub const addr = address.addr;
@@ -44,4 +45,5 @@ pub const spec = @import("./spec.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("./test.zig");
 }

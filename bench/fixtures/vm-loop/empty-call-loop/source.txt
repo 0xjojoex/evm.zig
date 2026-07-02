@@ -1,0 +1,4 @@
+handrolled VM-loop fixture: 1000 loop iterations, 1 CALL to an empty account per loop
+host: mock
+runtime bytes: 48
+target: 0x0000000000000000000000000000000000001234

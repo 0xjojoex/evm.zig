@@ -1,4 +1,5 @@
-const Opcode = @import("opcode.zig").Opcode;
+const opcode_info = @import("opcode.zig");
+const Opcode = opcode_info.Opcode;
 const std = @import("std");
 const evmz = @import("./evm.zig");
 const Interpreter = @import("./Interpreter.zig");
@@ -36,8 +37,10 @@ pub const Instruction = struct {
 };
 
 pub fn decode(opcode_byte: u8) ?Instruction {
-    const opcode = std.enums.fromInt(Opcode, opcode_byte) orelse return null;
-    return .{ .opcode = opcode, .static_gas = staticGas(opcode) };
+    const opcode: Opcode = @enumFromInt(opcode_byte);
+    const row = opcode_info.info(opcode.toByte());
+    if (!row.defined) return null;
+    return .{ .opcode = opcode, .static_gas = row.static_gas };
 }
 
 test decode {
@@ -46,98 +49,59 @@ test decode {
     try std.testing.expectEqual(null, decode(0x0c));
 }
 
+test "decode follows opcode table for every byte" {
+    for (0..256) |index| {
+        const opcode_byte: u8 = @intCast(index);
+        const row = opcode_info.info(opcode_byte);
+        const decoded = decode(opcode_byte);
+        if (!row.defined) {
+            try std.testing.expectEqual(null, decoded);
+            continue;
+        }
+
+        try std.testing.expect(decoded != null);
+        try std.testing.expectEqual(opcode_byte, @intFromEnum(decoded.?.opcode));
+        try std.testing.expectEqual(row.static_gas, decoded.?.static_gas);
+    }
+}
+
+test "fork-gated opcodes are invalid before their activation fork" {
+    try evmz.t.expectBytecodeStatusBySpec(.{.RETURNDATASIZE}, .homestead, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{.RETURNDATASIZE}, .byzantium, .success);
+
+    try evmz.t.expectBytecodeStatusBySpec(.{.BASEFEE}, .berlin, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{.BASEFEE}, .london, .success);
+
+    try evmz.t.expectBytecodeStatusBySpec(.{.PUSH0}, .london, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{.PUSH0}, .shanghai, .success);
+
+    try evmz.t.expectBytecodeStatusBySpec(.{.BLOBBASEFEE}, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{.BLOBBASEFEE}, .cancun, .success);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x00, .BLOBHASH }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x00, .BLOBHASH }, .cancun, .success);
+}
+
+test "fork-dependent static gas follows legacy schedules" {
+    try std.testing.expectEqual(@as(i64, 20), staticGasForSpec(.frontier, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 400), staticGasForSpec(.byzantium, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 700), staticGasForSpec(.istanbul, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 100), staticGasForSpec(.berlin, .BALANCE));
+
+    try std.testing.expectEqual(@as(i64, 20), staticGasForSpec(.homestead, .EXTCODECOPY));
+    try std.testing.expectEqual(@as(i64, 700), staticGasForSpec(.byzantium, .EXTCODECOPY));
+    try std.testing.expectEqual(@as(i64, 400), staticGasForSpec(.petersburg, .EXTCODEHASH));
+    try std.testing.expectEqual(@as(i64, 700), staticGasForSpec(.istanbul, .EXTCODEHASH));
+
+    try std.testing.expectEqual(@as(i64, 50), staticGasForSpec(.frontier, .SLOAD));
+    try std.testing.expectEqual(@as(i64, 200), staticGasForSpec(.byzantium, .SLOAD));
+    try std.testing.expectEqual(@as(i64, 800), staticGasForSpec(.istanbul, .SLOAD));
+
+    try std.testing.expectEqual(@as(i64, 0), staticGasForSpec(.homestead, .SELFDESTRUCT));
+    try std.testing.expectEqual(@as(i64, 5000), staticGasForSpec(.tangerine_whistle, .SELFDESTRUCT));
+}
+
 pub fn staticGas(opcode: Opcode) u16 {
-    return switch (opcode) {
-        .STOP => 0,
-        .ADD => 3,
-        .MUL => 5,
-        .SUB => 3,
-        .DIV => 5,
-        .SDIV => 5,
-        .MOD => 5,
-        .SMOD => 5,
-        .ADDMOD => 8,
-        .MULMOD => 8,
-        .EXP => 10,
-        .SIGNEXTEND => 5,
-        .LT => 3,
-        .GT => 3,
-        .SLT => 3,
-        .SGT => 3,
-        .EQ => 3,
-        .ISZERO => 3,
-        .AND => 3,
-        .OR => 3,
-        .XOR => 3,
-        .NOT => 3,
-        .BYTE => 3,
-        .SHL => 3,
-        .SHR => 3,
-        .SAR => 3,
-        .CLZ => 5,
-        .KECCAK256 => 30,
-        .ADDRESS => 2,
-        .BALANCE => 100,
-        .ORIGIN => 2,
-        .CALLER => 2,
-        .CALLVALUE => 2,
-        .CALLDATALOAD => 3,
-        .CALLDATASIZE => 2,
-        .CALLDATACOPY => 3,
-        .CODESIZE => 2,
-        .CODECOPY => 3,
-        .GASPRICE => 2,
-        .EXTCODESIZE => 100,
-        .EXTCODECOPY => 100,
-        .RETURNDATASIZE => 2,
-        .RETURNDATACOPY => 3,
-        .EXTCODEHASH => 100,
-        .BLOCKHASH => 20,
-        .COINBASE => 2,
-        .TIMESTAMP => 2,
-        .NUMBER => 2,
-        .PREVRANDAO => 2,
-        .GASLIMIT => 2,
-        .CHAINID => 2,
-        .SELFBALANCE => 5,
-        .BASEFEE => 2,
-        .BLOBHASH => 3,
-        .BLOBBASEFEE => 2,
-        .POP => 2,
-        .MLOAD => 3,
-        .MSTORE => 3,
-        .MSTORE8 => 3,
-        .SLOAD => 100,
-        .SSTORE => 0,
-        .JUMP => 8,
-        .JUMPI => 10,
-        .PC => 2,
-        .MSIZE => 2,
-        .GAS => 2,
-        .JUMPDEST => 1,
-        .TLOAD => 100,
-        .TSTORE => 100,
-        .MCOPY => 3,
-        .PUSH0 => 2,
-        .PUSH1, .PUSH2, .PUSH3, .PUSH4, .PUSH5, .PUSH6, .PUSH7, .PUSH8, .PUSH9, .PUSH10, .PUSH11, .PUSH12, .PUSH13, .PUSH14, .PUSH15, .PUSH16, .PUSH17, .PUSH18, .PUSH19, .PUSH20, .PUSH21, .PUSH22, .PUSH23, .PUSH24, .PUSH25, .PUSH26, .PUSH27, .PUSH28, .PUSH29, .PUSH30, .PUSH31, .PUSH32 => 3,
-        .DUP1, .DUP2, .DUP3, .DUP4, .DUP5, .DUP6, .DUP7, .DUP8, .DUP9, .DUP10, .DUP11, .DUP12, .DUP13, .DUP14, .DUP15, .DUP16 => 3,
-        .SWAP1, .SWAP2, .SWAP3, .SWAP4, .SWAP5, .SWAP6, .SWAP7, .SWAP8, .SWAP9, .SWAP10, .SWAP11, .SWAP12, .SWAP13, .SWAP14, .SWAP15, .SWAP16 => 3,
-        .LOG0 => 375,
-        .LOG1 => 375 * 2,
-        .LOG2 => 375 * 3,
-        .LOG3 => 375 * 4,
-        .LOG4 => 375 * 5,
-        .CREATE => 32000,
-        .CALL => 40,
-        .CALLCODE => 40,
-        .RETURN => 0,
-        .DELEGATECALL => 40,
-        .CREATE2 => 32000,
-        .STATICCALL => 40,
-        .REVERT => 0,
-        .INVALID => 0,
-        .SELFDESTRUCT => 5000,
-    };
+    return opcode_info.table[@intFromEnum(opcode)].static_gas;
 }
 
 pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
@@ -232,18 +196,22 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return logic.byte(frame);
         },
         @intFromEnum(Opcode.SHL) => {
+            if (!requireSpec(frame, .constantinople)) return;
             if (!chargeStaticGas(frame, .SHL)) return;
             return logic.shl(frame);
         },
         @intFromEnum(Opcode.SHR) => {
+            if (!requireSpec(frame, .constantinople)) return;
             if (!chargeStaticGas(frame, .SHR)) return;
             return logic.shr(frame);
         },
         @intFromEnum(Opcode.SAR) => {
+            if (!requireSpec(frame, .constantinople)) return;
             if (!chargeStaticGas(frame, .SAR)) return;
             return logic.sar(frame);
         },
         @intFromEnum(Opcode.CLZ) => {
+            if (!requireSpec(frame, .osaka)) return;
             if (!chargeStaticGas(frame, .CLZ)) return;
             return logic.clz(frame);
         },
@@ -304,14 +272,17 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return environment.extcodecopy(frame);
         },
         @intFromEnum(Opcode.RETURNDATASIZE) => {
+            if (!requireSpec(frame, .byzantium)) return;
             if (!chargeStaticGas(frame, .RETURNDATASIZE)) return;
             return environment.returndatasize(frame);
         },
         @intFromEnum(Opcode.RETURNDATACOPY) => {
+            if (!requireSpec(frame, .byzantium)) return;
             if (!chargeStaticGas(frame, .RETURNDATACOPY)) return;
             return environment.returndatacopy(frame);
         },
         @intFromEnum(Opcode.EXTCODEHASH) => {
+            if (!requireSpec(frame, .constantinople)) return;
             if (!chargeStaticGas(frame, .EXTCODEHASH)) return;
             return environment.extcodehash(frame);
         },
@@ -340,22 +311,27 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return environment.gaslimit(frame);
         },
         @intFromEnum(Opcode.CHAINID) => {
+            if (!requireSpec(frame, .istanbul)) return;
             if (!chargeStaticGas(frame, .CHAINID)) return;
             return environment.chainid(frame);
         },
         @intFromEnum(Opcode.SELFBALANCE) => {
+            if (!requireSpec(frame, .istanbul)) return;
             if (!chargeStaticGas(frame, .SELFBALANCE)) return;
             return environment.selfbalance(frame);
         },
         @intFromEnum(Opcode.BASEFEE) => {
+            if (!requireSpec(frame, .london)) return;
             if (!chargeStaticGas(frame, .BASEFEE)) return;
             return environment.basefee(frame);
         },
         @intFromEnum(Opcode.BLOBHASH) => {
+            if (!requireSpec(frame, .cancun)) return;
             if (!chargeStaticGas(frame, .BLOBHASH)) return;
             return environment.blobhash(frame);
         },
         @intFromEnum(Opcode.BLOBBASEFEE) => {
+            if (!requireSpec(frame, .cancun)) return;
             if (!chargeStaticGas(frame, .BLOBBASEFEE)) return;
             return environment.blobbasefee(frame);
         },
@@ -405,18 +381,22 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return;
         },
         @intFromEnum(Opcode.TLOAD) => {
+            if (!requireSpec(frame, .cancun)) return;
             if (!chargeStaticGas(frame, .TLOAD)) return;
             return storage.tload(frame);
         },
         @intFromEnum(Opcode.TSTORE) => {
+            if (!requireSpec(frame, .cancun)) return;
             if (!chargeStaticGas(frame, .TSTORE)) return;
             return storage.tstore(frame);
         },
         @intFromEnum(Opcode.MCOPY) => {
+            if (!requireSpec(frame, .cancun)) return;
             if (!chargeStaticGas(frame, .MCOPY)) return;
             return memory.mcopy(frame);
         },
         @intFromEnum(Opcode.PUSH0) => {
+            if (!requireSpec(frame, .shanghai)) return;
             if (!chargeStaticGas(frame, .PUSH0)) return;
             return stack.push0(frame);
         },
@@ -710,18 +690,24 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
         },
         @intFromEnum(Opcode.RETURN) => system.ret(frame),
         @intFromEnum(Opcode.DELEGATECALL) => {
+            if (!requireSpec(frame, .homestead)) return;
             if (!chargeStaticGas(frame, .DELEGATECALL)) return;
             return system.callByOp(frame, .DELEGATECALL);
         },
         @intFromEnum(Opcode.CREATE2) => {
+            if (!requireSpec(frame, .constantinople)) return;
             if (!chargeStaticGas(frame, .CREATE2)) return;
             return system.create2(frame);
         },
         @intFromEnum(Opcode.STATICCALL) => {
+            if (!requireSpec(frame, .byzantium)) return;
             if (!chargeStaticGas(frame, .STATICCALL)) return;
             return system.callByOp(frame, .STATICCALL);
         },
-        @intFromEnum(Opcode.REVERT) => system.revert(frame),
+        @intFromEnum(Opcode.REVERT) => {
+            if (!requireSpec(frame, .byzantium)) return;
+            return system.revert(frame);
+        },
         @intFromEnum(Opcode.INVALID) => system.invalid(frame),
         @intFromEnum(Opcode.SELFDESTRUCT) => {
             if (!chargeStaticGas(frame, .SELFDESTRUCT)) return;
@@ -732,7 +718,48 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
 }
 
 inline fn chargeStaticGas(frame: *CallFrame, comptime opcode: Opcode) bool {
-    const gas: i64 = comptime @intCast(staticGas(opcode));
+    const gas = staticGasForSpec(frame.spec, opcode);
     frame.trackGas(gas);
     return frame.status == .running;
+}
+
+fn staticGasForSpec(spec: evmz.Spec, comptime opcode: Opcode) i64 {
+    return switch (opcode) {
+        .BALANCE => if (spec.isImpl(.berlin))
+            100
+        else if (spec.isImpl(.istanbul))
+            700
+        else if (spec.isImpl(.tangerine_whistle))
+            400
+        else
+            20,
+        .EXTCODESIZE, .EXTCODECOPY => if (spec.isImpl(.berlin))
+            100
+        else if (spec.isImpl(.tangerine_whistle))
+            700
+        else
+            20,
+        .EXTCODEHASH => if (spec.isImpl(.berlin))
+            100
+        else if (spec.isImpl(.istanbul))
+            700
+        else
+            400,
+        .SLOAD => if (spec.isImpl(.berlin))
+            100
+        else if (spec.isImpl(.istanbul))
+            800
+        else if (spec.isImpl(.tangerine_whistle))
+            200
+        else
+            50,
+        .SELFDESTRUCT => if (spec.isImpl(.tangerine_whistle)) 5000 else 0,
+        else => @intCast(staticGas(opcode)),
+    };
+}
+
+inline fn requireSpec(frame: *CallFrame, spec: evmz.Spec) bool {
+    if (frame.spec.isImpl(spec)) return true;
+    frame.failWithStatus(.invalid);
+    return false;
 }

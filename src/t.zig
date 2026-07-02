@@ -42,11 +42,11 @@ fn bytecodeByte(comptime item: anytype) u8 {
     return switch (@typeInfo(T)) {
         .enum_literal => blk: {
             const opcode: evmz.Opcode = item;
-            break :blk opcode.toInt();
+            break :blk opcode.toByte();
         },
         .@"enum" => blk: {
             if (T != evmz.Opcode) @compileError("bytecode enum items must be evmz.Opcode");
-            break :blk item.toInt();
+            break :blk item.toByte();
         },
         .comptime_int => blk: {
             if (item < 0 or item > std.math.maxInt(u8)) @compileError("bytecode integer items must fit in u8");
@@ -80,19 +80,25 @@ pub const MockHost = struct {
     logs: std.ArrayList(Host.Log),
     tx_context: Host.TxContext,
     tx_context_reads: u64,
+    original_store: std.AutoHashMap(u256, u256),
     code: std.AutoHashMap(Address, []u8),
     local_account: std.AutoHashMap(Address, Host.Account),
     removed_account: std.AutoHashMap(Address, bool),
+    storage_reads: u64,
+    access_storage_reads: u64,
 
     pub fn init(alloc: std.mem.Allocator, tx_context: ?Host.TxContext) Self {
         return Self{
             .alloc = alloc,
             .store = std.AutoHashMap(u256, u256).init(alloc),
             .logs = .empty,
+            .original_store = std.AutoHashMap(u256, u256).init(alloc),
             .local_account = std.AutoHashMap(Address, Host.Account).init(alloc),
             .removed_account = std.AutoHashMap(Address, bool).init(alloc),
             .code = std.AutoHashMap(Address, []u8).init(alloc),
             .tx_context_reads = 0,
+            .storage_reads = 0,
+            .access_storage_reads = 0,
             .tx_context = if (tx_context) |ctx| ctx else Host.TxContext{
                 .base_fee = 0,
                 .gas_limit = 0,
@@ -111,10 +117,24 @@ pub const MockHost = struct {
 
     pub fn deinit(self: *Self) void {
         self.store.deinit();
+        self.original_store.deinit();
         self.logs.deinit(self.alloc);
         self.local_account.deinit();
         self.removed_account.deinit();
         self.code.deinit();
+    }
+
+    pub fn seedStorage(self: *Self, key: u256, value: u256) !void {
+        if (value == 0) {
+            _ = self.store.remove(key);
+        } else {
+            try self.store.put(key, value);
+        }
+        try self.original_store.put(key, value);
+    }
+
+    pub fn storageValue(self: *Self, key: u256) u256 {
+        return self.store.get(key) orelse 0;
     }
 
     fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
@@ -129,13 +149,23 @@ pub const MockHost = struct {
     fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
-        try self.store.put(key, value);
-        return .added;
+        const original_entry = try self.original_store.getOrPut(key);
+        if (!original_entry.found_existing) {
+            original_entry.value_ptr.* = self.storageValue(key);
+        }
+        const status = evmz.state.storageStatus(original_entry.value_ptr.*, self.storageValue(key), value);
+        if (value == 0) {
+            _ = self.store.remove(key);
+        } else {
+            try self.store.put(key, value);
+        }
+        return status;
     }
 
     fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
+        self.storage_reads += 1;
         return self.store.get(key) orelse 0;
     }
 
@@ -239,6 +269,7 @@ pub const MockHost = struct {
 
         const a = @This();
 
+        const should_refund = !self.removed_account.contains(address);
         const destrucing_balance = try a.getBalance(self, address);
         const recipient_balance = try a.getBalance(self, beneficiary);
 
@@ -253,7 +284,7 @@ pub const MockHost = struct {
         _ = self.local_account.remove(address);
         _ = try self.removed_account.put(address, true);
 
-        return false;
+        return should_refund;
     }
 
     fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
@@ -268,6 +299,7 @@ pub const MockHost = struct {
     fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
+        self.access_storage_reads += 1;
         const local = self.store.get(key);
         if (local) |_| {
             return .warm;
@@ -347,7 +379,7 @@ pub const MockHost = struct {
     }
 };
 
-fn defaultMessage() Host.Message {
+pub fn defaultMessage() Host.Message {
     return .{
         .depth = 0,
         .sender = addr(0),
@@ -359,6 +391,32 @@ fn defaultMessage() Host.Message {
     };
 }
 
+pub const BytecodeResult = struct {
+    status: evmz.Interpreter.Status,
+    gas_left: i64,
+    gas_refund: i64,
+    stack_top: ?u256,
+};
+
+pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, spec: evmz.Spec) !BytecodeResult {
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = host,
+        .msg = msg,
+        .code = code,
+        .spec = spec,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    return .{
+        .status = result.status,
+        .gas_left = result.gas_left,
+        .gas_refund = result.gas_refund,
+        .stack_top = interpreter.call_frame.stack.peek(),
+    };
+}
+
 pub fn expectBytecodeStatusBySpec(comptime items: anytype, spec: evmz.Spec, expected: evmz.Interpreter.Status) !void {
     const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
@@ -366,16 +424,7 @@ pub fn expectBytecodeStatusBySpec(comptime items: anytype, spec: evmz.Spec, expe
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var interpreter: evmz.Interpreter = undefined;
-    try interpreter.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &bytecode_bytes,
-        .spec = spec,
-    });
-    defer interpreter.deinit();
-
-    const result = interpreter.execute();
+    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, spec);
     try std.testing.expectEqual(expected, result.status);
 }
 
@@ -390,18 +439,9 @@ pub fn expectBytecodeStackTopBySpec(comptime items: anytype, spec: evmz.Spec, ex
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var interpreter: evmz.Interpreter = undefined;
-    try interpreter.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &bytecode_bytes,
-        .spec = spec,
-    });
-    defer interpreter.deinit();
-
-    const result = interpreter.execute();
+    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, spec);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(expected, interpreter.call_frame.stack.peek().?);
+    try std.testing.expectEqual(expected, result.stack_top.?);
 }
 
 pub fn expectLatestForkBytecodeStackTop(comptime items: anytype, expected: u256) !void {
@@ -418,14 +458,14 @@ test "environment opcodes delegate every tx context access to host" {
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var interpreter: evmz.Interpreter = undefined;
-    try interpreter.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode(.{ .ORIGIN, .GASPRICE }),
         .spec = .latest,
     });
-    defer interpreter.deinit();
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
     const result = interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);

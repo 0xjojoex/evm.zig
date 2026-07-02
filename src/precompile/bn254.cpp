@@ -1,4 +1,4 @@
-#include "precompile_bn254.h"
+#include "bn254.h"
 
 #include "evmone_precompiles/bn254.hpp"
 #include <intx/intx.hpp>

@@ -3,12 +3,17 @@ const evmz = @import("evmz");
 const zbench = @import("zbench");
 
 const uint256 = evmz.uint256;
+const scanner = evmz.code.scanner;
 
 const ops_per_run = 256;
+const raw_mask_ops_per_run = 256;
+const raw_mask_sample_len = 4096;
 const bench_config = zbench.Config{
     .max_iterations = 4096,
     .time_budget_ns = 50 * std.time.ns_per_ms,
 };
+
+var raw_mask_bytes: [raw_mask_sample_len]u8 = undefined;
 
 test "micro/arithmetic/sdiv" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
@@ -50,6 +55,19 @@ test "micro/arithmetic/addmod" {
 
     try bench.add("addmod/small", benchAddmodSmall, .{});
     try bench.add("addmod/wide", benchAddmodWide, .{});
+
+    try bench.run(std.testing.io, .stdout());
+}
+
+test "micro/code/raw-masks" {
+    initRawMaskInput();
+
+    var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
+    defer bench.deinit();
+
+    try bench.add("raw-masks/simd-16", benchRawSimdMasks16, .{});
+    try bench.add("raw-masks/scalar-16", benchRawScalarMasks16, .{});
+    try bench.add("raw-masks/scalar-15", benchRawScalarMasks15, .{});
 
     try bench.run(std.testing.io, .stdout());
 }
@@ -188,6 +206,50 @@ fn benchAddmodWide(_: std.mem.Allocator) void {
         const lane: u256 = @intCast(i + 1);
         std.mem.doNotOptimizeAway(lane);
         acc +%= uint256.addMod(max -% lane, 0x1_0000_0000_0000 + lane, modulus);
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn initRawMaskInput() void {
+    var seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    for (&raw_mask_bytes, 0..) |*byte, index| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        byte.* = @truncate(seed >> 24);
+        if (index % 53 == 0) byte.* = @intFromEnum(evmz.Opcode.JUMPDEST);
+        if (index % 47 == 0) byte.* = @intFromEnum(evmz.Opcode.PUSH1) + @as(u8, @truncate(index % 32));
+    }
+    std.mem.doNotOptimizeAway(raw_mask_bytes[0]);
+}
+
+fn benchRawSimdMasks16(_: std.mem.Allocator) void {
+    var acc: u64 = 0;
+    for (0..raw_mask_ops_per_run) |i| {
+        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
+        std.mem.doNotOptimizeAway(index);
+        const masks = scanner.rawSimdMasks(raw_mask_bytes[index..][0..scanner.lanes]);
+        acc +%= masks.push ^ (masks.jumpdest << 1);
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchRawScalarMasks16(_: std.mem.Allocator) void {
+    var acc: u64 = 0;
+    for (0..raw_mask_ops_per_run) |i| {
+        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
+        std.mem.doNotOptimizeAway(index);
+        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0..scanner.lanes]);
+        acc +%= masks.push ^ (masks.jumpdest << 1);
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchRawScalarMasks15(_: std.mem.Allocator) void {
+    var acc: u64 = 0;
+    for (0..raw_mask_ops_per_run) |i| {
+        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
+        std.mem.doNotOptimizeAway(index);
+        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0 .. scanner.lanes - 1]);
+        acc +%= masks.push ^ (masks.jumpdest << 1);
     }
     std.mem.doNotOptimizeAway(acc);
 }

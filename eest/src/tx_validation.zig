@@ -14,6 +14,7 @@ pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
         .insufficient_max_fee_per_blob_gas => "TransactionException.INSUFFICIENT_MAX_FEE_PER_BLOB_GAS",
         .gas_allowance_exceeded => "TransactionException.GAS_ALLOWANCE_EXCEEDED",
         .nonce_is_max => "TransactionException.NONCE_IS_MAX",
+        .nonce_mismatch => "TransactionException.NONCE_MISMATCH",
         .type_1_tx_pre_fork => "TransactionException.TYPE_1_TX_PRE_FORK",
         .type_2_tx_pre_fork => "TransactionException.TYPE_2_TX_PRE_FORK",
         .type_3_tx_pre_fork => "TransactionException.TYPE_3_TX_PRE_FORK",

@@ -98,6 +98,10 @@ pub fn peekN(self: *Stack, n: usize) ?u256 {
     return self.stacks[self.len - n];
 }
 
+pub fn asSlice(self: *const Stack) []const u256 {
+    return self.stacks[0..self.len];
+}
+
 pub fn dump(self: *const Stack) void {
     std.debug.print("--\n", .{});
     std.debug.print("Stack ({d}):\n", .{self.len});

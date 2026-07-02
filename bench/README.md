@@ -2,6 +2,40 @@
 
 This sidecar is for measurement harnesses that are not EEST fixtures.
 
+## Overall Comparison
+
+`zig build compare` is the VM-core scoreboard lane for the VM-loop fixtures. It
+runs each engine through an interpreter-level path: evmz through direct
+`Interpreter.execute`, evmone baseline and advanced through a standalone C++
+runner with analysis prepared once, and revm through the Rust sidecar with
+analyzed `Bytecode`:
+
+```sh
+cd bench
+zig build compare
+zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
+```
+
+From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
+`summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
+
+The executor/transaction comparison is intentionally a later lane. For now
+`evmz-executor` and `evmz-executor-yielding` remain available as diagnostic
+targets, but they are not mixed into the VM-core scoreboard.
+
+Current VM-core rows:
+
+| engine             | level                         | prepared outside timing                                                                           | timed window                                    | transaction/overlay work |
+| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------ |
+| `evmz`             | direct interpreter            | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | `Interpreter.execute`                           | no                       |
+| `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
+| `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
+| `revm-interpreter` | raw interpreter loop          | fixture loading, init-code deployment, `Bytecode` legacy analysis; per-run interpreter/host setup | `Interpreter::run_plain`                        | no                       |
+
+Future transaction/integration rows should stay separate, for example
+`evmz-executor`, `revm-transact`, or an evmone transaction shim. Keep the
+`scope` column visible whenever VM-core rows are compared.
+
 ## Micro Benchmarks
 
 `zig build micro` runs focused zBench tests for inner-loop work. These are
@@ -23,16 +57,18 @@ helpers stay above timer noise. Keep tests split by function or feature so
 
 ## VM-loop Runners
 
-`zig build vm-loop` implements the simple evm-bench fixture protocol for evmz
-and evmone. `zig build revm-vm-loop` runs the same fixtures through revm's
+`zig build vm-loop` implements the simple evm-bench fixture protocol for evmz.
+`zig build evmone-vm-loop` is the standalone C++ analyzed evmone runner used by
+compare/report. `zig build revm-vm-loop` runs the same fixtures through revm's
 low-level interpreter path:
 
 ```sh
 cd bench
 zig build vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
-zig build vm-loop -- --engine evmone --fixture fixtures/vm-loop/ten-thousand-hashes
+zig build evmone-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes --mode baseline
 zig build revm-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
 zig build vm-loop -- --fixture fixtures/vm-loop/erc20-mint --summary
+zig build vm-loop -- --engine evmz --fixture fixtures/vm-loop/erc20-mint --summary
 zig build vm-loop -- \
   --contract-code-path path/to/init-code.hex \
   --call-data 30627b7c \
@@ -44,8 +80,13 @@ runtime bytecode. Stdout contains one millisecond value per run so external
 harnesses can consume it. Use `--summary` for host callback counts on stderr.
 `--fixture` reads `init.hex`, `calldata.hex`, `num-runs.txt`, and
 `host-profile.txt` from a fixture directory. CLI flags override fixture defaults.
-The evmz runner times only `Interpreter.execute()` after call-frame setup. The
-evmone runner uses a fixture-scoped VM and times EVMC `execute()`.
+The default evmz runner is direct `Interpreter.execute()` with metadata prepared
+before timing. Use `--engine evmz-executor` only for the transaction/executor
+diagnostic stub; it prepares bytecode once and times
+`Executor.executePreparedCallTransaction` after transaction setup/reset. Use
+`--engine evmz-executor-yielding` only as a compatibility alias for that same
+yielding executor path. The standalone evmone runner prepares baseline or
+advanced analysis once and times the analyzed execution path.
 
 Host profiles:
 
@@ -56,9 +97,9 @@ Host profiles:
 
 Precompiles and real state execution should stay in dedicated kernel or
 integration lanes. This layer is intentionally about deployed runtime bytecode
-calls. The evmone runner uses the same simple Zig mock host as evmz. The revm
-VM-loop runner analyzes bytecode and times `Interpreter::run_plain()` with a
-small in-memory host; it does not include revm transaction validation,
+calls. The standalone evmone runner and revm sidecar use small in-memory hosts
+for the fixture protocol. The revm VM-loop runner analyzes bytecode and times
+`Interpreter::run_plain()`; it does not include revm transaction validation,
 finalization, or journal/database setup.
 
 ## Host-boundary runner
@@ -113,9 +154,9 @@ bytecode offset.
 cd bench
 zig build kernel -- --case mulmod --case addmod --repeats 5 --warmups 1
 zig build kernel -- --case push-pop --iterations 1000000 --repeats 3
-zig build kernel -- --engine evmz --engine evmz-call-total --engine evmone-baseline --engine evmone --case add
+zig build kernel -- --engine evmz --engine evmone-baseline --engine evmone --case add
 zig build revm-kernel -- --case add --case mulmod
-zig build kernel -- --engine evmz --engine evmz-call-total --engine evmone-baseline --engine evmone --tier edge --tier branch --iterations 10000
+zig build kernel -- --engine evmz --engine evmone-baseline --engine evmone --tier edge --tier branch --iterations 10000
 ```
 
 CSV columns:
@@ -127,10 +168,7 @@ suite,engine,case,repeat,iterations,bytecode_bytes,elapsed_ns,ns_per_iter,gas_us
 The Zig kernel runner supports `evmz`, `evmone-baseline`, and
 `evmone-advanced` (`evmone` is an alias for advanced mode). The `evmz` row
 times only `Interpreter.execute()` after bytecode generation and interpreter
-initialization. Use `evmz-call-total` for an evmz row that includes interpreter
-initialization and bytecode analysis; this is the row to inspect for
-JUMPDEST-heavy or large-bytecode cases. evmone rows time the EVMC `execute`
-call.
+initialization. evmone rows time the EVMC `execute` call.
 
 The revm runner is a small Rust sidecar under `bench/revm`. It emits the same
 CSV columns, but runs through revm's transaction API and reports execution gas
@@ -146,8 +184,8 @@ Case tiers:
 
 ## Comparison report
 
-`zig build report` runs the VM-loop fixtures across evmz/evmone/revm, the
-host-boundary matrix, opcode kernels against evmz/evmone/revm, and a small
+`zig build report` runs the VM-loop fixtures across evmz/evmone/revm,
+the host-boundary matrix, opcode kernels against evmz/evmone/revm, and a small
 representative EEST integration slice. It writes raw CSVs, a Markdown report,
 and a compact evmz checkpoint JSON:
 
@@ -165,8 +203,8 @@ Root delegate:
 zig build bench-report -- --out-dir ../output/bench-report
 ```
 
-The default lane is portable release: Zig `ReleaseFast`, evmone built into the
-Zig bench binary with the same optimization mode, and revm `cargo --release`.
+The default lane is portable release: Zig/C++ runners use `ReleaseFast`, and
+revm uses `cargo --release`.
 Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
 the compact JSON somewhere stable. Use `--baseline <path>` to include

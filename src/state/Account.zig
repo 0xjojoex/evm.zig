@@ -1,8 +1,9 @@
-//! Mutable account record used by the executor overlay and by `MemoryBackend`.
+//! Mutable account record used by the executor overlay and by `MemoryStore`.
 //!
 //! The `storage` map is not the production database. For a client-backed run,
-//! canonical slots are read through `Backend.getStorage`; this map holds slots
-//! that are materialized in a throwaway memory backend or touched by execution.
+//! canonical slots are read through `StateReader.getStorage`; this map holds
+//! slots materialized in a throwaway memory store. Execution writes live in
+//! `Overlay.storage_overlay`.
 
 const std = @import("std");
 

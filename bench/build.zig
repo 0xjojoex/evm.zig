@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
         "micro-optimize",
         "Optimization mode for micro benchmark tests",
     ) orelse if (optimize == .Debug) .ReleaseFast else optimize;
+    const compare_optimize = if (optimize == .Debug) .ReleaseFast else optimize;
     const micro_filter = b.option(
         []const u8,
         "micro-filter",
@@ -25,7 +26,6 @@ pub fn build(b: *std.Build) void {
 
     {
         const vm_loop_mod = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod);
-        addEvmoneVm(vm_loop_mod, evmone_dep, intx_dep);
         const vm_loop = b.addExecutable(.{
             .name = "evmz-vm-loop",
             .root_module = vm_loop_mod,
@@ -122,6 +122,59 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const evmone_vm_loop_mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        addEvmoneVm(evmone_vm_loop_mod, evmone_dep, intx_dep);
+        evmone_vm_loop_mod.addCSourceFile(.{
+            .file = b.path("evmone/vm_loop.cpp"),
+            .flags = &[_][]const u8{
+                "-std=c++20",
+                "-Wall",
+                "-Wextra",
+                "-Wno-missing-field-initializers",
+                "-fno-rtti",
+            },
+        });
+        const evmone_vm_loop = b.addExecutable(.{
+            .name = "evmone-vm-loop",
+            .root_module = evmone_vm_loop_mod,
+        });
+        b.installArtifact(evmone_vm_loop);
+
+        const run_evmone_vm_loop = b.addRunArtifact(evmone_vm_loop);
+        if (b.args) |args| run_evmone_vm_loop.addArgs(args);
+        b.step("evmone-vm-loop", "Run standalone evmone VM-loop fixture runner").dependOn(&run_evmone_vm_loop.step);
+    }
+
+    {
+        const compare_mod = b.createModule(.{
+            .root_source_file = b.path("src/compare.zig"),
+            .target = target,
+            .optimize = compare_optimize,
+        });
+        const compare = b.addExecutable(.{
+            .name = "evmz-compare",
+            .root_module = compare_mod,
+        });
+        b.installArtifact(compare);
+
+        const run_compare = b.addRunArtifact(compare);
+        run_compare.setCwd(b.path("."));
+        run_compare.addArgs(&.{
+            "--zig-exe",
+            b.graph.zig_exe,
+            "--optimize",
+            @tagName(compare_optimize),
+        });
+        if (b.args) |args| run_compare.addArgs(args);
+        b.step("compare", "Run VM-core comparison").dependOn(&run_compare.step);
+    }
+
+    {
         const run_report = b.addSystemCommand(&.{
             "python3",
             "scripts/report.py",
@@ -161,11 +214,7 @@ pub fn build(b: *std.Build) void {
             .root_module = benchModule(b, "src/common.zig", target, optimize, evmz_mod),
         });
         const vm_loop_tests = b.addTest(.{
-            .root_module = blk: {
-                const vm_loop_test_mod = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod);
-                addEvmoneVm(vm_loop_test_mod, evmone_dep, intx_dep);
-                break :blk vm_loop_test_mod;
-            },
+            .root_module = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod),
         });
         const host_boundary_tests = b.addTest(.{
             .root_module = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod),
@@ -183,6 +232,13 @@ pub fn build(b: *std.Build) void {
         const code_analysis_tests = b.addTest(.{
             .root_module = benchModule(b, "src/code_analysis.zig", target, optimize, evmz_mod),
         });
+        const compare_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/compare.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
         const test_step = b.step("test", "Run benchmark sidecar tests");
         test_step.dependOn(&b.addRunArtifact(common_tests).step);
         test_step.dependOn(&b.addRunArtifact(vm_loop_tests).step);
@@ -190,6 +246,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(host_matrix_tests).step);
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
         test_step.dependOn(&b.addRunArtifact(code_analysis_tests).step);
+        test_step.dependOn(&b.addRunArtifact(compare_tests).step);
     }
 }
 

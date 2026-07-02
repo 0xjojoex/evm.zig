@@ -7,7 +7,6 @@ const std = @import("std");
 const addr = evmz.addr;
 
 const CallFrame = Interpreter.CallFrame;
-const max_call_depth = 1024;
 const call_static_gas_floor = 40;
 
 fn wordToGas(word: u256) i64 {
@@ -107,19 +106,20 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
 
     var cost: i64 = if (value > 0) evmz.instruction.call_value_cost else 0;
 
-    if (op == Opcode.CALL and value > 0 and frame.spec.isImpl(.spurious_dragon)) {
-        if (!try frame.host.accountExists(address)) {
+    if (op == Opcode.CALL) {
+        const account_exists = try frame.host.accountExists(address);
+        // EIP-161 narrows the new-account charge to value-bearing CALLs.
+        const charges_new_account = if (frame.spec.isImpl(.spurious_dragon))
+            value > 0 and !account_exists
+        else
+            !account_exists;
+        if (charges_new_account) {
             cost += evmz.instruction.account_creation_cost;
         }
     }
 
     frame.trackGas(cost);
     if (frame.status != .running) return;
-
-    if (frame.msg.depth >= max_call_depth) {
-        frame.stack.pushUnchecked(0);
-        return;
-    }
 
     if (try frame.host.accessDelegatedAccount(address)) |delegated_access_status| {
         const delegated_access_cost: i64 = switch (delegated_access_status) {
@@ -143,22 +143,20 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
         frame.gas_left += 2300;
     }
 
-    const result = (try frame.host.call(msg)).expectCall();
-
-    const child_gas_left = @max(result.gas_left, 0);
-    frame.trackGas(msg.gas - child_gas_left);
-    if (frame.status != .running) return;
-
-    const output_size = @min(out_size_usize, result.output_data.len);
-    frame.memory.writeBytes(out_offset_usize, result.output_data[0..output_size]);
-
-    try frame.replaceReturnData(result.output_data);
-
-    if (result.status == .success) {
-        frame.stack.pushUnchecked(1);
-    } else {
+    if (frame.msg.depth >= Host.max_call_depth) {
         frame.stack.pushUnchecked(0);
+        return;
     }
+
+    const continuation = Interpreter.CallResume{
+        .gas_limit = msg.gas,
+        .out_offset = out_offset_usize,
+        .out_size = out_size_usize,
+    };
+    frame.setPendingAction(.{ .call = .{
+        .msg = msg,
+        .continuation = continuation,
+    } });
 }
 
 pub fn create(frame: *CallFrame) !void {
@@ -228,24 +226,18 @@ pub inline fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
         msg.gas = @min(msg.gas, frame.gas_left - @divFloor(frame.gas_left, 64));
     }
 
-    if (frame.msg.depth >= max_call_depth) {
+    if (frame.msg.depth >= Host.max_call_depth) {
         frame.stack.pushUnchecked(0);
         return;
     }
 
-    const result = (try frame.host.call(msg)).expectCreate();
-
-    const child_gas_left = @max(result.gas_left, 0);
-    frame.trackGas(msg.gas - child_gas_left);
-    if (frame.status != .running) return;
-
-    if (result.status == .success) {
-        try frame.replaceReturnData(&.{});
-        frame.stack.pushUnchecked(evmz.address.toU256(result.address));
-    } else {
-        try frame.replaceReturnData(result.output_data);
-        frame.stack.pushUnchecked(0);
-    }
+    const continuation = Interpreter.CreateResume{
+        .gas_limit = msg.gas,
+    };
+    frame.setPendingAction(.{ .create = .{
+        .msg = msg,
+        .continuation = continuation,
+    } });
 }
 
 pub fn selfdestruct(frame: *CallFrame) !void {
@@ -269,7 +261,7 @@ pub fn selfdestruct(frame: *CallFrame) !void {
 
     const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
 
-    if (should_refund and frame.spec.isImpl(.london)) {
+    if (should_refund and !frame.spec.isImpl(.london)) {
         frame.gas_refund += 24000;
     }
 

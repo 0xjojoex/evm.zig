@@ -22,7 +22,11 @@ pub const Spec = enum(u8) {
     prague,
     osaka,
 
+    /// The latest supported spec.
     pub const latest = Self.osaka;
+
+    /// The latest stable spec.
+    pub const stable = Self.osaka;
 
     const Self = @This();
 

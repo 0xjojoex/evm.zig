@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixture_common = @import("fixture.zig");
 const tx = @import("tx.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -30,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (paths.items.len == 0) {
-        try paths.append(allocator, "../.eest/fixtures/v5.4.0/fixtures/transaction_tests");
+        try paths.append(allocator, try fixture_common.lockedFixturePath(init.io, arena, "transaction_tests"));
     }
 
     var total = tx.Summary{};

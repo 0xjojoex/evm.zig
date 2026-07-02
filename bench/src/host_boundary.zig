@@ -349,20 +349,20 @@ fn runBytecodeHostOp(
         .code_address = common.contract_address,
     };
 
-    var interpreter: Interpreter = undefined;
-    try interpreter.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
         .spec = spec,
     });
-    errdefer interpreter.deinit();
+    errdefer frame.deinit();
+    var interpreter = frame.interpreter();
 
     counting_host.resetCounters();
     const start_ns = try common.monotonicNowNs();
     const result = interpreter.execute();
     const end_ns = try common.monotonicNowNs();
-    interpreter.deinit();
+    frame.deinit();
 
     if (result.status != .success) return error.BytecodeFailed;
     return .{

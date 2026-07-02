@@ -2,7 +2,7 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const Address = evmz.Address;
-const Executor = evmz.Executor;
+const Executor = @import("../executor.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 
@@ -85,9 +85,9 @@ test "block start calls Prague and Cancun system contracts" {
         .parent_beacon_block_root = beacon_root,
     });
 
-    try std.testing.expectEqual(@as(u256, 0xaa), executor.getAccount(history_storage_address).?.getStorage(0));
-    try std.testing.expectEqual(@as(u256, 12), executor.getAccount(beacon_roots_address).?.getStorage(12));
-    try std.testing.expectEqual(@as(u256, 0xbb), executor.getAccount(beacon_roots_address).?.getStorage(8191 + 12));
+    try std.testing.expectEqual(@as(u256, 0xaa), try executor.getStorage(history_storage_address, 0));
+    try std.testing.expectEqual(@as(u256, 12), try executor.getStorage(beacon_roots_address, 12));
+    try std.testing.expectEqual(@as(u256, 0xbb), try executor.getStorage(beacon_roots_address, 8191 + 12));
 
     try std.testing.expectEqual(Interpreter.Status.success, (try executor.executeSystemCall(
         tx_context,

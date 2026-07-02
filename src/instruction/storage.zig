@@ -44,7 +44,8 @@ const StorageCost = struct {
             break :blk actionCost;
         };
 
-        const net_gas = spec.isImpl(.constantinople);
+        // Petersburg disabled EIP-1283; Istanbul reintroduced net metering via EIP-2200.
+        const net_gas = spec == .constantinople or spec.isImpl(.istanbul);
         if (!net_gas) {
             return switch (status) {
                 .added, .deleted_added, .deleted_restored => .{ .cost = action.set, .refund = 0 },
@@ -58,7 +59,7 @@ const StorageCost = struct {
             .added => .{ .cost = action.set, .refund = 0 },
             .deleted => .{ .cost = action.reset, .refund = action.clear },
             .modified => .{ .cost = action.reset, .refund = 0 },
-            .deleted_added => .{ .cost = action.warm_access, .refund = action.clear },
+            .deleted_added => .{ .cost = action.warm_access, .refund = -action.clear },
             .modified_deleted => .{ .cost = action.warm_access, .refund = action.clear },
             .deleted_restored => .{ .cost = action.warm_access, .refund = action.reset - action.warm_access - action.clear },
             .added_deleted => .{ .cost = action.warm_access, .refund = action.set - action.warm_access },
@@ -67,23 +68,32 @@ const StorageCost = struct {
     }
 };
 
+test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
+    try std.testing.expectEqual(StorageCost{ .cost = 200, .refund = 4800 }, StorageCost.getCost(.constantinople, .modified_restored));
+    try std.testing.expectEqual(StorageCost{ .cost = 5000, .refund = 0 }, StorageCost.getCost(.petersburg, .modified_restored));
+    try std.testing.expectEqual(StorageCost{ .cost = 800, .refund = 4200 }, StorageCost.getCost(.istanbul, .modified_restored));
+}
+
 pub fn sstore(frame: *CallFrame) !void {
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
     }
     const key, const value = try frame.stack.popN(2);
 
+    const recipient = frame.msg.recipient;
+    const host = frame.host;
+
     if (frame.spec.isImpl(.istanbul) and frame.gas_left <= 2300) {
         frame.failWithStatus(.out_of_gas);
         return;
     }
 
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
+    if (frame.spec.isImpl(.berlin) and try host.accessStorage(recipient, key) == .cold) {
         frame.trackGas(instruction.cold_sload_cost);
         if (frame.status != .running) return;
     }
 
-    const status = try frame.host.setStorage(frame.msg.recipient, key, value);
+    const status = try host.setStorage(recipient, key, value);
 
     const cost = StorageCost.getCost(frame.spec, status);
 
@@ -94,13 +104,15 @@ pub fn sstore(frame: *CallFrame) !void {
 
 pub fn sload(frame: *CallFrame) !void {
     const key = try frame.stack.pop();
+    const host = frame.host;
+    const recipient = frame.msg.recipient;
 
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessStorage(frame.msg.recipient, key) == .cold) {
+    if (frame.spec.isImpl(.berlin) and try host.accessStorage(recipient, key) == .cold) {
         frame.trackGas(instruction.cold_sload_gas);
         if (frame.status != .running) return;
     }
 
-    const value = try frame.host.getStorage(frame.msg.recipient, key);
+    const value = try host.getStorage(recipient, key);
     frame.stack.pushUnchecked(value);
 }
 
@@ -151,16 +163,46 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     };
     const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
 
-    var interpreter: evmz.Interpreter = undefined;
-    try interpreter.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
         .spec = .berlin,
     });
-    defer interpreter.deinit();
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
     const result = interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
+}
+
+test "cold SLOAD out of gas stops before storage read" {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .sender = evmz.addr(0),
+        .gas = 3 + instruction.cold_sload_cost - 1,
+        .kind = Host.CallKind.call,
+        .recipient = evmz.addr(0),
+        .value = 0,
+        .input_data = &.{},
+    };
+    const bytecode = &.{ 0x60, 0x00, 0x54 };
+
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = bytecode,
+        .spec = .berlin,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
 }

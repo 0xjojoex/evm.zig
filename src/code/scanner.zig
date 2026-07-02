@@ -5,11 +5,6 @@ const t = @import("../t.zig");
 
 pub const lanes = 16;
 
-const jumpdest_opcode = @intFromEnum(Opcode.JUMPDEST);
-const push0_opcode = @intFromEnum(Opcode.PUSH0);
-const push1_opcode = @intFromEnum(Opcode.PUSH1);
-const push32_opcode = @intFromEnum(Opcode.PUSH32);
-
 pub const RawMasks = struct {
     push: u64,
     jumpdest: u64,
@@ -30,8 +25,9 @@ pub fn scan(
     var carry_payload: usize = 0;
 
     while (bytes.len - index >= lanes) : (index += lanes) {
-        const masks = rawSimdMasks(bytes, index);
-        consume(context, index, resolveBoundaryMasks(bytes[index..][0..lanes], masks.push, masks.jumpdest, &carry_payload));
+        const chunk = bytes[index..][0..lanes];
+        const masks = rawSimdMasks(chunk);
+        consume(context, index, resolveBoundaryMasks(chunk, masks.push, masks.jumpdest, &carry_payload));
     }
 
     if (index < bytes.len) {
@@ -51,8 +47,9 @@ pub fn scanFallible(
     var carry_payload: usize = 0;
 
     while (bytes.len - index >= lanes) : (index += lanes) {
-        const masks = rawSimdMasks(bytes, index);
-        try consume(context, index, resolveBoundaryMasks(bytes[index..][0..lanes], masks.push, masks.jumpdest, &carry_payload));
+        const chunk = bytes[index..][0..lanes];
+        const masks = rawSimdMasks(chunk);
+        try consume(context, index, resolveBoundaryMasks(chunk, masks.push, masks.jumpdest, &carry_payload));
     }
 
     if (index < bytes.len) {
@@ -90,28 +87,32 @@ fn numMasks(bit_length: usize) usize {
     return (bit_length + (@bitSizeOf(MaskInt) - 1)) / @bitSizeOf(MaskInt);
 }
 
-fn rawSimdMasks(bytes: []const u8, index: usize) RawMasks {
+pub fn rawSimdMasks(bytes: *const [lanes]u8) RawMasks {
     const Vec = @Vector(lanes, u8);
-    const ptr: *align(1) const Vec = @ptrCast(bytes.ptr + index);
-    const chunk = ptr.*;
+    const chunk: Vec = bytes.*;
     const push_matches = (chunk & @as(Vec, @splat(0xe0))) == @as(Vec, @splat(0x60));
-    const jumpdest_matches = chunk == @as(Vec, @splat(jumpdest_opcode));
+    const jumpdest_matches = chunk == @as(Vec, @splat(Opcode.JUMPDEST.toByte()));
 
-    var push: u64 = 0;
-    var jumpdest: u64 = 0;
-    inline for (0..lanes) |lane| {
-        push |= @as(u64, @intFromBool(push_matches[lane])) << lane;
-        jumpdest |= @as(u64, @intFromBool(jumpdest_matches[lane])) << lane;
-    }
-    return .{ .push = push, .jumpdest = jumpdest };
+    return .{
+        .push = boolVectorMask(push_matches),
+        .jumpdest = boolVectorMask(jumpdest_matches),
+    };
 }
 
-fn rawScalarMasks(bytes: []const u8) RawMasks {
+fn boolVectorMask(matches: @Vector(lanes, bool)) u64 {
+    const Bits = @Vector(lanes, u1);
+    const MaskInt = std.meta.Int(.unsigned, lanes);
+    const bits: Bits = @select(u1, matches, @as(Bits, @splat(1)), @as(Bits, @splat(0)));
+    return @as(u64, @as(MaskInt, @bitCast(bits)));
+}
+
+pub fn rawScalarMasks(bytes: []const u8) RawMasks {
     var push: u64 = 0;
     var jumpdest: u64 = 0;
     for (bytes, 0..) |byte, index| {
-        push |= @as(u64, @intFromBool(byte >= push1_opcode and byte <= push32_opcode)) << @intCast(index);
-        jumpdest |= @as(u64, @intFromBool(byte == jumpdest_opcode)) << @intCast(index);
+        const opcode: Opcode = @enumFromInt(byte);
+        push |= @as(u64, @intFromBool(opcode.isPushN())) << @intCast(index);
+        jumpdest |= @as(u64, @intFromBool(opcode == .JUMPDEST)) << @intCast(index);
     }
     return .{ .push = push, .jumpdest = jumpdest };
 }
@@ -136,7 +137,8 @@ fn resolveBoundaryMasks(bytes: []const u8, raw_push_mask: u64, raw_jumpdest_mask
         const bit_mask = @as(u64, 1) << @intCast(bit);
         if ((payload_mask & bit_mask) != 0) continue;
 
-        const push_len: usize = bytes[bit] - push0_opcode;
+        const opcode: Opcode = @enumFromInt(bytes[bit]);
+        const push_len: usize = opcode.toByte() - Opcode.PUSH0.toByte();
         const payload_start = bit + 1;
         const payload_end = payload_start + push_len;
         if (payload_start < len) {
@@ -165,6 +167,30 @@ fn rangeMask(start: usize, count: usize) u64 {
     return lowMask(count) << @intCast(start);
 }
 
+test "raw SIMD masks match scalar mask bit positions" {
+    var bytes = [_]u8{0} ** lanes;
+
+    inline for (0..lanes) |lane| {
+        bytes = [_]u8{0} ** lanes;
+        bytes[lane] = Opcode.PUSH1.toByte();
+        var expected = @as(u64, 1) << lane;
+        var simd = rawSimdMasks(&bytes);
+        var scalar = rawScalarMasks(&bytes);
+        try std.testing.expectEqual(expected, simd.push);
+        try std.testing.expectEqual(scalar.push, simd.push);
+        try std.testing.expectEqual(scalar.jumpdest, simd.jumpdest);
+
+        bytes = [_]u8{0} ** lanes;
+        bytes[lane] = Opcode.JUMPDEST.toByte();
+        expected = @as(u64, 1) << lane;
+        simd = rawSimdMasks(&bytes);
+        scalar = rawScalarMasks(&bytes);
+        try std.testing.expectEqual(expected, simd.jumpdest);
+        try std.testing.expectEqual(scalar.push, simd.push);
+        try std.testing.expectEqual(scalar.jumpdest, simd.jumpdest);
+    }
+}
+
 test "scanner marks jumpdests while ignoring PUSH payload noise" {
     const bytecode = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
     var map = try Metadata.BitSet.initEmpty(std.testing.allocator, bytecode.len);
@@ -179,10 +205,10 @@ test "scanner marks jumpdests while ignoring PUSH payload noise" {
 
 test "scanner carries PUSH payload across chunks" {
     var bytecode = [_]u8{0} ** 48;
-    bytecode[0] = Opcode.PUSH32.toInt();
-    bytecode[1] = Opcode.JUMPDEST.toInt();
-    bytecode[31] = Opcode.JUMPDEST.toInt();
-    bytecode[33] = Opcode.JUMPDEST.toInt();
+    bytecode[0] = Opcode.PUSH32.toByte();
+    bytecode[1] = Opcode.JUMPDEST.toByte();
+    bytecode[31] = Opcode.JUMPDEST.toByte();
+    bytecode[33] = Opcode.JUMPDEST.toByte();
     var map = try Metadata.BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
 

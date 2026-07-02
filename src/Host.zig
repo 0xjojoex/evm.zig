@@ -5,6 +5,8 @@ const Interpreter = @import("./Interpreter.zig");
 const addr = evmz.addr;
 const Address = evmz.Address;
 
+pub const max_call_depth: u16 = 1024;
+
 pub const Account = struct {
     balance: u256,
 };
@@ -133,7 +135,7 @@ pub const CallKind = enum(u8) {
             Opcode.CREATE => return CallKind.create,
             Opcode.CREATE2 => return CallKind.create2,
             // Opcode.EOFCREATE => return CallKind.eofcreate,
-            inline else => {
+            else => {
                 unreachable;
             },
         }

@@ -11,7 +11,7 @@ Environment overrides:
   EEST_REPO       default: ethereum/execution-spec-tests
   EEST_VERSION    default: v5.4.0
   EEST_ARTIFACT   default: fixtures_stable.tar.gz
-  EEST_DEST       default: ../.eest/fixtures/$EEST_VERSION
+  EEST_DEST       default: ../.eest/fixtures/${EEST_VERSION//@/-}
   EEST_CACHE      default: ../.eest/cache
   EEST_PRUNE_OUT_OF_SCOPE
                    default: 1; excludes client/engine fixtures from extraction
@@ -19,6 +19,10 @@ Environment overrides:
 Example:
   scripts/fetch-eest-fixtures.sh
   zig build eest -- ../.eest/fixtures/v5.4.0/fixtures/state_tests/path/to/test.json
+
+Latest moving test-release fixtures are published on ethereum/execution-specs
+under tests-* tags. The default remains the latest supported stable Osaka
+corpus; override EEST_REPO/EEST_VERSION/EEST_ARTIFACT for newer fork work.
 USAGE
 }
 
@@ -32,11 +36,13 @@ esac
 repo="${EEST_REPO:-ethereum/execution-spec-tests}"
 version="${EEST_VERSION:-v5.4.0}"
 artifact="${EEST_ARTIFACT:-fixtures_stable.tar.gz}"
-dest="${EEST_DEST:-../.eest/fixtures/${version}}"
+version_slug="${version//@/-}"
+url_version="${version//@/%40}"
+dest="${EEST_DEST:-../.eest/fixtures/${version_slug}}"
 cache="${EEST_CACHE:-../.eest/cache}"
 prune_out_of_scope="${EEST_PRUNE_OUT_OF_SCOPE:-1}"
-url="https://github.com/${repo}/releases/download/${version}/${artifact}"
-archive="${cache}/${version}-${artifact}"
+url="https://github.com/${repo}/releases/download/${url_version}/${artifact}"
+archive="${cache}/${version_slug}-${artifact}"
 out_of_scope_tracks=(
   "fixtures/blockchain_tests"
   "fixtures/blockchain_tests_engine"

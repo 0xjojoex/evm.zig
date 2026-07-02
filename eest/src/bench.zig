@@ -4,7 +4,7 @@ const evmone_bench = @import("bench_evmone.zig");
 const fixture_common = @import("fixture.zig");
 
 const Address = evmz.Address;
-const Executor = evmz.Executor;
+const Executor = evmz.executor;
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 const JsonValue = fixture_common.JsonValue;
@@ -12,9 +12,7 @@ const transaction = evmz.transaction;
 
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
-const authorizationListLen = fixture_common.authorizationListLen;
 const jsonString = fixture_common.jsonString;
-const parseAccessListEntry = fixture_common.parseAccessListEntry;
 const parseAddress = fixture_common.parseAddress;
 const parseAddressFromValue = fixture_common.parseAddressFromValue;
 const parseBlobHashes = fixture_common.parseBlobHashes;
@@ -22,9 +20,12 @@ const parseBytesFromValue = fixture_common.parseBytesFromValue;
 const parseFork = fixture_common.parseBenchmarkFork;
 const parseHashFromValue = fixture_common.parseHashFromValue;
 const parseHexInt = fixture_common.parseHexInt;
+const parseTransactionAccessListFromValue = fixture_common.parseTransactionAccessListFromValue;
+const parseTransactionAuthorizationList = fixture_common.parseTransactionAuthorizationList;
 const parseU256FromValue = fixture_common.parseU256FromValue;
 const parseU64FromValue = fixture_common.parseU64FromValue;
-const seedMemoryBackend = fixture_common.seedMemoryBackend;
+const rejectUnknownKeys = fixture_common.rejectUnknownKeys;
+const seedMemoryStore = fixture_common.seedMemoryStore;
 const strip0x = fixture_common.strip0x;
 
 pub const Options = struct {
@@ -55,7 +56,6 @@ pub const Engine = enum {
 pub const SkipReason = enum(u8) {
     unsupported_fork,
     malformed_fixture,
-    create_transaction,
     missing_sender,
     expected_exception,
     missing_post_state,
@@ -65,6 +65,9 @@ pub const SkipReason = enum(u8) {
 pub const FailReason = enum(u8) {
     code_mismatch,
     storage_mismatch,
+    balance_mismatch,
+    nonce_mismatch,
+    transaction_nonce_mismatch,
 };
 
 pub const Summary = struct {
@@ -182,13 +185,15 @@ pub fn runSliceLimited(allocator: std.mem.Allocator, label: []const u8, bytes: [
         const result = runFixture(allocator, entry.value_ptr.*, options) catch |err| {
             switch (err) {
                 error.UnsupportedFork => summary.countSkip(.unsupported_fork),
-                error.CreateTransaction => summary.countSkip(.create_transaction),
                 error.MissingSender => summary.countSkip(.missing_sender),
                 error.ExpectedException => summary.countSkip(.expected_exception),
                 error.MissingPostState => summary.countSkip(.missing_post_state),
                 error.UncheckedPostState => summary.countSkip(.unchecked_post_state),
                 error.CodeMismatch => summary.countFail(.code_mismatch),
                 error.StorageMismatch => summary.countFail(.storage_mismatch),
+                error.BalanceMismatch => summary.countFail(.balance_mismatch),
+                error.NonceMismatch => summary.countFail(.nonce_mismatch),
+                error.TransactionNonceMismatch => summary.countFail(.transaction_nonce_mismatch),
                 else => summary.countSkip(.malformed_fixture),
             }
             if (options.emit_results) {
@@ -261,25 +266,25 @@ fn runFixture(allocator: std.mem.Allocator, fixture: JsonValue, options: Options
 
 const BenchmarkRunner = struct {
     allocator: std.mem.Allocator,
-    backend: *evmz.state.MemoryBackend,
+    store: *evmz.state.MemoryStore,
     executor: Executor,
     engine: Engine,
     evmone: ?evmone_bench.Runner = null,
 
     fn init(allocator: std.mem.Allocator, pre: *const std.json.ObjectMap, spec: evmz.Spec, engine: Engine) !BenchmarkRunner {
-        const backend = try allocator.create(evmz.state.MemoryBackend);
-        errdefer allocator.destroy(backend);
-        backend.* = evmz.state.MemoryBackend.init(allocator);
-        errdefer backend.deinit();
+        const store = try allocator.create(evmz.state.MemoryStore);
+        errdefer allocator.destroy(store);
+        store.* = evmz.state.MemoryStore.init(allocator);
+        errdefer store.deinit();
 
-        try seedMemoryBackend(allocator, backend, pre);
+        try seedMemoryStore(allocator, store, pre);
 
         return .{
             .allocator = allocator,
-            .backend = backend,
+            .store = store,
             .executor = Executor.init(allocator, .{
                 .spec = spec,
-                .backend = backend.backend(),
+                .state_reader = store.reader(),
             }),
             .engine = engine,
         };
@@ -296,8 +301,8 @@ const BenchmarkRunner = struct {
     fn deinit(self: *BenchmarkRunner) void {
         if (self.evmone) |*evmone| evmone.deinit();
         self.executor.deinit();
-        self.backend.deinit();
-        self.allocator.destroy(self.backend);
+        self.store.deinit();
+        self.allocator.destroy(self.store);
     }
 
     fn executeFixture(self: *BenchmarkRunner, fixture: *const std.json.ObjectMap) !ExecuteStats {
@@ -307,7 +312,7 @@ const BenchmarkRunner = struct {
             const block = asObject(block_value) orelse return error.MalformedFixture;
             if (block.get("expectException") != null) return error.ExpectedException;
             const header = asObject(block.get("blockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-            try evmz.Executor.system_contracts.applyBlockStart(
+            try evmz.executor.system_contracts.applyBlockStart(
                 &self.executor,
                 try parseBlockTxContext(self.executor.spec, &header),
                 try parseBlockHeader(&header),
@@ -330,108 +335,115 @@ const BenchmarkRunner = struct {
         tx: *const std.json.ObjectMap,
     ) !ExecuteStats {
         const sender = parseAddressFromValue(tx.get("sender") orelse return error.MissingSender) catch return error.MissingSender;
-        const to_value = tx.get("to") orelse return error.CreateTransaction;
-        const to_string = jsonString(to_value) orelse return error.CreateTransaction;
-        if (strip0x(to_string).len == 0) return error.CreateTransaction;
-
-        const recipient = try parseAddress(to_string);
+        const to_string = jsonString(tx.get("to") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
+        const is_create = strip0x(to_string).len == 0;
+        const recipient = if (is_create) null else try parseAddress(to_string);
         const input = try parseBytesFromValue(self.allocator, tx.get("data") orelse return error.MalformedFixture);
         defer self.allocator.free(input);
         const gas_limit = try parseU64FromValue(tx.get("gasLimit") orelse return error.MalformedFixture);
         const value = try parseU256FromValue(tx.get("value") orelse return error.MalformedFixture);
+        var access_list = try parseTransactionAccessListFromValue(self.allocator, tx.get("accessList"));
+        defer access_list.deinit(self.allocator);
+        var authorization_list = try parseTransactionAuthorizationList(self.allocator, tx, .error_malformed_list);
+        defer authorization_list.deinit(self.allocator);
+        const normalized_tx = if (is_create)
+            transaction.Transaction{ .create = .{
+                .sender = sender,
+                .init_code = input,
+                .gas_limit = gas_limit,
+                .value = value,
+                .access_list = access_list.entries,
+                .authorization_list = authorization_list.entries,
+            } }
+        else
+            transaction.Transaction{ .call = .{
+                .sender = sender,
+                .recipient = recipient.?,
+                .input = input,
+                .gas_limit = gas_limit,
+                .value = value,
+                .access_list = access_list.entries,
+                .authorization_list = authorization_list.entries,
+            } };
         const blob_hashes = try parseBlobHashes(self.allocator, tx);
         defer self.allocator.free(blob_hashes);
+        if (tx.get("nonce")) |nonce_value| {
+            const tx_nonce = try parseU64FromValue(nonce_value);
+            const sender_account = try self.executor.getAccountOrLoad(sender);
+            const sender_nonce = if (sender_account) |account| account.nonce else 0;
+            if (sender_nonce != tx_nonce) return error.TransactionNonceMismatch;
+        }
 
         const tx_context = try parseTxContext(self.executor.spec, header, tx, sender, blob_hashes);
-        try self.executor.beginTransaction(tx_context, sender, recipient);
+        try self.executor.beginTransactionScope(tx_context, normalized_tx);
+        errdefer self.executor.closeTransaction();
 
-        const access_list_counts = try accessListCounts(tx);
-        const authorization_count = authorizationListLen(tx);
-        const intrinsic_gas = transaction.intrinsicGas(self.executor.spec, input, authorization_count, access_list_counts) orelse std.math.maxInt(u64);
-        const minimum_gas = transaction.minimumGas(self.executor.spec, input, authorization_count, access_list_counts) orelse std.math.maxInt(u64);
-        const execution_gas = if (gas_limit >= minimum_gas) gas_limit - intrinsic_gas else null;
-
-        const transaction_charged = if (execution_gas != null)
-            try self.executor.chargeTransactionCosts(sender, gas_limit, value)
-        else
-            false;
-        if (transaction_charged) {
-            try self.executor.incrementNonce(sender);
-            try self.processAccessList(tx);
-            try self.processAuthorizationList(tx);
-        }
-
-        var pre_execution_state = try self.executor.snapshot();
-        defer pre_execution_state.deinit(self.allocator);
-
-        var result = Interpreter.Result{
-            .status = .out_of_gas,
-            .gas_left = 0,
-            .gas_refund = 0,
-            .output_data = &.{},
+        const access_list_counts = transaction.accessListCounts(access_list.entries);
+        const intrinsic_options = transaction.IntrinsicGasOptions{
+            .authorization_count = authorization_list.count,
+            .access_list_counts = access_list_counts,
+            .is_create = is_create,
         };
-        var vm_elapsed_ns: u64 = 0;
-        if (execution_gas) |gas| {
-            if (!transaction_charged) {
-                result.status = .invalid;
-            } else {
-                const start = monotonicNanos();
-                result = switch (self.engine) {
-                    .evmz => try self.executor.executeCallTransaction(sender, recipient, input, gas, value),
-                    .evmone_baseline, .evmone_advanced => try self.evmone.?.executeCallTransaction(sender, recipient, input, gas, value),
-                };
-                vm_elapsed_ns = monotonicNanos() - start;
-            }
-        }
+        const gas_plan = transaction.gasPlan(self.executor.spec, input, gas_limit, intrinsic_options);
+        const base_fee = if (header.get("baseFeePerGas")) |base_fee_value| try parseU256FromValue(base_fee_value) else 0;
+        const settlement = try transactionSettlement(
+            self.executor.spec,
+            tx,
+            gas_limit,
+            gas_plan.intrinsic_gas,
+            tx_context.gas_price,
+            tx_context.coinbase,
+            base_fee,
+        );
 
-        if (Executor.executionRolledBack(result.status)) {
-            try self.executor.restore(&pre_execution_state);
-        } else {
-            try self.executor.finalizeTransaction();
-        }
+        var timed_engine = TimedTransactionEngine{ .runner = self };
+        const result = try self.executor.runTopLevelTransactionWithEngine(normalized_tx, .{
+            .execution_gas = gas_plan.execution_gas,
+            .settlement = settlement,
+        }, timed_engine.engine());
 
         const gas_left = if (result.gas_left > 0) @as(u64, @intCast(result.gas_left)) else 0;
-        return .{ .tx_count = 1, .gas_used = gas_limit - @min(gas_limit, gas_left), .vm_elapsed_ns = vm_elapsed_ns };
+        return .{ .tx_count = 1, .gas_used = gas_limit - @min(gas_limit, gas_left), .vm_elapsed_ns = timed_engine.elapsed_ns };
     }
 
-    fn processAccessList(self: *BenchmarkRunner, tx: *const std.json.ObjectMap) !void {
-        const list = asArray(tx.get("accessList") orelse return) orelse return error.MalformedFixture;
-        for (list.items) |item| {
-            const entry = try parseAccessListEntry(item);
-            try self.executor.warmAccessListAddress(entry.address);
-            for (entry.storage_keys.items) |key_value| {
-                const key = try parseU256FromValue(key_value);
-                try self.executor.warmAccessListStorage(entry.address, key);
-            }
-        }
-    }
+    const TimedTransactionEngine = struct {
+        runner: *BenchmarkRunner,
+        elapsed_ns: u64 = 0,
 
-    fn processAuthorizationList(self: *BenchmarkRunner, tx: *const std.json.ObjectMap) !void {
-        if (!self.executor.spec.isImpl(.prague)) return;
-        const list = asArray(tx.get("authorizationList") orelse return) orelse return error.MalformedFixture;
-        for (list.items) |item| {
-            const auth = asObject(item) orelse continue;
-            const y_parity = parseU256FromValue(auth.get("yParity") orelse auth.get("v") orelse continue) catch continue;
-            const legacy_v = if (auth.get("v")) |value| parseU256FromValue(value) catch continue else null;
-            const r = parseU256FromValue(auth.get("r") orelse continue) catch continue;
-            const s = parseU256FromValue(auth.get("s") orelse continue) catch continue;
-            const chain_id = parseU256FromValue(auth.get("chainId") orelse continue) catch continue;
-            const target = parseAddressFromValue(auth.get("address") orelse continue) catch continue;
-            const signer = parseAddressFromValue(auth.get("signer") orelse continue) catch continue;
-            const nonce_value = parseU256FromValue(auth.get("nonce") orelse continue) catch continue;
-            const nonce = std.math.cast(u64, nonce_value) orelse continue;
-            try self.executor.applyAuthorizationTuple(.{
-                .chain_id = chain_id,
-                .target = target,
-                .signer = signer,
-                .nonce = nonce,
-                .y_parity = y_parity,
-                .legacy_v = legacy_v,
-                .r = r,
-                .s = s,
-            });
+        fn engine(self: *TimedTransactionEngine) Executor.TransactionEngine {
+            return .{ .ptr = self, .execute = execute };
         }
-    }
+
+        fn execute(
+            ptr: ?*anyopaque,
+            executor: *Executor,
+            tx: transaction.Transaction,
+            gas: u64,
+        ) !Interpreter.Result {
+            const self: *TimedTransactionEngine = @ptrCast(@alignCast(ptr.?));
+            const start = monotonicNanos();
+            const result = switch (self.runner.engine) {
+                .evmz => try executor.executeTransactionMessage(tx, gas),
+                .evmone_baseline, .evmone_advanced => switch (tx) {
+                    .call => |call_tx| try self.runner.evmone.?.executeCallTransaction(
+                        call_tx.sender,
+                        call_tx.recipient,
+                        call_tx.input,
+                        gas,
+                        call_tx.value,
+                    ),
+                    .create => |create_tx| try self.runner.evmone.?.executeCreateTransaction(
+                        create_tx.sender,
+                        create_tx.init_code,
+                        gas,
+                        create_tx.value,
+                    ),
+                },
+            };
+            self.elapsed_ns += monotonicNanos() - start;
+            return result;
+        }
+    };
 };
 
 fn comparePostState(
@@ -446,7 +458,22 @@ fn comparePostState(
     while (account_it.next()) |account_entry| {
         const address = try parseAddress(account_entry.key_ptr.*);
         const expected_account = asObject(account_entry.value_ptr.*) orelse return error.MalformedFixture;
+        try rejectUnknownKeys(&expected_account, &.{ "balance", "nonce", "code", "storage" });
         const actual = try runner.executor.getAccountOrLoad(address);
+
+        if (expected_account.get("balance")) |balance_value| {
+            const expected_balance = try parseU256FromValue(balance_value);
+            const actual_balance = if (actual) |account| account.balance else 0;
+            compared_fields += 1;
+            if (actual_balance != expected_balance) return error.BalanceMismatch;
+        }
+
+        if (expected_account.get("nonce")) |nonce_value| {
+            const expected_nonce = try parseU64FromValue(nonce_value);
+            const actual_nonce = if (actual) |account| account.nonce else 0;
+            compared_fields += 1;
+            if (actual_nonce != expected_nonce) return error.NonceMismatch;
+        }
 
         if (expected_account.get("code")) |code_value| {
             const expected_code = try parseBytesFromValue(allocator, code_value);
@@ -462,7 +489,7 @@ fn comparePostState(
             while (storage_it.next()) |slot_entry| {
                 const key = try parseHexInt(u256, slot_entry.key_ptr.*);
                 const expected_value = try parseU256FromValue(slot_entry.value_ptr.*);
-                const actual_value = if (actual) |account| account.getStorage(key) else 0;
+                const actual_value = try runner.executor.getStorage(address, key);
                 compared_fields += 1;
                 if (actual_value != expected_value) return error.StorageMismatch;
             }
@@ -470,6 +497,30 @@ fn comparePostState(
     }
 
     if (compared_fields == 0) return error.UncheckedPostState;
+}
+
+fn transactionSettlement(
+    spec: evmz.Spec,
+    tx: *const std.json.ObjectMap,
+    gas_limit: u64,
+    intrinsic_gas: u64,
+    gas_price: u256,
+    coinbase: Address,
+    base_fee: u256,
+) !transaction.Settlement {
+    return .{
+        .spec = spec,
+        .gas_limit = gas_limit,
+        .intrinsic_gas = intrinsic_gas,
+        .gas_price = gas_price,
+        .priority_fee = transaction.effectivePriorityFee(spec, .{
+            .gas_price = gas_price,
+            .base_fee = base_fee,
+            .max_fee_per_gas = if (tx.get("maxFeePerGas")) |value| try parseU256FromValue(value) else null,
+            .max_priority_fee_per_gas = if (tx.get("maxPriorityFeePerGas")) |value| try parseU256FromValue(value) else null,
+        }),
+        .coinbase = coinbase,
+    };
 }
 
 fn parseTxContext(
@@ -521,7 +572,7 @@ fn parseBlockTxContext(spec: evmz.Spec, header: *const std.json.ObjectMap) !Host
     };
 }
 
-fn parseBlockHeader(header: *const std.json.ObjectMap) !evmz.Executor.system_contracts.BlockHeader {
+fn parseBlockHeader(header: *const std.json.ObjectMap) !evmz.executor.system_contracts.BlockHeader {
     return .{
         .number = if (header.get("number")) |value| try parseU64FromValue(value) else 0,
         .timestamp = if (header.get("timestamp")) |value| try parseU64FromValue(value) else 0,
@@ -533,20 +584,6 @@ fn parseBlockHeader(header: *const std.json.ObjectMap) !evmz.Executor.system_con
 fn parseBlobBaseFee(spec: evmz.Spec, header: *const std.json.ObjectMap) !u256 {
     const excess_blob_gas = if (header.get("excessBlobGas")) |value| try parseU256FromValue(value) else return 0;
     return transaction.blobBaseFeeForSpec(spec, excess_blob_gas) orelse error.Overflow;
-}
-
-fn accessListCounts(tx: *const std.json.ObjectMap) !transaction.AccessListCounts {
-    var result = transaction.AccessListCounts{};
-    const list = asArray(tx.get("accessList") orelse return result) orelse return error.MalformedFixture;
-    for (list.items) |item| {
-        const entry = try parseAccessListEntry(item);
-        result.addresses = std.math.add(usize, result.addresses, 1) catch return error.Overflow;
-        for (entry.storage_keys.items) |key_value| {
-            _ = try parseU256FromValue(key_value);
-            result.storage_keys = std.math.add(usize, result.storage_keys, 1) catch return error.Overflow;
-        }
-    }
-    return result;
 }
 
 fn parseFixtureSpec(fixture: *const std.json.ObjectMap) ?evmz.Spec {
@@ -744,6 +781,34 @@ test "benchmark listing respects match filters and max tests" {
     try std.testing.expectEqual(@as(usize, 0), summary.skipped);
 }
 
+fn runMinimalBenchmarkFixture(tx_extra: []const u8, post_account_fields: []const u8) !Summary {
+    const fixture = try std.mem.concat(std.testing.allocator, u8, &.{
+        "{\"bench_stop\":{\"network\":\"Prague\",\"_info\":{\"opcode_count\":1},\"pre\":{\"0x0000000000000000000000000000000000001000\":{\"balance\":\"0x00\",\"nonce\":\"0x00\",\"code\":\"0x00\",\"storage\":{}},\"0x000000000000000000000000000000000000aaaa\":{\"balance\":\"0xffffffffffff\",\"nonce\":\"0x00\",\"code\":\"0x\",\"storage\":{}}},\"blocks\":[{\"blockHeader\":{\"coinbase\":\"0x0000000000000000000000000000000000000000\",\"gasLimit\":\"0x030d40\",\"number\":\"0x01\",\"timestamp\":\"0x00\",\"baseFeePerGas\":\"0x00\",\"mixHash\":\"0x00\"},\"transactions\":[{\"sender\":\"0x000000000000000000000000000000000000aaaa\",\"to\":\"0x0000000000000000000000000000000000001000\",\"gasLimit\":\"0x0186a0\",\"gasPrice\":\"0x00\",\"value\":\"0x00\",\"data\":\"0x\"",
+        tx_extra,
+        "}]}],\"postState\":{\"0x0000000000000000000000000000000000001000\":{",
+        post_account_fields,
+        "}}}}",
+    });
+    defer std.testing.allocator.free(fixture);
+    return runSlice(std.testing.allocator, "fixture.json", fixture, .{ .iterations = 1, .warmups = 0 });
+}
+
+test "benchmark transaction nonce mismatch fails" {
+    const summary = try runMinimalBenchmarkFixture(",\"nonce\":\"0x01\"", "\"code\":\"0x00\"");
+    try std.testing.expectEqual(@as(usize, 1), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.transaction_nonce_mismatch)]);
+}
+
+test "benchmark post balance and nonce mismatches fail" {
+    const balance = try runMinimalBenchmarkFixture("", "\"balance\":\"0x01\"");
+    try std.testing.expectEqual(@as(usize, 1), balance.failed);
+    try std.testing.expectEqual(@as(usize, 1), balance.fail_reasons[@intFromEnum(FailReason.balance_mismatch)]);
+
+    const nonce = try runMinimalBenchmarkFixture("", "\"nonce\":\"0x01\"");
+    try std.testing.expectEqual(@as(usize, 1), nonce.failed);
+    try std.testing.expectEqual(@as(usize, 1), nonce.fail_reasons[@intFromEnum(FailReason.nonce_mismatch)]);
+}
+
 test "runs a minimal EEST benchmark blockchain fixture" {
     const fixture =
         \\{
@@ -813,6 +878,66 @@ test "runs a minimal EEST benchmark blockchain fixture" {
     try std.testing.expectEqual(@as(usize, 0), evmone_summary.skipped);
 }
 
+test "runs a top-level CREATE benchmark transaction" {
+    const sender = evmz.addr(0xaaaa);
+    const created = evmz.address.create(sender, 0);
+    var created_buf: [42]u8 = undefined;
+    const created_hex = try formatAddressHex(&created_buf, created);
+    const fixture = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "bench_top_level_create": {{
+        \\    "network": "Prague",
+        \\    "_info": {{ "opcode_count": 5 }},
+        \\    "pre": {{
+        \\      "0x000000000000000000000000000000000000aaaa": {{
+        \\        "balance": "0xffffffffffff",
+        \\        "nonce": "0x00",
+        \\        "code": "0x",
+        \\        "storage": {{}}
+        \\      }}
+        \\    }},
+        \\    "blocks": [{{
+        \\      "blockHeader": {{
+        \\        "coinbase": "0x0000000000000000000000000000000000000000",
+        \\        "gasLimit": "0x030d40",
+        \\        "number": "0x01",
+        \\        "timestamp": "0x00",
+        \\        "baseFeePerGas": "0x00",
+        \\        "mixHash": "0x00"
+        \\      }},
+        \\      "transactions": [{{
+        \\        "sender": "0x000000000000000000000000000000000000aaaa",
+        \\        "to": "0x",
+        \\        "gasLimit": "0x030d40",
+        \\        "gasPrice": "0x00",
+        \\        "value": "0x00",
+        \\        "data": "0x600060005360016000f3"
+        \\      }}]
+        \\    }}],
+        \\    "postState": {{
+        \\      "{s}": {{
+        \\        "code": "0x00"
+        \\      }}
+        \\    }}
+        \\  }}
+        \\}}
+    , .{created_hex});
+    defer std.testing.allocator.free(fixture);
+
+    for ([_]Engine{ .evmz, .evmone_advanced }) |engine| {
+        const summary = try runSlice(std.testing.allocator, "fixture.json", fixture, .{
+            .iterations = 1,
+            .warmups = 0,
+            .engine = engine,
+        });
+        try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
+        try std.testing.expectEqual(@as(usize, 1), summary.benchmarked);
+        try std.testing.expectEqual(@as(usize, 1), summary.transactions);
+        try std.testing.expectEqual(@as(usize, 0), summary.failed);
+        try std.testing.expectEqual(@as(usize, 0), summary.skipped);
+    }
+}
+
 test "evmone benchmark host supports CREATE callbacks" {
     const fixture =
         \\{
@@ -870,4 +995,9 @@ test "evmone benchmark host supports CREATE callbacks" {
     try std.testing.expectEqual(@as(usize, 1), summary.transactions);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 0), summary.skipped);
+}
+
+fn formatAddressHex(buffer: *[42]u8, address: Address) ![]const u8 {
+    const hex = std.fmt.bytesToHex(address, .lower);
+    return std.fmt.bufPrint(buffer, "0x{s}", .{&hex});
 }

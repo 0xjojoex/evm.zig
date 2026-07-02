@@ -1,18 +1,21 @@
 //! Executor-owned execution overlay for a transaction or nested call.
 //!
-//! `Backend` provides canonical reads. `Overlay` owns loaded accounts, writes,
+//! `StateReader` provides canonical reads. `Overlay` owns loaded accounts, writes,
 //! warm access state, transient storage, logs, snapshots, reverts, and the
-//! future journal.
+//! execution journal.
 
 const std = @import("std");
+const evmz = @import("../evm.zig");
 const Host = @import("../Host.zig");
-const address_mod = @import("../address.zig");
-const Spec = @import("../spec.zig").Spec;
-const Address = address_mod.Address;
+const Spec = evmz.Spec;
+const trace = @import("../trace.zig");
+const Address = evmz.Address;
 const AccountState = @import("./Account.zig");
-const Storage = @import("./Storage.zig");
-const StorageKey = Storage.Key;
-const StateBackend = @import("./Backend.zig");
+const storage = @import("./storage.zig");
+const StorageKey = storage.Key;
+const StateReader = @import("./StateReader.zig");
+const Changeset = @import("./Changeset.zig");
+const Journal = @import("./Journal.zig");
 
 const Overlay = @This();
 const AccountMap = std.AutoHashMap(Address, AccountState);
@@ -24,7 +27,7 @@ const StorageMap = std.AutoHashMap(StorageKey, u256);
 const TransientStorageMap = std.array_hash_map.Auto(StorageKey, u256);
 
 allocator: std.mem.Allocator,
-backend: ?StateBackend,
+state_reader: ?StateReader,
 accounts: AccountMap,
 warm_accounts: AddressSet,
 warm_storage: StorageSet,
@@ -34,12 +37,16 @@ transient_storage: TransientStorageMap,
 selfdestructed_accounts: AddressSet,
 created_contracts: AddressSet,
 deleted_accounts: AddressSet,
+dirty_accounts: AddressSet,
 logs: std.ArrayList(Host.Log),
+journal: Journal,
+trace_sink: ?*trace.Sink,
+trace_depth: u16,
 
 pub fn init(allocator: std.mem.Allocator) Overlay {
     return .{
         .allocator = allocator,
-        .backend = null,
+        .state_reader = null,
         .accounts = AccountMap.init(allocator),
         .warm_accounts = AddressSet.init(allocator),
         .warm_storage = StorageSet.init(allocator),
@@ -49,13 +56,17 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .selfdestructed_accounts = AddressSet.init(allocator),
         .created_contracts = AddressSet.init(allocator),
         .deleted_accounts = AddressSet.init(allocator),
+        .dirty_accounts = AddressSet.init(allocator),
         .logs = .empty,
+        .journal = Journal.init(),
+        .trace_sink = null,
+        .trace_depth = 0,
     };
 }
 
-pub fn initWithBackend(allocator: std.mem.Allocator, backend: StateBackend) Overlay {
+pub fn initWithStateReader(allocator: std.mem.Allocator, state_reader: StateReader) Overlay {
     var result = Overlay.init(allocator);
-    result.backend = backend;
+    result.state_reader = state_reader;
     return result;
 }
 
@@ -70,7 +81,9 @@ pub fn deinit(self: *Overlay) void {
     self.selfdestructed_accounts.deinit();
     self.created_contracts.deinit();
     self.deleted_accounts.deinit();
+    self.dirty_accounts.deinit();
     self.logs.deinit(self.allocator);
+    self.journal.deinit(self.allocator);
 }
 
 pub fn getAccount(self: *Overlay, address: Address) ?*AccountState {
@@ -80,8 +93,8 @@ pub fn getAccount(self: *Overlay, address: Address) ?*AccountState {
 pub fn getAccountOrLoad(self: *Overlay, address: Address) !?*AccountState {
     if (self.deleted_accounts.contains(address)) return null;
     if (self.accounts.getPtr(address)) |account| return account;
-    const backend = self.backend orelse return null;
-    if (try backend.loadAccount(self.allocator, address)) |account| {
+    const state_reader = self.state_reader orelse return null;
+    if (try state_reader.loadAccount(self.allocator, address)) |account| {
         var loaded = account;
         errdefer loaded.deinit(self.allocator);
         try self.accounts.put(address, loaded);
@@ -91,60 +104,220 @@ pub fn getAccountOrLoad(self: *Overlay, address: Address) !?*AccountState {
 }
 
 pub fn getOrCreateAccount(self: *Overlay, address: Address) !*AccountState {
-    const was_deleted = self.deleted_accounts.remove(address);
-    if (was_deleted) {
+    if (self.deleted_accounts.contains(address)) {
+        try self.journal.append(self.allocator, .{ .deleted_account_revived = address });
+        errdefer self.discardLastJournalEntry();
         try self.accounts.put(address, AccountState.init(self.allocator));
+        _ = self.deleted_accounts.remove(address);
         return self.accounts.getPtr(address).?;
     }
     if (try self.getAccountOrLoad(address)) |account| return account;
     if (!self.accounts.contains(address)) {
+        try self.journal.append(self.allocator, .{ .account_created = address });
+        errdefer self.discardLastJournalEntry();
         try self.accounts.put(address, AccountState.init(self.allocator));
     }
     return self.accounts.getPtr(address).?;
 }
 
 pub fn accountExists(self: *Overlay, address: Address) !bool {
-    if (self.deleted_accounts.contains(address)) return false;
-    if (self.accounts.contains(address)) return true;
-    const backend = self.backend orelse return false;
-    return backend.accountExists(address);
+    const result = blk: {
+        if (self.deleted_accounts.contains(address)) break :blk false;
+        if (self.accounts.contains(address)) break :blk true;
+        const state_reader = self.state_reader orelse break :blk false;
+        break :blk try state_reader.accountExists(address);
+    };
+    self.traceStateRead(.{
+        .account_exists = .{
+            .address = address,
+            .exists = result,
+        },
+    });
+    return result;
 }
 
 pub fn getCode(self: *Overlay, address: Address) ![]const u8 {
-    const account = try self.getAccountOrLoad(address) orelse return &.{};
-    return account.code;
+    const code = if (try self.getAccountOrLoad(address)) |account| account.code else &.{};
+    self.traceStateRead(.{
+        .code = .{
+            .address = address,
+            .size = code.len,
+        },
+    });
+    return code;
 }
 
 pub fn getBalance(self: *Overlay, address: Address) !u256 {
-    const account = try self.getAccountOrLoad(address) orelse return 0;
-    return account.balance;
+    const balance = if (try self.getAccountOrLoad(address)) |account| account.balance else 0;
+    self.traceStateRead(.{
+        .balance = .{
+            .address = address,
+            .value = balance,
+        },
+    });
+    return balance;
+}
+
+pub fn setBalance(self: *Overlay, address: Address, value: u256) !void {
+    const account = try self.getOrCreateAccount(address);
+    const previous = account.balance;
+    try self.journal.append(self.allocator, .{ .balance = .{
+        .address = address,
+        .prev = previous,
+    } });
+    errdefer self.discardLastJournalEntry();
+    const newly_dirty = try self.markAccountDirty(address);
+    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+
+    account.balance = value;
+    self.traceStateWrite(.{
+        .balance = .{
+            .address = address,
+            .previous = previous,
+            .value = value,
+        },
+    });
+}
+
+pub fn addBalance(self: *Overlay, address: Address, value: u256) !void {
+    if (value == 0) return;
+    const current = try self.getBalance(address);
+    try self.setBalance(address, current + value);
+}
+
+pub fn subtractBalance(self: *Overlay, address: Address, value: u256) !bool {
+    if (value == 0) return true;
+    const account = try self.getAccountOrLoad(address) orelse return false;
+    if (account.balance < value) return false;
+    try self.journal.append(self.allocator, .{ .balance = .{
+        .address = address,
+        .prev = account.balance,
+    } });
+    errdefer self.discardLastJournalEntry();
+    const newly_dirty = try self.markAccountDirty(address);
+    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+
+    const previous = account.balance;
+    account.balance -= value;
+    self.traceStateWrite(.{
+        .balance = .{
+            .address = address,
+            .previous = previous,
+            .value = account.balance,
+        },
+    });
+    return true;
+}
+
+pub fn setNonce(self: *Overlay, address: Address, value: u64) !void {
+    const account = try self.getOrCreateAccount(address);
+    try self.journal.append(self.allocator, .{ .nonce = .{
+        .address = address,
+        .prev = account.nonce,
+    } });
+    errdefer self.discardLastJournalEntry();
+    const newly_dirty = try self.markAccountDirty(address);
+    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+
+    const previous = account.nonce;
+    account.nonce = value;
+    self.traceStateWrite(.{
+        .nonce = .{
+            .address = address,
+            .previous = previous,
+            .value = value,
+        },
+    });
+}
+
+pub fn setCode(self: *Overlay, address: Address, code: []const u8) !void {
+    const account = try self.getOrCreateAccount(address);
+    const prev = try self.allocator.dupe(u8, account.code);
+    errdefer self.allocator.free(prev);
+
+    try self.journal.append(self.allocator, .{ .code = .{
+        .address = address,
+        .prev = prev,
+    } });
+    errdefer self.discardLastJournalEntry();
+    const newly_dirty = try self.markAccountDirty(address);
+    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+
+    try account.setCode(self.allocator, code);
+    self.traceStateWrite(.{
+        .code = .{
+            .address = address,
+            .size = code.len,
+        },
+    });
+}
+
+pub fn clearCode(self: *Overlay, address: Address) !void {
+    try self.setCode(address, &.{});
 }
 
 pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
-    if (self.deleted_accounts.contains(address)) return 0;
     const storage_key = StorageKey{ .address = address, .key = key };
-    if (self.storage_overlay.get(storage_key)) |value| return value;
-    if (self.accounts.getPtr(address)) |account| {
-        if (account.storage.get(key)) |value| return value;
-    }
-    const backend = self.backend orelse return 0;
-    return backend.getStorage(address, key);
+    const value = blk: {
+        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address)) break :blk 0;
+        if (self.storage_overlay.count() != 0) {
+            if (self.storage_overlay.get(storage_key)) |overlay_value| break :blk overlay_value;
+        }
+        if (self.accounts.getPtr(address)) |account| {
+            if (account.storage.count() != 0) {
+                if (account.storage.get(key)) |account_value| break :blk account_value;
+            }
+        }
+        const state_reader = self.state_reader orelse break :blk 0;
+        break :blk try state_reader.getStorage(address, key);
+    };
+    self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = value,
+        },
+    });
+    return value;
 }
 
 pub fn setStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStatus {
     const storage_key = StorageKey{ .address = address, .key = key };
-    const had_original = self.original_storage.contains(storage_key);
-    const original = try self.originalStorage(address, key);
-    const current = if (had_original) try self.getStorage(address, key) else original;
-    const account = try self.getOrCreateAccount(address);
+    const overlay_prev = self.storage_overlay.get(storage_key);
+    if (overlay_prev) |current| {
+        if (current == value) return .assigned;
+    }
+
+    const original_entry = try self.original_storage.getOrPut(storage_key);
+    const had_original = original_entry.found_existing;
+    if (!had_original) {
+        errdefer _ = self.original_storage.remove(storage_key);
+        original_entry.value_ptr.* = try self.getStorage(address, key);
+    }
+    const original = original_entry.value_ptr.*;
+    const current = if (had_original) overlay_prev orelse try self.getStorage(address, key) else original;
+    const status = storage.status(original, current, value);
+    if (current == value) return status;
+
+    _ = try self.getOrCreateAccount(address);
+
+    try self.journal.append(self.allocator, .{ .storage = .{
+        .address = address,
+        .key = key,
+        .overlay_had = overlay_prev != null,
+        .overlay_prev = overlay_prev orelse 0,
+    } });
 
     try self.storage_overlay.put(storage_key, value);
-    if (value == 0) {
-        _ = account.storage.remove(key);
-    } else {
-        try account.storage.put(key, value);
-    }
-    return Storage.status(original, current, value);
+    self.traceStateWrite(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .previous = current,
+            .value = value,
+        },
+    });
+    return status;
 }
 
 pub fn originalStorage(self: *Overlay, address: Address, key: u256) !u256 {
@@ -156,40 +329,306 @@ pub fn originalStorage(self: *Overlay, address: Address, key: u256) !u256 {
 }
 
 pub fn accountHasStorage(self: *Overlay, address: Address) !bool {
+    const result = try self.accountHasStorageInner(address);
+    self.traceStateRead(.{
+        .account_has_storage = .{
+            .address = address,
+            .exists = result,
+        },
+    });
+    return result;
+}
+
+fn accountHasStorageInner(self: *Overlay, address: Address) !bool {
     if (self.deleted_accounts.contains(address)) return false;
-    if (self.accounts.getPtr(address)) |account| {
-        if (account.storage.count() != 0) return true;
+    var overlay_it = self.storage_overlay.iterator();
+    while (overlay_it.next()) |entry| {
+        if (entry.value_ptr.* != 0 and std.mem.eql(u8, &entry.key_ptr.address, &address)) return true;
     }
-    const backend = self.backend orelse return false;
-    return backend.accountHasStorage(address);
+    if (self.accounts.getPtr(address)) |account| {
+        var storage_it = account.storage.iterator();
+        while (storage_it.next()) |entry| {
+            if (entry.value_ptr.* == 0) continue;
+            const storage_key = StorageKey{ .address = address, .key = entry.key_ptr.* };
+            if (self.storage_overlay.get(storage_key)) |overlay_value| {
+                if (overlay_value != 0) return true;
+            } else {
+                return true;
+            }
+        }
+    }
+    const state_reader = self.state_reader orelse return false;
+    return state_reader.accountHasStorage(address);
 }
 
 pub fn beginTransaction(self: *Overlay) void {
+    self.logs.clearRetainingCapacity();
+    self.closeTransaction();
+}
+
+pub fn closeTransaction(self: *Overlay) void {
     self.warm_accounts.clearRetainingCapacity();
     self.warm_storage.clearRetainingCapacity();
     self.transient_storage.clearRetainingCapacity();
     self.original_storage.clearRetainingCapacity();
+    self.journal.clearRetainingCapacity(self.allocator);
+}
+
+pub fn discardChanges(self: *Overlay) void {
+    self.closeTransaction();
+    self.clearAccounts();
+    self.storage_overlay.clearRetainingCapacity();
+    self.selfdestructed_accounts.clearRetainingCapacity();
+    self.created_contracts.clearRetainingCapacity();
+    self.deleted_accounts.clearRetainingCapacity();
+    self.dirty_accounts.clearRetainingCapacity();
+    self.logs.clearRetainingCapacity();
 }
 
 pub fn warmAccount(self: *Overlay, address: Address) !void {
+    if (self.warm_accounts.contains(address)) return;
+    try self.journal.append(self.allocator, .{ .warm_account = address });
+    errdefer self.discardLastJournalEntry();
     try self.warm_accounts.put(address, {});
+    self.traceStateWrite(.{
+        .warm_account = .{
+            .address = address,
+        },
+    });
 }
 
 pub fn warmStorage(self: *Overlay, address: Address, key: u256) !void {
-    try self.warm_storage.put(.{ .address = address, .key = key }, {});
+    const storage_key = StorageKey{ .address = address, .key = key };
+    if (self.warm_storage.contains(storage_key)) return;
+    try self.journal.append(self.allocator, .{ .warm_storage = storage_key });
+    errdefer self.discardLastJournalEntry();
+    try self.warm_storage.put(storage_key, {});
+    self.traceStateWrite(.{
+        .warm_storage = .{
+            .address = address,
+            .key = key,
+        },
+    });
 }
 
 pub fn getTransientStorage(self: *Overlay, address: Address, key: u256) u256 {
-    return self.transient_storage.get(.{ .address = address, .key = key }) orelse 0;
+    const value = self.transient_storage.get(.{ .address = address, .key = key }) orelse 0;
+    self.traceStateRead(.{
+        .transient_storage = .{
+            .address = address,
+            .key = key,
+            .value = value,
+        },
+    });
+    return value;
 }
 
 pub fn setTransientStorage(self: *Overlay, address: Address, key: u256, value: u256) !void {
     const storage_key = StorageKey{ .address = address, .key = key };
+    const prev = self.transient_storage.get(storage_key);
+    try self.journal.append(self.allocator, .{ .transient_storage = .{
+        .address = address,
+        .key = key,
+        .had_value = prev != null,
+        .prev = prev orelse 0,
+    } });
     if (value == 0) {
         _ = self.transient_storage.swapRemove(storage_key);
     } else {
         try self.transient_storage.put(self.allocator, storage_key, value);
     }
+    self.traceStateWrite(.{
+        .transient_storage = .{
+            .address = address,
+            .key = key,
+            .previous = prev orelse 0,
+            .value = value,
+        },
+    });
+}
+
+pub fn emitLog(self: *Overlay, event_log: Host.Log) !void {
+    try self.logs.append(self.allocator, event_log);
+    self.traceStateWrite(.{
+        .log = .{
+            .address = event_log.address,
+            .topics_len = event_log.topics.len,
+            .data_size = event_log.data.len,
+        },
+    });
+}
+
+pub fn markCreatedContract(self: *Overlay, address: Address) !void {
+    if (self.created_contracts.contains(address)) return;
+    try self.journal.append(self.allocator, .{ .created_contract = address });
+    errdefer self.discardLastJournalEntry();
+    try self.created_contracts.put(address, {});
+    self.traceStateWrite(.{
+        .created_contract = .{
+            .address = address,
+        },
+    });
+}
+
+pub fn markSelfdestructed(self: *Overlay, address: Address) !void {
+    if (self.selfdestructed_accounts.contains(address)) return;
+    try self.journal.append(self.allocator, .{ .selfdestruct = address });
+    errdefer self.discardLastJournalEntry();
+    try self.selfdestructed_accounts.put(address, {});
+    self.traceStateWrite(.{
+        .selfdestruct = .{
+            .address = address,
+        },
+    });
+}
+
+pub fn checkpoint(self: *const Overlay) Journal.Checkpoint {
+    const checkpoint_state = self.journal.checkpoint(self.logs.items.len);
+    self.traceCheckpoint(.checkpoint, checkpoint_state);
+    return checkpoint_state;
+}
+
+pub fn commitCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) void {
+    self.traceCheckpoint(.commit, checkpoint_state);
+}
+
+pub fn revertToCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) !void {
+    while (self.journal.len() > checkpoint_state.journal_len) {
+        var entry = self.journal.pop().?;
+        defer entry.deinit(self.allocator);
+        try self.revertJournalEntry(&entry);
+    }
+    self.logs.items.len = checkpoint_state.logs_len;
+    self.traceCheckpoint(.revert, checkpoint_state);
+}
+
+fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) !void {
+    switch (entry.*) {
+        .account_created => |address| {
+            if (self.accounts.fetchRemove(address)) |removed| {
+                var account = removed.value;
+                account.deinit(self.allocator);
+            }
+        },
+        .deleted_account_revived => |address| {
+            if (self.accounts.fetchRemove(address)) |removed| {
+                var account = removed.value;
+                account.deinit(self.allocator);
+            }
+            try self.deleted_accounts.put(address, {});
+        },
+        .dirty_account => |address| {
+            _ = self.dirty_accounts.remove(address);
+        },
+        .balance => |balance| {
+            if (self.accounts.getPtr(balance.address)) |account| {
+                account.balance = balance.prev;
+            }
+        },
+        .nonce => |nonce| {
+            if (self.accounts.getPtr(nonce.address)) |account| {
+                account.nonce = nonce.prev;
+            }
+        },
+        .code => |*code| {
+            if (self.accounts.getPtr(code.address)) |account| {
+                self.allocator.free(account.code);
+                account.code = code.prev;
+                code.prev = &.{};
+            }
+        },
+        .account_removed => |*removed| {
+            if (removed.prev) |account| {
+                if (self.accounts.fetchRemove(removed.address)) |existing| {
+                    var existing_account = existing.value;
+                    existing_account.deinit(self.allocator);
+                }
+                try self.accounts.put(removed.address, account);
+                removed.prev = null;
+            }
+        },
+        .storage => |storage_entry| {
+            const storage_key = StorageKey{ .address = storage_entry.address, .key = storage_entry.key };
+            if (storage_entry.overlay_had) {
+                try self.storage_overlay.put(storage_key, storage_entry.overlay_prev);
+            } else {
+                _ = self.storage_overlay.remove(storage_key);
+            }
+        },
+        .transient_storage => |storage_entry| {
+            const storage_key = StorageKey{ .address = storage_entry.address, .key = storage_entry.key };
+            if (storage_entry.had_value) {
+                try self.transient_storage.put(self.allocator, storage_key, storage_entry.prev);
+            } else {
+                _ = self.transient_storage.swapRemove(storage_key);
+            }
+        },
+        .warm_account => |address| {
+            _ = self.warm_accounts.remove(address);
+        },
+        .warm_storage => |storage_key| {
+            _ = self.warm_storage.remove(storage_key);
+        },
+        .created_contract => |address| {
+            _ = self.created_contracts.remove(address);
+        },
+        .selfdestruct => |address| {
+            _ = self.selfdestructed_accounts.remove(address);
+        },
+        .deleted_account_marked => |address| {
+            _ = self.deleted_accounts.remove(address);
+        },
+        .created_contract_cleared => |address| {
+            try self.created_contracts.put(address, {});
+        },
+        .selfdestruct_cleared => |address| {
+            try self.selfdestructed_accounts.put(address, {});
+        },
+        .storage_overlay_removed => |removed| {
+            try self.storage_overlay.put(removed.key, removed.prev);
+        },
+    }
+}
+
+fn markAccountDirty(self: *Overlay, address: Address) !bool {
+    if (self.dirty_accounts.contains(address)) return false;
+    try self.journal.append(self.allocator, .{ .dirty_account = address });
+    errdefer self.discardLastJournalEntry();
+    try self.dirty_accounts.put(address, {});
+    return true;
+}
+
+fn undoAccountDirtyMark(self: *Overlay, address: Address) void {
+    _ = self.dirty_accounts.remove(address);
+    self.discardLastJournalEntry();
+}
+
+fn traceStateRead(self: *const Overlay, event: trace.StateRead) void {
+    const sink = self.trace_sink orelse return;
+    if (!sink.wantsStateReadKind(event.kind())) return;
+    sink.stateRead(event.withDepth(self.trace_depth));
+}
+
+fn traceStateWrite(self: *const Overlay, event: trace.StateWrite) void {
+    const sink = self.trace_sink orelse return;
+    if (!sink.wantsStateWriteKind(event.kind())) return;
+    sink.stateWrite(event.withDepth(self.trace_depth));
+}
+
+fn traceCheckpoint(self: *const Overlay, kind: trace.CheckpointKind, checkpoint_state: Journal.Checkpoint) void {
+    const sink = self.trace_sink orelse return;
+    if (!sink.wantsCheckpoint()) return;
+    sink.checkpoint(.{
+        .kind = kind,
+        .depth = self.trace_depth,
+        .journal_len = checkpoint_state.journal_len,
+        .logs_len = checkpoint_state.logs_len,
+    });
+}
+
+fn discardLastJournalEntry(self: *Overlay) void {
+    var entry = self.journal.pop() orelse return;
+    entry.deinit(self.allocator);
 }
 
 pub fn snapshot(self: *Overlay) !Snapshot {
@@ -202,7 +641,9 @@ pub fn snapshot(self: *Overlay) !Snapshot {
         .selfdestructed_accounts = AddressSet.init(self.allocator),
         .created_contracts = AddressSet.init(self.allocator),
         .deleted_accounts = AddressSet.init(self.allocator),
+        .dirty_accounts = AddressSet.init(self.allocator),
         .logs_len = self.logs.items.len,
+        .journal_len = self.journal.len(),
     };
     errdefer result.deinit(self.allocator);
 
@@ -248,64 +689,23 @@ pub fn snapshot(self: *Overlay) !Snapshot {
         try result.deleted_accounts.put(address.*, {});
     }
 
+    var dirty_it = self.dirty_accounts.keyIterator();
+    while (dirty_it.next()) |address| {
+        try result.dirty_accounts.put(address.*, {});
+    }
+
     return result;
 }
 
 pub fn restore(self: *Overlay, snapshot_state: *Snapshot) !void {
-    self.clearAccounts();
-    self.warm_accounts.clearRetainingCapacity();
-    self.warm_storage.clearRetainingCapacity();
-    self.storage_overlay.clearRetainingCapacity();
-    self.transient_storage.clearRetainingCapacity();
-    self.selfdestructed_accounts.clearRetainingCapacity();
-    self.created_contracts.clearRetainingCapacity();
-    self.deleted_accounts.clearRetainingCapacity();
-    self.logs.items.len = snapshot_state.logs_len;
-
-    var account_it = snapshot_state.accounts.iterator();
-    while (account_it.next()) |entry| {
-        var account = try entry.value_ptr.clone(self.allocator);
-        errdefer account.deinit(self.allocator);
-        try self.accounts.put(entry.key_ptr.*, account);
-    }
-
-    var warm_account_it = snapshot_state.warm_accounts.keyIterator();
-    while (warm_account_it.next()) |address| {
-        try self.warm_accounts.put(address.*, {});
-    }
-
-    var warm_storage_it = snapshot_state.warm_storage.keyIterator();
-    while (warm_storage_it.next()) |key| {
-        try self.warm_storage.put(key.*, {});
-    }
-
-    var storage_overlay_it = snapshot_state.storage_overlay.iterator();
-    while (storage_overlay_it.next()) |entry| {
-        try self.storage_overlay.put(entry.key_ptr.*, entry.value_ptr.*);
-    }
-
-    var transient_it = snapshot_state.transient_storage.iterator();
-    while (transient_it.next()) |entry| {
-        try self.transient_storage.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
-    }
-
-    var selfdestruct_it = snapshot_state.selfdestructed_accounts.keyIterator();
-    while (selfdestruct_it.next()) |address| {
-        try self.selfdestructed_accounts.put(address.*, {});
-    }
-
-    var created_it = snapshot_state.created_contracts.keyIterator();
-    while (created_it.next()) |address| {
-        try self.created_contracts.put(address.*, {});
-    }
-
-    var deleted_it = snapshot_state.deleted_accounts.keyIterator();
-    while (deleted_it.next()) |address| {
-        try self.deleted_accounts.put(address.*, {});
-    }
+    try self.restoreFromSnapshot(snapshot_state);
 }
 
 pub fn restoreRevertible(self: *Overlay, snapshot_state: *Snapshot) !void {
+    try self.restoreFromSnapshot(snapshot_state);
+}
+
+fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.clearAccounts();
     self.warm_accounts.clearRetainingCapacity();
     self.warm_storage.clearRetainingCapacity();
@@ -314,7 +714,9 @@ pub fn restoreRevertible(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.selfdestructed_accounts.clearRetainingCapacity();
     self.created_contracts.clearRetainingCapacity();
     self.deleted_accounts.clearRetainingCapacity();
+    self.dirty_accounts.clearRetainingCapacity();
     self.logs.items.len = snapshot_state.logs_len;
+    self.journal.truncate(self.allocator, snapshot_state.journal_len);
 
     var account_it = snapshot_state.accounts.iterator();
     while (account_it.next()) |entry| {
@@ -356,6 +758,11 @@ pub fn restoreRevertible(self: *Overlay, snapshot_state: *Snapshot) !void {
     var deleted_it = snapshot_state.deleted_accounts.keyIterator();
     while (deleted_it.next()) |address| {
         try self.deleted_accounts.put(address.*, {});
+    }
+
+    var dirty_it = snapshot_state.dirty_accounts.keyIterator();
+    while (dirty_it.next()) |address| {
+        try self.dirty_accounts.put(address.*, {});
     }
 }
 
@@ -368,33 +775,126 @@ pub fn clearAccounts(self: *Overlay) void {
 }
 
 pub fn finalizeTransaction(self: *Overlay, spec: Spec) !void {
+    var finalized_accounts: std.ArrayList(Address) = .empty;
+    defer finalized_accounts.deinit(self.allocator);
+    var newly_deleted_accounts: std.ArrayList(Address) = .empty;
+    defer newly_deleted_accounts.deinit(self.allocator);
+    var removed_storage_keys: std.ArrayList(StorageKey) = .empty;
+    defer removed_storage_keys.deinit(self.allocator);
+
+    const journal_len = self.journal.len();
+    errdefer self.journal.truncate(self.allocator, journal_len);
+
     var it = self.selfdestructed_accounts.keyIterator();
     while (it.next()) |address| {
+        try self.journal.append(self.allocator, .{ .selfdestruct_cleared = address.* });
         if (spec.isImpl(.cancun) and !self.created_contracts.contains(address.*)) continue;
-        if (self.accounts.fetchRemove(address.*)) |removed| {
+        try finalized_accounts.append(self.allocator, address.*);
+        try self.journalAccountRemoved(address.*);
+        try self.journalStorageOverlayRemovedForAddress(address.*, &removed_storage_keys);
+        if (!self.deleted_accounts.contains(address.*)) {
+            try newly_deleted_accounts.append(self.allocator, address.*);
+            try self.journal.append(self.allocator, .{ .deleted_account_marked = address.* });
+        }
+    }
+
+    var created_it = self.created_contracts.keyIterator();
+    while (created_it.next()) |address| {
+        try self.journal.append(self.allocator, .{ .created_contract_cleared = address.* });
+    }
+
+    try self.deleted_accounts.ensureUnusedCapacity(@intCast(newly_deleted_accounts.items.len));
+
+    for (finalized_accounts.items) |address| {
+        if (self.accounts.fetchRemove(address)) |removed| {
             var account = removed.value;
             account.deinit(self.allocator);
         }
-        try self.removeStorageForAddress(address.*);
-        try self.deleted_accounts.put(address.*, {});
+        self.traceStateWrite(.{
+            .account_deleted = .{
+                .address = address,
+            },
+        });
     }
+    for (removed_storage_keys.items) |key| {
+        _ = self.storage_overlay.remove(key);
+    }
+    for (newly_deleted_accounts.items) |address| {
+        self.deleted_accounts.putAssumeCapacity(address, {});
+    }
+
     self.selfdestructed_accounts.clearRetainingCapacity();
     self.created_contracts.clearRetainingCapacity();
 }
 
-fn removeStorageForAddress(self: *Overlay, address: Address) !void {
-    var keys: std.ArrayList(StorageKey) = .empty;
-    defer keys.deinit(self.allocator);
+pub fn changeset(self: *Overlay) !Changeset {
+    var result = Changeset.init();
+    errdefer result.deinit(self.allocator);
 
-    var it = self.storage_overlay.keyIterator();
-    while (it.next()) |key| {
-        if (std.mem.eql(u8, &key.address, &address)) {
-            try keys.append(self.allocator, key.*);
+    var dirty_it = self.dirty_accounts.keyIterator();
+    while (dirty_it.next()) |dirty_address| {
+        const address = dirty_address.*;
+        if (self.deleted_accounts.contains(address)) continue;
+        const account = self.accounts.getPtr(address) orelse continue;
+
+        {
+            const code = try self.allocator.dupe(u8, account.code);
+            errdefer self.allocator.free(code);
+            try result.account_updates.append(self.allocator, .{
+                .address = address,
+                .nonce = account.nonce,
+                .balance = account.balance,
+                .code = code,
+            });
         }
     }
 
-    for (keys.items) |key| {
-        _ = self.storage_overlay.remove(key);
+    var deleted_it = self.deleted_accounts.keyIterator();
+    while (deleted_it.next()) |address| {
+        try result.account_deletes.append(self.allocator, address.*);
+    }
+
+    var storage_it = self.storage_overlay.iterator();
+    while (storage_it.next()) |entry| {
+        if (self.deleted_accounts.contains(entry.key_ptr.address)) continue;
+        try result.storage_writes.append(self.allocator, .{
+            .address = entry.key_ptr.address,
+            .key = entry.key_ptr.key,
+            .value = entry.value_ptr.*,
+        });
+    }
+
+    result.sort();
+    return result;
+}
+
+fn journalAccountRemoved(self: *Overlay, address: Address) !void {
+    var prev: ?AccountState = if (self.accounts.getPtr(address)) |account|
+        try account.clone(self.allocator)
+    else
+        null;
+    errdefer if (prev) |*account| account.deinit(self.allocator);
+
+    try self.journal.append(self.allocator, .{ .account_removed = .{
+        .address = address,
+        .prev = prev,
+    } });
+}
+
+fn journalStorageOverlayRemovedForAddress(
+    self: *Overlay,
+    address: Address,
+    removed_keys: *std.ArrayList(StorageKey),
+) !void {
+    var it = self.storage_overlay.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, &entry.key_ptr.address, &address)) {
+            try removed_keys.append(self.allocator, entry.key_ptr.*);
+            try self.journal.append(self.allocator, .{ .storage_overlay_removed = .{
+                .key = entry.key_ptr.*,
+                .prev = entry.value_ptr.*,
+            } });
+        }
     }
 }
 
@@ -430,7 +930,9 @@ pub const Snapshot = struct {
     selfdestructed_accounts: AddressSet,
     created_contracts: AddressSet,
     deleted_accounts: AddressSet,
+    dirty_accounts: AddressSet,
     logs_len: usize,
+    journal_len: usize,
 
     pub fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
         var account_it = self.accounts.valueIterator();
@@ -445,6 +947,7 @@ pub const Snapshot = struct {
         self.selfdestructed_accounts.deinit();
         self.created_contracts.deinit();
         self.deleted_accounts.deinit();
+        self.dirty_accounts.deinit();
     }
 };
 
@@ -456,128 +959,6 @@ pub const TransientSnapshot = struct {
     }
 };
 
-test "snapshot restores accounts and warm state" {
-    var overlay = Overlay.init(std.testing.allocator);
-    defer overlay.deinit();
-
-    const test_address = address_mod.addr(1);
-    var account = try overlay.getOrCreateAccount(test_address);
-    account.balance = 7;
-    try overlay.warm_accounts.put(test_address, {});
-
-    var snapshot_state = try overlay.snapshot();
-    defer snapshot_state.deinit(std.testing.allocator);
-
-    account = try overlay.getOrCreateAccount(test_address);
-    account.balance = 9;
-    overlay.warm_accounts.clearRetainingCapacity();
-
-    try overlay.restore(&snapshot_state);
-    try std.testing.expectEqual(@as(u256, 7), overlay.getAccount(test_address).?.balance);
-    try std.testing.expect(overlay.warm_accounts.contains(test_address));
-}
-
-test "revertible snapshot restores warm state" {
-    var overlay = Overlay.init(std.testing.allocator);
-    defer overlay.deinit();
-
-    const warm_before = address_mod.addr(1);
-    const warm_after = address_mod.addr(2);
-    try overlay.warm_accounts.put(warm_before, {});
-    try overlay.warm_storage.put(.{ .address = warm_before, .key = 1 }, {});
-
-    var snapshot_state = try overlay.snapshot();
-    defer snapshot_state.deinit(std.testing.allocator);
-
-    try overlay.warm_accounts.put(warm_after, {});
-    try overlay.warm_storage.put(.{ .address = warm_after, .key = 2 }, {});
-
-    try overlay.restoreRevertible(&snapshot_state);
-    try std.testing.expect(overlay.warm_accounts.contains(warm_before));
-    try std.testing.expect(!overlay.warm_accounts.contains(warm_after));
-    try std.testing.expect(overlay.warm_storage.contains(.{ .address = warm_before, .key = 1 }));
-    try std.testing.expect(!overlay.warm_storage.contains(.{ .address = warm_after, .key = 2 }));
-}
-
-const TestBackend = struct {
-    address: Address,
-    key: u256,
-    value: u256,
-    balance: u256,
-    load_count: usize = 0,
-    storage_reads: usize = 0,
-
-    fn backend(self: *TestBackend) StateBackend {
-        return .{ .ptr = self, .vtable = &.{
-            .accountExists = backendAccountExists,
-            .loadAccount = backendLoadAccount,
-            .getStorage = backendGetStorage,
-            .accountHasStorage = backendAccountHasStorage,
-        } };
-    }
-
-    fn backendAccountExists(ptr: *anyopaque, address: Address) !bool {
-        const self: *TestBackend = @ptrCast(@alignCast(ptr));
-        return std.mem.eql(u8, &self.address, &address);
-    }
-
-    fn backendLoadAccount(ptr: *anyopaque, allocator: std.mem.Allocator, address: Address) !?AccountState {
-        const self: *TestBackend = @ptrCast(@alignCast(ptr));
-        if (!std.mem.eql(u8, &self.address, &address)) return null;
-        self.load_count += 1;
-
-        var account = AccountState.init(allocator);
-        errdefer account.deinit(allocator);
-        account.balance = self.balance;
-        try account.setCode(allocator, &.{0x5f});
-        return account;
-    }
-
-    fn backendGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
-        const self: *TestBackend = @ptrCast(@alignCast(ptr));
-        self.storage_reads += 1;
-        if (std.mem.eql(u8, &self.address, &address) and key == self.key) return self.value;
-        return 0;
-    }
-
-    fn backendAccountHasStorage(ptr: *anyopaque, address: Address) !bool {
-        const self: *TestBackend = @ptrCast(@alignCast(ptr));
-        return std.mem.eql(u8, &self.address, &address) and self.value != 0;
-    }
-};
-
-test "backend loads account and storage lazily" {
-    const address = address_mod.addr(0xbeef);
-    var backend = TestBackend{
-        .address = address,
-        .key = 7,
-        .value = 0xab,
-        .balance = 0x1234,
-    };
-    var overlay = Overlay.initWithBackend(std.testing.allocator, backend.backend());
-    defer overlay.deinit();
-
-    try std.testing.expect(try overlay.accountExists(address));
-    try std.testing.expectEqual(@as(u256, 0x1234), try overlay.getBalance(address));
-    try std.testing.expectEqualSlices(u8, &.{0x5f}, try overlay.getCode(address));
-    try std.testing.expectEqual(@as(u256, 0xab), try overlay.getStorage(address, 7));
-    try std.testing.expectEqual(@as(usize, 1), backend.load_count);
-    try std.testing.expectEqual(@as(usize, 1), backend.storage_reads);
-}
-
-test "zero storage write masks backend value" {
-    const address = address_mod.addr(0xbeef);
-    var backend = TestBackend{
-        .address = address,
-        .key = 7,
-        .value = 0xab,
-        .balance = 0,
-    };
-    var overlay = Overlay.initWithBackend(std.testing.allocator, backend.backend());
-    defer overlay.deinit();
-
-    overlay.beginTransaction();
-    try std.testing.expectEqual(Host.StorageStatus.deleted, try overlay.setStorage(address, 7, 0));
-    try std.testing.expectEqual(@as(u256, 0), try overlay.getStorage(address, 7));
-    try std.testing.expectEqual(@as(usize, 1), backend.storage_reads);
+test {
+    _ = @import("./Overlay_test.zig");
 }

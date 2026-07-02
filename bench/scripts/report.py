@@ -26,7 +26,7 @@ DEFAULT_EEST_ROOT = (
     REPO_ROOT
     / ".eest"
     / "benchmarks"
-    / "benchmark-v0.0.7"
+    / "tests-benchmark-v0.0.9"
     / "fixtures"
     / "blockchain_tests"
     / "benchmark"
@@ -45,7 +45,8 @@ VM_LOOP_FIXTURES = (
     "fixtures/vm-loop/erc20-transfer",
 )
 
-VM_LOOP_ENGINES = ("evmz", "evmone-baseline", "evmone", "revm")
+VM_LOOP_BASELINE_ENGINE = "evmz"
+VM_LOOP_ENGINES = (VM_LOOP_BASELINE_ENGINE, "evmone-baseline", "evmone", "revm")
 
 EEST_CASES = (
     {
@@ -200,6 +201,7 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
                 {
                     "fixture": name,
                     "engine": summary.get("engine", engine_name(engine)),
+                    "scope": summary.get("scope") or vm_loop_scope(engine),
                     "host_profile": summary.get("host_profile", ""),
                     "spec": summary.get("spec", ""),
                     "runs": len(times),
@@ -218,6 +220,7 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
         (
             "fixture",
             "engine",
+            "scope",
             "host_profile",
             "spec",
             "runs",
@@ -256,6 +259,26 @@ def run_vm_loop_engine(
             raw_dir,
         )
 
+    if engine.startswith("evmone"):
+        evmone_args = [
+            args.zig_exe,
+            "build",
+            f"-Doptimize={args.optimize}",
+            "evmone-vm-loop",
+            "--",
+            "--fixture",
+            fixture,
+            "--summary",
+        ]
+        if engine == "evmone-baseline":
+            evmone_args.extend(["--mode", "baseline"])
+        return run_command(
+            f"vm-loop-{fixture_name}-{engine_name(engine)}",
+            evmone_args,
+            BENCH_DIR,
+            raw_dir,
+        )
+
     return run_command(
         f"vm-loop-{fixture_name}-{engine_name(engine)}",
         [
@@ -277,6 +300,18 @@ def run_vm_loop_engine(
 
 def engine_name(engine: str) -> str:
     return "evmone-advanced" if engine == "evmone" else engine
+
+
+def vm_loop_scope(engine: str) -> str:
+    if engine == VM_LOOP_BASELINE_ENGINE:
+        return "interpreter-prepared-execute"
+    if engine == "evmone":
+        return "advanced-analyzed-execute"
+    if engine == "evmone-baseline":
+        return "baseline-analyzed-execute"
+    if engine == "revm":
+        return "raw-interpreter"
+    return ""
 
 
 def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:
@@ -315,8 +350,6 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
             "--",
             "--engine",
             "evmz",
-            "--engine",
-            "evmz-call-total",
             "--engine",
             "evmone-baseline",
             "--engine",
@@ -546,13 +579,13 @@ def build_checkpoint(
             "eest_warmups": args.eest_warmups,
         },
         "evmz": {
+            "vm_loop_engine": VM_LOOP_BASELINE_ENGINE,
             "vm_loop_median_ms": {
                 row["fixture"]: row["median_ms"]
                 for row in vm_loop_rows
-                if row.get("engine") == "evmz" and row.get("median_ms") is not None
+                if row.get("engine") == VM_LOOP_BASELINE_ENGINE and row.get("median_ms") is not None
             },
             "kernel_ns_per_iter": flatten_engine_map(kernel, "evmz"),
-            "kernel_call_total_ns_per_iter": flatten_engine_map(kernel, "evmz-call-total"),
             "host_bytecode_ns_per_op": {
                 op: value
                 for (op, boundary), value in host.items()
@@ -612,8 +645,8 @@ def render_report(
         lines.append(f"- baseline: `{display_path(baseline_path)}`")
     lines.append("")
     lines.append(
-        "Portable release means Zig `ReleaseFast`, evmone compiled into the Zig bench binary, "
-        "and revm `cargo --release`. No native CPU flags are enabled by this reporter."
+        "Portable release means Zig `ReleaseFast` for Zig/C++ runners and revm `cargo --release`. "
+        "No native CPU flags are enabled by this reporter."
     )
     lines.append("")
 
@@ -631,14 +664,15 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
         (str(row.get("fixture", "")), str(row.get("engine", ""))): float_value(row.get("median_ms"))
         for row in rows
     }
-    table = [["fixture", "engine", "host", "runs", "runtime bytes", "host calls", "logs", "median ms", "evmz/engine"]]
+    table = [["fixture", "engine", "scope", "host", "runs", "runtime bytes", "host calls", "logs", "median ms", f"{VM_LOOP_BASELINE_ENGINE}/engine"]]
     for row in rows:
-        evmz_ms = by_fixture_engine.get((str(row["fixture"]), "evmz"))
+        evmz_ms = by_fixture_engine.get((str(row["fixture"]), VM_LOOP_BASELINE_ENGINE))
         row_ms = float_value(row.get("median_ms"))
         table.append(
             [
                 row["fixture"],
                 row["engine"],
+                row.get("scope", ""),
                 row["host_profile"],
                 str(row["runs"]),
                 fmt_int(row["runtime_bytes"]),
@@ -651,7 +685,7 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
     return [
         "## VM-loop comparison",
         "",
-        "Same deployed-runtime fixture protocol across runner adapters. Deploy/runtime setup is outside the timed call. evmz times `Interpreter.execute()`, evmone times EVMC `execute()` on a fixture-scoped VM, and revm times its low-level interpreter loop. Host-call counts are reported by every VM-loop runner, but callback granularity differs by host API, so use them as a guardrail rather than an exact equality check.",
+        "VM-core comparison over the same deployed-runtime fixture protocol. Deploy/runtime setup is outside the timed call. evmz times direct `Interpreter.execute` with prepared metadata, evmone baseline/advanced use analyzed-code execution from the standalone C++ runner, and revm times its low-level interpreter loop with analyzed `Bytecode`. The executor/transaction lane is intentionally left out of this default report until it has matching revm/evmone transaction-level adapters.",
         "",
         *markdown_table(table),
         "",
@@ -700,13 +734,12 @@ def render_kernel(rows: list[dict[str, Any]]) -> list[str]:
             ranked.append((evmz / best_other, case))
     ranked.sort(reverse=True)
 
-    table = [["case", "evmz", "evmz total", "evmone base", "evmone adv", "revm", "evmz/best"]]
+    table = [["case", "evmz", "evmone base", "evmone adv", "revm", "evmz/best"]]
     for ratio, case in ranked[:14]:
         table.append(
             [
                 case,
                 fmt_float(medians.get(("evmz", case)), 2),
-                fmt_float(medians.get(("evmz-call-total", case)), 2),
                 fmt_float(medians.get(("evmone-baseline", case)), 2),
                 fmt_float(medians.get(("evmone-advanced", case)), 2),
                 fmt_float(medians.get(("revm", case)), 2),
@@ -716,7 +749,7 @@ def render_kernel(rows: list[dict[str, Any]]) -> list[str]:
     return [
         "## Opcode kernel comparison",
         "",
-        "Median ns/iteration. `evmz total` includes interpreter init and bytecode analysis.",
+        "Median ns/iteration. Zig and evmone kernel rows are direct execution paths; the revm kernel sidecar currently uses its transaction API, so treat that row as a diagnostic baseline rather than a perfectly identical interpreter-only kernel.",
         "",
         *markdown_table(table),
         "",
@@ -760,7 +793,6 @@ def render_checkpoint_delta(checkpoint: dict[str, Any], baseline: dict[str, Any]
     rows: list[list[str]] = [["metric", "case", "baseline", "current", "delta"]]
     for section, direction in (
         ("kernel_ns_per_iter", "lower"),
-        ("kernel_call_total_ns_per_iter", "lower"),
         ("eest_vm_mgas_per_s", "higher"),
         ("vm_loop_median_ms", "lower"),
     ):

@@ -223,14 +223,14 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
         0x3c, // EXTCODECOPY
     };
 
-    var interpreter: evmz.Interpreter = undefined;
-    try interpreter.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
         .spec = .cancun,
     });
-    defer interpreter.deinit();
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
     const result = interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
