@@ -121,6 +121,19 @@ pub const TxResult = struct {
     validation_error: ?transaction.ValidationError = null,
 };
 
+const PreparedTransaction = struct {
+    created_address: ?Address,
+    host_context: Host.TxContext,
+    normalized_tx: transaction.Transaction,
+    gas_plan: transaction.GasPlan,
+    settlement: transaction.Settlement,
+};
+
+const PreparedTransactionResult = union(enum) {
+    rejected: TxResult,
+    executable: PreparedTransaction,
+};
+
 /// Borrowed transaction receipt view for client/fixture receipt builders.
 ///
 /// `logs` is borrowed from the VM and is invalidated by the next transaction,
@@ -147,31 +160,35 @@ pub const BlockSession = struct {
     tx_count: u64 = 0,
 
     pub fn transact(self: *BlockSession, tx: Transaction) !TxResult {
-        var pre_tx = try self.vm.executor.snapshot();
-        defer pre_tx.deinit(self.vm.executor.allocator);
+        const prepared = try self.vm.prepareTransaction(tx);
+        switch (prepared) {
+            .rejected => |result| return result,
+            .executable => |executable| {
+                var pre_tx = try self.vm.executor.snapshot();
+                defer pre_tx.deinit(self.vm.executor.allocator);
 
-        const result = try self.vm.transact(tx);
-        if (result.status == .rejected) return result;
+                const result = try self.vm.executePreparedTransaction(executable);
+                const next_block_gas = std.math.add(u64, self.block_gas_used, result.block_gas_used) catch {
+                    try self.vm.executor.restore(&pre_tx);
+                    return .{
+                        .status = .rejected,
+                        .validation_error = .gas_allowance_exceeded,
+                    };
+                };
+                if (self.vm.env.gas_limit != 0 and next_block_gas > self.vm.env.gas_limit) {
+                    try self.vm.executor.restore(&pre_tx);
+                    return .{
+                        .status = .rejected,
+                        .validation_error = .gas_allowance_exceeded,
+                    };
+                }
 
-        const next_block_gas = std.math.add(u64, self.block_gas_used, result.block_gas_used) catch {
-            try self.vm.executor.restore(&pre_tx);
-            return .{
-                .status = .rejected,
-                .validation_error = .gas_allowance_exceeded,
-            };
-        };
-        if (self.vm.env.gas_limit != 0 and next_block_gas > self.vm.env.gas_limit) {
-            try self.vm.executor.restore(&pre_tx);
-            return .{
-                .status = .rejected,
-                .validation_error = .gas_allowance_exceeded,
-            };
+                self.gas_used += result.gas_used;
+                self.block_gas_used = next_block_gas;
+                self.tx_count += 1;
+                return result;
+            },
         }
-
-        self.gas_used += result.gas_used;
-        self.block_gas_used = next_block_gas;
-        self.tx_count += 1;
-        return result;
     }
 
     pub fn receipt(self: *const BlockSession, result: TxResult) TxReceiptView {
@@ -291,13 +308,21 @@ pub fn systemCall(self: *Vm, call: SystemCall) !EvmResult {
 
 /// Execute one protocol transaction into the VM overlay.
 pub fn transact(self: *Vm, tx: Transaction) !TxResult {
+    const prepared = try self.prepareTransaction(tx);
+    return switch (prepared) {
+        .rejected => |result| result,
+        .executable => |executable| try self.executePreparedTransaction(executable),
+    };
+}
+
+fn prepareTransaction(self: *Vm, tx: Transaction) !PreparedTransactionResult {
     self.executor.clearLogs();
     const validation = try validate(&self.executor, self.env, tx);
     if (validation.err) |err| {
-        return .{
+        return .{ .rejected = .{
             .status = .rejected,
             .validation_error = err,
-        };
+        } };
     }
 
     const created_address = if (tx.to == null) address.create(tx.sender, validation.sender_nonce) else null;
@@ -324,14 +349,24 @@ pub fn transact(self: *Vm, tx: Transaction) !TxResult {
         .coinbase = self.env.coinbase,
     });
 
-    try self.executor.beginTransactionScope(host_context, normalized_tx);
-    errdefer self.executor.closeTransaction();
-    const result = try self.executor.runTopLevelTransaction(normalized_tx, .{
-        .execution = gas_plan.execution,
+    return .{ .executable = .{
+        .created_address = created_address,
+        .host_context = host_context,
+        .normalized_tx = normalized_tx,
+        .gas_plan = gas_plan,
         .settlement = settlement,
+    } };
+}
+
+fn executePreparedTransaction(self: *Vm, prepared: PreparedTransaction) !TxResult {
+    try self.executor.beginTransactionScope(prepared.host_context, prepared.normalized_tx);
+    errdefer self.executor.closeTransaction();
+    const result = try self.executor.runTopLevelTransaction(prepared.normalized_tx, .{
+        .execution = prepared.gas_plan.execution,
+        .settlement = prepared.settlement,
     });
 
-    const costs = try transaction.settlementCosts(settlement, .{
+    const costs = try transaction.settlementCosts(prepared.settlement, .{
         .gas_left = result.gas_left,
         .gas_refund = result.gas_refund,
         .gas_reservoir = result.gas_reservoir,
@@ -343,7 +378,7 @@ pub fn transact(self: *Vm, tx: Transaction) !TxResult {
         .block_gas_used = costs.block_gas_used,
         .gas_refunded = costs.refunded_gas,
         .output = result.output_data,
-        .created_address = if (result.status == .success) created_address else null,
+        .created_address = if (result.status == .success) prepared.created_address else null,
     };
 }
 
@@ -998,6 +1033,38 @@ test "Vm rejected transaction clears borrowed log surface" {
     try std.testing.expectEqual(TxStatus.rejected, rejected.status);
     try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, rejected.validation_error.?);
     try std.testing.expectEqual(@as(usize, 0), vm.logs().len);
+}
+
+test "BlockSession validation rejection skips rollback snapshot" {
+    const sender = addr(0xaaaa);
+    const recipient = addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 10_000_000;
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var vm = Vm.init(failing_allocator.allocator(), .{
+        .spec = .amsterdam,
+        .state_reader = memory.reader(),
+    });
+    defer vm.deinit();
+
+    try std.testing.expect((try vm.getAccount(sender)) != null);
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+
+    var block = vm.beginBlock(.{ .gas_limit = 1_000_000 });
+    const rejected = try block.transact(.{
+        .sender = sender,
+        .nonce = 99,
+        .to = recipient,
+        .gas_limit = 300_000,
+    });
+    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, rejected.validation_error.?);
+    try std.testing.expect(!failing_allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 0), block.finish().tx_count);
 }
 
 test "BlockSession accumulates block gas and rolls back overflow transaction" {
