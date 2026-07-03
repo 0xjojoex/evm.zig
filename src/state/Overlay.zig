@@ -71,6 +71,7 @@ pub fn initWithStateReader(allocator: std.mem.Allocator, state_reader: StateRead
 }
 
 pub fn deinit(self: *Overlay) void {
+    self.clearLogsRetainingCapacity();
     self.clearAccounts();
     self.accounts.deinit();
     self.warm_accounts.deinit();
@@ -362,7 +363,7 @@ fn accountHasStorageInner(self: *Overlay, address: Address) !bool {
 }
 
 pub fn beginTransaction(self: *Overlay) void {
-    self.logs.clearRetainingCapacity();
+    self.clearLogsRetainingCapacity();
     self.closeTransaction();
 }
 
@@ -382,7 +383,7 @@ pub fn discardChanges(self: *Overlay) void {
     self.created_contracts.clearRetainingCapacity();
     self.deleted_accounts.clearRetainingCapacity();
     self.dirty_accounts.clearRetainingCapacity();
-    self.logs.clearRetainingCapacity();
+    self.clearLogsRetainingCapacity();
 }
 
 pub fn warmAccount(self: *Overlay, address: Address) !void {
@@ -448,7 +449,15 @@ pub fn setTransientStorage(self: *Overlay, address: Address, key: u256, value: u
 }
 
 pub fn emitLog(self: *Overlay, event_log: Host.Log) !void {
-    try self.logs.append(self.allocator, event_log);
+    const topics = try self.allocator.dupe(u256, event_log.topics);
+    errdefer self.allocator.free(topics);
+    const data = try self.allocator.dupe(u8, event_log.data);
+    errdefer self.allocator.free(data);
+    try self.logs.append(self.allocator, .{
+        .address = event_log.address,
+        .topics = topics,
+        .data = data,
+    });
     self.traceStateWrite(.{
         .log = .{
             .address = event_log.address,
@@ -498,7 +507,7 @@ pub fn revertToCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) 
         defer entry.deinit(self.allocator);
         try self.revertJournalEntry(&entry);
     }
-    self.logs.items.len = checkpoint_state.logs_len;
+    self.truncateLogs(checkpoint_state.logs_len);
     self.traceCheckpoint(.revert, checkpoint_state);
 }
 
@@ -715,7 +724,7 @@ fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.created_contracts.clearRetainingCapacity();
     self.deleted_accounts.clearRetainingCapacity();
     self.dirty_accounts.clearRetainingCapacity();
-    self.logs.items.len = snapshot_state.logs_len;
+    self.truncateLogs(snapshot_state.logs_len);
     self.journal.truncate(self.allocator, snapshot_state.journal_len);
 
     var account_it = snapshot_state.accounts.iterator();
@@ -766,6 +775,32 @@ fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     }
 }
 
+pub fn getLogs(self: *const Overlay) []const Host.Log {
+    return self.logs.items;
+}
+
+pub fn clearLogs(self: *Overlay) void {
+    self.clearLogsRetainingCapacity();
+}
+
+fn clearLogsRetainingCapacity(self: *Overlay) void {
+    self.truncateLogs(0);
+    self.logs.clearRetainingCapacity();
+}
+
+fn truncateLogs(self: *Overlay, len: usize) void {
+    for (self.logs.items[len..]) |*event_log| {
+        deinitLog(self.allocator, event_log);
+    }
+    self.logs.items.len = len;
+}
+
+fn deinitLog(allocator: std.mem.Allocator, event_log: *Host.Log) void {
+    allocator.free(@constCast(event_log.topics));
+    allocator.free(@constCast(event_log.data));
+    event_log.* = undefined;
+}
+
 pub fn clearAccounts(self: *Overlay) void {
     var account_it = self.accounts.valueIterator();
     while (account_it.next()) |account| {
@@ -788,6 +823,14 @@ pub fn finalizeTransaction(self: *Overlay, spec: Spec) !void {
     var it = self.selfdestructed_accounts.keyIterator();
     while (it.next()) |address| {
         try self.journal.append(self.allocator, .{ .selfdestruct_cleared = address.* });
+        if (spec.isImpl(.amsterdam) and self.created_contracts.contains(address.*)) {
+            try self.journalStorageOverlayRemovedForAddress(address.*, &removed_storage_keys);
+            if (self.accounts.contains(address.*)) {
+                try self.setCode(address.*, &.{});
+                try self.setNonce(address.*, 0);
+            }
+            continue;
+        }
         if (spec.isImpl(.cancun) and !self.created_contracts.contains(address.*)) continue;
         try finalized_accounts.append(self.allocator, address.*);
         try self.journalAccountRemoved(address.*);

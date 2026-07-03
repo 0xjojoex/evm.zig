@@ -21,9 +21,10 @@ pub const Spec = enum(u8) {
     cancun,
     prague,
     osaka,
+    amsterdam,
 
     /// The latest supported spec.
-    pub const latest = Self.osaka;
+    pub const latest = Self.amsterdam;
 
     /// The latest stable spec.
     pub const stable = Self.osaka;
@@ -36,6 +37,9 @@ pub const Spec = enum(u8) {
 };
 
 test "linear fork checks" {
+    try std.testing.expectEqual(Spec.amsterdam, Spec.latest);
+    try std.testing.expectEqual(Spec.osaka, Spec.stable);
+    try std.testing.expect(Spec.amsterdam.isImpl(.osaka));
     try std.testing.expect(Spec.osaka.isImpl(.prague));
     try std.testing.expect(Spec.prague.isImpl(.cancun));
     try std.testing.expect(!Spec.prague.isImpl(.osaka));

@@ -503,6 +503,22 @@ test "code analysis records truncated PUSH metadata" {
     try std.testing.expect(!analysis.isInstructionStart(1));
 }
 
+test "code analysis does not mask EIP-8024 operand-looking bytes" {
+    const bytecode = t.bytecode(.{ .DUPN, .JUMPDEST, .DUPN, .PUSH1, .JUMPDEST });
+    var analysis = try Analysis.init(std.testing.allocator, &bytecode);
+    defer analysis.deinit(std.testing.allocator);
+
+    try std.testing.expect(analysis.isInstructionStart(0));
+    try std.testing.expect(analysis.isInstructionStart(1));
+    try std.testing.expect(analysis.isInstructionStart(2));
+    try std.testing.expect(analysis.isInstructionStart(3));
+    try std.testing.expect(!analysis.isInstructionStart(4));
+    try std.testing.expect(analysis.isValidJumpDest(&bytecode, 1));
+    try std.testing.expect(!analysis.isValidJumpDest(&bytecode, 4));
+    try std.testing.expectEqual(@as(u8, 1), analysis.instructions[0].len);
+    try std.testing.expectEqual(@as(u8, 0), analysis.instructions[0].immediate_len);
+}
+
 test "code analysis predecodes full PUSH immediates" {
     const bytecode = t.bytecode(.{ .PUSH3, 0x01, 0x02, 0x03, .STOP });
     var analysis = try Analysis.init(std.testing.allocator, &bytecode);

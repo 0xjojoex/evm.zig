@@ -46,17 +46,63 @@ pub const Result = struct {
     status: Status,
     gas_left: i64,
     gas_refund: i64,
+    gas_reservoir: i64 = 0,
+    state_gas_spent: i64 = 0,
+    state_gas_from_gas_left: i64 = 0,
     output_data: []u8,
+
+    pub fn refillIntrinsicStateGas(self: *Result, amount: i64) void {
+        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, amount) catch std.math.maxInt(i64);
+        self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, amount) catch std.math.minInt(i64);
+    }
+
+    pub fn trackStateGas(self: *Result, gas: i64) void {
+        if (gas <= 0) return;
+        const reservoir_available = @max(self.gas_reservoir, 0);
+        const from_reservoir = @min(reservoir_available, gas);
+        const from_regular = gas - from_reservoir;
+        if (from_regular > self.gas_left) {
+            self.status = .out_of_gas;
+            self.gas_left = 0;
+            return;
+        }
+        self.gas_reservoir -= from_reservoir;
+        self.gas_left -= from_regular;
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+    }
+
+    pub fn finalizeFrameStateGas(self: *Result) void {
+        switch (self.status) {
+            .success => {},
+            .revert => self.unwindFrameStateGas(true),
+            .invalid, .out_of_gas => self.unwindFrameStateGas(false),
+        }
+    }
+
+    fn unwindFrameStateGas(self: *Result, restore_regular_gas: bool) void {
+        const max_i64 = @as(i64, std.math.maxInt(i64));
+        const min_i64 = @as(i64, std.math.minInt(i64));
+        const reservoir_delta = std.math.sub(i64, self.state_gas_spent, self.state_gas_from_gas_left) catch if (self.state_gas_spent >= 0) max_i64 else min_i64;
+        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, reservoir_delta) catch if (reservoir_delta >= 0) max_i64 else min_i64;
+        if (restore_regular_gas) {
+            self.gas_left = std.math.add(i64, self.gas_left, self.state_gas_from_gas_left) catch if (self.state_gas_from_gas_left >= 0) max_i64 else min_i64;
+        }
+        self.state_gas_spent = 0;
+        self.state_gas_from_gas_left = 0;
+    }
 };
 
 pub const CallResume = struct {
     gas_limit: i64,
     out_offset: usize,
     out_size: usize,
+    state_gas_charged: i64 = 0,
 };
 
 pub const CreateResume = struct {
     gas_limit: i64,
+    state_gas_charged: i64 = 0,
 };
 
 pub const CallAction = struct {
@@ -112,27 +158,50 @@ pub fn executeUntilAction(self: *Interpreter) RunResult {
             self.stepTraced();
         }
     } else {
-        var frame = self.call_frame;
-        while (frame.status == .running and frame.pc < frame.code.len) {
-            const opcode_byte = frame.code[frame.pc];
-            frame.pc += 1;
-
-            instruction.execute(opcode_byte, frame) catch {
-                if (frame.status == .running) {
-                    frame.failWithStatus(.invalid);
-                }
-            };
-        }
-
-        if (frame.status == .running) {
-            frame.status = .success;
-        }
+        self.executeUntraced();
     }
 
     if (self.call_frame.takePendingAction()) |action| {
         return .{ .action = action };
     }
     return .{ .finished = self.call_frame.getResult() };
+}
+
+fn executeUntraced(self: *Interpreter) void {
+    var frame = self.call_frame;
+    if (frame.has_zero_padded_code) {
+        executeUntracedPadded(frame);
+    } else {
+        executeUntracedBounded(frame);
+    }
+
+    if (frame.status == .running) {
+        frame.status = .success;
+    }
+}
+
+fn executeUntracedPadded(frame: *CallFrame) void {
+    while (frame.status == .running) {
+        const opcode_byte = frame.read_code[frame.pc];
+        frame.pc += 1;
+        executeOpcode(opcode_byte, frame);
+    }
+}
+
+fn executeUntracedBounded(frame: *CallFrame) void {
+    while (frame.status == .running and frame.pc < frame.code.len) {
+        const opcode_byte = frame.code[frame.pc];
+        frame.pc += 1;
+        executeOpcode(opcode_byte, frame);
+    }
+}
+
+inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) void {
+    instruction.execute(opcode_byte, frame) catch {
+        if (frame.status == .running) {
+            frame.failWithStatus(.invalid);
+        }
+    };
 }
 
 fn resolveHostAction(self: *Interpreter, action: Action) void {
@@ -207,13 +276,16 @@ pub const CallFrame = struct {
     status: FrameStatus,
     allocator: std.mem.Allocator,
     host: *Host,
-    msg: Host.Message,
+    msg: *Host.Message,
     stack: Stack,
     memory: Memory,
     pc: usize = 0,
     code: []const u8 = &.{},
     gas_left: i64 = 0,
     gas_refund: i64 = 0,
+    gas_reservoir: i64 = 0,
+    state_gas_spent: i64 = 0,
+    state_gas_from_gas_left: i64 = 0,
     return_data: []u8 = &.{},
     output_data: []u8 = &.{},
     analysis: CodeAnalysisState = .empty,
@@ -223,16 +295,19 @@ pub const CallFrame = struct {
     spec: evmz.Spec = evmz.Spec.latest,
     pending_action: ?Action = null,
     pending_step_end: ?PendingStepEnd = null,
+    read_code: []const u8 = &.{},
+    has_zero_padded_code: bool = false,
 
     pub fn init(
         self: *CallFrame,
         allocator: std.mem.Allocator,
         options: Init,
+        msg_storage: *Host.Message,
     ) !void {
-        const code = if (options.bytecode) |bytecode|
-            bytecode.bytes
+        const code, const read_code, const has_zero_padded_code = if (options.bytecode) |bytecode|
+            .{ bytecode.bytes, bytecode.read_bytes, true }
         else
-            options.code;
+            .{ options.code, options.code, false };
         const analysis = if (options.bytecode == null)
             try CodeAnalysisState.init(code, options.config)
         else
@@ -240,14 +315,20 @@ pub const CallFrame = struct {
 
         self.allocator = allocator;
         self.host = options.host;
-        self.msg = options.msg.*;
+        msg_storage.* = options.msg.*;
+        self.msg = msg_storage;
         self.stack = undefined;
         self.stack.len = 0;
         self.memory = Memory.init(allocator);
         self.pc = 0;
         self.code = code;
+        self.read_code = read_code;
+        self.has_zero_padded_code = has_zero_padded_code;
         self.gas_left = options.msg.gas;
         self.gas_refund = 0;
+        self.gas_reservoir = options.msg.gas_reservoir;
+        self.state_gas_spent = 0;
+        self.state_gas_from_gas_left = 0;
         self.return_data = &.{};
         self.output_data = &.{};
         self.analysis = analysis;
@@ -298,6 +379,12 @@ pub const CallFrame = struct {
     pub fn resumeCallResult(self: *CallFrame, continuation: CallResume, result: Host.CallResult) !void {
         const child_gas_left = @max(result.gas_left, 0);
         self.trackGas(continuation.gas_limit - child_gas_left);
+        self.gas_reservoir = result.gas_reservoir;
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
+        if (result.status != .success) {
+            self.refillStateGas(continuation.state_gas_charged);
+        }
         if (self.status != .running) {
             self.finishPendingStepEndTrace();
             return;
@@ -318,6 +405,13 @@ pub const CallFrame = struct {
     pub fn resumeCreateResult(self: *CallFrame, continuation: CreateResume, result: Host.CreateResult) !void {
         const child_gas_left = @max(result.gas_left, 0);
         self.trackGas(continuation.gas_limit - child_gas_left);
+        self.gas_reservoir = result.gas_reservoir;
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
+        self.refillStateGas(result.state_gas_refund);
+        if (result.status != .success) {
+            self.refillStateGas(continuation.state_gas_charged);
+        }
         if (self.status != .running) {
             self.finishPendingStepEndTrace();
             return;
@@ -343,6 +437,35 @@ pub const CallFrame = struct {
             return;
         }
         self.gas_left -= gas;
+    }
+
+    /// Charge EIP-8037 state gas from the reservoir first, spilling into
+    /// `gas_left` only after the reservoir is empty.
+    pub fn trackStateGas(self: *CallFrame, gas: i64) void {
+        if (gas <= 0) return;
+        const reservoir_available = @max(self.gas_reservoir, 0);
+        const from_reservoir = @min(reservoir_available, gas);
+        const from_regular = gas - from_reservoir;
+        if (from_regular > self.gas_left) {
+            self.failWithStatus(.out_of_gas);
+            return;
+        }
+        self.gas_reservoir -= from_reservoir;
+        self.gas_left -= from_regular;
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+    }
+
+    /// Refill state gas in LIFO order: gas spilled from `gas_left` is restored
+    /// first, then the reservoir is credited.
+    pub fn refillStateGas(self: *CallFrame, gas: i64) void {
+        if (gas <= 0) return;
+        const to_regular = @min(self.state_gas_from_gas_left, gas);
+        self.gas_left = std.math.add(i64, self.gas_left, to_regular) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left -= to_regular;
+        const to_reservoir = gas - to_regular;
+        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, to_reservoir) catch std.math.maxInt(i64);
+        self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, gas) catch std.math.minInt(i64);
     }
 
     pub fn failWithStatus(self: *CallFrame, status: Status) void {
@@ -399,13 +522,18 @@ pub const CallFrame = struct {
     }
 
     pub fn getResult(self: *const CallFrame) Result {
-        return Result{
+        var result = Result{
             .gas_left = self.gas_left,
             // EIP-2200: a frame-local refund counter is discarded on revert.
             .gas_refund = if (self.status == .success) self.gas_refund else 0,
+            .gas_reservoir = self.gas_reservoir,
+            .state_gas_spent = self.state_gas_spent,
+            .state_gas_from_gas_left = self.state_gas_from_gas_left,
             .output_data = self.output_data,
             .status = self.status.toResult(),
         };
+        result.finalizeFrameStateGas();
+        return result;
     }
 
     fn wantsStepTracing(self: *const CallFrame) bool {
@@ -448,6 +576,24 @@ pub const CallFrame = struct {
         const pending = self.pending_step_end orelse return;
         self.pending_step_end = null;
         self.traceStepEnd(pending.pc, pending.opcode_byte, pending.decoded_opcode, pending.gas_before);
+    }
+};
+
+pub const CallFrameSlot = struct {
+    frame: CallFrame = undefined,
+    msg: Host.Message = undefined,
+
+    pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
+        try self.frame.init(allocator, options, &self.msg);
+    }
+
+    pub fn deinit(self: *CallFrameSlot) void {
+        self.frame.deinit();
+        self.* = undefined;
+    }
+
+    pub fn interpreter(self: *CallFrameSlot) Interpreter {
+        return Interpreter.init(&self.frame);
     }
 };
 
@@ -514,6 +660,84 @@ test "interpreter trace sink records step start and end" {
     try std.testing.expectEqual(@as(usize, 2), recorder.last_end_pc);
     try std.testing.expectEqual(@as(usize, 3), recorder.last_end_pc_next);
     try std.testing.expectEqual(trace.StepStatus.success, recorder.last_end_status);
+}
+
+test "interpreter state gas charges reservoir before gas left and refills LIFO" {
+    var frame: CallFrame = undefined;
+    frame.status = .running;
+    frame.gas_left = 10;
+    frame.gas_reservoir = 5;
+    frame.state_gas_spent = 0;
+    frame.state_gas_from_gas_left = 0;
+
+    frame.trackStateGas(8);
+    try std.testing.expectEqual(FrameStatus.running, frame.status);
+    try std.testing.expectEqual(@as(i64, 7), frame.gas_left);
+    try std.testing.expectEqual(@as(i64, 0), frame.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 8), frame.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 3), frame.state_gas_from_gas_left);
+
+    frame.refillStateGas(4);
+    try std.testing.expectEqual(@as(i64, 10), frame.gas_left);
+    try std.testing.expectEqual(@as(i64, 1), frame.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 4), frame.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), frame.state_gas_from_gas_left);
+}
+
+test "interpreter state gas charge is atomic on out of gas" {
+    var frame: CallFrame = undefined;
+    frame.status = .running;
+    frame.gas_left = 2;
+    frame.gas_reservoir = 5;
+    frame.state_gas_spent = 0;
+    frame.state_gas_from_gas_left = 0;
+
+    frame.trackStateGas(8);
+    try std.testing.expectEqual(FrameStatus.out_of_gas, frame.status);
+    try std.testing.expectEqual(@as(i64, 0), frame.gas_left);
+    try std.testing.expectEqual(@as(i64, 5), frame.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 0), frame.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), frame.state_gas_from_gas_left);
+}
+
+test "interpreter reverts frame-local state gas" {
+    var frame: CallFrame = undefined;
+    frame.status = .running;
+    frame.gas_left = 10;
+    frame.gas_reservoir = 5;
+    frame.state_gas_spent = 0;
+    frame.state_gas_from_gas_left = 0;
+    frame.output_data = &.{};
+
+    frame.trackStateGas(8);
+    frame.failWithStatus(.revert);
+    const result = frame.getResult();
+
+    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
+    try std.testing.expectEqual(@as(i64, 10), result.gas_left);
+    try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
+}
+
+test "interpreter exceptional halt unwinds state gas without restoring regular gas" {
+    var frame: CallFrame = undefined;
+    frame.status = .running;
+    frame.gas_left = 10;
+    frame.gas_reservoir = 5;
+    frame.state_gas_spent = 0;
+    frame.state_gas_from_gas_left = 0;
+    frame.output_data = &.{};
+
+    frame.trackStateGas(8);
+    frame.failWithStatus(.invalid);
+    const result = frame.getResult();
+
+    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
+    try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
 test "interpreter trace schema controls step emission" {
@@ -630,21 +854,23 @@ const TraceRecorder = struct {
 
 pub const OwnedCallFrame = struct {
     allocator: std.mem.Allocator,
+    slot: *CallFrameSlot,
     frame: *CallFrame,
 
     pub fn init(allocator: std.mem.Allocator, options: Init) !OwnedCallFrame {
-        const frame = try allocator.create(CallFrame);
-        errdefer allocator.destroy(frame);
-        try frame.init(allocator, options);
+        const slot = try allocator.create(CallFrameSlot);
+        errdefer allocator.destroy(slot);
+        try slot.init(allocator, options);
         return .{
             .allocator = allocator,
-            .frame = frame,
+            .slot = slot,
+            .frame = &slot.frame,
         };
     }
 
     pub fn deinit(self: *OwnedCallFrame) void {
-        self.frame.deinit();
-        self.allocator.destroy(self.frame);
+        self.slot.deinit();
+        self.allocator.destroy(self.slot);
         self.* = undefined;
     }
 
@@ -652,6 +878,32 @@ pub const OwnedCallFrame = struct {
         return Interpreter.init(self.frame);
     }
 };
+
+comptime {
+    if (@sizeOf(usize) == 8) {
+        assertLayout(@sizeOf(CallFrame) == 33440, "CallFrame size changed; rerun VM-loop canary benches");
+        assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
+        assertLayout(@offsetOf(CallFrame, "stack") == 0, "CallFrame stack moved; rerun arithmetic VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "memory") == 33072, "CallFrame memory moved; rerun memory VM-loop bench");
+        const pc_offset = @offsetOf(CallFrame, "pc");
+        const code_offset = @offsetOf(CallFrame, "code");
+        const gas_left_offset = @offsetOf(CallFrame, "gas_left");
+        const hot_start = @min(pc_offset, @min(code_offset, gas_left_offset));
+        const hot_end = @max(
+            pc_offset + @sizeOf(usize),
+            @max(code_offset + @sizeOf([]const u8), gas_left_offset + @sizeOf(i64)),
+        );
+        assertLayout(hot_start / 64 == (hot_end - 1) / 64, "CallFrame pc/code/gas_left no longer share a 64-byte cache-line window; rerun VM-loop canary benches");
+        assertLayout(@offsetOf(CallFrame, "msg") == 33064, "CallFrame msg pointer moved; check message ownership layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33632, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
+        assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame), "CallFrameSlot msg no longer follows frame storage");
+    }
+}
+
+fn assertLayout(comptime ok: bool, comptime message: []const u8) void {
+    if (!ok) @compileError(message);
+}
 
 test "interpreter can execute prepared bytecode jumpdest map" {
     const t = @import("./t.zig");
@@ -685,4 +937,72 @@ test "interpreter can execute prepared bytecode jumpdest map" {
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expect(!interpreter.call_frame.analysis.isAnalyzed());
     try std.testing.expect(bytecode.jumpdests.analyzed);
+}
+
+test "prepared bytecode uses padded read bytes for truncated push" {
+    const t = @import("./t.zig");
+    const raw = t.bytecode(.{ .PUSH32, 0x01 });
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .none);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var mock_host = t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+
+    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+        .spec = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(usize, raw.len), interpreter.call_frame.code.len);
+    try std.testing.expectEqual(@as(usize, raw.len + Bytecode.zero_padding_len), interpreter.call_frame.read_code.len);
+    try std.testing.expectEqual(@as(u256, 1) << 248, interpreter.call_frame.stack.peek().?);
+}
+
+test "prepared bytecode keeps CODESIZE semantic length" {
+    const t = @import("./t.zig");
+    const raw = t.bytecode(.{.CODESIZE});
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .none);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var mock_host = t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+
+    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+        .spec = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(u256, raw.len), interpreter.call_frame.stack.peek().?);
 }

@@ -58,11 +58,11 @@ fn bytecodeByte(comptime item: anytype) u8 {
 }
 
 pub const MockCall = struct {
-    call_frame: evmz.Interpreter.CallFrame,
+    slot: evmz.Interpreter.CallFrameSlot,
 
     pub fn init(allocator: std.mem.Allocator, host: *Host, msg: *const Host.Message, code: []const u8, spec: evmz.Spec) !MockCall {
         var self: MockCall = undefined;
-        try self.call_frame.init(allocator, .{
+        try self.slot.init(allocator, .{
             .host = host,
             .msg = msg,
             .code = code,
@@ -86,6 +86,8 @@ pub const MockHost = struct {
     removed_account: std.AutoHashMap(Address, bool),
     storage_reads: u64,
     access_storage_reads: u64,
+    block_hash_reads: u64,
+    last_block_hash_number: ?u256,
 
     pub fn init(alloc: std.mem.Allocator, tx_context: ?Host.TxContext) Self {
         return Self{
@@ -99,6 +101,8 @@ pub const MockHost = struct {
             .tx_context_reads = 0,
             .storage_reads = 0,
             .access_storage_reads = 0,
+            .block_hash_reads = 0,
+            .last_block_hash_number = null,
             .tx_context = if (tx_context) |ctx| ctx else Host.TxContext{
                 .base_fee = 0,
                 .gas_limit = 0,
@@ -171,8 +175,8 @@ pub const MockHost = struct {
 
     fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = number;
-        _ = self;
+        self.block_hash_reads += 1;
+        self.last_block_hash_number = number;
         return 1;
     }
 
@@ -444,12 +448,32 @@ pub fn expectBytecodeStackTopBySpec(comptime items: anytype, spec: evmz.Spec, ex
     try std.testing.expectEqual(expected, result.stack_top.?);
 }
 
+pub fn expectStackBySpec(code: []const u8, spec: evmz.Spec, expected: []const u256) !void {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = code,
+        .spec = spec,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqualSlices(u256, expected, interpreter.call_frame.stack.asSlice());
+}
+
 pub fn expectLatestForkBytecodeStackTop(comptime items: anytype, expected: u256) !void {
     try expectBytecodeStackTopBySpec(items, .latest, expected);
 }
 
 test "mock host persists storage writes" {
-    try expectLatestForkBytecodeStackTop(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, 0x2a);
+    try expectBytecodeStackTopBySpec(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
 }
 
 test "environment opcodes delegate every tx context access to host" {
@@ -471,4 +495,71 @@ test "environment opcodes delegate every tx context access to host" {
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
 
     try std.testing.expectEqual(@as(u64, 2), mock_host.tx_context_reads);
+}
+
+test "SLOTNUM pushes the transaction context slot number" {
+    var mock_host = MockHost.init(std.testing.allocator, .{
+        .base_fee = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .coinbase = addr(0),
+        .origin = addr(0),
+        .blob_base_fee = 0,
+        .blob_hashes = &.{},
+        .chain_id = 0,
+        .number = 1000,
+        .slot_number = 0x123456789abcdef0,
+        .prev_randao = 0,
+        .timestamp = 0,
+    });
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+    const code = bytecode(.{.SLOTNUM});
+
+    const result = try runBytecodeWithHost(&host, &msg, &code, .amsterdam);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.tx_context_reads);
+}
+
+fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
+    var mock_host = MockHost.init(std.testing.allocator, .{
+        .base_fee = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .coinbase = addr(0),
+        .origin = addr(0),
+        .blob_base_fee = 0,
+        .blob_hashes = &.{},
+        .chain_id = 0,
+        .number = 1000,
+        .prev_randao = 0,
+        .timestamp = 0,
+    });
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = defaultMessage();
+    const code = [_]u8{
+        evmz.Opcode.PUSH2.toByte(),
+        @as(u8, @intCast(number >> 8)),
+        @as(u8, @truncate(number)),
+        evmz.Opcode.BLOCKHASH.toByte(),
+    };
+
+    const result = try runBytecodeWithHost(&host, &msg, &code, .latest);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(expected, result.stack_top.?);
+    try std.testing.expectEqual(expected_reads, mock_host.block_hash_reads);
+    if (expected_reads > 0) {
+        try std.testing.expectEqual(@as(u256, number), mock_host.last_block_hash_number.?);
+    }
+}
+
+test "BLOCKHASH only queries host for the 256 most recent complete blocks" {
+    try expectBlockhash(999, 1, 1);
+    try expectBlockhash(744, 1, 1);
+    try expectBlockhash(1000, 0, 0);
+    try expectBlockhash(1001, 0, 0);
+    try expectBlockhash(743, 0, 0);
 }

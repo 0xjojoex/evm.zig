@@ -6,15 +6,14 @@ This package owns the Ethereum Execution Spec Tests runners for `evmz`.
 scripts/fetch-eest-fixtures.sh
 zig build eest-scope
 zig build eest
-zig build eest -- ../.eest/fixtures/v5.4.0/fixtures/state_tests/path/to/test.json
+zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/path/to/test.json
 zig build eest-classify
 zig build eest-tx
 ```
 
-The default state-test corpus is the latest supported stable Osaka snapshot.
-Newer moving test-release fixtures live under `tests-*` tags in
-`ethereum/execution-specs`; use the script environment overrides for those.
-Bare `zig build eest` resolves `eest.lock` `dest` and runs
+The default state-test corpus comes from `eest.lock`, currently
+`tests-glamsterdam-devnet@v6.1.0` from `ethereum/execution-specs` for Amsterdam
+work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
 `fixtures/state_tests`.
 
 Benchmark fixtures are a separate EEST release track:

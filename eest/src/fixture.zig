@@ -86,6 +86,21 @@ fn parseLockValue(bytes: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+test "EEST lock parser trims comments and values" {
+    const bytes =
+        \\# comment
+        \\ repo = ethereum/execution-specs
+        \\version=tests-glamsterdam-devnet@v6.1.0
+        \\artifact = fixtures_glamsterdam-devnet.tar.gz
+        \\
+    ;
+
+    try std.testing.expectEqualStrings("ethereum/execution-specs", parseLockValue(bytes, "repo").?);
+    try std.testing.expectEqualStrings("tests-glamsterdam-devnet@v6.1.0", parseLockValue(bytes, "version").?);
+    try std.testing.expectEqualStrings("fixtures_glamsterdam-devnet.tar.gz", parseLockValue(bytes, "artifact").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), parseLockValue(bytes, "missing"));
+}
+
 pub fn asObject(value: JsonValue) ?std.json.ObjectMap {
     return switch (value) {
         .object => |object| object,
@@ -362,6 +377,7 @@ pub fn parseStateFork(name: []const u8) ?evmz.Spec {
     if (std.ascii.eqlIgnoreCase(name, "Cancun")) return .cancun;
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
     if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
+    if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
     return null;
 }
 
@@ -370,6 +386,7 @@ pub fn parseBenchmarkFork(name: []const u8) ?evmz.Spec {
     if (std.ascii.eqlIgnoreCase(name, "Cancun")) return .cancun;
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
     if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
+    if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
     return null;
 }
 
@@ -385,5 +402,7 @@ fn hexDigit(char: u8) !u8 {
 test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.Spec.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.Spec.osaka, parseStateFork("Osaka"));
+    try std.testing.expectEqual(evmz.Spec.amsterdam, parseStateFork("Amsterdam"));
     try std.testing.expectEqual(evmz.Spec.osaka, parseBenchmarkFork("Osaka"));
+    try std.testing.expectEqual(evmz.Spec.amsterdam, parseBenchmarkFork("Amsterdam"));
 }

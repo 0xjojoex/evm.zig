@@ -38,6 +38,7 @@ pub const ValidationError = enum {
     type_3_tx_contract_creation,
     type_3_tx_zero_blobs,
     type_3_tx_blob_count_exceeded,
+    type_3_tx_max_blob_gas_allowance_exceeded,
     type_3_tx_invalid_blob_versioned_hash,
     initcode_size_exceeded,
     sender_not_eoa,
@@ -52,6 +53,8 @@ pub const ValidationInput = struct {
     spec: Spec,
     kind: TxKind = .legacy,
     is_create: bool = false,
+    is_self_transfer: bool = false,
+    creates_account: bool = false,
     gas_limit: u64,
     input: []const u8 = &.{},
     value: u256 = 0,
@@ -90,7 +93,8 @@ pub fn validate(input: ValidationInput) ?ValidationError {
     if (input.kind == .blob) {
         if (input.is_create) return .type_3_tx_contract_creation;
         if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
-        if (input.blob_hashes.len > blob.maxBlobCount(input.spec)) return .type_3_tx_blob_count_exceeded;
+        if (input.blob_hashes.len > blob.maxBlobCount(input.spec)) return .type_3_tx_max_blob_gas_allowance_exceeded;
+        if (input.blob_hashes.len > blob.maxBlobCountPerTransaction(input.spec)) return .type_3_tx_blob_count_exceeded;
         for (input.blob_hashes) |hash| {
             if (blob.blobVersion(hash) != 0x01) return .type_3_tx_invalid_blob_versioned_hash;
         }
@@ -112,22 +116,36 @@ pub fn validate(input: ValidationInput) ?ValidationError {
         return .insufficient_max_fee_per_gas;
     }
 
-    if (input.is_create and input.spec.isImpl(.shanghai) and input.input.len > gas.max_initcode_size) {
+    if (input.is_create and input.spec.isImpl(.shanghai) and input.input.len > gas.maxInitcodeSize(input.spec)) {
         return .initcode_size_exceeded;
     }
 
-    const intrinsic = gas.intrinsicGasForTransaction(input.spec, input.input, .{
+    const intrinsic_options = gas.IntrinsicGasOptions{
         .authorization_count = input.authorization_count,
         .access_list_counts = input.access_list_counts,
         .is_create = input.is_create,
-    }) orelse return .intrinsic_gas_too_low;
-    if (input.gas_limit < intrinsic) return .intrinsic_gas_too_low;
+        .value = input.value,
+        .is_self_transfer = input.is_self_transfer,
+        .creates_account = input.creates_account,
+    };
+    const intrinsic_regular = gas.intrinsicRegularGasForTransaction(input.spec, input.input, intrinsic_options) orelse return .intrinsic_gas_too_low;
+    const intrinsic_state = gas.intrinsicStateGasForTransaction(input.spec, intrinsic_options) orelse return .intrinsic_gas_too_low;
+    const intrinsic = std.math.add(u64, intrinsic_regular, intrinsic_state) catch return .intrinsic_gas_too_low;
+    const floor = gas.floorGasForTransaction(input.spec, input.input, intrinsic_options);
 
-    if (gas.floorGas(input.spec, input.input)) |floor| {
-        if (input.gas_limit < floor) return .intrinsic_gas_below_floor_gas_cost;
+    if (input.spec.isImpl(.amsterdam)) {
+        var capped_intrinsic = intrinsic_regular;
+        if (floor) |floor_gas| capped_intrinsic = @max(capped_intrinsic, floor_gas);
+        if (capped_intrinsic > gas.max_transaction_gas_limit) return .intrinsic_gas_too_low;
     }
 
-    if (input.spec.isImpl(.osaka) and input.gas_limit > gas.max_transaction_gas_limit) {
+    if (input.gas_limit < intrinsic) return .intrinsic_gas_too_low;
+
+    if (floor) |floor_gas| {
+        if (input.gas_limit < floor_gas) return .intrinsic_gas_below_floor_gas_cost;
+    }
+
+    if (hasTotalTransactionGasCap(input.spec) and input.gas_limit > gas.max_transaction_gas_limit) {
         return .gas_allowance_exceeded;
     }
 
@@ -173,6 +191,10 @@ fn preForkError(spec: Spec, kind: TxKind) ?ValidationError {
     };
 }
 
+fn hasTotalTransactionGasCap(spec: Spec) bool {
+    return spec.isImpl(.osaka) and !spec.isImpl(.amsterdam);
+}
+
 test "transaction prepayment includes blob gas" {
     try std.testing.expectEqual(@as(u256, 4_286_432), prepaymentCost(500_000, 7, 1, 6));
 }
@@ -193,6 +215,50 @@ test "transaction validation rejects Prague floor gas" {
         .input = &.{ 1, 1, 1, 1 },
         .sender_balance = 1_000_000,
     }).?);
+}
+
+test "transaction validation applies Amsterdam calldata floor" {
+    const amsterdam_floor_input = [_]u8{1} ** 63;
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .prague,
+        .gas_limit = 21_200,
+        .input = &.{ 1, 1, 1, 1 },
+        .sender_balance = 1_000_000,
+    }));
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 16_031,
+        .input = &amsterdam_floor_input,
+        .sender_balance = 1_000_000,
+    }).?);
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 16_032,
+        .input = &amsterdam_floor_input,
+        .sender_balance = 1_000_000,
+    }));
+}
+
+test "transaction validation includes Amsterdam access-list data surcharge" {
+    const access_counts = AccessListCounts{ .addresses = 1, .storage_keys = 1 };
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .osaka,
+        .gas_limit = 25_300,
+        .access_list_counts = access_counts,
+        .sender_balance = 100_000,
+    }));
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 24_327,
+        .access_list_counts = access_counts,
+        .sender_balance = 100_000,
+    }).?);
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 24_328,
+        .access_list_counts = access_counts,
+        .sender_balance = 100_000,
+    }));
 }
 
 test "transaction validation checks max fee balance" {
@@ -304,6 +370,39 @@ test "transaction validation applies Osaka transaction gas cap" {
     }));
 }
 
+test "transaction validation does not apply Osaka total gas cap after Amsterdam" {
+    const fixture_gas: u64 = 120_000_000;
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .amsterdam,
+        .gas_limit = fixture_gas,
+        .gas_price = 1,
+        .block_gas_limit = fixture_gas,
+        .sender_balance = fixture_gas,
+    }));
+}
+
+test "transaction validation caps Amsterdam intrinsic regular gas" {
+    const too_many_addresses = (gas.max_transaction_gas_limit - 15_000) / (gas.amsterdam_access_list_address_gas + gas.access_list_address_data_gas) + 1;
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 30_000_000,
+        .access_list_counts = .{ .addresses = too_many_addresses },
+    }).?);
+}
+
+test "transaction validation caps Amsterdam calldata floor gas" {
+    const floor_exceeding_len = (gas.max_transaction_gas_limit - gas.amsterdam_tx_base_cost) / 64 + 1;
+    const input = try std.testing.allocator.alloc(u8, floor_exceeding_len);
+    defer std.testing.allocator.free(input);
+    @memset(input, 1);
+
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, validate(.{
+        .spec = .amsterdam,
+        .gas_limit = 30_000_000,
+        .input = input,
+    }).?);
+}
+
 test "transaction validation rejects old type gas price below base fee" {
     try std.testing.expectEqual(ValidationError.insufficient_max_fee_per_gas, validate(.{
         .spec = .cancun,
@@ -315,6 +414,9 @@ test "transaction validation rejects old type gas price below base fee" {
 }
 
 test "transaction validation rejects blob shape errors" {
+    const seven_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 7;
+    const ten_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 10;
+
     try std.testing.expectEqual(ValidationError.type_3_tx_zero_blobs, validate(.{
         .spec = .cancun,
         .kind = .blob,
@@ -331,6 +433,24 @@ test "transaction validation rejects blob shape errors" {
         .max_fee_per_blob_gas = 1,
         .blob_hashes = &.{@as(u256, 0x02) << 248},
         .sender_balance = 1_000_000,
+    }).?);
+    try std.testing.expectEqual(ValidationError.type_3_tx_blob_count_exceeded, validate(.{
+        .spec = .osaka,
+        .kind = .blob,
+        .gas_limit = 21_000,
+        .max_fee_per_gas = 1,
+        .max_fee_per_blob_gas = 1,
+        .blob_hashes = &seven_blob_hashes,
+        .sender_balance = 10_000_000,
+    }).?);
+    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, validate(.{
+        .spec = .osaka,
+        .kind = .blob,
+        .gas_limit = 21_000,
+        .max_fee_per_gas = 1,
+        .max_fee_per_blob_gas = 1,
+        .blob_hashes = &ten_blob_hashes,
+        .sender_balance = 10_000_000,
     }).?);
 }
 
@@ -369,6 +489,33 @@ test "transaction validation rejects oversized initcode" {
         .is_create = true,
         .gas_limit = 1_000_000,
         .input = &initcode,
+        .sender_balance = 1_000_000,
+    }).?);
+
+    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, validate(.{
+        .spec = .osaka,
+        .is_create = true,
+        .gas_limit = 1_000_000,
+        .input = &initcode,
+        .sender_balance = 1_000_000,
+    }).?);
+
+    try std.testing.expectEqual(@as(?ValidationError, null), validate(.{
+        .spec = .amsterdam,
+        .is_create = true,
+        .gas_limit = 4_000_000,
+        .input = &initcode,
+        .sender_balance = 4_000_000,
+    }));
+
+    const oversized_amsterdam = try std.testing.allocator.alloc(u8, gas.amsterdam_max_initcode_size + 1);
+    defer std.testing.allocator.free(oversized_amsterdam);
+    @memset(oversized_amsterdam, 0);
+    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, validate(.{
+        .spec = .amsterdam,
+        .is_create = true,
+        .gas_limit = 1_000_000,
+        .input = oversized_amsterdam,
         .sender_balance = 1_000_000,
     }).?);
 }

@@ -170,7 +170,7 @@ fn runVector(
     summary: *Summary,
 ) !void {
     const post_obj = asObject(post) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&post_obj, &.{ "hash", "logs", "txbytes", "indexes", "state", "expectException" });
+    try rejectUnknownKeys(&post_obj, &.{ "hash", "logs", "receipt", "txbytes", "indexes", "state", "expectException" });
     const expected_exception = if (post_obj.get("expectException")) |value|
         jsonString(value) orelse return error.MalformedFixture
     else
@@ -204,6 +204,7 @@ fn runVector(
         "currentDifficulty",
         "currentBaseFee",
         "currentRandom",
+        "slotNumber",
         "currentExcessBlobGas",
         "currentBlobBaseFee",
         "currentChainId",
@@ -336,7 +337,7 @@ fn finishPostAssertions(
 }
 
 fn hasUnsupportedPostAssertions(post_obj: *const std.json.ObjectMap) bool {
-    return post_obj.get("hash") != null or post_obj.get("logs") != null or post_obj.get("txbytes") != null;
+    return post_obj.get("hash") != null or post_obj.get("logs") != null or post_obj.get("receipt") != null or post_obj.get("txbytes") != null;
 }
 
 fn selectedAccessList(tx: *const std.json.ObjectMap, index: usize) !?std.json.Array {
@@ -414,8 +415,12 @@ fn parseFixtureConfig(fixture: *const std.json.ObjectMap, spec: evmz.Spec) !Fixt
 
     if (config.get("blobSchedule")) |schedule_value| {
         const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
-        try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague" });
-        const schedule_key: ?[]const u8 = if (spec.isImpl(.prague))
+        try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
+        const schedule_key: ?[]const u8 = if (spec.isImpl(.amsterdam))
+            "Amsterdam"
+        else if (spec.isImpl(.osaka))
+            "Osaka"
+        else if (spec.isImpl(.prague))
             "Prague"
         else if (spec.isImpl(.cancun))
             "Cancun"
@@ -441,6 +446,34 @@ fn parseBlobSchedule(value: JsonValue) !transaction.BlobSchedule {
     };
 }
 
+test "EEST fixture config selects Amsterdam blob schedule" {
+    const fixture =
+        \\{
+        \\  "config": {
+        \\    "blobSchedule": {
+        \\      "Cancun": {"target": "0x03", "max": "0x06", "baseFeeUpdateFraction": "0x01"},
+        \\      "Prague": {"target": "0x06", "max": "0x09", "baseFeeUpdateFraction": "0x02"},
+        \\      "Osaka": {"target": "0x09", "max": "0x0c", "baseFeeUpdateFraction": "0x03"},
+        \\      "Amsterdam": {"target": "0x0c", "max": "0x0f", "baseFeeUpdateFraction": "0x04"},
+        \\      "BPO1": {"target": "0x0f", "max": "0x12", "baseFeeUpdateFraction": "0x05"},
+        \\      "BPO2": {"target": "0x12", "max": "0x15", "baseFeeUpdateFraction": "0x06"}
+        \\    }
+        \\  }
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(JsonValue, std.testing.allocator, fixture, .{});
+    defer parsed.deinit();
+    const obj = asObject(parsed.value) orelse return error.MalformedFixture;
+
+    const osaka = try parseFixtureConfig(&obj, .osaka);
+    try std.testing.expectEqual(@as(u64, 9), osaka.blob_schedule.?.target);
+    try std.testing.expectEqual(@as(u64, 12), osaka.blob_schedule.?.max);
+
+    const amsterdam = try parseFixtureConfig(&obj, .amsterdam);
+    try std.testing.expectEqual(@as(u64, 12), amsterdam.blob_schedule.?.target);
+    try std.testing.expectEqual(@as(u64, 15), amsterdam.blob_schedule.?.max);
+}
+
 fn parseVmEnv(
     spec: evmz.Spec,
     env: *const std.json.ObjectMap,
@@ -451,12 +484,29 @@ fn parseVmEnv(
         .chain_id = if (env.get("currentChainId")) |v| try parseU256FromValue(v) else config.chain_id,
         .coinbase = if (env.get("currentCoinbase")) |v| try parseAddressFromValue(v) else evmz.addr(0),
         .number = if (env.get("currentNumber")) |v| try parseU64FromValue(v) else 0,
+        .slot_number = if (env.get("slotNumber")) |v| try parseU64FromValue(v) else 0,
         .timestamp = if (env.get("currentTimestamp")) |v| try parseU64FromValue(v) else 0,
         .gas_limit = if (env.get("currentGasLimit")) |v| try parseU64FromValue(v) else 0,
         .prev_randao = if (env.get("currentRandom")) |v| try parseU256FromValue(v) else if (env.get("currentDifficulty")) |v| try parseU256FromValue(v) else 0,
         .base_fee = base_fee,
         .blob_base_fee = try parseBlobBaseFee(spec, env, config),
     };
+}
+
+test "EEST env parser reads Amsterdam slotNumber" {
+    const fixture =
+        \\{
+        \\  "currentNumber": "0x01",
+        \\  "slotNumber": "0x1234"
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(JsonValue, std.testing.allocator, fixture, .{});
+    defer parsed.deinit();
+    const env = asObject(parsed.value) orelse return error.MalformedFixture;
+
+    const parsed_env = try parseVmEnv(.amsterdam, &env, .{});
+    try std.testing.expectEqual(@as(u64, 1), parsed_env.number);
+    try std.testing.expectEqual(@as(u64, 0x1234), parsed_env.slot_number);
 }
 
 fn parseBlobBaseFee(spec: evmz.Spec, env: *const std.json.ObjectMap, config: FixtureConfig) !u256 {
@@ -772,7 +822,7 @@ test "EEST unsupported assertion fields do not block comparable post state" {
         "",
         "0x0186a0",
         "0x",
-        ",\"hash\":\"0x00\",\"logs\":\"0x00\",\"txbytes\":\"0x00\"",
+        ",\"hash\":\"0x00\",\"logs\":\"0x00\",\"receipt\":{},\"txbytes\":\"0x00\"",
         "\"storage\":{\"0x00\":\"0x2a\"}",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
@@ -813,6 +863,7 @@ test "EEST unsupported-only assertion fields are unchecked" {
         \\        "indexes": {"data": 0, "gas": 0, "value": 0},
         \\        "hash": "0x00",
         \\        "logs": "0x00",
+        \\        "receipt": {},
         \\        "txbytes": "0x00"
         \\      }]
         \\    }

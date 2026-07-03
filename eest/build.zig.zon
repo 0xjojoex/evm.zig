@@ -8,8 +8,8 @@
             .path = "..",
         },
         .evmone = .{
-            .url = "https://github.com/ethereum/evmone/archive/v0.21.0.tar.gz",
-            .hash = "N-V-__8AAEoAGQDVR2HlZeJCH3NaRFATldXVpE69rTye9H73",
+            .url = "https://github.com/ethereum/evmone/archive/v0.22.0.tar.gz",
+            .hash = "N-V-__8AADOYGwC_FdEquM666Mq-QPmuIaokolG11necs8NL",
         },
         .intx = .{
             .url = "https://github.com/chfast/intx/archive/v0.15.0.tar.gz",

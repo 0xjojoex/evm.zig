@@ -9,6 +9,8 @@ const Interpreter = evmz.Interpreter;
 const Journal = @import("../state/Journal.zig");
 const Opcode = evmz.Opcode;
 const eip7702 = @import("./eip7702.zig");
+const transaction = @import("../transaction.zig");
+const tx_gas = @import("../transaction/gas.zig");
 
 pub const ScratchScope = struct {
     executor: *Executor,
@@ -23,11 +25,12 @@ pub const ScratchScope = struct {
 
 pub const FrameLease = struct {
     executor: *Executor,
+    slot: *Interpreter.CallFrameSlot,
     frame: *Interpreter.CallFrame,
 
     pub fn deinit(self: *FrameLease) void {
-        self.frame.deinit();
-        self.executor.call_frame_pool.destroy(self.frame);
+        self.slot.deinit();
+        self.executor.call_frame_pool.destroy(self.slot);
         self.* = undefined;
     }
 
@@ -60,6 +63,7 @@ const StartedCreate = union(enum) {
 const ChildCreate = struct {
     checkpoint_state: Journal.Checkpoint,
     address: Address,
+    account_pre_existing: bool,
     msg: Host.Message,
     init_code: []const u8,
 };
@@ -68,7 +72,7 @@ const RuntimeFrame = struct {
     kind: RuntimeFrameKind,
     frame: FrameLease,
     scratch: ?ScratchScope = null,
-    can_yield: bool,
+    needs_action_loop: bool,
     pending_action: ?Interpreter.Action = null,
 
     fn deinit(self: *RuntimeFrame) void {
@@ -112,7 +116,7 @@ const CallRuntime = struct {
         try self.frames.append(self.executor.allocator, .{
             .kind = .root_call,
             .frame = frame,
-            .can_yield = codeMayYield(bytecode.bytes),
+            .needs_action_loop = codeNeedsActionLoop(bytecode.bytes),
         });
     }
 
@@ -135,7 +139,7 @@ const CallRuntime = struct {
             .kind = .{ .call = checkpoint_state },
             .frame = frame,
             .scratch = scratch,
-            .can_yield = codeMayYield(code),
+            .needs_action_loop = codeNeedsActionLoop(code),
         });
     }
 
@@ -157,7 +161,7 @@ const CallRuntime = struct {
             .kind = .{ .create = child },
             .frame = frame,
             .scratch = scratch,
-            .can_yield = codeMayYield(child.init_code),
+            .needs_action_loop = codeNeedsActionLoop(child.init_code),
         });
     }
 
@@ -173,7 +177,7 @@ const CallRuntime = struct {
             const runtime_frame = &self.frames.items[index];
             var interpreter = runtime_frame.frame.interpreter();
             const depth = runtime_frame.frame.frame.msg.depth;
-            const run_result: Interpreter.RunResult = if (runtime_frame.can_yield)
+            const run_result: Interpreter.RunResult = if (runtime_frame.needs_action_loop)
                 executeInterpreterUntilAction(self.executor, &interpreter, depth)
             else
                 .{ .finished = executeInterpreter(self.executor, &interpreter, depth) };
@@ -261,7 +265,7 @@ const CallRuntime = struct {
         self.executor.state.trace_depth = msg.depth;
         defer self.executor.state.trace_depth = previous_depth;
 
-        if (msg.depth > Host.max_call_depth) return createFailure(self.executor, evmz.addr(0), msg.gas, .invalid);
+        if (msg.depth > Host.max_call_depth) return createFailure(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
 
         switch (try beginCreate(self.executor, msg)) {
             .immediate => |result| return result,
@@ -285,6 +289,9 @@ const CallRuntime = struct {
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
             }),
             .call => |checkpoint_state| blk: {
                 try finishCallCheckpoint(self.executor, checkpoint_state, result.status);
@@ -293,6 +300,9 @@ const CallRuntime = struct {
                     .output_data = result.output_data,
                     .gas_left = result.gas_left,
                     .gas_refund = result.gas_refund,
+                    .gas_reservoir = result.gas_reservoir,
+                    .state_gas_spent = result.state_gas_spent,
+                    .state_gas_from_gas_left = result.state_gas_from_gas_left,
                 });
             },
             .create => |child| try finishCreate(self.executor, child, result),
@@ -306,7 +316,10 @@ pub fn executeCall(self: *Executor, options: Executor.Call) !Executor.EvmResult 
         options.sender,
         options.recipient,
         options.input,
-        options.gas,
+        .{
+            .regular_left = options.gas,
+            .reservoir = options.gas_reservoir,
+        },
         options.value,
     );
     return Host.Result.fromCall(.{
@@ -314,6 +327,9 @@ pub fn executeCall(self: *Executor, options: Executor.Call) !Executor.EvmResult 
         .output_data = result.output_data,
         .gas_left = result.gas_left,
         .gas_refund = result.gas_refund,
+        .gas_reservoir = result.gas_reservoir,
+        .state_gas_spent = result.state_gas_spent,
+        .state_gas_from_gas_left = result.state_gas_from_gas_left,
     });
 }
 
@@ -322,12 +338,43 @@ pub fn executeCallTransaction(
     sender: Address,
     recipient: Address,
     input: []const u8,
-    gas: u64,
+    gas: transaction.ExecutionGas,
     value: u256,
 ) !Interpreter.Result {
+    _ = try currentTxContext(self);
+    var execution_gas = gas;
+    const top_frame_state_gas = try chargeTopFrameValueTransferStateGas(self, sender, recipient, value, &execution_gas);
+    if (top_frame_state_gas.out_of_gas) {
+        return .{
+            .status = .out_of_gas,
+            .gas_left = 0,
+            .gas_refund = 0,
+            .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+            .output_data = &.{},
+        };
+    }
+
     const resolved = try resolvedCodeAddress(self, recipient);
     if (!resolved.delegated and evmz.precompile.activeAt(self.spec, recipient) != null) {
-        return executePrecompileCallTransaction(self, sender, recipient, input, gas, value);
+        var result = try executePrecompileCallTransaction(self, sender, recipient, input, execution_gas, value);
+        finishTopFrameStateGas(&result, top_frame_state_gas);
+        return result;
+    }
+    if (resolved.delegated and self.spec.isImpl(.amsterdam)) {
+        const access_status = try accessDelegatedCodeTarget(self, resolved.address);
+        const access_cost = delegatedCodeTargetAccessCost(self.spec, access_status);
+        if (execution_gas.regular_left < access_cost) {
+            var result = Interpreter.Result{
+                .status = .out_of_gas,
+                .gas_left = 0,
+                .gas_refund = 0,
+                .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                .output_data = &.{},
+            };
+            finishTopFrameStateGas(&result, top_frame_state_gas);
+            return result;
+        }
+        execution_gas.regular_left -= access_cost;
     }
 
     var scratch = try callScratch(self, 0);
@@ -335,14 +382,89 @@ pub fn executeCallTransaction(
     const code = try dupeCodeAlloc(self, scratch.allocator, resolved.address);
     var bytecode = try prepareBytecodeAlloc(self, scratch.allocator, code);
 
-    return executePreparedCallTransaction(self, .{
+    var result = try executePreparedCallTransaction(self, .{
         .bytecode = &bytecode,
         .sender = sender,
         .recipient = recipient,
         .input = input,
-        .gas = gas,
+        .gas = execution_gas.regular_left,
+        .gas_reservoir = execution_gas.reservoir,
         .value = value,
     });
+    finishTopFrameStateGas(&result, top_frame_state_gas);
+    return result;
+}
+
+fn accessDelegatedCodeTarget(self: *Executor, target: Address) !Host.AccessStatus {
+    if (!self.spec.isImpl(.amsterdam) and evmz.precompile.activeAt(self.spec, target) != null) return .warm;
+    if (self.spec.isImpl(.amsterdam)) {
+        if (!self.state.warm_accounts.contains(target)) {
+            try self.state.warmAccount(target);
+        }
+        return .cold;
+    }
+    if (self.state.warm_accounts.contains(target)) return .warm;
+    try self.state.warmAccount(target);
+    return .cold;
+}
+
+fn delegatedCodeTargetAccessCost(spec: evmz.Spec, status: Host.AccessStatus) u64 {
+    return switch (status) {
+        .cold => if (spec.isImpl(.amsterdam))
+            tx_gas.amsterdam_cold_account_access_cost
+        else
+            evmz.instruction.cold_account_access_cost,
+        .warm => evmz.instruction.warm_storage_read_cost,
+    };
+}
+
+const TopFrameStateGasCharge = struct {
+    spent: i64 = 0,
+    from_regular: i64 = 0,
+    out_of_gas: bool = false,
+};
+
+fn chargeTopFrameValueTransferStateGas(
+    self: *Executor,
+    sender: Address,
+    recipient: Address,
+    value: u256,
+    gas: *transaction.ExecutionGas,
+) !TopFrameStateGasCharge {
+    if (!self.spec.isImpl(.amsterdam)) return .{};
+    if (value == 0) return .{};
+    if (std.mem.eql(u8, &sender, &recipient)) return .{};
+    if (try self.state.accountExists(recipient)) return .{};
+
+    const charge = tx_gas.amsterdam_new_account_state_gas;
+    const from_reservoir = @min(gas.reservoir, charge);
+    const from_regular = charge - from_reservoir;
+    if (from_regular > gas.regular_left) return .{ .out_of_gas = true };
+
+    gas.reservoir -= from_reservoir;
+    gas.regular_left -= from_regular;
+    return .{
+        .spent = std.math.cast(i64, charge) orelse std.math.maxInt(i64),
+        .from_regular = std.math.cast(i64, from_regular) orelse std.math.maxInt(i64),
+    };
+}
+
+fn finishTopFrameStateGas(result: *Interpreter.Result, charge: TopFrameStateGasCharge) void {
+    if (charge.spent == 0) return;
+    const from_reservoir = std.math.sub(i64, charge.spent, charge.from_regular) catch 0;
+    switch (result.status) {
+        .success => {
+            result.state_gas_spent = std.math.add(i64, result.state_gas_spent, charge.spent) catch std.math.maxInt(i64);
+            result.state_gas_from_gas_left = std.math.add(i64, result.state_gas_from_gas_left, charge.from_regular) catch std.math.maxInt(i64);
+        },
+        .revert => {
+            result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
+            result.gas_left = std.math.add(i64, result.gas_left, charge.from_regular) catch std.math.maxInt(i64);
+        },
+        .invalid, .out_of_gas => {
+            result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
+        },
+    }
 }
 
 fn executePrecompileCallTransaction(
@@ -350,7 +472,7 @@ fn executePrecompileCallTransaction(
     sender: Address,
     recipient: Address,
     input: []const u8,
-    gas: u64,
+    gas: transaction.ExecutionGas,
     value: u256,
 ) !Interpreter.Result {
     self.clearLastOutput();
@@ -368,13 +490,17 @@ fn executePrecompileCallTransaction(
         self,
         recipient,
         input,
-        std.math.cast(i64, gas) orelse std.math.maxInt(i64),
+        std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+        std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
     )) orelse unreachable;
     const result = host_result.expectCall();
     return .{
         .status = result.status,
         .gas_left = result.gas_left,
         .gas_refund = result.gas_refund,
+        .gas_reservoir = result.gas_reservoir,
+        .state_gas_spent = result.state_gas_spent,
+        .state_gas_from_gas_left = result.state_gas_from_gas_left,
         .output_data = self.last_call_output,
     };
 }
@@ -398,6 +524,7 @@ pub fn executePreparedCallTransaction(
         .depth = 0,
         .kind = .call,
         .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
+        .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
         .recipient = options.recipient,
         .sender = options.sender,
         .input_data = options.input,
@@ -413,6 +540,9 @@ pub fn executePreparedCallTransaction(
         .status = call_result.status,
         .gas_left = call_result.gas_left,
         .gas_refund = call_result.gas_refund,
+        .gas_reservoir = call_result.gas_reservoir,
+        .state_gas_spent = call_result.state_gas_spent,
+        .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
         .output_data = self.last_call_output,
     };
 }
@@ -421,13 +551,14 @@ pub fn executeCreateTransaction(
     self: *Executor,
     sender: Address,
     init_code: []const u8,
-    gas: u64,
+    gas: transaction.ExecutionGas,
     value: u256,
 ) !Host.Result {
     return executeCreate(self, .{
         .sender = sender,
         .init_code = init_code,
-        .gas = gas,
+        .gas = gas.regular_left,
+        .gas_reservoir = gas.reservoir,
         .value = value,
     });
 }
@@ -439,6 +570,7 @@ pub fn executeCreate(self: *Executor, options: Executor.Create) !Executor.EvmRes
         .depth = 0,
         .kind = if (options.salt == null) .create else .create2,
         .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
+        .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
         .sender = options.sender,
         .input_data = options.init_code,
         .value = options.value,
@@ -503,9 +635,9 @@ pub fn acquireRawFrame(
     code: []const u8,
     bytecode: ?*Bytecode,
 ) !FrameLease {
-    const call_frame = try self.call_frame_pool.create(self.allocator);
-    errdefer self.call_frame_pool.destroy(call_frame);
-    try call_frame.init(frame_allocator, .{
+    const slot = try self.call_frame_pool.create(self.allocator);
+    errdefer self.call_frame_pool.destroy(slot);
+    try slot.init(frame_allocator, .{
         .host = host_iface,
         .msg = msg,
         .code = code,
@@ -516,7 +648,8 @@ pub fn acquireRawFrame(
     });
     return .{
         .executor = self,
-        .frame = call_frame,
+        .slot = slot,
+        .frame = &slot.frame,
     };
 }
 
@@ -561,21 +694,24 @@ fn stabilizeFinalResult(self: *Executor, result: Host.Result) !Host.Result {
         .output_data = output,
         .gas_left = result.gasLeft(),
         .gas_refund = result.gasRefund(),
+        .gas_reservoir = result.gasReservoir(),
+        .state_gas_spent = result.stateGasSpent(),
+        .state_gas_from_gas_left = result.stateGasFromGasLeft(),
     });
 }
 
-fn codeMayYield(code: []const u8) bool {
+fn codeNeedsActionLoop(code: []const u8) bool {
     var pc: usize = 0;
     while (pc < code.len) {
         const opcode_byte = code[pc];
         pc += 1;
-        if (isYieldBoundaryOpcode(opcode_byte)) return true;
+        if (isActionBoundaryOpcode(opcode_byte)) return true;
         pc += @min(pushDataLen(opcode_byte), code.len - pc);
     }
     return false;
 }
 
-inline fn isYieldBoundaryOpcode(opcode_byte: u8) bool {
+inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
     const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
     return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
         opcode_byte == @intFromEnum(Opcode.STATICCALL);
@@ -593,6 +729,7 @@ fn beginCall(self: *Executor, msg: Host.Message) !StartedCall {
             .output_data = &.{},
             .gas_left = msg.gas,
             .gas_refund = 0,
+            .gas_reservoir = msg.gas_reservoir,
         }) };
     }
 
@@ -615,13 +752,14 @@ fn beginCall(self: *Executor, msg: Host.Message) !StartedCall {
                 .output_data = &.{},
                 .gas_left = msg.gas,
                 .gas_refund = 0,
+                .gas_reservoir = msg.gas_reservoir,
             }) };
         }
     }
 
     const resolved = try resolvedCodeAddress(self, msg.code_address);
     if (!resolved.delegated and evmz.precompile.activeAt(self.spec, msg.code_address) != null) {
-        if (try executePrecompileCall(self, msg.code_address, msg.input_data, msg.gas)) |result| {
+        if (try executePrecompileCall(self, msg.code_address, msg.input_data, msg.gas, msg.gas_reservoir)) |result| {
             if (result.status() == .success) {
                 try touchLegacyCallRecipient(self, msg);
             }
@@ -640,6 +778,7 @@ fn beginCall(self: *Executor, msg: Host.Message) !StartedCall {
             .output_data = &.{},
             .gas_left = msg.gas,
             .gas_refund = 0,
+            .gas_reservoir = msg.gas_reservoir,
         }) };
     }
 
@@ -655,6 +794,7 @@ fn executePrecompileCall(
     recipient: Address,
     input: []const u8,
     gas: i64,
+    gas_reservoir: i64,
 ) !?Host.Result {
     const precompile_result = evmz.precompile.execute(
         self.allocator,
@@ -668,6 +808,7 @@ fn executePrecompileCall(
             .output_data = &.{},
             .gas_left = 0,
             .gas_refund = 0,
+            .gas_reservoir = gas_reservoir,
         }),
         else => return err,
     };
@@ -685,6 +826,7 @@ fn executePrecompileCall(
         .output_data = self.last_call_output,
         .gas_left = if (status == .success) result.gas_left else 0,
         .gas_refund = 0,
+        .gas_reservoir = gas_reservoir,
     });
 }
 
@@ -723,7 +865,7 @@ pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
     if (msg.kind == .create or msg.kind == .create2) {
         // Opcode handlers check the caller frame depth before constructing the
         // child message. The executor receives that already-incremented child.
-        if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, .invalid);
+        if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
         return createContract(self, msg);
     }
 
@@ -753,6 +895,9 @@ pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
                 .output_data = self.last_call_output,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
             });
         },
     };
@@ -763,7 +908,7 @@ fn createContract(self: *Executor, msg: Host.Message) !Host.Result {
     self.state.trace_depth = msg.depth;
     defer self.state.trace_depth = previous_depth;
 
-    if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, .invalid);
+    if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
 
     return switch (try beginCreate(self, msg)) {
         .immediate => |result| result,
@@ -795,14 +940,15 @@ fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
         else => unreachable,
     };
     if (caller.balance < msg.value) {
-        return .{ .immediate = createFailure(self, create_address, msg.gas, .invalid) };
+        return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
     }
 
+    const next_nonce = std.math.add(u64, caller.nonce, 1) catch return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
     if (self.spec.isImpl(.berlin)) {
         try self.warmAccessListAddress(create_address);
     }
+    const account_pre_existing = try self.state.accountExists(create_address);
 
-    const next_nonce = std.math.add(u64, caller.nonce, 1) catch return .{ .immediate = createFailure(self, create_address, msg.gas, .invalid) };
     try self.state.setNonce(msg.sender, next_nonce);
     const checkpoint_state = self.state.checkpoint();
     var checkpoint_open = true;
@@ -813,11 +959,12 @@ fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
     if (try createCollision(self, create_address)) {
         self.state.commitCheckpoint(checkpoint_state);
         checkpoint_open = false;
-        return .{ .immediate = createFailure(self, create_address, 0, .invalid) };
+        return .{ .immediate = createFailure(self, create_address, 0, msg.gas_reservoir, .invalid) };
     }
 
     _ = try self.state.subtractBalance(msg.sender, msg.value);
     try self.state.addBalance(create_address, msg.value);
+    try Executor.transfer_logs.emit(self, msg.sender, create_address, msg.value);
     try self.state.setNonce(create_address, if (self.spec.isImpl(.spurious_dragon)) 1 else 0);
     try self.state.clearCode(create_address);
     try self.state.markCreatedContract(create_address);
@@ -826,6 +973,7 @@ fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
         .depth = msg.depth,
         .kind = .call,
         .gas = msg.gas,
+        .gas_reservoir = msg.gas_reservoir,
         .recipient = create_address,
         .sender = msg.sender,
         .input_data = &.{},
@@ -837,6 +985,7 @@ fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
     return .{ .child = .{
         .checkpoint_state = checkpoint_state,
         .address = create_address,
+        .account_pre_existing = account_pre_existing,
         .msg = child_msg,
         .init_code = msg.input_data,
     } };
@@ -849,6 +998,7 @@ fn finishCreate(self: *Executor, child: ChildCreate, result: Interpreter.Result)
     }
 
     const output = try setLastOutput(self, result.output_data);
+    const account_state_gas_refund = createAccountStateGasRefund(self.spec, child.account_pre_existing);
     if (result.status != .success) {
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
@@ -857,31 +1007,41 @@ fn finishCreate(self: *Executor, child: ChildCreate, result: Interpreter.Result)
             .output_data = output,
             .gas_left = result.gas_left,
             .gas_refund = result.gas_refund,
+            .gas_reservoir = result.gas_reservoir,
+            .state_gas_spent = result.state_gas_spent,
+            .state_gas_from_gas_left = result.state_gas_from_gas_left,
         });
     }
 
-    if (self.spec.isImpl(.spurious_dragon) and output.len > Executor.max_code_size) {
+    if (self.spec.isImpl(.spurious_dragon) and output.len > Executor.maxCodeSize(self.spec)) {
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
-        return createFailure(self, child.address, 0, .out_of_gas);
+        return createFailureFromResult(self, child.address, result, .out_of_gas);
     }
     if (self.spec.isImpl(.london) and output.len > 0 and output[0] == 0xef) {
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
-        return createFailure(self, child.address, 0, .invalid);
+        return createFailureFromResult(self, child.address, result, .invalid);
     }
 
     const runtime_size = std.math.cast(i64, output.len) orelse {
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
-        return createFailure(self, child.address, 0, .out_of_gas);
+        return createFailureFromResult(self, child.address, result, .out_of_gas);
     };
-    const deposit_cost = std.math.mul(i64, runtime_size, Executor.code_deposit_gas) catch {
+    const deposit_regular_cost = if (self.spec.isImpl(.amsterdam)) blk: {
+        const words = evmz.calcWordSize(i64, runtime_size);
+        break :blk std.math.mul(i64, words, tx_gas.amsterdam_code_deposit_word_cost) catch {
+            try self.state.revertToCheckpoint(child.checkpoint_state);
+            checkpoint_open = false;
+            return createFailureFromResult(self, child.address, result, .out_of_gas);
+        };
+    } else std.math.mul(i64, runtime_size, Executor.code_deposit_gas) catch {
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
-        return createFailure(self, child.address, 0, .out_of_gas);
+        return createFailureFromResult(self, child.address, result, .out_of_gas);
     };
-    if (result.gas_left < deposit_cost) {
+    if (result.gas_left < deposit_regular_cost) {
         if (!self.spec.isImpl(.homestead)) {
             self.state.commitCheckpoint(child.checkpoint_state);
             checkpoint_open = false;
@@ -890,11 +1050,31 @@ fn finishCreate(self: *Executor, child: ChildCreate, result: Interpreter.Result)
                 .output_data = output,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
+                .state_gas_refund = account_state_gas_refund,
             });
         }
         try self.state.revertToCheckpoint(child.checkpoint_state);
         checkpoint_open = false;
-        return createFailure(self, child.address, 0, .out_of_gas);
+        return createFailureFromResult(self, child.address, result, .out_of_gas);
+    }
+
+    var deposit_result = result;
+    deposit_result.gas_left -= deposit_regular_cost;
+    if (self.spec.isImpl(.amsterdam)) {
+        const deposit_state_gas = std.math.mul(i64, runtime_size, tx_gas.amsterdam_cost_per_state_byte) catch {
+            try self.state.revertToCheckpoint(child.checkpoint_state);
+            checkpoint_open = false;
+            return createFailureFromResult(self, child.address, deposit_result, .out_of_gas);
+        };
+        deposit_result.trackStateGas(deposit_state_gas);
+        if (deposit_result.status != .success) {
+            try self.state.revertToCheckpoint(child.checkpoint_state);
+            checkpoint_open = false;
+            return createFailureFromResult(self, child.address, deposit_result, deposit_result.status);
+        }
     }
 
     try self.state.setCode(child.address, output);
@@ -904,19 +1084,38 @@ fn finishCreate(self: *Executor, child: ChildCreate, result: Interpreter.Result)
     return Host.Result.fromCreate(child.address, .{
         .status = .success,
         .output_data = output,
-        .gas_left = result.gas_left - deposit_cost,
-        .gas_refund = result.gas_refund,
+        .gas_left = deposit_result.gas_left,
+        .gas_refund = deposit_result.gas_refund,
+        .gas_reservoir = deposit_result.gas_reservoir,
+        .state_gas_spent = deposit_result.state_gas_spent,
+        .state_gas_from_gas_left = deposit_result.state_gas_from_gas_left,
+        .state_gas_refund = account_state_gas_refund,
     });
 }
 
-fn createFailure(self: *Executor, create_address: Address, gas_left: i64, status: Interpreter.Status) Host.Result {
+fn createAccountStateGasRefund(spec: evmz.Spec, account_pre_existing: bool) i64 {
+    if (!spec.isImpl(.amsterdam) or !account_pre_existing) return 0;
+    return std.math.cast(i64, tx_gas.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64);
+}
+
+fn createFailure(self: *Executor, create_address: Address, gas_left: i64, gas_reservoir: i64, status: Interpreter.Status) Host.Result {
     self.clearLastOutput();
     return Host.Result.fromCreate(create_address, .{
         .status = status,
         .output_data = &.{},
         .gas_left = gas_left,
         .gas_refund = 0,
+        .gas_reservoir = gas_reservoir,
     });
+}
+
+fn createFailureFromResult(self: *Executor, create_address: Address, result: Interpreter.Result, status: Interpreter.Status) Host.Result {
+    var failed = result;
+    failed.status = status;
+    failed.gas_left = 0;
+    failed.gas_refund = 0;
+    failed.finalizeFrameStateGas();
+    return createFailure(self, create_address, failed.gas_left, failed.gas_reservoir, status);
 }
 
 fn createCollision(self: *Executor, address: Address) !bool {

@@ -40,6 +40,7 @@ pub const CallTransaction = struct {
     value: u256 = 0,
     access_list: []const AccessListEntry = &.{},
     authorization_list: []const AuthorizationTuple = &.{},
+    authorization_count: ?usize = null,
 };
 
 pub const CreateTransaction = struct {
@@ -49,6 +50,7 @@ pub const CreateTransaction = struct {
     value: u256 = 0,
     access_list: []const AccessListEntry = &.{},
     authorization_list: []const AuthorizationTuple = &.{},
+    authorization_count: ?usize = null,
 };
 
 pub const Transaction = union(enum) {
@@ -103,6 +105,13 @@ pub const Transaction = union(enum) {
             .create => |tx| tx.authorization_list,
         };
     }
+
+    pub fn authorizationCount(self: Transaction) usize {
+        return switch (self) {
+            .call => |tx| tx.authorization_count orelse tx.authorization_list.len,
+            .create => |tx| tx.authorization_count orelse tx.authorization_list.len,
+        };
+    }
 };
 
 pub const NormalizedTransactionInput = struct {
@@ -113,6 +122,7 @@ pub const NormalizedTransactionInput = struct {
     value: u256 = 0,
     access_list: []const AccessListEntry = &.{},
     authorization_list: []const AuthorizationTuple = &.{},
+    authorization_count: ?usize = null,
 };
 
 pub fn normalizedTransaction(input: NormalizedTransactionInput) Transaction {
@@ -125,6 +135,7 @@ pub fn normalizedTransaction(input: NormalizedTransactionInput) Transaction {
             .value = input.value,
             .access_list = input.access_list,
             .authorization_list = input.authorization_list,
+            .authorization_count = input.authorization_count,
         } };
     }
     return .{ .create = .{
@@ -134,5 +145,6 @@ pub fn normalizedTransaction(input: NormalizedTransactionInput) Transaction {
         .value = input.value,
         .access_list = input.access_list,
         .authorization_list = input.authorization_list,
+        .authorization_count = input.authorization_count,
     } };
 }

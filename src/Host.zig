@@ -32,6 +32,7 @@ pub const Message = struct {
     depth: u16,
     kind: CallKind,
     gas: i64,
+    gas_reservoir: i64 = 0,
     recipient: Address = addr(0),
     sender: Address,
     input_data: []const u8,
@@ -47,6 +48,10 @@ pub const CallResult = struct {
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
+    gas_reservoir: i64 = 0,
+    state_gas_spent: i64 = 0,
+    state_gas_from_gas_left: i64 = 0,
+    state_gas_refund: i64 = 0,
 };
 
 pub const CreateResult = struct {
@@ -54,6 +59,10 @@ pub const CreateResult = struct {
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
+    gas_reservoir: i64 = 0,
+    state_gas_spent: i64 = 0,
+    state_gas_from_gas_left: i64 = 0,
+    state_gas_refund: i64 = 0,
     address: Address,
 };
 
@@ -71,6 +80,10 @@ pub const Result = union(enum) {
             .output_data = result.output_data,
             .gas_left = result.gas_left,
             .gas_refund = result.gas_refund,
+            .gas_reservoir = result.gas_reservoir,
+            .state_gas_spent = result.state_gas_spent,
+            .state_gas_from_gas_left = result.state_gas_from_gas_left,
+            .state_gas_refund = result.state_gas_refund,
             .address = address,
         } };
     }
@@ -100,6 +113,27 @@ pub const Result = union(enum) {
         return switch (self) {
             .call => |result| result.gas_refund,
             .create => |result| result.gas_refund,
+        };
+    }
+
+    pub fn gasReservoir(self: Result) i64 {
+        return switch (self) {
+            .call => |result| result.gas_reservoir,
+            .create => |result| result.gas_reservoir,
+        };
+    }
+
+    pub fn stateGasSpent(self: Result) i64 {
+        return switch (self) {
+            .call => |result| result.state_gas_spent,
+            .create => |result| result.state_gas_spent,
+        };
+    }
+
+    pub fn stateGasFromGasLeft(self: Result) i64 {
+        return switch (self) {
+            .call => |result| result.state_gas_from_gas_left,
+            .create => |result| result.state_gas_from_gas_left,
         };
     }
 
@@ -148,6 +182,7 @@ pub const TxContext = struct {
     origin: Address,
     coinbase: Address,
     number: u64,
+    slot_number: u64 = 0,
     timestamp: u64,
     gas_limit: u64,
     prev_randao: u256,

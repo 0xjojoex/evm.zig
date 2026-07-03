@@ -1,4 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const use_limb_div_mod = builtin.target.cpu.arch == .riscv64;
 
 pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
     return std.mem.readInt(u256, bytes, .big);
@@ -35,7 +38,8 @@ pub inline fn div(a: u256, b: u256) u256 {
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @intCast(a)) / @as(u64, @intCast(b));
     }
-    return a / b;
+    if (!use_limb_div_mod) return a / b;
+    return divKnuth(a, b);
 }
 
 pub inline fn mod(a: u256, b: u256) u256 {
@@ -43,7 +47,8 @@ pub inline fn mod(a: u256, b: u256) u256 {
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @intCast(a)) % @as(u64, @intCast(b));
     }
-    return a % b;
+    if (!use_limb_div_mod) return a % b;
+    return modKnuth(a, b);
 }
 
 pub inline fn addMod(a: u256, b: u256, modulo: u256) u256 {
@@ -61,7 +66,7 @@ pub inline fn mulMod(lhs: u256, rhs: u256, modulo: u256) u256 {
     if (complement <= std.math.maxInt(u64)) {
         return mulModNearPowerOfTwo(lhs, rhs, modulo, @intCast(complement));
     }
-    return mulModBigInt(lhs, rhs, modulo);
+    return mulModKnuth(lhs, rhs, modulo);
 }
 
 pub inline fn checkedAdd(a: u256, b: u256) ?u256 {
@@ -103,31 +108,6 @@ inline fn mulModGeneric(lhs: u256, rhs: u256, modulo: u256) u256 {
     return @intCast((@as(u512, lhs) * rhs) % modulo);
 }
 
-fn mulModBigInt(lhs: u256, rhs: u256, modulo: u256) u256 {
-    const bigint = std.math.big.int;
-    const word_limb_count = comptime bigint.calcTwosCompLimbCount(256);
-    const product_limb_count = comptime word_limb_count * 2;
-
-    var lhs_limbs: [word_limb_count]std.math.big.Limb = undefined;
-    var rhs_limbs: [word_limb_count]std.math.big.Limb = undefined;
-    var modulo_limbs: [word_limb_count]std.math.big.Limb = undefined;
-    var product_limbs: [product_limb_count]std.math.big.Limb = undefined;
-    var quotient_limbs: [product_limb_count]std.math.big.Limb = undefined;
-    var remainder_limbs: [word_limb_count]std.math.big.Limb = undefined;
-    var div_limbs: [bigint.calcDivLimbsBufferLen(product_limb_count, word_limb_count)]std.math.big.Limb = undefined;
-
-    const left = bigint.Mutable.init(&lhs_limbs, lhs);
-    const right = bigint.Mutable.init(&rhs_limbs, rhs);
-    const divisor = bigint.Mutable.init(&modulo_limbs, modulo);
-    var product = bigint.Mutable.init(&product_limbs, 0);
-    var quotient = bigint.Mutable.init(&quotient_limbs, 0);
-    var remainder = bigint.Mutable.init(&remainder_limbs, 0);
-
-    product.mulNoAlias(left.toConst(), right.toConst(), null);
-    quotient.divTrunc(&remainder, product.toConst(), divisor.toConst(), &div_limbs);
-    return remainder.toInt(u256) catch unreachable;
-}
-
 inline fn mulModNearPowerOfTwo(lhs: u256, rhs: u256, modulo: u256, complement: u64) u256 {
     const product = @as(u512, lhs) * rhs;
     var reduced: u320 = @as(u320, @as(u256, @truncate(product))) +
@@ -143,6 +123,490 @@ inline fn mulModNearPowerOfTwo(lhs: u256, rhs: u256, modulo: u256, complement: u
         result -%= modulo;
     }
     return result;
+}
+
+const Word4 = [4]u64;
+const Word5 = [5]u64;
+const Word8 = [8]u64;
+const Word9 = [9]u64;
+
+inline fn toLimbs(out: *Word4, value: u256) void {
+    out[0] = @truncate(value);
+    out[1] = @truncate(value >> 64);
+    out[2] = @truncate(value >> 128);
+    out[3] = @truncate(value >> 192);
+}
+
+inline fn fromLimbs(limbs: Word4) u256 {
+    return @as(u256, limbs[0]) |
+        (@as(u256, limbs[1]) << 64) |
+        (@as(u256, limbs[2]) << 128) |
+        (@as(u256, limbs[3]) << 192);
+}
+
+inline fn fromLimbsPtr(limbs: *const Word4) u256 {
+    return @as(u256, limbs[0]) |
+        (@as(u256, limbs[1]) << 64) |
+        (@as(u256, limbs[2]) << 128) |
+        (@as(u256, limbs[3]) << 192);
+}
+
+inline fn clearLimbs(comptime N: usize, out: *[N]u64) void {
+    inline for (0..N) |i| out[i] = 0;
+}
+
+fn countLimbs(comptime N: usize, limbs: *const [N]u64) usize {
+    var n = N;
+    while (n > 0 and limbs[n - 1] == 0) n -= 1;
+    return n;
+}
+
+fn ltPrefix(comptime N: usize, a: *const [N]u64, a_len: usize, b: *const Word4, b_len: usize) bool {
+    if (a_len != b_len) return a_len < b_len;
+    var i = a_len;
+    while (i != 0) {
+        i -= 1;
+        if (a[i] != b[i]) return a[i] < b[i];
+    }
+    return false;
+}
+
+fn mulFull4(out: *Word8, lhs: *const Word4, rhs: *const Word4) void {
+    clearLimbs(8, out);
+
+    inline for (0..4) |i| {
+        var carry: u128 = 0;
+        inline for (0..4) |j| {
+            const index = i + j;
+            const sum = @as(u128, out[index]) + @as(u128, lhs[i]) * @as(u128, rhs[j]) + carry;
+            out[index] = @truncate(sum);
+            carry = sum >> 64;
+        }
+
+        var index = i + 4;
+        while (carry != 0) : (index += 1) {
+            const sum = @as(u128, out[index]) + carry;
+            out[index] = @truncate(sum);
+            carry = sum >> 64;
+        }
+    }
+}
+
+fn div128by64(n_hi: u64, n_lo: u64, denominator: u64) struct { q: u64, r: u64 } {
+    const base: u64 = 1 << 32;
+    const shift: u6 = @intCast(@clz(denominator));
+    const v = denominator << shift;
+    const vn1 = v >> 32;
+    const vn0 = v & 0xffff_ffff;
+
+    const un32 = if (shift > 0)
+        (n_hi << shift) | (n_lo >> @intCast(@as(u7, 64) - shift))
+    else
+        n_hi;
+    const un10 = n_lo << shift;
+    const un1 = un10 >> 32;
+    const un0 = un10 & 0xffff_ffff;
+
+    var q1 = un32 / vn1;
+    var rhat = un32 % vn1;
+
+    while (q1 >= base or q1 * vn0 > (rhat << 32) + un1) {
+        q1 -= 1;
+        rhat += vn1;
+        if (rhat >= base) break;
+    }
+
+    const un21 = un32 *% base +% un1 -% q1 *% v;
+
+    var q0 = un21 / vn1;
+    rhat = un21 % vn1;
+
+    while (q0 >= base or q0 * vn0 > (rhat << 32) + un0) {
+        q0 -= 1;
+        rhat += vn1;
+        if (rhat >= base) break;
+    }
+
+    return .{
+        .q = q1 * base + q0,
+        .r = (un21 *% base +% un0 -% q0 *% v) >> shift,
+    };
+}
+
+fn mulSubAt(u: *Word9, divisor: *const Word4, divisor_len: usize, offset: usize, qhat: u64) bool {
+    var carry: u128 = 0;
+    var borrow: u128 = 0;
+
+    for (0..divisor_len) |i| {
+        const product = @as(u128, qhat) * @as(u128, divisor[i]) + carry;
+        carry = product >> 64;
+
+        const rhs = @as(u128, @as(u64, @truncate(product))) + borrow;
+        const lhs = @as(u128, u[offset + i]);
+        if (lhs >= rhs) {
+            u[offset + i] = @truncate(lhs - rhs);
+            borrow = 0;
+        } else {
+            u[offset + i] = @truncate((@as(u128, 1) << 64) + lhs - rhs);
+            borrow = 1;
+        }
+    }
+
+    const high_rhs = carry + borrow;
+    const high_lhs = @as(u128, u[offset + divisor_len]);
+    if (high_lhs >= high_rhs) {
+        u[offset + divisor_len] = @truncate(high_lhs - high_rhs);
+        return false;
+    }
+
+    u[offset + divisor_len] = @truncate((@as(u128, 1) << 64) + high_lhs - high_rhs);
+    return true;
+}
+
+fn addBackAt(u: *Word9, divisor: *const Word4, divisor_len: usize, offset: usize) void {
+    var carry: u128 = 0;
+    for (0..divisor_len) |i| {
+        const sum = @as(u128, u[offset + i]) + @as(u128, divisor[i]) + carry;
+        u[offset + i] = @truncate(sum);
+        carry = sum >> 64;
+    }
+    u[offset + divisor_len] +%= @truncate(carry);
+}
+
+fn modNxMKnuth(out: *Word4, numerator: *const Word8, modulo: *const Word4, numerator_len: usize, divisor_len: usize) void {
+    var divisor: Word4 = undefined;
+    var u: Word9 = undefined;
+
+    const shift: u6 = @intCast(@clz(modulo[divisor_len - 1]));
+    if (shift == 0) {
+        inline for (0..4) |i| {
+            if (i < divisor_len) divisor[i] = modulo[i];
+        }
+        inline for (0..8) |i| {
+            if (i < numerator_len) {
+                u[i] = numerator[i];
+            } else {
+                u[i] = 0;
+            }
+        }
+        u[8] = 0;
+    } else {
+        const rshift: u6 = @intCast(@as(u7, 64) - shift);
+        divisor[0] = modulo[0] << shift;
+        var i: usize = 1;
+        while (i < divisor_len) : (i += 1) {
+            divisor[i] = (modulo[i] << shift) | (modulo[i - 1] >> rshift);
+        }
+
+        u[0] = numerator[0] << shift;
+        i = 1;
+        while (i < numerator_len) : (i += 1) {
+            u[i] = (numerator[i] << shift) | (numerator[i - 1] >> rshift);
+        }
+        u[numerator_len] = numerator[numerator_len - 1] >> rshift;
+    }
+
+    var offset = numerator_len - divisor_len + 1;
+    while (offset != 0) {
+        offset -= 1;
+
+        var qhat: u64 = undefined;
+        var rhat: u64 = undefined;
+        var rhat_overflow = false;
+        if (u[offset + divisor_len] == divisor[divisor_len - 1]) {
+            qhat = std.math.maxInt(u64);
+            const add = @addWithOverflow(u[offset + divisor_len - 1], divisor[divisor_len - 1]);
+            rhat = add[0];
+            rhat_overflow = add[1] != 0;
+        } else {
+            const trial = div128by64(u[offset + divisor_len], u[offset + divisor_len - 1], divisor[divisor_len - 1]);
+            qhat = trial.q;
+            rhat = trial.r;
+        }
+
+        if (divisor_len >= 2) {
+            while (!rhat_overflow and
+                @as(u128, qhat) * @as(u128, divisor[divisor_len - 2]) >
+                    (@as(u128, rhat) << 64) | @as(u128, u[offset + divisor_len - 2]))
+            {
+                qhat -%= 1;
+                const add = @addWithOverflow(rhat, divisor[divisor_len - 1]);
+                rhat = add[0];
+                rhat_overflow = add[1] != 0;
+            }
+        }
+
+        if (mulSubAt(&u, &divisor, divisor_len, offset, qhat)) {
+            addBackAt(&u, &divisor, divisor_len, offset);
+        }
+    }
+
+    clearLimbs(4, out);
+    if (shift == 0) {
+        inline for (0..4) |i| {
+            if (i < divisor_len) out[i] = u[i];
+        }
+    } else {
+        const lshift: u6 = @intCast(@as(u7, 64) - shift);
+        inline for (0..4) |i| {
+            if (i < divisor_len) {
+                const upper = if (i + 1 < divisor_len) u[i + 1] << lshift else 0;
+                out[i] = (u[i] >> shift) | upper;
+            }
+        }
+    }
+}
+
+fn mod8By4Knuth(out: *Word4, numerator: *const Word8, modulo: *const Word4) void {
+    const divisor_len = countLimbs(4, modulo);
+    const numerator_len = countLimbs(8, numerator);
+    if (numerator_len == 0) {
+        clearLimbs(4, out);
+        return;
+    }
+    if (ltPrefix(8, numerator, numerator_len, modulo, divisor_len)) {
+        clearLimbs(4, out);
+        inline for (0..4) |i| {
+            if (i < numerator_len) out[i] = numerator[i];
+        }
+        return;
+    }
+
+    if (divisor_len == 1) {
+        var rem: u64 = 0;
+        var i = numerator_len;
+        while (i != 0) {
+            i -= 1;
+            const result = div128by64(rem, numerator[i], modulo[0]);
+            rem = result.r;
+        }
+        out[0] = rem;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
+        return;
+    }
+
+    modNxMKnuth(out, numerator, modulo, numerator_len, divisor_len);
+}
+
+inline fn divModSingleLimb(out_q: *Word4, out_r: *Word4, numerator: *const Word4, numerator_len: usize, divisor: u64) void {
+    clearLimbs(4, out_q);
+
+    var rem: u64 = 0;
+    var i = numerator_len;
+    while (i != 0) {
+        i -= 1;
+        const result = div128by64(rem, numerator[i], divisor);
+        out_q[i] = result.q;
+        rem = result.r;
+    }
+
+    out_r[0] = rem;
+    out_r[1] = 0;
+    out_r[2] = 0;
+    out_r[3] = 0;
+}
+
+inline fn divMulSubAt(u: *Word5, divisor: *const Word4, divisor_len: usize, offset: usize, qhat: u64) bool {
+    var carry: u128 = 0;
+    var borrow: u128 = 0;
+
+    for (0..divisor_len) |i| {
+        const product = @as(u128, qhat) * @as(u128, divisor[i]) + carry;
+        carry = product >> 64;
+
+        const rhs = @as(u128, @as(u64, @truncate(product))) + borrow;
+        const lhs = @as(u128, u[offset + i]);
+        if (lhs >= rhs) {
+            u[offset + i] = @truncate(lhs - rhs);
+            borrow = 0;
+        } else {
+            u[offset + i] = @truncate((@as(u128, 1) << 64) + lhs - rhs);
+            borrow = 1;
+        }
+    }
+
+    const high_rhs = carry + borrow;
+    const high_lhs = @as(u128, u[offset + divisor_len]);
+    if (high_lhs >= high_rhs) {
+        u[offset + divisor_len] = @truncate(high_lhs - high_rhs);
+        return false;
+    }
+
+    u[offset + divisor_len] = @truncate((@as(u128, 1) << 64) + high_lhs - high_rhs);
+    return true;
+}
+
+inline fn divAddBackAt(u: *Word5, divisor: *const Word4, divisor_len: usize, offset: usize) void {
+    var carry: u128 = 0;
+    for (0..divisor_len) |i| {
+        const sum = @as(u128, u[offset + i]) + @as(u128, divisor[i]) + carry;
+        u[offset + i] = @truncate(sum);
+        carry = sum >> 64;
+    }
+    u[offset + divisor_len] +%= @truncate(carry);
+}
+
+inline fn unnormalizeRemainder(out: *Word4, u: *const Word5, divisor_len: usize, shift: u6) void {
+    clearLimbs(4, out);
+    if (shift == 0) {
+        inline for (0..4) |i| {
+            if (i < divisor_len) out[i] = u[i];
+        }
+        return;
+    }
+
+    const lshift: u6 = @intCast(@as(u7, 64) - shift);
+    inline for (0..4) |i| {
+        if (i < divisor_len) {
+            const upper = if (i + 1 < divisor_len) u[i + 1] << lshift else 0;
+            out[i] = (u[i] >> shift) | upper;
+        }
+    }
+}
+
+inline fn divModNormalized(out_q: *Word4, out_r: *Word4, numerator: *const Word4, numerator_len: usize, divisor_in: *const Word4, divisor_len: usize) void {
+    var divisor: Word4 = undefined;
+    var u: Word5 = undefined;
+
+    const shift: u6 = @intCast(@clz(divisor_in[divisor_len - 1]));
+    if (shift == 0) {
+        inline for (0..4) |i| {
+            divisor[i] = if (i < divisor_len) divisor_in[i] else 0;
+        }
+        inline for (0..5) |i| {
+            if (i < 4) {
+                u[i] = if (i < numerator_len) numerator[i] else 0;
+            } else {
+                u[i] = 0;
+            }
+        }
+    } else {
+        const rshift: u6 = @intCast(@as(u7, 64) - shift);
+        inline for (0..4) |i| divisor[i] = 0;
+        inline for (0..5) |i| u[i] = 0;
+
+        divisor[0] = divisor_in[0] << shift;
+        var i: usize = 1;
+        while (i < divisor_len) : (i += 1) {
+            divisor[i] = (divisor_in[i] << shift) | (divisor_in[i - 1] >> rshift);
+        }
+
+        u[0] = numerator[0] << shift;
+        i = 1;
+        while (i < numerator_len) : (i += 1) {
+            u[i] = (numerator[i] << shift) | (numerator[i - 1] >> rshift);
+        }
+        u[numerator_len] = numerator[numerator_len - 1] >> rshift;
+    }
+
+    clearLimbs(4, out_q);
+    var offset = numerator_len - divisor_len + 1;
+    while (offset != 0) {
+        offset -= 1;
+
+        var qhat: u64 = undefined;
+        var rhat: u64 = undefined;
+        var rhat_overflow = false;
+        if (u[offset + divisor_len] == divisor[divisor_len - 1]) {
+            qhat = std.math.maxInt(u64);
+            const add = @addWithOverflow(u[offset + divisor_len - 1], divisor[divisor_len - 1]);
+            rhat = add[0];
+            rhat_overflow = add[1] != 0;
+        } else {
+            const trial = div128by64(u[offset + divisor_len], u[offset + divisor_len - 1], divisor[divisor_len - 1]);
+            qhat = trial.q;
+            rhat = trial.r;
+        }
+
+        if (divisor_len >= 2) {
+            while (!rhat_overflow and
+                @as(u128, qhat) * @as(u128, divisor[divisor_len - 2]) >
+                    (@as(u128, rhat) << 64) | @as(u128, u[offset + divisor_len - 2]))
+            {
+                qhat -%= 1;
+                const add = @addWithOverflow(rhat, divisor[divisor_len - 1]);
+                rhat = add[0];
+                rhat_overflow = add[1] != 0;
+            }
+        }
+
+        out_q[offset] = qhat;
+        if (divMulSubAt(&u, &divisor, divisor_len, offset, qhat)) {
+            out_q[offset] -%= 1;
+            divAddBackAt(&u, &divisor, divisor_len, offset);
+        }
+    }
+
+    unnormalizeRemainder(out_r, &u, divisor_len, shift);
+}
+
+inline fn divModKnuth(out_q: *Word4, out_r: *Word4, numerator: *const Word4, divisor: *const Word4) void {
+    const divisor_len = countLimbs(4, divisor);
+    if (divisor_len == 0) {
+        clearLimbs(4, out_q);
+        clearLimbs(4, out_r);
+        return;
+    }
+
+    const numerator_len = countLimbs(4, numerator);
+    if (numerator_len == 0) {
+        clearLimbs(4, out_q);
+        clearLimbs(4, out_r);
+        return;
+    }
+
+    if (ltPrefix(4, numerator, numerator_len, divisor, divisor_len)) {
+        clearLimbs(4, out_q);
+        inline for (0..4) |i| out_r[i] = numerator[i];
+        return;
+    }
+
+    if (divisor_len == 1) {
+        divModSingleLimb(out_q, out_r, numerator, numerator_len, divisor[0]);
+    } else {
+        divModNormalized(out_q, out_r, numerator, numerator_len, divisor, divisor_len);
+    }
+}
+
+inline fn divKnuth(value: u256, denominator: u256) u256 {
+    var numerator: Word4 = undefined;
+    var divisor: Word4 = undefined;
+    var quotient: Word4 = undefined;
+    var remainder: Word4 = undefined;
+
+    toLimbs(&numerator, value);
+    toLimbs(&divisor, denominator);
+    divModKnuth(&quotient, &remainder, &numerator, &divisor);
+    return fromLimbsPtr(&quotient);
+}
+
+inline fn modKnuth(value: u256, denominator: u256) u256 {
+    var numerator: Word4 = undefined;
+    var divisor: Word4 = undefined;
+    var quotient: Word4 = undefined;
+    var remainder: Word4 = undefined;
+
+    toLimbs(&numerator, value);
+    toLimbs(&divisor, denominator);
+    divModKnuth(&quotient, &remainder, &numerator, &divisor);
+    return fromLimbsPtr(&remainder);
+}
+
+fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
+    var lhs_limbs: Word4 = undefined;
+    var rhs_limbs: Word4 = undefined;
+    var modulo_limbs: Word4 = undefined;
+    var product: Word8 = undefined;
+    var reduced: Word4 = undefined;
+
+    toLimbs(&lhs_limbs, lhs);
+    toLimbs(&rhs_limbs, rhs);
+    toLimbs(&modulo_limbs, modulo);
+    mulFull4(&product, &lhs_limbs, &rhs_limbs);
+    mod8By4Knuth(&reduced, &product, &modulo_limbs);
+    return fromLimbs(reduced);
 }
 
 test sdiv {
@@ -164,6 +628,23 @@ test smod {
 test "unsigned div and mod use EVM zero semantics and match builtin arithmetic" {
     const max = std.math.maxInt(u256);
     const word_sized = @as(u256, 0x1_0000_0000);
+    const cases = [_]struct {
+        numerator: u256,
+        denominator: u256,
+    }{
+        .{
+            .numerator = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef,
+            .denominator = 0x8123456789abcdef0011223344556677,
+        },
+        .{
+            .numerator = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef,
+            .denominator = 0x8123456789abcdef00112233445566778899aabbccddeeff,
+        },
+        .{
+            .numerator = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef,
+            .denominator = 0x8123456789abcdef00112233445566778899aabbccddeeff1020304050607080,
+        },
+    };
 
     try std.testing.expectEqual(@as(u256, 0), div(1, 0));
     try std.testing.expectEqual(@as(u256, 0), mod(1, 0));
@@ -173,6 +654,13 @@ test "unsigned div and mod use EVM zero semantics and match builtin arithmetic" 
     try std.testing.expectEqual(word_sized % 3, mod(word_sized, 3));
     try std.testing.expectEqual(max / (max - 1), div(max, max - 1));
     try std.testing.expectEqual(max % (max - 1), mod(max, max - 1));
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.numerator / case.denominator, div(case.numerator, case.denominator));
+        try std.testing.expectEqual(case.numerator % case.denominator, mod(case.numerator, case.denominator));
+        try std.testing.expectEqual(case.numerator / case.denominator, divKnuth(case.numerator, case.denominator));
+        try std.testing.expectEqual(case.numerator % case.denominator, modKnuth(case.numerator, case.denominator));
+    }
 }
 
 test "bytes32 conversion uses Ethereum byte order" {
@@ -299,6 +787,10 @@ test "modular arithmetic fuzzes optimized reducers against full-width oracle" {
                 else => unreachable,
             };
 
+            try std.testing.expectEqual(if (modulo == 0) 0 else lhs / modulo, div(lhs, modulo));
+            try std.testing.expectEqual(if (modulo == 0) 0 else lhs % modulo, mod(lhs, modulo));
+            try std.testing.expectEqual(if (modulo == 0) 0 else lhs / modulo, divKnuth(lhs, modulo));
+            try std.testing.expectEqual(if (modulo == 0) 0 else lhs % modulo, modKnuth(lhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else addModGeneric(lhs, rhs, modulo), addMod(lhs, rhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else mulModGeneric(lhs, rhs, modulo), mulMod(lhs, rhs, modulo));
         }

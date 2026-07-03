@@ -83,12 +83,36 @@ pub fn swap(self: *Stack, comptime n: usize) Error!void {
     std.mem.swap(u256, &self.stacks[target], &self.stacks[self.len - 1]);
 }
 
+pub fn swapDepth(self: *Stack, n: usize) Error!void {
+    if (self.len <= n) {
+        return Error.StackUnderflow;
+    }
+
+    const target = self.len - 1 - n;
+    std.mem.swap(u256, &self.stacks[target], &self.stacks[self.len - 1]);
+}
+
 /// Duplicate the nth element from the top of the stack
 pub fn dup(self: *Stack, comptime n: usize) Error!void {
     if (self.len < n) {
         return Error.StackUnderflow;
     }
     try self.push(self.stacks[self.len - n]);
+}
+
+pub fn dupDepth(self: *Stack, n: usize) Error!void {
+    if (self.len < n) {
+        return Error.StackUnderflow;
+    }
+    try self.push(self.stacks[self.len - n]);
+}
+
+pub fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
+    if (self.len <= n or self.len <= m) {
+        return Error.StackUnderflow;
+    }
+
+    std.mem.swap(u256, &self.stacks[self.len - 1 - n], &self.stacks[self.len - 1 - m]);
 }
 
 pub fn peekN(self: *Stack, n: usize) ?u256 {

@@ -177,7 +177,6 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         .output_size = 0,
         .release = null,
         .create_address = std.mem.zeroes(evmc.evmc_address),
-        .padding = undefined,
     };
 }
 
@@ -274,6 +273,7 @@ fn revFromSpec(spec: evmz.Spec) evmc.evmc_revision {
         .cancun => evmc.EVMC_CANCUN,
         .prague => evmc.EVMC_PRAGUE,
         .osaka => evmc.EVMC_OSAKA,
+        .amsterdam => evmc.EVMC_AMSTERDAM,
     };
 }
 

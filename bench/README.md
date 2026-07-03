@@ -20,8 +20,8 @@ From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
 `summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
 
 The executor/transaction comparison is intentionally a later lane. For now
-`evmz-executor` and `evmz-executor-yielding` remain available as diagnostic
-targets, but they are not mixed into the VM-core scoreboard.
+`evmz-executor` remains available as a diagnostic target, but it is not mixed
+into the VM-core scoreboard.
 
 Current VM-core rows:
 
@@ -83,10 +83,9 @@ harnesses can consume it. Use `--summary` for host callback counts on stderr.
 The default evmz runner is direct `Interpreter.execute()` with metadata prepared
 before timing. Use `--engine evmz-executor` only for the transaction/executor
 diagnostic stub; it prepares bytecode once and times
-`Executor.executePreparedCallTransaction` after transaction setup/reset. Use
-`--engine evmz-executor-yielding` only as a compatibility alias for that same
-yielding executor path. The standalone evmone runner prepares baseline or
-advanced analysis once and times the analyzed execution path.
+`Executor.executePreparedCallTransaction` after transaction setup/reset. The
+standalone evmone runner prepares baseline or advanced analysis once and times
+the analyzed execution path.
 
 Host profiles:
 

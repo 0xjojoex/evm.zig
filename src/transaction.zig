@@ -16,10 +16,15 @@ pub const authorization_intrinsic_gas = gas.authorization_intrinsic_gas;
 pub const authorization_existing_account_refund_gas = gas.authorization_existing_account_refund_gas;
 pub const access_list_address_gas = gas.access_list_address_gas;
 pub const access_list_storage_key_gas = gas.access_list_storage_key_gas;
+pub const access_list_address_data_gas = gas.access_list_address_data_gas;
+pub const access_list_storage_key_data_gas = gas.access_list_storage_key_data_gas;
 pub const create_transaction_gas = gas.create_transaction_gas;
+pub const amsterdam_new_account_state_gas = gas.amsterdam_new_account_state_gas;
 pub const initcode_word_gas = gas.initcode_word_gas;
 pub const max_initcode_size = gas.max_initcode_size;
+pub const amsterdam_max_initcode_size = gas.amsterdam_max_initcode_size;
 pub const max_transaction_gas_limit = gas.max_transaction_gas_limit;
+pub const maxInitcodeSize = gas.maxInitcodeSize;
 
 pub const AccessListCounts = transaction.AccessListCounts;
 pub const BlobSchedule = blob.BlobSchedule;
@@ -28,6 +33,9 @@ pub const TxKind = transaction.TxKind;
 pub const SenderCodeKind = validation.SenderCodeKind;
 pub const ValidationError = validation.ValidationError;
 pub const IntrinsicGasOptions = gas.IntrinsicGasOptions;
+pub const GasCharge = gas.GasCharge;
+pub const InitialGas = gas.InitialGas;
+pub const ExecutionGas = gas.ExecutionGas;
 pub const GasPlan = gas.GasPlan;
 pub const ValidationInput = validation.ValidationInput;
 pub const AccessListEntry = transaction.AccessListEntry;
@@ -38,6 +46,7 @@ pub const NormalizedTransactionInput = transaction.NormalizedTransactionInput;
 pub const Transaction = transaction.Transaction;
 pub const FeeInput = settlement.FeeInput;
 pub const Settlement = settlement.Settlement;
+pub const SettlementFees = settlement.SettlementFees;
 pub const ExecutionGasResult = settlement.ExecutionGasResult;
 pub const SettlementCosts = settlement.SettlementCosts;
 
@@ -49,10 +58,12 @@ pub const gasPlan = gas.gasPlan;
 pub const minimumGas = gas.minimumGas;
 pub const minimumGasForTransaction = gas.minimumGasForTransaction;
 pub const floorGas = gas.floorGas;
+pub const floorGasForTransaction = gas.floorGasForTransaction;
 pub const validate = validation.validate;
 pub const maxPrepaymentCost = validation.maxPrepaymentCost;
 pub const prepaymentCost = validation.prepaymentCost;
 pub const calldataTokenCount = gas.calldataTokenCount;
+pub const accessListDataCost = gas.accessListDataCost;
 pub const blobSchedule = blob.blobSchedule;
 pub const blobBaseFee = blob.blobBaseFee;
 pub const blobBaseFeeForSpec = blob.blobBaseFeeForSpec;
@@ -61,6 +72,7 @@ pub const calcExcessBlobGas = blob.calcExcessBlobGas;
 pub const calcExcessBlobGasForSchedule = blob.calcExcessBlobGasForSchedule;
 pub const fakeExponential = blob.fakeExponential;
 pub const effectivePriorityFee = settlement.effectivePriorityFee;
+pub const settlementFromGasPlan = settlement.settlementFromGasPlan;
 pub const settlementCosts = settlement.settlementCosts;
 pub const checkedGasCost = settlement.checkedGasCost;
 
@@ -101,6 +113,7 @@ test "transaction facade exposes normalized transaction shape" {
     try std.testing.expectEqual(@as(u256, 3), tx.value());
     try std.testing.expectEqual(@as(usize, 1), tx.accessList().len);
     try std.testing.expectEqual(@as(usize, 1), tx.authorizationList().len);
+    try std.testing.expectEqual(@as(usize, 1), tx.authorizationCount());
 }
 
 test {

@@ -33,6 +33,7 @@ const Options = struct {
     optimize: []const u8 = "ReleaseFast",
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
+    spec: ?[]const u8 = null,
     out_dir: ?[]const u8 = null,
     json: bool = false,
 };
@@ -133,6 +134,11 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.num_runs = try parseNonZeroUsize(value);
         } else if (stripPrefix(arg, "--num-runs=")) |value| {
             options.num_runs = try parseNonZeroUsize(value);
+        } else if (std.mem.eql(u8, arg, "--spec")) {
+            const value = args.next() orelse return error.MissingSpec;
+            options.spec = try allocator.dupe(u8, value);
+        } else if (stripPrefix(arg, "--spec=")) |value| {
+            options.spec = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--out-dir")) {
             const value = args.next() orelse return error.MissingOutDir;
             options.out_dir = try allocator.dupe(u8, value);
@@ -161,6 +167,7 @@ fn printUsage() void {
         \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
+        \\  --spec <name>          fork spec forwarded to each engine, default runner-specific latest/stable
         \\  --out-dir <dir>        raw output directory, default zig-out/compare/<timestamp>
         \\  --json                 print JSON summary instead of markdown table
         \\
@@ -196,7 +203,7 @@ fn engineCommand(
         try argv.append(allocator, "evmz");
     }
 
-    try appendFixtureArgs(allocator, &argv, fixture, options.num_runs);
+    try appendFixtureArgs(allocator, &argv, fixture, options.num_runs, options.spec);
 
     if (engine == .evmone_baseline) {
         try argv.append(allocator, "--mode");
@@ -211,10 +218,15 @@ fn appendFixtureArgs(
     argv: *std.ArrayList([]const u8),
     fixture: []const u8,
     num_runs: ?usize,
+    spec: ?[]const u8,
 ) !void {
     try argv.append(allocator, "--fixture");
     try argv.append(allocator, fixture);
     try argv.append(allocator, "--summary");
+    if (spec) |name| {
+        try argv.append(allocator, "--spec");
+        try argv.append(allocator, name);
+    }
     if (num_runs) |runs| {
         try argv.append(allocator, "--num-runs");
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{runs}));

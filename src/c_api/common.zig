@@ -5,7 +5,7 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 comptime {
-    if (evmc.EVMC_ABI_VERSION != 12) {
+    if (evmc.EVMC_ABI_VERSION != 13) {
         @compileError("EVMC ABI changed; update the evmz EVMC adapter");
     }
 }
@@ -33,7 +33,7 @@ pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
 pub fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {
     return evmz.Host.TxContext{
         .base_fee = fromEvmcBytes32(tx_context.block_base_fee),
-        .blob_base_fee = fromEvmcBytes32(tx_context.block_base_fee),
+        .blob_base_fee = fromEvmcBytes32(tx_context.blob_base_fee),
         // .blob_hashes = tx_context.blob_hashes.*,
         .blob_hashes = &.{},
         .chain_id = fromEvmcBytes32(tx_context.chain_id),
@@ -41,6 +41,7 @@ pub fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {
         .gas_limit = @intCast(tx_context.block_gas_limit),
         .gas_price = fromEvmcBytes32(tx_context.tx_gas_price),
         .number = @intCast(tx_context.block_number),
+        .slot_number = @intCast(tx_context.block_slot_number),
         .origin = fromEvmcAddress(tx_context.tx_origin),
         .prev_randao = fromEvmcBytes32(tx_context.block_prev_randao),
         .timestamp = @intCast(tx_context.block_timestamp),

@@ -5,15 +5,15 @@ library first: small enough to inspect, strict enough to run Ethereum Execution
 Spec Tests, and fast enough to benchmark against evmone and revm.
 
 Current state: the VM has broad fork and opcode coverage, and the locked EEST
-state-test corpus passes end to end. Benchmark surfaces remain split between
-VM-core comparisons and transaction-facade diagnostics.
+state-test lane targets the active Amsterdam fixture track. Benchmark surfaces
+remain split between VM-core comparisons and transaction-facade diagnostics.
 
 ## Status
 
 | Area           | State                                                                                                                                                                                                                                                                              |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Correctness    | Locked EEST v5.4.0 state tests pass `44,039` vectors: `44,039` passed, `0` failed, `0` skipped, `0` unchecked.                                                                                                                                                                      |
-| Fork coverage  | Fork rules are modeled through `osaka` (`Spec.latest`). EEST fixtures load across Frontier through Osaka buckets.                                                                                                                                                                  |
+| Correctness    | Locked EEST state fixtures now resolve through `eest.lock`, currently `tests-glamsterdam-devnet@v6.1.0` for Amsterdam work. Use `zig build eest-classify` after fetching for the current strict coverage summary.                                                                  |
+| Fork coverage  | Fork gating includes active-development `amsterdam` (`Spec.latest`), while `osaka` remains `Spec.stable`. EEST fixture fork parsers accept Frontier through Amsterdam buckets.                                                                                                      |
 | Performance    | Portable-release VM-core reports compare direct evmz interpreter execution with standalone evmone baseline/advanced and revm interpreter runners. Current results are mixed: evmz is strongest on `SSTORE` and ERC20 mock-host calls, but trails evmone baseline on tight dispatch, memory, log, and `SLOAD` fixtures. |
 | Public surface | Zig API, VM/state layer, EVMC-compatible C entrypoint, EEST runner, benchmark sidecar, and local report generator.                                                                                                                                                                 |
 
@@ -30,7 +30,8 @@ scope.
 - `Host`: native Zig host interface and EVMC bridge.
 - `executor`: advanced execution core used by diagnostics, benchmark sidecars,
   and lower-level integrations.
-- Fork-aware `Spec` handling through Osaka.
+- Fork-aware `Spec` gating through active Amsterdam, with Osaka kept as
+  `Spec.stable`.
 - Ethereum transaction, transaction-envelope, RLP, address, and `uint256`
   helpers.
 - Native-backed precompiles for the supported fork set.
@@ -98,13 +99,13 @@ scripts/fetch-eest-fixtures.sh
 zig build eest-scope
 zig build eest-classify
 zig build eest
-zig build eest -- ../.eest/fixtures/v5.4.0/fixtures/state_tests/path/to/test.json
+zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/path/to/test.json
 ```
 
-The default state-test fetch stays on the latest supported stable Osaka snapshot.
-Moving test-release and benchmark fixture tags now live in
-`ethereum/execution-specs`. Bare `zig build eest` resolves `eest.lock`
-`dest` and runs `fixtures/state_tests`.
+The default state-test fetch reads `eest.lock`, currently the
+`tests-glamsterdam-devnet@v6.1.0` fixture release from
+`ethereum/execution-specs`. Bare `zig build eest` resolves `eest.lock` `dest`
+and runs `fixtures/state_tests`.
 
 Root delegates are available too:
 
@@ -114,17 +115,10 @@ zig build eest-scope
 zig build eest-classify
 ```
 
-The latest locked state-test run reports:
-
-```text
-../.eest/fixtures/v5.4.0/fixtures/state_tests:
-fixtures=44039 vectors=44039 passed=44039 failed=0 skipped=0 unchecked=0
-```
-
-This is the main correctness signal for the current implementation. The state
-runner checks transaction nonce, fixture chain/blob config, and post-state
-account balance, nonce, code, and storage. It rejects unknown keys in supported
-fixture shapes.
+The strict classifier is the main correctness signal for the current
+implementation. The state runner checks transaction nonce, fixture chain/blob
+config, and post-state account balance, nonce, code, and storage. It rejects
+unknown keys in supported fixture shapes.
 
 The EEST benchmark runner also consumes decoded `blockchain_tests` benchmark
 fixtures, but raw engine payloads, trie/root validation, receipts, and benchmark
@@ -157,20 +151,20 @@ zig build bench-revm-kernel -- --case add
 
 Current portable-release VM-core snapshot:
 
-Median milliseconds from `zig build bench-compare -- --num-runs 1000`. Lower is
-faster.
+Median milliseconds from the VM-loop section of `zig build bench-report`. Lower
+is faster.
 
 | VM-loop fixture     |    evmz | evmone-base | evmone-adv | revm-int |
 | ------------------- | ------: | ----------: | ---------: | -------: |
-| Arithmetic loop     | `0.290` |     `0.105` |    `0.338` |  `0.503` |
-| Memory store loop   | `0.229` |     `0.104` |    `0.257` |  `0.431` |
-| Keccak loop         | `3.674` |     `3.744` |    `3.718` |  `3.009` |
-| Ten-thousand hash   | `1.725` |     `0.927` |    `1.703` |  `2.276` |
-| Storage SLOAD loop  | `0.131` |     `0.075` |    `0.104` |  `0.116` |
-| Storage SSTORE loop | `0.362` |     `1.295` |    `1.325` |  `1.169` |
-| LOG0 loop           | `0.100` |     `0.038` |    `0.084` |  `0.131` |
-| ERC20 mint          | `3.350` |     `4.571` |    `5.432` |  `4.063` |
-| ERC20 transfer      | `6.142` |     `7.290` |    `8.311` |  `6.799` |
+| Arithmetic loop     | `0.291` |     `0.095` |    `0.346` |  `0.519` |
+| Memory store loop   | `0.229` |     `0.094` |    `0.256` |  `0.418` |
+| Keccak loop         | `3.628` |     `3.620` |    `3.803` |  `4.995` |
+| Ten-thousand hashes | `1.612` |     `0.764` |    `1.678` |  `4.870` |
+| Storage SLOAD loop  | `0.134` |     `0.075` |    `0.103` |  `0.337` |
+| Storage SSTORE loop | `0.357` |     `1.136` |    `1.164` |  `1.176` |
+| LOG0 loop           | `0.102` |     `0.078` |    `0.080` |  `0.134` |
+| ERC20 mint          | `3.190` |     `4.273` |    `5.113` |  `7.073` |
+| ERC20 transfer      | `5.956` |     `6.744` |    `7.867` |  `6.871` |
 
 The VM-loop rows measure deployed runtime calls. Deployment, fixture loading,
 bytecode analysis/preparation, and frame/interpreter setup are outside the
@@ -208,9 +202,16 @@ reports stay under ignored `output/`.
 
 ## License
 
-evm.zig source is licensed under MIT.
+evm.zig original source code is licensed under MIT. See `LICENSE`.
 
 This repository also builds against third-party components that retain their own
-licenses. In particular, evmone/EVMC precompile code is licensed under
-Apache-2.0. Binary and source distributions should include the relevant
-third-party license notices.
+licenses. Runtime/precompile-related components include:
+
+- c-kzg-4844: Apache-2.0
+- blst: Apache-2.0
+- EVMC / evmone headers and benchmark support: Apache-2.0
+- mcl: BSD-3-Clause
+
+These third-party licenses remain in effect. Source and binary distributions
+that include these components should reproduce the applicable copyright,
+license, disclaimer, and NOTICE files.

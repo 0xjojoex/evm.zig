@@ -8,6 +8,7 @@ pub const min_blob_base_fee: u256 = 1;
 pub const blob_base_cost: u64 = 8_192;
 pub const cancun_blob_base_fee_update_fraction: u256 = 3_338_477;
 pub const prague_blob_base_fee_update_fraction: u256 = 5_007_716;
+pub const amsterdam_blob_base_fee_update_fraction: u256 = 11_684_671;
 pub const blob_base_fee_update_fraction: u256 = cancun_blob_base_fee_update_fraction;
 
 pub const BlobSchedule = struct {
@@ -24,6 +25,13 @@ pub const ExcessBlobGasInput = struct {
 
 pub fn blobSchedule(spec: Spec) ?BlobSchedule {
     if (!spec.isImpl(.cancun)) return null;
+    if (spec.isImpl(.amsterdam)) {
+        return .{
+            .target = 14,
+            .max = 21,
+            .base_fee_update_fraction = amsterdam_blob_base_fee_update_fraction,
+        };
+    }
     if (spec.isImpl(.prague)) {
         return .{
             .target = 6,
@@ -100,6 +108,11 @@ pub fn maxBlobCount(spec: Spec) usize {
     return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
 }
 
+pub fn maxBlobCountPerTransaction(spec: Spec) usize {
+    if (spec.isImpl(.osaka)) return 6;
+    return maxBlobCount(spec);
+}
+
 pub fn blobVersion(hash: u256) u8 {
     return @intCast(hash >> 248);
 }
@@ -110,7 +123,11 @@ test "transaction blob fee helpers" {
     try std.testing.expectEqual(@as(u64, 6), blobSchedule(.cancun).?.max);
     try std.testing.expectEqual(cancun_blob_base_fee_update_fraction, blobSchedule(.cancun).?.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u64, 9), blobSchedule(.osaka).?.max);
+    try std.testing.expectEqual(@as(usize, 6), maxBlobCountPerTransaction(.osaka));
     try std.testing.expectEqual(prague_blob_base_fee_update_fraction, blobSchedule(.osaka).?.base_fee_update_fraction);
+    try std.testing.expectEqual(@as(u64, 14), blobSchedule(.amsterdam).?.target);
+    try std.testing.expectEqual(@as(u64, 21), blobSchedule(.amsterdam).?.max);
+    try std.testing.expectEqual(amsterdam_blob_base_fee_update_fraction, blobSchedule(.amsterdam).?.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u256, 19), blobBaseFeeForSpec(.cancun, 10_000_000));
     try std.testing.expectEqual(@as(u256, 7), blobBaseFeeForSpec(.osaka, 10_000_000));
     try std.testing.expectEqual(@as(u256, 786_432), calcExcessBlobGas(.prague, .{

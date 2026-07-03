@@ -373,6 +373,11 @@ const BenchmarkRunner = struct {
             const sender_nonce = if (sender_account) |account| account.nonce else 0;
             if (sender_nonce != tx_nonce) return error.TransactionNonceMismatch;
         }
+        const is_self_transfer = !is_create and std.mem.eql(u8, &sender, &recipient.?);
+        const creates_account = if (!is_create and value != 0 and !is_self_transfer)
+            (try self.executor.getAccountOrLoad(recipient.?)) == null
+        else
+            false;
 
         const tx_context = try parseTxContext(self.executor.spec, header, tx, sender, blob_hashes);
         try self.executor.beginTransactionScope(tx_context, normalized_tx);
@@ -383,6 +388,9 @@ const BenchmarkRunner = struct {
             .authorization_count = authorization_list.count,
             .access_list_counts = access_list_counts,
             .is_create = is_create,
+            .value = value,
+            .is_self_transfer = is_self_transfer,
+            .creates_account = creates_account,
         };
         const gas_plan = transaction.gasPlan(self.executor.spec, input, gas_limit, intrinsic_options);
         const base_fee = if (header.get("baseFeePerGas")) |base_fee_value| try parseU256FromValue(base_fee_value) else 0;
@@ -390,7 +398,7 @@ const BenchmarkRunner = struct {
             self.executor.spec,
             tx,
             gas_limit,
-            gas_plan.intrinsic_gas,
+            gas_plan,
             tx_context.gas_price,
             tx_context.coinbase,
             base_fee,
@@ -398,12 +406,17 @@ const BenchmarkRunner = struct {
 
         var timed_engine = TimedTransactionEngine{ .runner = self };
         const result = try self.executor.runTopLevelTransactionWithEngine(normalized_tx, .{
-            .execution_gas = gas_plan.execution_gas,
+            .execution = gas_plan.execution,
             .settlement = settlement,
         }, timed_engine.engine());
 
-        const gas_left = if (result.gas_left > 0) @as(u64, @intCast(result.gas_left)) else 0;
-        return .{ .tx_count = 1, .gas_used = gas_limit - @min(gas_limit, gas_left), .vm_elapsed_ns = timed_engine.elapsed_ns };
+        const costs = try transaction.settlementCosts(settlement, .{
+            .gas_left = result.gas_left,
+            .gas_refund = result.gas_refund,
+            .gas_reservoir = result.gas_reservoir,
+            .state_gas_spent = result.state_gas_spent,
+        });
+        return .{ .tx_count = 1, .gas_used = costs.gas_used, .vm_elapsed_ns = timed_engine.elapsed_ns };
     }
 
     const TimedTransactionEngine = struct {
@@ -418,7 +431,7 @@ const BenchmarkRunner = struct {
             ptr: ?*anyopaque,
             executor: *Executor,
             tx: transaction.Transaction,
-            gas: u64,
+            gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
             const self: *TimedTransactionEngine = @ptrCast(@alignCast(ptr.?));
             const start = monotonicNanos();
@@ -429,13 +442,13 @@ const BenchmarkRunner = struct {
                         call_tx.sender,
                         call_tx.recipient,
                         call_tx.input,
-                        gas,
+                        gas.regular_left,
                         call_tx.value,
                     ),
                     .create => |create_tx| try self.runner.evmone.?.executeCreateTransaction(
                         create_tx.sender,
                         create_tx.init_code,
-                        gas,
+                        gas.regular_left,
                         create_tx.value,
                     ),
                 },
@@ -503,15 +516,12 @@ fn transactionSettlement(
     spec: evmz.Spec,
     tx: *const std.json.ObjectMap,
     gas_limit: u64,
-    intrinsic_gas: u64,
+    gas_plan: transaction.GasPlan,
     gas_price: u256,
     coinbase: Address,
     base_fee: u256,
 ) !transaction.Settlement {
-    return .{
-        .spec = spec,
-        .gas_limit = gas_limit,
-        .intrinsic_gas = intrinsic_gas,
+    return transaction.settlementFromGasPlan(spec, gas_limit, gas_plan, .{
         .gas_price = gas_price,
         .priority_fee = transaction.effectivePriorityFee(spec, .{
             .gas_price = gas_price,
@@ -520,7 +530,7 @@ fn transactionSettlement(
             .max_priority_fee_per_gas = if (tx.get("maxPriorityFeePerGas")) |value| try parseU256FromValue(value) else null,
         }),
         .coinbase = coinbase,
-    };
+    });
 }
 
 fn parseTxContext(

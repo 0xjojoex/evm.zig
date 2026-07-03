@@ -25,12 +25,52 @@ Environment:
 
 Examples:
   scripts/classify-eest-fixtures.sh --exclude-static
-  scripts/classify-eest-fixtures.sh ../.eest/fixtures/v5.4.0/fixtures/state_tests/cancun
+  scripts/classify-eest-fixtures.sh ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/cancun
   scripts/classify-eest-fixtures.sh --limit 50 --timeout 5
 USAGE
 }
 
-root="${EEST_FIXTURE_ROOT:-../.eest/fixtures/v5.4.0/fixtures/state_tests}"
+lock_path=""
+lock_prefix=""
+if [[ -f "../eest.lock" ]]; then
+  lock_path="../eest.lock"
+  lock_prefix=".."
+elif [[ -f "eest.lock" ]]; then
+  lock_path="eest.lock"
+fi
+
+lock_value() {
+  local key="$1"
+  [[ -n "${lock_path}" ]] || return 1
+  awk -F= -v key="${key}" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      lhs=$1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+      if (lhs == key) {
+        sub(/^[^=]*=/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+        print
+        exit
+      }
+    }
+  ' "${lock_path}"
+}
+
+lock_path_value() {
+  local key="$1"
+  local value
+  value="$(lock_value "${key}")"
+  [[ -n "${value}" ]] || return 1
+  if [[ "${value}" = /* || -z "${lock_prefix}" ]]; then
+    printf '%s\n' "${value}"
+  else
+    printf '%s/%s\n' "${lock_prefix}" "${value}"
+  fi
+}
+
+default_root="$(lock_path_value dest || printf '../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0')/fixtures/state_tests"
+root="${EEST_FIXTURE_ROOT:-${default_root}}"
 runner="${EEST_RUNNER:-../.eest/bin/evmz-eest}"
 timeout_seconds=3
 out="../.eest/reports/state-tests.raw.txt"

@@ -161,7 +161,6 @@ fn call(
         .output_size = 0,
         .create_address = std.mem.zeroes(evmc.evmc_address),
         .release = null,
-        .padding = undefined,
     };
 
     const output_data = result.outputData();
@@ -178,7 +177,6 @@ fn call(
         .output_size = output_data.len,
         .create_address = create_address,
         .release = null,
-        .padding = undefined,
     };
 }
 
@@ -203,6 +201,9 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
         .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
         .tx_origin = toEvmcAddress(tx_context.origin),
         .blob_base_fee = toEvmcBytes32(tx_context.blob_base_fee),
+        .blob_hashes = null,
+        .blob_hashes_count = 0,
+        .block_slot_number = tx_context.slot_number,
     };
 }
 

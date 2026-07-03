@@ -350,7 +350,7 @@ fn modexpOsakaIterationCount(exponent_len: u256, exponent_head: u256) ?u256 {
 
     const tail = uint256.checkedMul(16, exponent_len - 32) orelse return null;
     const adjusted = if (bit_len == 0)
-        tail - 1
+        tail
     else
         uint256.checkedAdd(tail, bit_len - 1) orelse return null;
     return @max(adjusted, 1);
@@ -1211,6 +1211,20 @@ test modexp {
     const osaka_oog = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &eip198_input, 4079)).?;
     try std.testing.expectEqual(Status.out_of_gas, osaka_oog.status);
 
+    var osaka_zero_head_long_exp: [225]u8 = undefined;
+    @memset(&osaka_zero_head_long_exp, 0);
+    std.mem.writeInt(u256, osaka_zero_head_long_exp[0..32], 1, .big);
+    std.mem.writeInt(u256, osaka_zero_head_long_exp[32..64], 64, .big);
+    std.mem.writeInt(u256, osaka_zero_head_long_exp[64..96], 64, .big);
+    osaka_zero_head_long_exp[96] = 1;
+    @memset(osaka_zero_head_long_exp[161..225], 2);
+    const osaka_zero_head_oog = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_535)).?;
+    try std.testing.expectEqual(Status.out_of_gas, osaka_zero_head_oog.status);
+    const osaka_zero_head = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_536)).?;
+    defer std.testing.allocator.free(osaka_zero_head.output_data);
+    try std.testing.expectEqual(Status.success, osaka_zero_head.status);
+    try std.testing.expectEqual(@as(i64, 0), osaka_zero_head.gas_left);
+
     var small_input: [99]u8 = undefined;
     _ = try std.fmt.hexToBytes(&small_input, "0000000000000000000000000000000000000000000000000000000000000001" ++
         "0000000000000000000000000000000000000000000000000000000000000001" ++
@@ -1375,6 +1389,15 @@ test "bn254 pairing" {
 
     const malformed = (try execute(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &[_]u8{0}, 45_000)).?;
     try std.testing.expectEqual(Status.failure, malformed.status);
+}
+
+test "bn254 pairing rejects field elements outside modulus" {
+    var input = [_]u8{0} ** bn254_pair_size;
+    _ = try std.fmt.hexToBytes(input[0..32], "30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47");
+
+    const invalid = (try execute(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &input, 180_000)).?;
+    try std.testing.expectEqual(Status.failure, invalid.status);
+    try std.testing.expectEqual(@as(i64, 0), invalid.gas_left);
 }
 
 test blake2f {

@@ -266,7 +266,7 @@ fn addEvmoneVm(module: *std.Build.Module, evmone_dep: *std.Build.Dependency, int
         "-Wno-unknown-attributes",
         "-fno-exceptions",
         "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.21.0\"",
+        "-DPROJECT_VERSION=\"0.22.0\"",
     };
     const c_flags = &[_][]const u8{
         "-Wall",

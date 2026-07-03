@@ -242,6 +242,26 @@ test "simd jumpdest map ignores fake push in PUSH payload" {
     try expectSimdMatchesLinear(&bytecode);
 }
 
+test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
+    {
+        const bytecode = t.bytecode(.{ .DUPN, .JUMPDEST });
+        var map = JumpDestMap.init(.simd_bitmask);
+        defer map.deinit(std.testing.allocator);
+
+        try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 1));
+        try expectSimdMatchesLinear(&bytecode);
+    }
+
+    {
+        const bytecode = t.bytecode(.{ .DUPN, .PUSH1, .JUMPDEST });
+        var map = JumpDestMap.init(.simd_bitmask);
+        defer map.deinit(std.testing.allocator);
+
+        try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 2));
+        try expectSimdMatchesLinear(&bytecode);
+    }
+}
+
 test "simd jumpdest map carries PUSH payload across chunks" {
     var bytecode = [_]u8{0} ** 48;
     bytecode[0] = Opcode.PUSH32.toByte();

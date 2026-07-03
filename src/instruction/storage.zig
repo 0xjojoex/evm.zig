@@ -3,6 +3,7 @@ const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
 const Host = evmz.Host;
 const std = @import("std");
+const tx_gas = @import("../transaction/gas.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -20,6 +21,20 @@ const StorageCost = struct {
     };
 
     fn getCost(spec: evmz.Spec, status: Host.StorageStatus) @This() {
+        if (spec.isImpl(.amsterdam)) {
+            const storage_write: i16 = @intCast(tx_gas.amsterdam_storage_write_cost);
+            const clear_refund: i16 = @intCast(tx_gas.amsterdam_storage_clear_refund);
+            return switch (status) {
+                .assigned => .{ .cost = 0, .refund = 0 },
+                .added, .modified => .{ .cost = storage_write, .refund = 0 },
+                .deleted => .{ .cost = storage_write, .refund = clear_refund },
+                .deleted_added => .{ .cost = 0, .refund = -clear_refund },
+                .modified_deleted => .{ .cost = 0, .refund = clear_refund },
+                .deleted_restored => .{ .cost = 0, .refund = storage_write - clear_refund },
+                .added_deleted, .modified_restored => .{ .cost = 0, .refund = storage_write },
+            };
+        }
+
         const action = blk: {
             var actionCost = ActionCost{
                 .warm_access = 200,
@@ -74,6 +89,12 @@ test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
     try std.testing.expectEqual(StorageCost{ .cost = 800, .refund = 4200 }, StorageCost.getCost(.istanbul, .modified_restored));
 }
 
+test "Amsterdam SSTORE separates access and write gas from state gas" {
+    try std.testing.expectEqual(StorageCost{ .cost = 10_000, .refund = 0 }, StorageCost.getCost(.amsterdam, .added));
+    try std.testing.expectEqual(StorageCost{ .cost = 0, .refund = 10_000 }, StorageCost.getCost(.amsterdam, .added_deleted));
+    try std.testing.expectEqual(StorageCost{ .cost = 0, .refund = -2_480 }, StorageCost.getCost(.amsterdam, .deleted_restored));
+}
+
 pub fn sstore(frame: *CallFrame) !void {
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
@@ -88,7 +109,16 @@ pub fn sstore(frame: *CallFrame) !void {
         return;
     }
 
-    if (frame.spec.isImpl(.berlin) and try host.accessStorage(recipient, key) == .cold) {
+    const access_status = if (frame.spec.isImpl(.berlin)) try host.accessStorage(recipient, key) else .warm;
+
+    if (frame.spec.isImpl(.amsterdam)) {
+        const access_gas: u64 = switch (access_status) {
+            .cold => tx_gas.amsterdam_cold_storage_access_cost,
+            .warm => instruction.warm_storage_read_cost,
+        };
+        frame.trackGas(std.math.cast(i64, access_gas) orelse std.math.maxInt(i64));
+        if (frame.status != .running) return;
+    } else if (frame.spec.isImpl(.berlin) and access_status == .cold) {
         frame.trackGas(instruction.cold_sload_cost);
         if (frame.status != .running) return;
     }
@@ -100,6 +130,15 @@ pub fn sstore(frame: *CallFrame) !void {
     frame.trackGas(cost.cost);
     if (frame.status != .running) return;
     frame.gas_refund += cost.refund;
+
+    if (frame.spec.isImpl(.amsterdam)) {
+        const state_gas = std.math.cast(i64, tx_gas.amsterdam_storage_set_state_gas) orelse std.math.maxInt(i64);
+        switch (status) {
+            .added => frame.trackStateGas(state_gas),
+            .added_deleted => frame.refillStateGas(state_gas),
+            else => {},
+        }
+    }
 }
 
 pub fn sload(frame: *CallFrame) !void {
@@ -108,7 +147,11 @@ pub fn sload(frame: *CallFrame) !void {
     const recipient = frame.msg.recipient;
 
     if (frame.spec.isImpl(.berlin) and try host.accessStorage(recipient, key) == .cold) {
-        frame.trackGas(instruction.cold_sload_gas);
+        const cold_sload_gas = if (frame.spec.isImpl(.amsterdam))
+            tx_gas.amsterdam_cold_storage_access_cost - instruction.warm_storage_read_cost
+        else
+            instruction.cold_sload_gas;
+        frame.trackGas(std.math.cast(i64, cold_sload_gas) orelse std.math.maxInt(i64));
         if (frame.status != .running) return;
     }
 
@@ -175,6 +218,39 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     const result = interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
+}
+
+test "Amsterdam cold new SSTORE charges state gas from reservoir" {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .sender = evmz.addr(0),
+        .gas = 100_000,
+        .gas_reservoir = @intCast(tx_gas.amsterdam_storage_set_state_gas),
+        .kind = Host.CallKind.call,
+        .recipient = evmz.addr(0),
+        .value = 0,
+        .input_data = &.{},
+    };
+    const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+
+    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = bytecode,
+        .spec = .amsterdam,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - 3_000 - 10_000), result.gas_left);
+    try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, @intCast(tx_gas.amsterdam_storage_set_state_gas)), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
 test "cold SLOAD out of gas stops before storage read" {

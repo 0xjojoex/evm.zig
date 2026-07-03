@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     const ckzg_dep = b.dependency("ckzg", .{ .target = target, .optimize = optimize });
     const blst_dep = b.dependency("blst", .{ .target = target, .optimize = optimize });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
-    const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
+    const mcl_dep = b.dependency("mcl", .{});
     const trusted_setup_mod = buildTrustedSetupModule(b, ckzg_dep.path("src/trusted_setup.txt"));
 
     const evmz_mod = b.addModule("evmz", .{
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     evmz_mod.addIncludePath(b.path("include"));
-    addPrecompileNative(b, evmz_mod, ckzg_dep, blst_dep, evmone_dep, intx_dep, trusted_setup_mod);
+    addPrecompileNative(b, evmz_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
 
     const c_lib_mod = b.createModule(.{
         .root_source_file = b.path("src/evmc.zig"),
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     });
     c_lib_mod.addIncludePath(b.path("include"));
     c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
-    addPrecompileNative(b, c_lib_mod, ckzg_dep, blst_dep, evmone_dep, intx_dep, trusted_setup_mod);
+    addPrecompileNative(b, c_lib_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
 
     const static_c_lib = b.addLibrary(.{
         .name = "evmz",
@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
             .link_libcpp = true,
         });
         lib_unit_tests_mod.addIncludePath(b.path("include"));
-        addPrecompileNative(b, lib_unit_tests_mod, ckzg_dep, blst_dep, evmone_dep, intx_dep, trusted_setup_mod);
+        addPrecompileNative(b, lib_unit_tests_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
         const lib_unit_tests = b.addTest(.{
             .root_module = lib_unit_tests_mod,
             .filters = b.args orelse &.{},
@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
         });
         c_api_tests_mod.addIncludePath(b.path("include"));
         c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
-        addPrecompileNative(b, c_api_tests_mod, ckzg_dep, blst_dep, evmone_dep, intx_dep, trusted_setup_mod);
+        addPrecompileNative(b, c_api_tests_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
         const c_api_tests = b.addTest(.{
             .root_module = c_api_tests_mod,
             .filters = b.args orelse &.{},
@@ -168,7 +168,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .link_libcpp = true,
             });
-            addPrecompileNative(b, example_mod, ckzg_dep, blst_dep, evmone_dep, intx_dep, trusted_setup_mod);
+            addPrecompileNative(b, example_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
             const example = b.addExecutable(.{
                 .name = example_name,
                 .root_module = b.createModule(.{
@@ -298,14 +298,22 @@ fn addPrecompileNative(
     ckzg_dep: *std.Build.Dependency,
     blst_dep: *std.Build.Dependency,
     evmone_dep: *std.Build.Dependency,
-    intx_dep: *std.Build.Dependency,
+    mcl_dep: *std.Build.Dependency,
     trusted_setup_mod: *std.Build.Module,
 ) void {
-    const cxx_flags = &[_][]const u8{
+    const mcl_flags = &[_][]const u8{
         "-std=c++20",
         "-Wall",
         "-Wextra",
         "-Wno-missing-field-initializers",
+        "-DNDEBUG",
+        "-DMCL_FP_BIT=256",
+        "-DMCL_FR_BIT=256",
+        "-DMCL_USE_LLVM=1",
+        "-DMCL_BINT_ASM=1",
+        "-DMCL_BINT_ASM_X64=0",
+        "-DMCL_MSM=0",
+        "-DMCL_DONT_USE_XBYAK",
     };
     const c_flags = &[_][]const u8{
         "-Wall",
@@ -317,14 +325,15 @@ fn addPrecompileNative(
     module.addImport("kzg_trusted_setup", trusted_setup_mod);
     module.addIncludePath(b.path("src/precompile"));
     module.addIncludePath(evmone_dep.path("evmc/include"));
-    module.addIncludePath(evmone_dep.path("lib"));
-    module.addIncludePath(evmone_dep.path("include"));
-    module.addIncludePath(intx_dep.path("include"));
     module.addIncludePath(ckzg_dep.path("src"));
     module.addIncludePath(blst_dep.path("bindings"));
-    module.addCSourceFile(.{ .file = b.path("src/precompile/bn254.cpp"), .flags = cxx_flags });
-    module.addCSourceFile(.{ .file = evmone_dep.path("lib/evmone_precompiles/bn254.cpp"), .flags = cxx_flags });
-    module.addCSourceFile(.{ .file = evmone_dep.path("lib/evmone_precompiles/pairing/bn254/pairing.cpp"), .flags = cxx_flags });
+    module.addIncludePath(mcl_dep.path("include"));
+    module.addIncludePath(mcl_dep.path("src"));
+    module.addCSourceFile(.{ .file = b.path("src/precompile/bn254.cpp"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = mcl_dep.path("src/fp.cpp"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = mcl_dep.path("src/bn_c256.cpp"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = mcl_dep.path("src/base64.ll"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = mcl_dep.path("src/bint64.ll"), .flags = mcl_flags });
     module.addCSourceFile(.{ .file = b.path("src/precompile/bls12.c"), .flags = c_flags });
 }
 

@@ -84,7 +84,6 @@ fn execute(
             .output_size = 0,
             .create_address = std.mem.zeroes(evmc.evmc_address),
             .release = release,
-            .padding = undefined,
         };
     };
 
@@ -152,7 +151,6 @@ fn makeResult(
                 .output_size = 0,
                 .create_address = std.mem.zeroes(evmc.evmc_address),
                 .release = null,
-                .padding = undefined,
             };
         };
         @memcpy(output_copy, output_data);
@@ -169,7 +167,6 @@ fn makeResult(
         .output_size = output_size,
         .create_address = create_address,
         .release = release_fn,
-        .padding = undefined,
     };
 }
 
@@ -259,6 +256,7 @@ fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context) evmz.Host.TxContext {
         .gas_limit = @intCast(tx_context.block_gas_limit),
         .gas_price = fromEvmcBytes32(tx_context.tx_gas_price),
         .number = @intCast(tx_context.block_number),
+        .slot_number = @intCast(tx_context.block_slot_number),
         .origin = fromEvmcAddress(tx_context.tx_origin),
         .prev_randao = fromEvmcBytes32(tx_context.block_prev_randao),
         .timestamp = @intCast(tx_context.block_timestamp),
@@ -487,6 +485,7 @@ fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
         evmc.EVMC_CANCUN => .cancun,
         evmc.EVMC_PRAGUE => .prague,
         evmc.EVMC_OSAKA => .osaka,
+        evmc.EVMC_AMSTERDAM => .amsterdam,
         else => return error.UnmatchedSpec,
     };
 }

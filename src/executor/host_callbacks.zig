@@ -83,9 +83,10 @@ fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []cons
 }
 
 fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {
-    _ = ptr;
-    _ = number;
-    return 0;
+    const self: *Executor = @ptrCast(@alignCast(ptr));
+    const source = self.block_hash_source orelse return 0;
+    const block_number = std.math.cast(u64, number) orelse return 0;
+    return (try source.getBlockHash(block_number)) orelse 0;
 }
 
 fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
@@ -107,7 +108,10 @@ fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatu
 fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
     const self: *Executor = @ptrCast(@alignCast(ptr));
     const target = eip7702.delegationTarget(try self.getCode(address)) orelse return null;
-    return try accessAccount(ptr, target);
+    if (evmz.precompile.activeAt(self.spec, target) != null) return .warm;
+    if (self.state.warm_accounts.contains(target)) return .warm;
+    try self.state.warmAccount(target);
+    return .cold;
 }
 
 fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
@@ -123,10 +127,18 @@ fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
     if (balance > 0) {
         if (!same_address) {
             try self.state.addBalance(beneficiary, balance);
+            try Executor.transfer_logs.emit(self, address, beneficiary, balance);
         }
-        if (!same_address or !self.spec.isImpl(.cancun) or self.state.created_contracts.contains(address)) {
+        if (!same_address or (!self.spec.isImpl(.cancun) or self.state.created_contracts.contains(address)) and !self.spec.isImpl(.amsterdam)) {
             try self.state.setBalance(address, 0);
         }
+    }
+    if (same_address and self.spec.isImpl(.amsterdam)) {
+        if (self.state.created_contracts.contains(address)) {
+            try self.state.setNonce(address, 0);
+            try self.state.markSelfdestructed(address);
+        }
+        return should_refund;
     }
     try self.state.markSelfdestructed(address);
     return should_refund;

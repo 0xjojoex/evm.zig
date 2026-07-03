@@ -36,7 +36,6 @@ const ResolvedOptions = struct {
 const Engine = enum {
     evmz,
     evmz_executor,
-    evmz_executor_yielding,
 };
 
 const ExecutorRuntimeRunner = struct {
@@ -265,15 +264,14 @@ fn printUsage() void {
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
         \\  --spec <name>                 fork spec, default latest
-        \\  --engine <name>               evmz, evmz-executor, evmz-executor-yielding
+        \\  --engine <name>               evmz, evmz-executor
         \\  --host-profile <null|mock>    host boundary, default null
         \\  --summary                     print host callback counts to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp      opt into std.heap.smp_allocator for allocator probes
         \\
         \\Scopes:
         \\  evmz times direct Interpreter.execute with metadata prepared before timing
-        \\  evmz-executor is the default transaction/executor diagnostic with tx setup/reset outside timing
-        \\  evmz-executor-yielding is a compatibility alias for the iterative executor path
+        \\  evmz-executor is the transaction/executor diagnostic with tx setup/reset outside timing
         \\
     , .{});
 }
@@ -326,20 +324,19 @@ fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
         .evmz_executor => "evmz-executor",
-        .evmz_executor_yielding => "evmz-executor-yielding",
     };
 }
 
 fn isExecutorEngine(engine: Engine) bool {
     return switch (engine) {
-        .evmz_executor, .evmz_executor_yielding => true,
+        .evmz_executor => true,
         else => false,
     };
 }
 
 fn evmzConfig(engine: Engine) evmz.Config {
     return switch (engine) {
-        .evmz, .evmz_executor, .evmz_executor_yielding => .base,
+        .evmz, .evmz_executor => .base,
     };
 }
 
@@ -347,7 +344,6 @@ fn measureScopeName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "interpreter-prepared-execute",
         .evmz_executor => "executor-prepared-call",
-        .evmz_executor_yielding => "executor-prepared-call",
     };
 }
 
@@ -484,14 +480,13 @@ fn prepareTimedMetadata(
     return switch (engine) {
         .evmz => try interpreter.call_frame.analysis.jumpdests.analyze(allocator, runtime_code),
 
-        .evmz_executor, .evmz_executor_yielding => unreachable,
+        .evmz_executor => unreachable,
     };
 }
 
 test "engine parser accepts aliases" {
     try std.testing.expectEqual(Engine.evmz, parseEngine("evmz").?);
     try std.testing.expectEqual(Engine.evmz_executor, parseEngine("evmz-executor").?);
-    try std.testing.expectEqual(Engine.evmz_executor_yielding, parseEngine("evmz-executor-yielding").?);
     try std.testing.expect(parseEngine("evmone") == null);
     try std.testing.expect(parseEngine("evmone-baseline") == null);
     try std.testing.expect(parseEngine("evmz-call-total") == null);
@@ -502,7 +497,6 @@ test "engine parser accepts aliases" {
 test "engine scope names make benchmark boundary explicit" {
     try std.testing.expectEqualStrings("interpreter-prepared-execute", measureScopeName(.evmz));
     try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.evmz_executor));
-    try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.evmz_executor_yielding));
 }
 
 test "deploys runtime and runs empty bytecode under null host" {

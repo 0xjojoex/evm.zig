@@ -298,7 +298,6 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         .output_size = executor.last_call_output.len,
         .release = null,
         .create_address = result.create_address,
-        .padding = undefined,
     };
 }
 
@@ -385,11 +384,10 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
             .output_size = executor.last_call_output.len,
             .release = null,
             .create_address = toEvmcAddress(create_address),
-            .padding = undefined,
         };
     }
 
-    if (executor.spec.isImpl(.spurious_dragon) and child_output.len > Executor.max_code_size) {
+    if (executor.spec.isImpl(.spurious_dragon) and child_output.len > Executor.maxCodeSize(executor.spec)) {
         try executor.state.revertToCheckpoint(checkpoint_state);
         checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
@@ -422,7 +420,6 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
                 .output_size = 0,
                 .release = null,
                 .create_address = toEvmcAddress(create_address),
-                .padding = undefined,
             };
         }
         try executor.state.revertToCheckpoint(checkpoint_state);
@@ -442,7 +439,6 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         .output_size = 0,
         .release = null,
         .create_address = toEvmcAddress(create_address),
-        .padding = undefined,
     };
 }
 
@@ -473,8 +469,7 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
         .blob_base_fee = toEvmcBytes32(tx_context.blob_base_fee),
         .blob_hashes = null,
         .blob_hashes_count = 0,
-        .initcodes = null,
-        .initcodes_count = 0,
+        .block_slot_number = tx_context.slot_number,
     };
 }
 
@@ -547,7 +542,6 @@ fn failureResult(status_code: evmc.evmc_status_code, gas_left: i64) evmc.evmc_re
         .output_size = 0,
         .release = null,
         .create_address = std.mem.zeroes(evmc.evmc_address),
-        .padding = undefined,
     };
 }
 
@@ -596,6 +590,7 @@ fn revFromSpec(spec: evmz.Spec) evmc.evmc_revision {
         .cancun => evmc.EVMC_CANCUN,
         .prague => evmc.EVMC_PRAGUE,
         .osaka => evmc.EVMC_OSAKA,
+        .amsterdam => evmc.EVMC_AMSTERDAM,
     };
 }
 

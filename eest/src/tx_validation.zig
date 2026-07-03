@@ -22,6 +22,7 @@ pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
         .type_3_tx_contract_creation => "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
         .type_3_tx_zero_blobs => "TransactionException.TYPE_3_TX_ZERO_BLOBS",
         .type_3_tx_blob_count_exceeded => "TransactionException.TYPE_3_TX_BLOB_COUNT_EXCEEDED",
+        .type_3_tx_max_blob_gas_allowance_exceeded => "TransactionException.TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED",
         .type_3_tx_invalid_blob_versioned_hash => "TransactionException.TYPE_3_TX_INVALID_BLOB_VERSIONED_HASH",
         .initcode_size_exceeded => "TransactionException.INITCODE_SIZE_EXCEEDED",
         .sender_not_eoa => "TransactionException.SENDER_NOT_EOA",
@@ -32,6 +33,8 @@ pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
 
 pub fn validationErrorMatchesEest(error_value: transaction.ValidationError, expected: []const u8) bool {
     const name = eestExceptionName(error_value);
+    if (error_value == .intrinsic_gas_below_floor_gas_cost and exceptionNameMatches("TransactionException.INTRINSIC_GAS_TOO_LOW", expected)) return true;
+    if (error_value == .gas_allowance_exceeded and exceptionNameMatches("TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM", expected)) return true;
     return exceptionNameMatches(name, expected);
 }
 
@@ -70,5 +73,13 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
     try std.testing.expect(rawValidationErrorMatchesEest(
         .type_4_invalid_authority_signature,
         "TransactionException.TYPE_4_INVALID_AUTHORITY_SIGNATURE|TransactionException.TYPE_4_INVALID_AUTHORITY_SIGNATURE_S_TOO_HIGH",
+    ));
+    try std.testing.expect(validationErrorMatchesEest(
+        .intrinsic_gas_below_floor_gas_cost,
+        "TransactionException.INTRINSIC_GAS_TOO_LOW",
+    ));
+    try std.testing.expect(validationErrorMatchesEest(
+        .gas_allowance_exceeded,
+        "TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",
     ));
 }

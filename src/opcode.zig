@@ -56,6 +56,7 @@ pub const Opcode = enum(u8) {
     BASEFEE = 0x48,
     BLOBHASH = 0x49,
     BLOBBASEFEE = 0x4a,
+    SLOTNUM = 0x4b,
     POP = 0x50,
     MLOAD = 0x51,
     MSTORE = 0x52,
@@ -141,6 +142,9 @@ pub const Opcode = enum(u8) {
     LOG2 = 0xa2,
     LOG3 = 0xa3,
     LOG4 = 0xa4,
+    DUPN = 0xe6,
+    SWAPN = 0xe7,
+    EXCHANGE = 0xe8,
     CREATE = 0xf0,
     CALL = 0xf1,
     CALLCODE = 0xf2,
@@ -309,6 +313,7 @@ fn infoFor(op: Opcode) OpInfo {
         .BASEFEE => .{ .static_gas = 2, .stack_out = 1 },
         .BLOBHASH => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1 },
         .BLOBBASEFEE => .{ .static_gas = 2, .stack_out = 1 },
+        .SLOTNUM => .{ .static_gas = 2, .stack_out = 1 },
 
         // 0x50s — stack / memory / storage / flow
         .POP => .{ .static_gas = 2, .stack_in = 1 },
@@ -417,6 +422,10 @@ fn infoFor(op: Opcode) OpInfo {
             };
         },
 
+        .DUPN => .{ .static_gas = 3, .stack_in = 235, .stack_out = 236 },
+        .SWAPN => .{ .static_gas = 3, .stack_in = 236, .stack_out = 236 },
+        .EXCHANGE => .{ .static_gas = 3, .stack_in = 30, .stack_out = 30 },
+
         // 0xf0s — system / calls (all share uses_gas_left + dynamic + host + state)
         .CREATE => .{ .static_gas = 32000, .stack_in = 3, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
         .CALL => .{ .static_gas = 40, .stack_in = 7, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
@@ -465,6 +474,13 @@ test "opcode table reproduces the per-opcode switches" {
     try expectEqual(@as(u8, 3), table[@intFromEnum(Opcode.DUP3)].stack_in);
     try expectEqual(@as(u8, 4), table[@intFromEnum(Opcode.DUP3)].stack_out);
     try expectEqual(@as(i16, 0), table[@intFromEnum(Opcode.SWAP5)].stackChange());
+
+    // EIP-8024 opcodes carry execution immediates but do not mask JUMPDEST analysis.
+    try expectEqual(@as(u8, 0), table[@intFromEnum(Opcode.DUPN)].immediate);
+    try expectEqual(@as(u16, 3), table[@intFromEnum(Opcode.DUPN)].static_gas);
+    try expectEqual(@as(i16, 1), table[@intFromEnum(Opcode.DUPN)].stackChange());
+    try expectEqual(@as(i16, 0), table[@intFromEnum(Opcode.SWAPN)].stackChange());
+    try expectEqual(@as(u8, 30), table[@intFromEnum(Opcode.EXCHANGE)].stack_in);
 
     // LOG family gas + flags
     try expectEqual(@as(u16, 1875), table[@intFromEnum(Opcode.LOG4)].static_gas);

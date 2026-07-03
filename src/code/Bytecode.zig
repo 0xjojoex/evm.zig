@@ -6,13 +6,17 @@ const t = @import("../t.zig");
 
 const Bytecode = @This();
 
+pub const zero_padding_len = 33;
+
 bytes: []u8,
+read_bytes: []u8,
 jumpdests: JumpDestMap,
 analysis: Analysis,
 preprocessing: Config.Preprocessing,
 
 pub const empty = Bytecode{
     .bytes = &.{},
+    .read_bytes = &.{},
     .jumpdests = .empty,
     .analysis = .empty,
     .preprocessing = .none,
@@ -22,7 +26,10 @@ pub fn init(allocator: std.mem.Allocator, bytes: []const u8, preprocessing: Conf
     var self = empty;
     errdefer self.deinit(allocator);
 
-    self.bytes = try allocator.dupe(u8, bytes);
+    self.read_bytes = try allocator.alloc(u8, bytes.len + zero_padding_len);
+    @memcpy(self.read_bytes[0..bytes.len], bytes);
+    @memset(self.read_bytes[bytes.len..], 0);
+    self.bytes = self.read_bytes[0..bytes.len];
     self.preprocessing = preprocessing;
 
     const config = Config{ .preprocessing = preprocessing };
@@ -38,7 +45,7 @@ pub fn init(allocator: std.mem.Allocator, bytes: []const u8, preprocessing: Conf
 }
 
 pub fn deinit(self: *Bytecode, allocator: std.mem.Allocator) void {
-    allocator.free(self.bytes);
+    allocator.free(self.read_bytes);
     self.jumpdests.deinit(allocator);
     self.analysis.deinit(allocator);
     self.* = empty;
@@ -71,6 +78,17 @@ test "bytecode can precompute jumpdest map" {
     try std.testing.expect(!bytecode.isAnalyzed());
     try std.testing.expect(!try bytecode.isValidJumpDest(std.testing.allocator, 1));
     try std.testing.expect(try bytecode.isValidJumpDest(std.testing.allocator, 2));
+}
+
+test "bytecode keeps semantic bytes separate from padded read bytes" {
+    const raw = t.bytecode(.{ .PUSH32, 0x01 });
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .none);
+    defer bytecode.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(raw.len, bytecode.bytes.len);
+    try std.testing.expectEqual(raw.len + Bytecode.zero_padding_len, bytecode.read_bytes.len);
+    try std.testing.expectEqualSlices(u8, &raw, bytecode.bytes);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** Bytecode.zero_padding_len), bytecode.read_bytes[raw.len..]);
 }
 
 test "bytecode full preprocessing builds analysis" {

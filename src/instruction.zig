@@ -4,6 +4,7 @@ const std = @import("std");
 const evmz = @import("./evm.zig");
 const Interpreter = @import("./Interpreter.zig");
 const CallFrame = Interpreter.CallFrame;
+const tx_gas = @import("./transaction/gas.zig");
 
 pub const call_value_cost = 9000;
 pub const account_creation_cost = 25000;
@@ -79,6 +80,22 @@ test "fork-gated opcodes are invalid before their activation fork" {
     try evmz.t.expectBytecodeStatusBySpec(.{.BLOBBASEFEE}, .cancun, .success);
     try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x00, .BLOBHASH }, .shanghai, .invalid);
     try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH1, 0x00, .BLOBHASH }, .cancun, .success);
+
+    try evmz.t.expectBytecodeStatusBySpec(.{.SLOTNUM}, .osaka, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{.SLOTNUM}, .amsterdam, .success);
+
+    try evmz.t.expectBytecodeStatusBySpec(.{
+        .PUSH1, 0x01,   .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .DUPN,  0x80,
+    }, .osaka, .invalid);
+    try evmz.t.expectBytecodeStatusBySpec(.{
+        .PUSH1, 0x01,   .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .DUPN,  0x80,
+    }, .amsterdam, .success);
 }
 
 test "fork-dependent static gas follows legacy schedules" {
@@ -301,6 +318,11 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
         @intFromEnum(Opcode.NUMBER) => {
             if (!chargeStaticGas(frame, .NUMBER)) return;
             return environment.number(frame);
+        },
+        @intFromEnum(Opcode.SLOTNUM) => {
+            if (!requireSpec(frame, .amsterdam)) return;
+            if (!chargeStaticGas(frame, .SLOTNUM)) return;
+            return environment.slotnum(frame);
         },
         @intFromEnum(Opcode.PREVRANDAO) => {
             if (!chargeStaticGas(frame, .PREVRANDAO)) return;
@@ -656,6 +678,21 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             if (!chargeStaticGas(frame, .SWAP16)) return;
             return stack.swap(frame, 16);
         },
+        @intFromEnum(Opcode.DUPN) => {
+            if (!requireSpec(frame, .amsterdam)) return;
+            if (!chargeStaticGas(frame, .DUPN)) return;
+            return stack.dupn(frame);
+        },
+        @intFromEnum(Opcode.SWAPN) => {
+            if (!requireSpec(frame, .amsterdam)) return;
+            if (!chargeStaticGas(frame, .SWAPN)) return;
+            return stack.swapn(frame);
+        },
+        @intFromEnum(Opcode.EXCHANGE) => {
+            if (!requireSpec(frame, .amsterdam)) return;
+            if (!chargeStaticGas(frame, .EXCHANGE)) return;
+            return stack.exchange(frame);
+        },
         @intFromEnum(Opcode.LOG0) => {
             if (!chargeStaticGas(frame, .LOG0)) return;
             return logging.log(frame, 0);
@@ -753,6 +790,10 @@ fn staticGasForSpec(spec: evmz.Spec, comptime opcode: Opcode) i64 {
             200
         else
             50,
+        .CREATE, .CREATE2 => if (spec.isImpl(.amsterdam))
+            tx_gas.amsterdam_create_access_cost
+        else
+            @intCast(staticGas(opcode)),
         .SELFDESTRUCT => if (spec.isImpl(.tangerine_whistle)) 5000 else 0,
         else => @intCast(staticGas(opcode)),
     };

@@ -2,7 +2,9 @@ const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
 const instruction = evmz.instruction;
+const tx_gas = @import("../transaction/gas.zig");
 const CallFrame = Interpreter.CallFrame;
+const Host = evmz.Host;
 
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {
@@ -17,6 +19,27 @@ fn sourceFromOffset(source: []const u8, offset_word: u256) []const u8 {
     const offset = std.math.cast(usize, offset_word) orelse return &.{};
     if (offset >= source.len) return &.{};
     return source[offset..];
+}
+
+fn coldAccountAccessGas(spec: evmz.Spec) i64 {
+    const access_gas = if (spec.isImpl(.amsterdam))
+        tx_gas.amsterdam_cold_account_access_cost - instruction.warm_storage_read_cost
+    else
+        instruction.cold_account_access_gas;
+    return std.math.cast(i64, access_gas) orelse std.math.maxInt(i64);
+}
+
+fn codeAccountAccessGas(spec: evmz.Spec, status: Host.AccessStatus) i64 {
+    return switch (status) {
+        .cold => std.math.cast(i64, if (spec.isImpl(.amsterdam))
+            tx_gas.amsterdam_cold_account_access_cost
+        else
+            instruction.cold_account_access_gas) orelse std.math.maxInt(i64),
+        .warm => if (spec.isImpl(.amsterdam))
+            instruction.warm_storage_read_cost
+        else
+            0,
+    };
 }
 
 pub fn gas(frame: *CallFrame) !void {
@@ -63,6 +86,11 @@ pub fn number(frame: *CallFrame) !void {
     try frame.stack.push(tx_context.number);
 }
 
+pub fn slotnum(frame: *CallFrame) !void {
+    const tx_context = try frame.host.getTxContext();
+    try frame.stack.push(tx_context.slot_number);
+}
+
 pub fn prevrandao(frame: *CallFrame) !void {
     const tx_context = try frame.host.getTxContext();
     try frame.stack.push(tx_context.prev_randao);
@@ -82,8 +110,10 @@ pub fn blockhash(frame: *CallFrame) !void {
     const block_number: u256 = try frame.stack.pop();
 
     const tx_context = try frame.host.getTxContext();
+    const current_number: u256 = tx_context.number;
+    const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
 
-    if (block_number > tx_context.number + 256) {
+    if (block_number < current_number and block_number >= oldest_hashable) {
         const block_hash = try frame.host.getBlockHash(block_number);
         frame.stack.pushUnchecked(block_hash);
     } else {
@@ -95,7 +125,7 @@ pub fn balance(frame: *CallFrame) !void {
     const target_address_word = try frame.stack.pop();
     const target_address = evmz.address.fromWord(target_address_word);
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(instruction.cold_account_access_gas);
+        frame.trackGas(coldAccountAccessGas(frame.spec));
         if (frame.status != .running) return;
     }
     const address_balance = try frame.host.getBalance(target_address);
@@ -152,8 +182,8 @@ pub fn codecopy(frame: *CallFrame) !void {
 pub fn extcodesize(frame: *CallFrame) !void {
     const target_address_word = try frame.stack.pop();
     const target_address = evmz.address.fromWord(target_address_word);
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(instruction.cold_account_access_gas);
+    if (frame.spec.isImpl(.berlin)) {
+        frame.trackGas(codeAccountAccessGas(frame.spec, try frame.host.accessAccount(target_address)));
         if (frame.status != .running) return;
     }
     const size = try frame.host.getCodeSize(target_address);
@@ -166,8 +196,8 @@ pub fn extcodecopy(frame: *CallFrame) !void {
     const size = frame.wordToUsizeOrOog(size_word) orelse return;
     const dest_offset = frame.memoryOffsetToUsizeOrOog(dest_offset_word, size) orelse return;
 
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(instruction.cold_account_access_gas);
+    if (frame.spec.isImpl(.berlin)) {
+        frame.trackGas(codeAccountAccessGas(frame.spec, try frame.host.accessAccount(target_address)));
         if (frame.status != .running) return;
     }
 
@@ -188,7 +218,7 @@ pub fn extcodehash(frame: *CallFrame) !void {
     const address_word = try frame.stack.pop();
     const target_address = evmz.address.fromWord(address_word);
     if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(instruction.cold_account_access_gas);
+        frame.trackGas(coldAccountAccessGas(frame.spec));
         if (frame.status != .running) return;
     }
     const code_hash = try frame.host.getCodeHash(target_address);
