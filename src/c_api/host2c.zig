@@ -14,6 +14,7 @@ const toEvmcBytes32 = common.toEvmcBytes32;
 pub const HostContext = extern struct {
     ptr: *anyopaque align(@alignOf(*anyopaque)),
     host: *Host align(@alignOf(*Host)),
+    blob_hashes: [common.max_blob_hashes]evmc.evmc_bytes32,
 
     vtable: *const struct {
         deinit: *const fn (ptr: *anyopaque) void,
@@ -23,6 +24,7 @@ pub const HostContext = extern struct {
         return .{
             .ptr = host,
             .host = host,
+            .blob_hashes = undefined,
             .vtable = &.{
                 .deinit = borrowedDeinit,
             },
@@ -139,31 +141,45 @@ fn call(
     msg: [*c]const evmc.evmc_message,
 ) callconv(.c) evmc.evmc_result {
     const host = HostContext.getHostFromContext(context);
+    const kind = common.callKindFromEvmc(msg.*.kind) catch return failureResult(evmc.EVMC_FAILURE);
+    const depth = std.math.cast(u16, msg.*.depth) orelse return failureResult(evmc.EVMC_FAILURE);
+    const input_data = common.evmcInputData(msg.*.input_data, msg.*.input_size) catch return failureResult(evmc.EVMC_FAILURE);
 
     const message = Host.Message{
-        .kind = @enumFromInt(msg.*.kind),
-        .depth = @intCast(msg.*.depth),
+        .kind = kind,
+        .depth = depth,
         .gas = msg.*.gas,
         .recipient = fromEvmcAddress(msg.*.recipient),
         .sender = fromEvmcAddress(msg.*.sender),
-        .input_data = if (msg.*.input_size == 0) &.{} else msg.*.input_data[0..msg.*.input_size],
+        .input_data = input_data,
         .value = fromEvmcBytes32(msg.*.value),
         .is_static = msg.*.flags & evmc.EVMC_STATIC != 0,
         .code_address = fromEvmcAddress(msg.*.code_address),
         .create2_salt = fromEvmcBytes32(msg.*.create2_salt),
     };
 
-    const result = host.call(message) catch return evmc.evmc_result{
-        .status_code = evmc.EVMC_FAILURE,
-        .gas_left = 0,
-        .gas_refund = 0,
-        .output_data = null,
-        .output_size = 0,
-        .create_address = std.mem.zeroes(evmc.evmc_address),
-        .release = null,
-    };
+    const result = host.call(message) catch return failureResult(evmc.EVMC_FAILURE);
 
     const output_data = result.outputData();
+    var output_ptr: [*c]const u8 = null;
+    var release_fn: evmc.evmc_release_result_fn = null;
+    if (output_data.len > 0) {
+        const output_copy = std.heap.c_allocator.alloc(u8, output_data.len) catch {
+            return evmc.evmc_result{
+                .status_code = evmc.EVMC_OUT_OF_MEMORY,
+                .gas_left = 0,
+                .gas_refund = 0,
+                .output_data = null,
+                .output_size = 0,
+                .create_address = std.mem.zeroes(evmc.evmc_address),
+                .release = null,
+            };
+        };
+        @memcpy(output_copy, output_data);
+        output_ptr = output_copy.ptr;
+        release_fn = releaseResult;
+    }
+
     const create_address = switch (result) {
         .call => std.mem.zeroes(evmc.evmc_address),
         .create => |create| toEvmcAddress(create.address),
@@ -173,20 +189,43 @@ fn call(
         .status_code = statusToEvmc(result.status()),
         .gas_left = result.gasLeft(),
         .gas_refund = result.gasRefund(),
-        .output_data = if (output_data.len == 0) null else output_data.ptr,
+        .output_data = output_ptr,
         .output_size = output_data.len,
         .create_address = create_address,
+        .release = release_fn,
+    };
+}
+
+fn failureResult(status_code: evmc.evmc_status_code) evmc.evmc_result {
+    return evmc.evmc_result{
+        .status_code = status_code,
+        .gas_left = 0,
+        .gas_refund = 0,
+        .output_data = null,
+        .output_size = 0,
+        .create_address = std.mem.zeroes(evmc.evmc_address),
         .release = null,
     };
+}
+
+fn releaseResult(result: [*c]const evmc.evmc_result) callconv(.c) void {
+    if (result.*.output_data == null) return;
+    const data = @as([*]u8, @ptrCast(@constCast(result.*.output_data)))[0..result.*.output_size];
+    std.heap.c_allocator.free(data);
 }
 
 fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_context {
     if (context == null) {
         return std.mem.zeroes(evmc.evmc_tx_context);
     }
-    const host = HostContext.getHostFromContext(context);
+    const host_context = HostContext.fromContext(context).?;
+    const host = host_context.host;
     const tx_context = host.getTxContext() catch {
         log.warn("getTxContext failed", .{});
+        return std.mem.zeroes(evmc.evmc_tx_context);
+    };
+    const blob_hashes = common.toEvmcBlobHashes(tx_context.blob_hashes, &host_context.blob_hashes) catch {
+        log.warn("getTxContext blob hash conversion failed", .{});
         return std.mem.zeroes(evmc.evmc_tx_context);
     };
 
@@ -201,8 +240,8 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
         .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
         .tx_origin = toEvmcAddress(tx_context.origin),
         .blob_base_fee = toEvmcBytes32(tx_context.blob_base_fee),
-        .blob_hashes = null,
-        .blob_hashes_count = 0,
+        .blob_hashes = if (blob_hashes.len == 0) null else blob_hashes.ptr,
+        .blob_hashes_count = blob_hashes.len,
         .block_slot_number = tx_context.slot_number,
     };
 }
@@ -218,6 +257,7 @@ fn statusToEvmc(status: Interpreter.Status) evmc.evmc_status_code {
 
 fn getBlockHash(context: ?*evmc.evmc_host_context, number: i64) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
+    if (number < 0) return toEvmcBytes32(0);
     return toEvmcBytes32(host.getBlockHash(@intCast(number)) catch 0);
 }
 
@@ -230,8 +270,12 @@ fn emitLog(
     topics_count: usize,
 ) callconv(.c) void {
     const host = HostContext.getHostFromContext(context);
+    if (topics_count > 4) {
+        log.err("emitLog failed: too many topics {}", .{topics_count});
+        return;
+    }
 
-    // max 4 topcis
+    // EVMC permits at most 4 topics.
     var topics_max: [4]u256 = undefined;
 
     for (0..topics_count) |i| {

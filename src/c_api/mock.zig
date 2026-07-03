@@ -2,22 +2,29 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const t = @import("../t.zig");
 const host2c = @import("host2c.zig");
-const evmc = @import("common.zig").evmc;
+const common = @import("common.zig");
+const evmc = common.evmc;
 
 pub const MockHostContext = struct {
     mock_host: t.MockHost,
     host: evmz.Host,
     host_context: host2c.HostContext,
+    blob_hashes: [common.max_blob_hashes]u256,
 
     const Self = @This();
 
-    pub fn create(tx_context: ?evmz.Host.TxContext) !*Self {
+    pub fn create(tx_context: ?evmc.evmc_tx_context) !*Self {
         const self = try std.heap.c_allocator.create(Self);
-        self.mock_host = t.MockHost.init(std.heap.c_allocator, tx_context);
+        const native_tx_context = if (tx_context) |ctx|
+            try common.fromEvmcTxContext(ctx, &self.blob_hashes)
+        else
+            null;
+        self.mock_host = t.MockHost.init(std.heap.c_allocator, native_tx_context);
         self.host = self.mock_host.host();
         self.host_context = host2c.HostContext{
             .ptr = self,
             .host = &self.host,
+            .blob_hashes = undefined,
             .vtable = &.{
                 .deinit = deinit,
             },
