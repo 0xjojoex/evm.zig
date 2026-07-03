@@ -104,7 +104,7 @@ pub fn sstore(frame: *CallFrame) !void {
     const recipient = frame.msg.recipient;
     const host = frame.host;
 
-    if (frame.spec.isImpl(.istanbul) and frame.gas_left <= 2300) {
+    if (frame.spec.isImpl(.istanbul) and frame.gas_left <= instruction.call_stipend) {
         frame.failWithStatus(.out_of_gas);
         return;
     }

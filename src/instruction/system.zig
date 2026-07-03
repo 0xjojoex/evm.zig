@@ -158,8 +158,8 @@ pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
     }
 
     if (value > 0) {
-        msg.gas += 2300;
-        frame.gas_left += 2300;
+        msg.gas += evmz.instruction.call_stipend;
+        frame.gas_left += evmz.instruction.call_stipend;
     }
     msg.gas_reservoir = frame.gas_reservoir;
 

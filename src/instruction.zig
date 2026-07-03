@@ -7,6 +7,7 @@ const CallFrame = Interpreter.CallFrame;
 const tx_gas = @import("./transaction/gas.zig");
 
 pub const call_value_cost = 9000;
+pub const call_stipend: i64 = @intCast(tx_gas.call_stipend);
 pub const account_creation_cost = 25000;
 
 // [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929)
