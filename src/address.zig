@@ -10,8 +10,8 @@ pub const ParseError = error{
 };
 
 /// Ergonomic address constructor for unsigned integer literals, small unsigned integers,
-/// address bytes, and 40-character hex strings with an optional 0x prefix.
-pub fn addr(value: anytype) Address {
+/// address bytes, and comptime-known 40-character hex strings with an optional 0x prefix.
+pub inline fn addr(value: anytype) Address {
     const T = @TypeOf(value);
     return switch (@typeInfo(T)) {
         .comptime_int => fromComptimeInt(value),
@@ -63,15 +63,15 @@ fn fromArray(comptime T: type, comptime array: std.builtin.Type.Array, value: T)
     @compileError("addr only accepts [20]u8 address bytes by value; use a string or []const u8 for hex");
 }
 
-fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Pointer, value: T) Address {
+inline fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Pointer, value: T) Address {
     return switch (pointer.size) {
         .one => fromSinglePointer(pointer.child, value),
-        .slice => @compileError("addr does not accept slices; use fromHex(...) for runtime hex, or pass a string literal / fixed-size array pointer"),
+        .slice => @compileError("addr does not accept slices; use fromHex(...) for runtime hex, or pass a comptime-known string literal / fixed-size array pointer"),
         else => @compileError("addr does not accept pointer type " ++ @typeName(T)),
     };
 }
 
-fn fromSinglePointer(comptime Child: type, value: anytype) Address {
+inline fn fromSinglePointer(comptime Child: type, value: anytype) Address {
     if (Child == Address) return value.*;
     return switch (@typeInfo(Child)) {
         .array => |array| fromHexStringPointer(array, value),
@@ -79,16 +79,16 @@ fn fromSinglePointer(comptime Child: type, value: anytype) Address {
     };
 }
 
-fn fromHexStringPointer(comptime array: std.builtin.Type.Array, value: anytype) Address {
+inline fn fromHexStringPointer(comptime array: std.builtin.Type.Array, comptime value: anytype) Address {
     if (array.child != u8) @compileError("addr only accepts u8 hex strings");
-    return fromHex(value[0..array.len]) catch |err| invalidHexPanic(err);
+    return fromComptimeHex(value[0..array.len]);
 }
 
-fn invalidHexPanic(err: ParseError) noreturn {
-    switch (err) {
-        error.InvalidAddressHexLength => @panic("address hex must contain 40 hex characters, with optional 0x prefix"),
-        error.InvalidAddressHexCharacter => @panic("address hex contains a non-hex character"),
-    }
+fn fromComptimeHex(comptime hex: []const u8) Address {
+    return comptime fromHex(hex) catch |err| switch (err) {
+        error.InvalidAddressHexLength => @compileError("address hex must contain 40 hex characters, with optional 0x prefix"),
+        error.InvalidAddressHexCharacter => @compileError("address hex contains a non-hex character"),
+    };
 }
 
 fn hasHexPrefix(hex: []const u8) bool {
