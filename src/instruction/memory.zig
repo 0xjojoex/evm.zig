@@ -75,10 +75,6 @@ pub fn msize(frame: *CallFrame) !void {
 }
 
 pub fn mcopy(frame: *CallFrame) !void {
-    if (!frame.spec.isImpl(.cancun)) {
-        return error.UnsupportedInstruction;
-    }
-
     const dest, const offset, const size = try frame.stack.popN(3);
     if (size == 0) return;
 

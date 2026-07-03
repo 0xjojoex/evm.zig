@@ -111,11 +111,6 @@ pub fn sar(frame: *CallFrame) !void {
 }
 
 pub fn clz(frame: *CallFrame) !void {
-    if (!frame.spec.isImpl(.osaka)) {
-        frame.failWithStatus(.invalid);
-        return;
-    }
-
     const value = frame.stack.peek() orelse return error.StackUnderflow;
     frame.stack.replaceTopUnchecked(@clz(value));
 }

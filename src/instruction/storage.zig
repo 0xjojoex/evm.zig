@@ -160,20 +160,12 @@ pub fn sload(frame: *CallFrame) !void {
 }
 
 pub fn tload(frame: *CallFrame) !void {
-    if (!frame.spec.isImpl(.cancun)) {
-        return error.UnsupportedInstruction;
-    }
-
     const key = try frame.stack.pop();
     const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
     frame.stack.pushUnchecked(value);
 }
 
 pub fn tstore(frame: *CallFrame) !void {
-    if (!frame.spec.isImpl(.cancun)) {
-        return error.UnsupportedInstruction;
-    }
-
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
     }

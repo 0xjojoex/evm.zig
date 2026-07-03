@@ -189,10 +189,7 @@ pub fn create2(frame: *CallFrame) !void {
     return createImpl(frame, comptime true);
 }
 
-pub inline fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
-    if (is_create2 and !frame.spec.isImpl(.constantinople)) {
-        return error.UnsupportedInstruction;
-    }
+fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
     if (frame.msg.is_static) {
         return error.StaticCallViolation;
     }
