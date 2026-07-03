@@ -14,10 +14,12 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run micro benchmark tests whose names contain this filter",
     );
+    const profile = buildProfileOption(b);
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
+        .profile = profile,
     });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
@@ -171,6 +173,8 @@ pub fn build(b: *std.Build) void {
             b.graph.zig_exe,
             "--optimize",
             @tagName(compare_optimize),
+            "--profile",
+            profile,
         });
         if (b.args) |args| run_compare.addArgs(args);
         b.step("compare", "Run VM-core comparison").dependOn(&run_compare.step);
@@ -182,6 +186,8 @@ pub fn build(b: *std.Build) void {
             "scripts/report.py",
             "--zig-exe",
             b.graph.zig_exe,
+            "--profile",
+            profile,
         });
         run_report.setCwd(b.path("."));
         if (b.args) |args| run_report.addArgs(args);
@@ -248,6 +254,14 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
         test_step.dependOn(&b.addRunArtifact(compare_tests).step);
     }
+}
+
+fn buildProfileOption(b: *std.Build) []const u8 {
+    const profile = b.option([]const u8, "profile", "Build profile: native or zkvm") orelse "native";
+    if (!std.mem.eql(u8, profile, "native") and !std.mem.eql(u8, profile, "zkvm")) {
+        std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
+    }
+    return profile;
 }
 
 fn addEvmoneVm(module: *std.Build.Module, evmone_dep: *std.Build.Dependency, intx_dep: *std.Build.Dependency) void {

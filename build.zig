@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const profile = buildProfileOption(b);
+    const is_native_profile = std.mem.eql(u8, profile, "native");
+    const build_options = buildOptions(b, profile);
     const bench_optimize = b.option(
         std.builtin.OptimizeMode,
         "bench-optimize",
@@ -23,56 +26,65 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    const ckzg_dep = b.dependency("ckzg", .{ .target = target, .optimize = optimize });
-    const blst_dep = b.dependency("blst", .{ .target = target, .optimize = optimize });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
-    const mcl_dep = b.dependency("mcl", .{});
-    const trusted_setup_mod = buildTrustedSetupModule(b, ckzg_dep.path("src/trusted_setup.txt"));
+    const native_precompile_deps = if (is_native_profile)
+        nativePrecompileDeps(b, target, optimize)
+    else
+        null;
 
     const evmz_mod = b.addModule("evmz", .{
         .root_source_file = b.path("src/evm.zig"),
         .target = target,
         .optimize = optimize,
     });
+    evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
-    addPrecompileNative(b, evmz_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
+    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
+    if (native_precompile_deps) |deps| {
+        addPrecompileNative(b, evmz_mod, deps, evmone_dep);
+    }
 
-    const c_lib_mod = b.createModule(.{
-        .root_source_file = b.path("src/evmc.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .link_libcpp = true,
-    });
-    c_lib_mod.addIncludePath(b.path("include"));
-    c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
-    addPrecompileNative(b, c_lib_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
+    const static_c_lib = if (is_native_profile) static_c_lib: {
+        const c_lib_mod = b.createModule(.{
+            .root_source_file = b.path("src/evmc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        c_lib_mod.addOptions("build_options", build_options);
+        c_lib_mod.addIncludePath(b.path("include"));
+        c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
+        addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
 
-    const static_c_lib = b.addLibrary(.{
-        .name = "evmz",
-        .root_module = c_lib_mod,
-        .linkage = .static,
-    });
-    b.installArtifact(static_c_lib);
-    b.default_step.dependOn(&static_c_lib.step);
+        const static_c_lib = b.addLibrary(.{
+            .name = "evmz",
+            .root_module = c_lib_mod,
+            .linkage = .static,
+        });
+        b.installArtifact(static_c_lib);
+        b.default_step.dependOn(&static_c_lib.step);
 
-    const shared_c_lib = b.addLibrary(.{
-        .name = "evmz",
-        .root_module = c_lib_mod,
-        .linkage = .dynamic,
-    });
-    b.installArtifact(shared_c_lib);
-    b.default_step.dependOn(&shared_c_lib.step);
+        const shared_c_lib = b.addLibrary(.{
+            .name = "evmz",
+            .root_module = c_lib_mod,
+            .linkage = .dynamic,
+        });
+        b.installArtifact(shared_c_lib);
+        b.default_step.dependOn(&shared_c_lib.step);
 
-    // C headers.
-    const evmz_compat_header = b.addInstallHeaderFile(b.path("include/evmz.h"), "evmz.h");
-    const evmz_evmc_header = b.addInstallHeaderFile(b.path("include/evmz/evmc.h"), "evmz/evmc.h");
-    const evmz_native_header = b.addInstallHeaderFile(b.path("include/evmz/evmz.h"), "evmz/evmz.h");
-    const evmc_header = b.addInstallHeaderFile(evmone_dep.path("evmc/include/evmc/evmc.h"), "evmc/evmc.h");
-    b.getInstallStep().dependOn(&evmz_compat_header.step);
-    b.getInstallStep().dependOn(&evmz_evmc_header.step);
-    b.getInstallStep().dependOn(&evmz_native_header.step);
-    b.getInstallStep().dependOn(&evmc_header.step);
+        // C headers.
+        const evmz_compat_header = b.addInstallHeaderFile(b.path("include/evmz.h"), "evmz.h");
+        const evmz_evmc_header = b.addInstallHeaderFile(b.path("include/evmz/evmc.h"), "evmz/evmc.h");
+        const evmz_native_header = b.addInstallHeaderFile(b.path("include/evmz/evmz.h"), "evmz/evmz.h");
+        const evmc_header = b.addInstallHeaderFile(evmone_dep.path("evmc/include/evmc/evmc.h"), "evmc/evmc.h");
+        b.getInstallStep().dependOn(&evmz_compat_header.step);
+        b.getInstallStep().dependOn(&evmz_evmc_header.step);
+        b.getInstallStep().dependOn(&evmz_native_header.step);
+        b.getInstallStep().dependOn(&evmc_header.step);
+
+        break :static_c_lib static_c_lib;
+    } else null;
 
     // test
     {
@@ -80,36 +92,41 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/evm.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libcpp = true,
+            .link_libcpp = is_native_profile,
         });
+        lib_unit_tests_mod.addOptions("build_options", build_options);
         lib_unit_tests_mod.addIncludePath(b.path("include"));
-        addPrecompileNative(b, lib_unit_tests_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
+        lib_unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
+        if (native_precompile_deps) |deps| {
+            addPrecompileNative(b, lib_unit_tests_mod, deps, evmone_dep);
+        }
         const lib_unit_tests = b.addTest(.{
             .root_module = lib_unit_tests_mod,
             .filters = b.args orelse &.{},
         });
 
-        const c_api_tests_mod = b.createModule(.{
-            .root_source_file = b.path("src/evmc.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .link_libcpp = true,
-        });
-        c_api_tests_mod.addIncludePath(b.path("include"));
-        c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
-        addPrecompileNative(b, c_api_tests_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
-        const c_api_tests = b.addTest(.{
-            .root_module = c_api_tests_mod,
-            .filters = b.args orelse &.{},
-        });
-        const run_c_api_tests = b.addRunArtifact(c_api_tests);
-
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_lib_unit_tests.step);
-        test_step.dependOn(&run_c_api_tests.step);
+        if (is_native_profile) {
+            const c_api_tests_mod = b.createModule(.{
+                .root_source_file = b.path("src/evmc.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            c_api_tests_mod.addOptions("build_options", build_options);
+            c_api_tests_mod.addIncludePath(b.path("include"));
+            c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
+            addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
+            const c_api_tests = b.addTest(.{
+                .root_module = c_api_tests_mod,
+                .filters = b.args orelse &.{},
+            });
+            test_step.dependOn(&b.addRunArtifact(c_api_tests).step);
+        }
     }
 
     {
@@ -137,25 +154,26 @@ pub fn build(b: *std.Build) void {
     const optimize_name = @tagName(optimize);
     const bench_optimize_name = @tagName(bench_optimize);
     if (pathExists(b, "eest/build.zig")) {
-        addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null);
-        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null);
-        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null);
-        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null);
-        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null);
-        addEestDelegate(b, "bench", "Run EEST benchmark blockchain-test fixtures", "bench", null, bench_optimize_name);
+        addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, profile);
+        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null, profile);
+        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, profile);
+        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, profile);
+        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, profile);
+        addEestDelegate(b, "bench", "Run EEST benchmark blockchain-test fixtures", "bench", null, bench_optimize_name, profile);
     }
     if (pathExists(b, "bench/build.zig")) {
-        addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null);
-        addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max);
-        addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name);
-        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null);
-        addBenchDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name);
-        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name);
-        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name);
-        addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name);
-        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null);
-        addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name);
-        addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter);
+        addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, profile);
+        addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
+        addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, profile);
+        addBenchDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, profile);
+        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, profile);
+        addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, profile);
+        addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, profile);
     }
 
     // example
@@ -176,9 +194,13 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/evm.zig"),
                 .target = target,
                 .optimize = optimize,
-                .link_libcpp = true,
+                .link_libcpp = is_native_profile,
             });
-            addPrecompileNative(b, example_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
+            example_mod.addOptions("build_options", build_options);
+            example_mod.addIncludePath(evmone_dep.path("evmc/include"));
+            if (native_precompile_deps) |deps| {
+                addPrecompileNative(b, example_mod, deps, evmone_dep);
+            }
             const example = b.addExecutable(.{
                 .name = example_exe_name,
                 .root_module = b.createModule(.{
@@ -194,6 +216,9 @@ pub fn build(b: *std.Build) void {
             const run_step = b.step("example", "Run the example");
             run_step.dependOn(&run_example.step);
         } else {
+            if (!is_native_profile) {
+                std.debug.panic("C examples require -Dprofile=native", .{});
+            }
             const example_c = b.addExecutable(.{
                 .name = example_exe_name,
                 .root_module = b.createModule(.{
@@ -214,7 +239,7 @@ pub fn build(b: *std.Build) void {
                     "-std=c99",
                 },
             });
-            example_c.root_module.linkLibrary(static_c_lib);
+            example_c.root_module.linkLibrary(static_c_lib.?);
             var run_example = b.addRunArtifact(example_c);
             run_example.has_side_effects = true;
             const run_step = b.step("example", "Run the example");
@@ -223,9 +248,46 @@ pub fn build(b: *std.Build) void {
     }
 }
 
+fn buildProfileOption(b: *std.Build) []const u8 {
+    const profile = b.option([]const u8, "profile", "Build profile: native or zkvm") orelse "native";
+    if (!std.mem.eql(u8, profile, "native") and !std.mem.eql(u8, profile, "zkvm")) {
+        std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
+    }
+    return profile;
+}
+
+fn buildOptions(b: *std.Build, profile: []const u8) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption([]const u8, "profile", profile);
+    return options;
+}
+
 fn pathExists(b: *std.Build, sub_path: []const u8) bool {
     std.Io.Dir.accessAbsolute(b.graph.io, b.pathFromRoot(sub_path), .{}) catch return false;
     return true;
+}
+
+const NativePrecompileDeps = struct {
+    ckzg_dep: *std.Build.Dependency,
+    blst_dep: *std.Build.Dependency,
+    mcl_dep: *std.Build.Dependency,
+    trusted_setup_mod: *std.Build.Module,
+};
+
+fn nativePrecompileDeps(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) NativePrecompileDeps {
+    const ckzg_dep = b.dependency("ckzg", .{ .target = target, .optimize = optimize });
+    const blst_dep = b.dependency("blst", .{ .target = target, .optimize = optimize });
+    const mcl_dep = b.dependency("mcl", .{});
+    return .{
+        .ckzg_dep = ckzg_dep,
+        .blst_dep = blst_dep,
+        .mcl_dep = mcl_dep,
+        .trusted_setup_mod = buildTrustedSetupModule(b, ckzg_dep.path("src/trusted_setup.txt")),
+    };
 }
 
 fn addEestDelegate(
@@ -235,6 +297,7 @@ fn addEestDelegate(
     child_step: []const u8,
     optimize_name: ?[]const u8,
     bench_optimize_name: ?[]const u8,
+    profile: []const u8,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -246,6 +309,7 @@ fn addEestDelegate(
     if (bench_optimize_name) |name| {
         run.addArg(b.fmt("-Dbench-optimize={s}", .{name}));
     }
+    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
     run.addArg(child_step);
     if (b.args) |args| {
         run.addArg("--");
@@ -263,6 +327,7 @@ fn addBenchDelegate(
     description: []const u8,
     child_step: []const u8,
     optimize_name: ?[]const u8,
+    profile: []const u8,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -271,6 +336,7 @@ fn addBenchDelegate(
     if (optimize_name) |name| {
         run.addArg(b.fmt("-Doptimize={s}", .{name}));
     }
+    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
     run.addArg(child_step);
     if (b.args) |args| {
         run.addArg("--");
@@ -287,12 +353,14 @@ fn addBenchVmLoopDelegate(
     optimize_name: []const u8,
     support_min: ?[]const u8,
     support_max: ?[]const u8,
+    profile: []const u8,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
     });
     run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
+    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
     if (support_min) |revision| {
         run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
     }
@@ -314,12 +382,14 @@ fn addBenchMicroDelegate(
     b: *std.Build,
     optimize_name: []const u8,
     micro_filter: ?[]const u8,
+    profile: []const u8,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
     });
     run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
+    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
     if (micro_filter) |filter| {
         run.addArg(b.fmt("-Dmicro-filter={s}", .{filter}));
     }
@@ -333,11 +403,8 @@ fn addBenchMicroDelegate(
 fn addPrecompileNative(
     b: *std.Build,
     module: *std.Build.Module,
-    ckzg_dep: *std.Build.Dependency,
-    blst_dep: *std.Build.Dependency,
+    deps: NativePrecompileDeps,
     evmone_dep: *std.Build.Dependency,
-    mcl_dep: *std.Build.Dependency,
-    trusted_setup_mod: *std.Build.Module,
 ) void {
     const mcl_flags = &[_][]const u8{
         "-std=c++20",
@@ -359,19 +426,19 @@ fn addPrecompileNative(
     };
     module.link_libc = true;
     module.link_libcpp = true;
-    module.addImport("ckzg", ckzg_dep.module("ckzg"));
-    module.addImport("kzg_trusted_setup", trusted_setup_mod);
+    module.addImport("ckzg", deps.ckzg_dep.module("ckzg"));
+    module.addImport("kzg_trusted_setup", deps.trusted_setup_mod);
     module.addIncludePath(b.path("src/precompile"));
     module.addIncludePath(evmone_dep.path("evmc/include"));
-    module.addIncludePath(ckzg_dep.path("src"));
-    module.addIncludePath(blst_dep.path("bindings"));
-    module.addIncludePath(mcl_dep.path("include"));
-    module.addIncludePath(mcl_dep.path("src"));
+    module.addIncludePath(deps.ckzg_dep.path("src"));
+    module.addIncludePath(deps.blst_dep.path("bindings"));
+    module.addIncludePath(deps.mcl_dep.path("include"));
+    module.addIncludePath(deps.mcl_dep.path("src"));
     module.addCSourceFile(.{ .file = b.path("src/precompile/bn254.cpp"), .flags = mcl_flags });
-    module.addCSourceFile(.{ .file = mcl_dep.path("src/fp.cpp"), .flags = mcl_flags });
-    module.addCSourceFile(.{ .file = mcl_dep.path("src/bn_c256.cpp"), .flags = mcl_flags });
-    module.addCSourceFile(.{ .file = mcl_dep.path("src/base64.ll"), .flags = mcl_flags });
-    module.addCSourceFile(.{ .file = mcl_dep.path("src/bint64.ll"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = deps.mcl_dep.path("src/fp.cpp"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = deps.mcl_dep.path("src/bn_c256.cpp"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = deps.mcl_dep.path("src/base64.ll"), .flags = mcl_flags });
+    module.addCSourceFile(.{ .file = deps.mcl_dep.path("src/bint64.ll"), .flags = mcl_flags });
     module.addCSourceFile(.{ .file = b.path("src/precompile/bls12.c"), .flags = c_flags });
 }
 

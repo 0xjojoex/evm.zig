@@ -8,16 +8,19 @@ pub fn build(b: *std.Build) void {
         "bench-optimize",
         "Optimization mode for the EEST benchmark runner",
     ) orelse .ReleaseFast;
+    const profile = buildProfileOption(b);
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
+        .profile = profile,
     });
     const evmz_mod = evmz_dep.module("evmz");
 
     const bench_evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = bench_optimize,
+        .profile = profile,
     });
     const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
@@ -89,6 +92,14 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_bench.addArgs(args);
         b.step("bench", "Run EEST benchmark blockchain-test fixtures").dependOn(&run_bench.step);
     }
+}
+
+fn buildProfileOption(b: *std.Build) []const u8 {
+    const profile = b.option([]const u8, "profile", "Build profile: native or zkvm") orelse "native";
+    if (!std.mem.eql(u8, profile, "native") and !std.mem.eql(u8, profile, "zkvm")) {
+        std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
+    }
+    return profile;
 }
 
 fn eestModule(

@@ -109,8 +109,7 @@ pub fn keccak256(frame: *CallFrame) !void {
 
     const value = frame.memory.readBytes(offset, size);
 
-    var result: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(value, &result, .{});
+    const result = evmz.crypto.keccak256(value);
 
     const final_result = evmz.uint256.fromBytes32(&result);
     frame.stack.pushUnchecked(final_result);

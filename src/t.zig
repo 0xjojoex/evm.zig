@@ -250,8 +250,7 @@ pub const MockHost = struct {
         if (code.len == 0) {
             return evmz.empty_code_hash;
         }
-        var result: [32]u8 = undefined;
-        std.crypto.hash.sha3.Keccak256.hash(code, &result, .{});
+        const result = evmz.crypto.keccak256(code);
         const final_result = evmz.uint256.fromBytes32(&result);
 
         return final_result;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto = @import("crypto.zig");
 
 pub const Address = [20]u8;
 
@@ -107,15 +108,13 @@ pub fn create(sender: Address, nonce: u64) Address {
     @memcpy(encoded[2 .. 2 + sender.len], &sender);
     @memcpy(encoded[2 + sender.len .. 2 + sender.len + nonce_rlp.len], nonce_rlp);
 
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(encoded[0 .. 1 + payload_len], &hash, .{});
+    const hash = crypto.keccak256(encoded[0 .. 1 + payload_len]);
     return fromHash(hash);
 }
 
 /// keccak256( 0xff ++ address ++ salt ++ keccak256(init_code))[12:]
 pub fn create2(sender: Address, salt: u256, init_code: []const u8) Address {
-    var init_hash: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(init_code, &init_hash, .{});
+    const init_hash = crypto.keccak256(init_code);
 
     var salt_bytes: [32]u8 = undefined;
     std.mem.writeInt(u256, &salt_bytes, salt, .big);
@@ -126,8 +125,7 @@ pub fn create2(sender: Address, salt: u256, init_code: []const u8) Address {
     @memcpy(data[21..53], &salt_bytes);
     @memcpy(data[53..85], &init_hash);
 
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(&data, &hash, .{});
+    const hash = crypto.keccak256(&data);
     return fromHash(hash);
 }
 

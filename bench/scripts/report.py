@@ -126,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zig-exe", default="zig")
     parser.add_argument("--optimize", default="ReleaseFast")
+    parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
     parser.add_argument("--out-dir", default="../output/bench-report")
     parser.add_argument("--report")
     parser.add_argument("--checkpoint")
@@ -153,6 +154,7 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "platform": f"{platform.system()} {platform.machine()}",
         "zig": command_version([args.zig_exe, "version"]),
+        "profile": args.profile,
         "rustc": tool_major_version(command_version(["rustc", "--version"])),
         "cargo": tool_major_version(command_version(["cargo", "--version"])),
         "solc": solc_version(),
@@ -249,6 +251,7 @@ def run_vm_loop_engine(
             [
                 args.zig_exe,
                 "build",
+                *build_profile_args(args),
                 "revm-vm-loop",
                 "--",
                 "--fixture",
@@ -264,6 +267,7 @@ def run_vm_loop_engine(
             args.zig_exe,
             "build",
             f"-Doptimize={args.optimize}",
+            *build_profile_args(args),
             "evmone-vm-loop",
             "--",
             "--fixture",
@@ -285,6 +289,7 @@ def run_vm_loop_engine(
             args.zig_exe,
             "build",
             f"-Doptimize={args.optimize}",
+            *build_profile_args(args),
             "vm-loop",
             "--",
             "--engine",
@@ -314,6 +319,10 @@ def vm_loop_scope(engine: str) -> str:
     return ""
 
 
+def build_profile_args(args: argparse.Namespace) -> list[str]:
+    return [f"-Dprofile={args.profile}"]
+
+
 def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:
     stdout, _ = run_command(
         "host-matrix",
@@ -321,6 +330,7 @@ def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> l
             args.zig_exe,
             "build",
             f"-Doptimize={args.optimize}",
+            *build_profile_args(args),
             "host-matrix",
             "--",
             "--iterations",
@@ -346,6 +356,7 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
             args.zig_exe,
             "build",
             f"-Doptimize={args.optimize}",
+            *build_profile_args(args),
             "kernel",
             "--",
             "--engine",
@@ -371,6 +382,7 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
         [
             args.zig_exe,
             "build",
+            *build_profile_args(args),
             "revm-kernel",
             "--",
             "--tier",
@@ -407,6 +419,7 @@ def run_eest(args: argparse.Namespace, raw_dir: Path, out_dir: Path, eest_root: 
                 args.zig_exe,
                 "build",
                 f"-Dbench-optimize={args.optimize}",
+                *build_profile_args(args),
                 "bench",
                 "--",
                 "--engine",

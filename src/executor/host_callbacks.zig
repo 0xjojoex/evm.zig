@@ -116,8 +116,7 @@ pub fn For(comptime Executor: type) type {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             const account = try self.state.getAccountOrLoad(address) orelse return 0;
             if (account.code.len == 0) return evmz.empty_code_hash;
-            var result: [32]u8 = undefined;
-            std.crypto.hash.sha3.Keccak256.hash(account.code, &result, .{});
+            const result = evmz.crypto.keccak256(account.code);
             return std.mem.readInt(u256, &result, .big);
         }
 

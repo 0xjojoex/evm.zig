@@ -4,6 +4,7 @@ pub const address = @import("./address.zig");
 pub const BlockHashSource = @import("./BlockHashSource.zig");
 pub const c_api = @import("./c_api.zig");
 pub const code = @import("./code.zig");
+pub const crypto = @import("./crypto.zig");
 pub const definition = @import("./definition.zig");
 pub const ExecutionConfig = @import("./ExecutionConfig.zig");
 pub const easm = @import("./easm.zig");

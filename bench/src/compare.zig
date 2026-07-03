@@ -31,6 +31,7 @@ const Engine = enum {
 const Options = struct {
     zig_exe: []const u8 = "zig",
     optimize: []const u8 = "ReleaseFast",
+    profile: []const u8 = "native",
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
     spec: ?[]const u8 = null,
@@ -124,6 +125,11 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.optimize = try allocator.dupe(u8, value);
         } else if (stripPrefix(arg, "--optimize=")) |value| {
             options.optimize = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            const value = args.next() orelse return error.MissingProfile;
+            options.profile = try parseProfile(allocator, value);
+        } else if (stripPrefix(arg, "--profile=")) |value| {
+            options.profile = try parseProfile(allocator, value);
         } else if (std.mem.eql(u8, arg, "--fixture")) {
             const value = args.next() orelse return error.MissingFixture;
             try options.fixtures.append(allocator, try allocator.dupe(u8, value));
@@ -165,6 +171,7 @@ fn printUsage() void {
         \\Options:
         \\  --zig-exe <path>       Zig executable used for child bench steps
         \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
+        \\  --profile <profile>    evmz build profile forwarded to child Zig builds
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
         \\  --spec <name>          fork spec forwarded to each engine, default runner-specific latest/stable
@@ -189,6 +196,9 @@ fn engineCommand(
             try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{options.optimize}));
         },
         .revm_interpreter => {},
+    }
+    if (engine == .evmz) {
+        try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
     }
 
     try argv.append(allocator, switch (engine) {
@@ -539,6 +549,13 @@ fn baseName(path: []const u8) []const u8 {
 fn stripPrefix(value: []const u8, prefix: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, value, prefix)) return null;
     return value[prefix.len..];
+}
+
+fn parseProfile(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (!std.mem.eql(u8, value, "native") and !std.mem.eql(u8, value, "zkvm")) {
+        return error.UnsupportedProfile;
+    }
+    return allocator.dupe(u8, value);
 }
 
 fn parseNonZeroUsize(value: []const u8) !usize {
