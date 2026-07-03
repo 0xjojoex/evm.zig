@@ -116,7 +116,7 @@ fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus
 
 fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
     const self: *Executor = @ptrCast(@alignCast(ptr));
-    return call_runtime.call(self, msg);
+    return call_runtime.resolveHostCall(self, msg);
 }
 
 fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {

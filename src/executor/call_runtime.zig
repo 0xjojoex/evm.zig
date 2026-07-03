@@ -566,7 +566,7 @@ pub fn executeCreateTransaction(
 pub fn executeCreate(self: *Executor, options: Executor.Create) !Executor.EvmResult {
     self.clearLastOutput();
     _ = try currentTxContext(self);
-    return createContract(self, .{
+    return executeCreateMessage(self, .{
         .depth = 0,
         .kind = if (options.salt == null) .create else .create2,
         .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
@@ -682,22 +682,43 @@ fn endCallScratch(self: *Executor, depth: u16) void {
 }
 
 fn setLastOutput(self: *Executor, output_data: []const u8) ![]u8 {
+    const output = try self.allocator.dupe(u8, output_data);
     self.clearLastOutput();
-    self.last_call_output = try self.allocator.dupe(u8, output_data);
+    self.last_call_output = output;
     return self.last_call_output;
 }
 
 fn stabilizeFinalResult(self: *Executor, result: Host.Result) !Host.Result {
-    const output = try setLastOutput(self, result.outputData());
-    return Host.Result.fromCall(.{
-        .status = result.status(),
-        .output_data = output,
-        .gas_left = result.gasLeft(),
-        .gas_refund = result.gasRefund(),
-        .gas_reservoir = result.gasReservoir(),
-        .state_gas_spent = result.stateGasSpent(),
-        .state_gas_from_gas_left = result.stateGasFromGasLeft(),
-    });
+    return switch (result) {
+        .call => |call_result| Host.Result.fromCall(.{
+            .status = call_result.status,
+            .output_data = try setLastOutput(self, call_result.output_data),
+            .gas_left = call_result.gas_left,
+            .gas_refund = call_result.gas_refund,
+            .gas_reservoir = call_result.gas_reservoir,
+            .state_gas_spent = call_result.state_gas_spent,
+            .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
+        }),
+        .create => |create_result| Host.Result.fromCreate(create_result.address, .{
+            .status = create_result.status,
+            .output_data = if (aliasesLastOutput(self, create_result.output_data))
+                self.last_call_output
+            else
+                try setLastOutput(self, create_result.output_data),
+            .gas_left = create_result.gas_left,
+            .gas_refund = create_result.gas_refund,
+            .gas_reservoir = create_result.gas_reservoir,
+            .state_gas_spent = create_result.state_gas_spent,
+            .state_gas_from_gas_left = create_result.state_gas_from_gas_left,
+            .state_gas_refund = create_result.state_gas_refund,
+        }),
+    };
+}
+
+fn aliasesLastOutput(self: *const Executor, output_data: []const u8) bool {
+    if (output_data.len != self.last_call_output.len) return false;
+    if (output_data.len == 0) return true;
+    return output_data.ptr == self.last_call_output.ptr;
 }
 
 fn codeNeedsActionLoop(code: []const u8) bool {
@@ -857,7 +878,9 @@ fn hasBalance(self: *Executor, address: Address, value: u256) !bool {
     return account.balance >= value;
 }
 
-pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
+/// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
+/// and create transactions enter `CallRuntime` through their executor entrypoints.
+pub fn resolveHostCall(self: *Executor, msg: Host.Message) !Host.Result {
     const previous_depth = self.state.trace_depth;
     self.state.trace_depth = msg.depth;
     defer self.state.trace_depth = previous_depth;
@@ -866,7 +889,7 @@ pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
         // Opcode handlers check the caller frame depth before constructing the
         // child message. The executor receives that already-incremented child.
         if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
-        return createContract(self, msg);
+        return executeCreateMessage(self, msg);
     }
 
     return switch (try beginCall(self, msg)) {
@@ -903,7 +926,7 @@ pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
     };
 }
 
-fn createContract(self: *Executor, msg: Host.Message) !Host.Result {
+fn executeCreateMessage(self: *Executor, msg: Host.Message) !Host.Result {
     const previous_depth = self.state.trace_depth;
     self.state.trace_depth = msg.depth;
     defer self.state.trace_depth = previous_depth;
@@ -918,16 +941,12 @@ fn createContract(self: *Executor, msg: Host.Message) !Host.Result {
                 if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
             }
 
-            var host_iface = self.host();
-            var scratch = try callScratch(self, child.msg.depth);
-            defer scratch.deinit();
-            var frame = try acquireRawFrame(self, scratch.allocator, &host_iface, &child.msg, child.init_code, null);
-            defer frame.deinit();
-            var interpreter = frame.interpreter();
-
-            const result = try executeInterpreter(self, &interpreter, child.msg.depth);
+            var runtime = CallRuntime.init(self);
+            defer runtime.deinit();
+            try runtime.pushChildCreate(child);
+            const result = try runtime.run();
             checkpoint_open = false;
-            break :blk try finishCreate(self, child, result);
+            break :blk result;
         },
     };
 }
@@ -1122,4 +1141,23 @@ fn createCollision(self: *Executor, address: Address) !bool {
     if (evmz.precompile.activeAt(self.spec, address) != null) return true;
     const account = try self.state.getAccountOrLoad(address) orelse return false;
     return account.nonce != 0 or account.code.len != 0 or try self.state.accountHasStorage(address);
+}
+
+test "CREATE final stabilization reuses already-stable output" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var executor = Executor.init(failing_allocator.allocator(), .{
+        .spec = .berlin,
+    });
+    defer executor.deinit();
+
+    executor.last_call_output = try std.testing.allocator.dupe(u8, &.{0xaa});
+    const result = (try stabilizeFinalResult(&executor, Host.Result.fromCreate(evmz.addr(0x1234), .{
+        .status = .success,
+        .output_data = executor.last_call_output,
+        .gas_left = 7,
+        .gas_refund = 0,
+    }))).expectCreate();
+
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+    try std.testing.expect(result.output_data.ptr == executor.last_call_output.ptr);
 }

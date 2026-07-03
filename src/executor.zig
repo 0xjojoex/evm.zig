@@ -2508,7 +2508,7 @@ test "callcode with insufficient balance fails without executing target code" {
     try executor.state.accounts.put(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = 1,
         .kind = .callcode,
         .gas = 100_000,
@@ -2577,7 +2577,7 @@ test "call-like message at max depth still executes in recipient storage" {
     inline for (.{ Host.CallKind.callcode, Host.CallKind.delegatecall }, 0..) |kind, slot| {
         try executor.getAccount(target).?.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
         try executor.beginTransaction(tx_context, caller, caller);
-        const result = (try call_runtime.call(&executor, .{
+        const result = (try executeHostCall(&executor, .{
             .depth = Host.max_call_depth,
             .kind = kind,
             .gas = 100_000,
@@ -2622,7 +2622,7 @@ test "value call at max depth returns stipend without child execution" {
     try executor.state.accounts.put(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
@@ -2669,7 +2669,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     try executor.state.accounts.put(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
@@ -2706,7 +2706,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
     try executor.state.accounts.put(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
@@ -2742,7 +2742,7 @@ test "exceptional child call burns forwarded gas" {
     try executor.state.accounts.put(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = 1,
         .kind = .call,
         .gas = 100_000,
@@ -2775,7 +2775,7 @@ test "exceptional child call rolls back storage via checkpoint" {
     try executor.state.accounts.put(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
-    const result = (try call_runtime.call(&executor, .{
+    const result = (try executeHostCall(&executor, .{
         .depth = 1,
         .kind = .call,
         .gas = 100_000,
@@ -3143,6 +3143,11 @@ fn testTxContext(origin: Address, gas_limit: u64) Host.TxContext {
         .blob_base_fee = 0,
         .blob_hashes = &.{},
     };
+}
+
+fn executeHostCall(executor: *Executor, msg: Host.Message) !Host.Result {
+    var host_iface = executor.host();
+    return host_iface.call(msg);
 }
 
 test {
