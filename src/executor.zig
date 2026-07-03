@@ -433,6 +433,7 @@ fn runStandaloneCall(self: *Executor, tx_context: Host.TxContext, options: Call)
 
     var pre_execution = try self.snapshot();
     defer pre_execution.deinit(self.allocator);
+    errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
 
     const result = try self.executeCall(options);
     try self.finishStandaloneTransaction(result.status(), &pre_execution);
@@ -445,6 +446,7 @@ fn runStandaloneCreate(self: *Executor, tx_context: Host.TxContext, options: Cre
 
     var pre_execution = try self.snapshot();
     defer pre_execution.deinit(self.allocator);
+    errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
 
     const result = try self.executeCreate(options);
     try self.finishStandaloneTransaction(result.status(), &pre_execution);
@@ -522,6 +524,13 @@ pub fn runTopLevelTransactionWithEngine(
     run: TopLevelTransactionRun,
     engine: TransactionEngine,
 ) !Interpreter.Result {
+    var shell_start_state = try self.snapshot();
+    defer shell_start_state.deinit(self.allocator);
+    errdefer {
+        self.restore(&shell_start_state) catch {};
+        self.closeTransaction();
+    }
+
     const sender = tx.sender();
     var execution_gas = run.gas();
     const transaction_charged = if (execution_gas != null)
@@ -642,7 +651,7 @@ pub fn executeSystemCall(
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = call_runtime.executeInterpreter(self, &interpreter, message.depth);
+    const result = try call_runtime.executeInterpreter(self, &interpreter, message.depth);
     self.clearLastOutput();
     self.last_call_output = try self.allocator.dupe(u8, result.output_data);
 
@@ -1207,6 +1216,66 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 12_500), result.gas_refund);
     try std.testing.expectEqual(@as(u256, 963_200), executor.getAccount(sender).?.balance);
+}
+
+test "top-level engine errors roll back without gas settlement" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    var tx_context = testTxContext(sender, 100_000);
+    tx_context.gas_price = 1;
+    var executor = Executor.init(std.testing.allocator, .{
+        .spec = .prague,
+    });
+    defer executor.deinit();
+
+    var sender_account = AccountState.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    sender_account.nonce = 7;
+    try executor.state.accounts.put(sender, sender_account);
+
+    const tx = Transaction{ .call = .{
+        .sender = sender,
+        .recipient = recipient,
+        .gas_limit = 100_000,
+    } };
+    const FailingEngine = struct {
+        fn execute(
+            ptr: ?*anyopaque,
+            inner: *Executor,
+            normalized_tx: Transaction,
+            gas: transaction.ExecutionGas,
+        ) !Interpreter.Result {
+            _ = ptr;
+            _ = inner;
+            _ = normalized_tx;
+            _ = gas;
+            return error.DatabaseUnavailable;
+        }
+    };
+
+    try executor.beginTransactionScope(tx_context, tx);
+    try std.testing.expectError(
+        error.DatabaseUnavailable,
+        executor.runTopLevelTransactionWithEngine(tx, .{
+            .execution_gas = 79_000,
+            .settlement = .{
+                .spec = .prague,
+                .gas_limit = 100_000,
+                .intrinsic_gas = 21_000,
+                .intrinsic_state_gas = 0,
+                .floor_gas = 21_000,
+                .gas_price = 1,
+                .priority_fee = 0,
+                .coinbase = tx_context.coinbase,
+            },
+        }, .{ .execute = FailingEngine.execute }),
+    );
+
+    const restored_sender = executor.getAccount(sender).?;
+    try std.testing.expectEqual(@as(u256, 1_000_000), restored_sender.balance);
+    try std.testing.expectEqual(@as(u64, 7), restored_sender.nonce);
+    try std.testing.expectEqual(null, executor.tx_context);
+    try std.testing.expectEqual(@as(u32, 0), executor.state.warm_accounts.count());
 }
 
 test "Amsterdam malformed authorization count refills intrinsic auth gas" {

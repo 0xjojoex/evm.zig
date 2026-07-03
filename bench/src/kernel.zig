@@ -304,7 +304,7 @@ fn measureEvmz(
     }
 
     const start_ns = if (scope == .execute_only) try common.monotonicNowNs() else total_start_ns;
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     const end_ns = try common.monotonicNowNs();
     const host_calls = counting_host.counters.total();
     frame.deinit();

@@ -178,9 +178,9 @@ const CallRuntime = struct {
             var interpreter = runtime_frame.frame.interpreter();
             const depth = runtime_frame.frame.frame.msg.depth;
             const run_result: Interpreter.RunResult = if (runtime_frame.needs_action_loop)
-                executeInterpreterUntilAction(self.executor, &interpreter, depth)
+                try executeInterpreterUntilAction(self.executor, &interpreter, depth)
             else
-                .{ .finished = executeInterpreter(self.executor, &interpreter, depth) };
+                .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
             switch (run_result) {
                 .action => |action| try self.handleAction(index, action),
                 .finished => |result| {
@@ -594,14 +594,14 @@ fn dupeCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address
     return allocator.dupe(u8, try self.getCode(address));
 }
 
-pub fn executeInterpreter(self: *Executor, interpreter: *Interpreter, depth: u16) Interpreter.Result {
+pub fn executeInterpreter(self: *Executor, interpreter: *Interpreter, depth: u16) !Interpreter.Result {
     const previous_depth = self.state.trace_depth;
     self.state.trace_depth = depth;
     defer self.state.trace_depth = previous_depth;
     return interpreter.execute();
 }
 
-pub fn executeInterpreterUntilAction(self: *Executor, interpreter: *Interpreter, depth: u16) Interpreter.RunResult {
+pub fn executeInterpreterUntilAction(self: *Executor, interpreter: *Interpreter, depth: u16) !Interpreter.RunResult {
     const previous_depth = self.state.trace_depth;
     self.state.trace_depth = depth;
     defer self.state.trace_depth = previous_depth;
@@ -884,7 +884,7 @@ pub fn call(self: *Executor, msg: Host.Message) !Host.Result {
             var frame = try acquireRawFrame(self, scratch.allocator, &host_iface, &msg, code, null);
             defer frame.deinit();
             var interpreter = frame.interpreter();
-            const result = executeInterpreter(self, &interpreter, msg.depth);
+            const result = try executeInterpreter(self, &interpreter, msg.depth);
 
             self.clearLastOutput();
             self.last_call_output = try self.allocator.dupe(u8, result.output_data);
@@ -925,7 +925,7 @@ fn createContract(self: *Executor, msg: Host.Message) !Host.Result {
             defer frame.deinit();
             var interpreter = frame.interpreter();
 
-            const result = executeInterpreter(self, &interpreter, child.msg.depth);
+            const result = try executeInterpreter(self, &interpreter, child.msg.depth);
             checkpoint_open = false;
             break :blk try finishCreate(self, child, result);
         },

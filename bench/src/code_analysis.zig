@@ -292,7 +292,7 @@ fn deployRuntime(allocator: std.mem.Allocator, init_code: []const u8, spec: evmz
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     if (result.status != .success) return error.DeployFailed;
     return allocator.dupe(u8, result.output_data);
 }

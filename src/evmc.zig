@@ -129,7 +129,14 @@ fn execute(
     };
     defer frame.deinit();
     var interpreter = frame.interpreter();
-    const result = interpreter.execute();
+    const result = interpreter.execute() catch |err| {
+        log.err("execute failed: {}", .{err});
+        const status_code: evmc.evmc_status_code = if (err == error.OutOfMemory)
+            evmc.EVMC_OUT_OF_MEMORY
+        else
+            evmc.EVMC_FAILURE;
+        return makeResult(status_code, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+    };
 
     const status_code = statusToEvmc(result.status);
     const output_data = if (hasOutput(status_code)) result.output_data else &.{};

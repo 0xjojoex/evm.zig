@@ -360,7 +360,7 @@ fn runBytecodeHostOp(
 
     counting_host.resetCounters();
     const start_ns = try common.monotonicNowNs();
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     const end_ns = try common.monotonicNowNs();
     frame.deinit();
 

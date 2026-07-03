@@ -426,7 +426,7 @@ fn deployRuntime(
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     if (result.status != .success) return error.DeployFailed;
     return allocator.dupe(u8, result.output_data);
 }
@@ -463,7 +463,7 @@ fn timeRuntimeCall(
     try prepareTimedMetadata(allocator, &interpreter, runtime_code, engine);
 
     const start_ns = try common.monotonicNowNs();
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     const end_ns = try common.monotonicNowNs();
     frame.deinit();
 

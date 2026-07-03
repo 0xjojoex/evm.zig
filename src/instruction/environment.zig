@@ -262,7 +262,7 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqualSlices(u8, &.{ 0xbb, 0xcc, 0x00, 0x00 }, interpreter.call_frame.memory.readBytes(0, 4));
 }

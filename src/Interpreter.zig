@@ -10,7 +10,7 @@ const Stack = @import("./Stack.zig");
 const trace = @import("./trace.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 
-const Error = error{} | Stack.Error | std.mem.Allocator.Error | instruction.Error;
+const Error = anyerror;
 
 pub const Status = enum(u8) { success, invalid, revert, out_of_gas };
 
@@ -143,22 +143,22 @@ pub fn init(call_frame: *CallFrame) Interpreter {
     return .{ .call_frame = call_frame };
 }
 
-pub fn execute(self: *Interpreter) Result {
+pub fn execute(self: *Interpreter) Error!Result {
     while (true) {
-        switch (self.executeUntilAction()) {
+        switch (try self.executeUntilAction()) {
             .finished => |result| return result,
-            .action => |action| self.resolveHostAction(action),
+            .action => |action| try self.resolveHostAction(action),
         }
     }
 }
 
-pub fn executeUntilAction(self: *Interpreter) RunResult {
+pub fn executeUntilAction(self: *Interpreter) Error!RunResult {
     if (self.call_frame.wantsStepTracing()) {
         while (self.call_frame.status == .running) {
-            self.stepTraced();
+            try self.stepTraced();
         }
     } else {
-        self.executeUntraced();
+        try self.executeUntraced();
     }
 
     if (self.call_frame.takePendingAction()) |action| {
@@ -167,12 +167,12 @@ pub fn executeUntilAction(self: *Interpreter) RunResult {
     return .{ .finished = self.call_frame.getResult() };
 }
 
-fn executeUntraced(self: *Interpreter) void {
+fn executeUntraced(self: *Interpreter) Error!void {
     var frame = self.call_frame;
     if (frame.has_zero_padded_code) {
-        executeUntracedPadded(frame);
+        try executeUntracedPadded(frame);
     } else {
-        executeUntracedBounded(frame);
+        try executeUntracedBounded(frame);
     }
 
     if (frame.status == .running) {
@@ -180,51 +180,59 @@ fn executeUntraced(self: *Interpreter) void {
     }
 }
 
-fn executeUntracedPadded(frame: *CallFrame) void {
+fn executeUntracedPadded(frame: *CallFrame) Error!void {
     while (frame.status == .running) {
         const opcode_byte = frame.read_code[frame.pc];
         frame.pc += 1;
-        executeOpcode(opcode_byte, frame);
+        try executeOpcode(opcode_byte, frame);
     }
 }
 
-fn executeUntracedBounded(frame: *CallFrame) void {
+fn executeUntracedBounded(frame: *CallFrame) Error!void {
     while (frame.status == .running and frame.pc < frame.code.len) {
         const opcode_byte = frame.code[frame.pc];
         frame.pc += 1;
-        executeOpcode(opcode_byte, frame);
+        try executeOpcode(opcode_byte, frame);
     }
 }
 
-inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) void {
-    instruction.execute(opcode_byte, frame) catch {
-        if (frame.status == .running) {
-            frame.failWithStatus(.invalid);
+inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) Error!void {
+    instruction.execute(opcode_byte, frame) catch |err| {
+        if (invalidStatusError(err)) {
+            if (frame.status == .running) {
+                frame.failWithStatus(.invalid);
+            }
+            return;
         }
+        return err;
     };
 }
 
-fn resolveHostAction(self: *Interpreter, action: Action) void {
+fn resolveHostAction(self: *Interpreter, action: Action) Error!void {
     switch (action) {
         .call => |call_action| {
-            const result = (self.call_frame.host.call(call_action.msg) catch {
-                if (self.call_frame.status == .running) self.call_frame.failWithStatus(.invalid);
-                return;
-            }).expectCall();
-            self.call_frame.resumeCallResult(call_action.continuation, result) catch {
-                if (self.call_frame.status == .running) self.call_frame.failWithStatus(.invalid);
-            };
+            const result = (try self.call_frame.host.call(call_action.msg)).expectCall();
+            try self.call_frame.resumeCallResult(call_action.continuation, result);
         },
         .create => |create_action| {
-            const result = (self.call_frame.host.call(create_action.msg) catch {
-                if (self.call_frame.status == .running) self.call_frame.failWithStatus(.invalid);
-                return;
-            }).expectCreate();
-            self.call_frame.resumeCreateResult(create_action.continuation, result) catch {
-                if (self.call_frame.status == .running) self.call_frame.failWithStatus(.invalid);
-            };
+            const result = (try self.call_frame.host.call(create_action.msg)).expectCreate();
+            try self.call_frame.resumeCreateResult(create_action.continuation, result);
         },
     }
+}
+
+fn invalidStatusError(err: anyerror) bool {
+    // These are EVM exceptional halts. Host/backend/resource failures must
+    // propagate through the error channel instead of becoming `.invalid`.
+    return switch (err) {
+        error.StackOverflow,
+        error.StackUnderflow,
+        error.StaticCallViolation,
+        error.UnknownOpcode,
+        error.UnsupportedInstruction,
+        => true,
+        else => false,
+    };
 }
 
 const PendingStepEnd = struct {
@@ -234,7 +242,7 @@ const PendingStepEnd = struct {
     gas_before: i64,
 };
 
-fn stepTraced(self: *Interpreter) void {
+fn stepTraced(self: *Interpreter) Error!void {
     if (self.call_frame.pc >= self.call_frame.code.len) {
         self.call_frame.status = .success;
         return;
@@ -250,11 +258,7 @@ fn stepTraced(self: *Interpreter) void {
     if (wants_start) self.call_frame.traceStepStart(pc, opcode_byte, decoded_opcode);
     self.call_frame.pc += 1;
 
-    instruction.execute(opcode_byte, self.call_frame) catch {
-        if (self.call_frame.status == .running) {
-            self.call_frame.failWithStatus(.invalid);
-        }
-    };
+    try executeOpcode(opcode_byte, self.call_frame);
     if (self.call_frame.pc >= self.call_frame.code.len and self.call_frame.status == .running) {
         self.call_frame.status = .success;
     }
@@ -640,7 +644,7 @@ test "interpreter trace sink records step start and end" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(u8, 2), recorder.starts);
@@ -765,7 +769,7 @@ test "interpreter trace schema controls step emission" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(u8, 0), recorder.starts);
@@ -933,7 +937,7 @@ test "interpreter can execute prepared bytecode jumpdest map" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expect(!interpreter.call_frame.analysis.isAnalyzed());
     try std.testing.expect(bytecode.jumpdests.analyzed);
@@ -967,7 +971,7 @@ test "prepared bytecode uses padded read bytes for truncated push" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(usize, raw.len), interpreter.call_frame.code.len);
     try std.testing.expectEqual(@as(usize, raw.len + Bytecode.zero_padding_len), interpreter.call_frame.read_code.len);
@@ -1002,7 +1006,7 @@ test "prepared bytecode keeps CODESIZE semantic length" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(u256, raw.len), interpreter.call_frame.stack.peek().?);
 }

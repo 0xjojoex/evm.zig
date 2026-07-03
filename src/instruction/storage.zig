@@ -215,7 +215,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
 }
@@ -245,7 +245,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - 3_000 - 10_000), result.gas_left);
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
@@ -277,7 +277,7 @@ test "cold SLOAD out of gas stops before storage read" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
     try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);

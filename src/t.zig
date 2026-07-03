@@ -88,6 +88,8 @@ pub const MockHost = struct {
     access_storage_reads: u64,
     block_hash_reads: u64,
     last_block_hash_number: ?u256,
+    tx_context_error: ?anyerror,
+    call_error: ?anyerror,
 
     pub fn init(alloc: std.mem.Allocator, tx_context: ?Host.TxContext) Self {
         return Self{
@@ -103,6 +105,8 @@ pub const MockHost = struct {
             .access_storage_reads = 0,
             .block_hash_reads = 0,
             .last_block_hash_number = null,
+            .tx_context_error = null,
+            .call_error = null,
             .tx_context = if (tx_context) |ctx| ctx else Host.TxContext{
                 .base_fee = 0,
                 .gas_limit = 0,
@@ -319,6 +323,7 @@ pub const MockHost = struct {
 
     fn getTxContext(ptr: *anyopaque) !Host.TxContext {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.tx_context_error) |err| return err;
         self.tx_context_reads += 1;
         return self.tx_context;
     }
@@ -334,8 +339,9 @@ pub const MockHost = struct {
     }
 
     fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
-        _ = ptr;
+        const self: *Self = @ptrCast(@alignCast(ptr));
         _ = msg;
+        if (self.call_error) |err| return err;
         return Host.Result.fromCall(.{
             .gas_left = 0,
             .gas_refund = 0,
@@ -412,7 +418,7 @@ pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const 
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     return .{
         .status = result.status,
         .gas_left = result.gas_left,
@@ -463,7 +469,7 @@ pub fn expectStackBySpec(code: []const u8, spec: evmz.Spec, expected: []const u2
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqualSlices(u256, expected, interpreter.call_frame.stack.asSlice());
 }
@@ -491,10 +497,42 @@ test "environment opcodes delegate every tx context access to host" {
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
 
     try std.testing.expectEqual(@as(u64, 2), mock_host.tx_context_reads);
+}
+
+test "host read errors propagate out of bytecode execution" {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    mock_host.tx_context_error = error.DatabaseUnavailable;
+    var host = mock_host.host();
+    const msg = defaultMessage();
+    const code = bytecode(.{.ORIGIN});
+
+    try std.testing.expectError(
+        error.DatabaseUnavailable,
+        runBytecodeWithHost(&host, &msg, &code, .latest),
+    );
+}
+
+test "host action errors propagate out of CALL execution" {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    mock_host.call_error = error.DatabaseUnavailable;
+    var host = mock_host.host();
+    const msg = defaultMessage();
+    const code = bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0,      .PUSH0,
+        .PUSH0, .PUSH1, 0x01,        .PUSH2,
+        0x27,   0x10,   .CALL,
+    });
+
+    try std.testing.expectError(
+        error.DatabaseUnavailable,
+        runBytecodeWithHost(&host, &msg, &code, .latest),
+    );
 }
 
 test "SLOTNUM pushes the transaction context slot number" {

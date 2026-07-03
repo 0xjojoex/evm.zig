@@ -267,7 +267,7 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     defer frame.deinit();
 
     var interpreter = frame.interpreter();
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 6_997), result.gas_left);
 }
@@ -293,7 +293,7 @@ fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.Acces
     defer frame.deinit();
 
     var interpreter = frame.interpreter();
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     const expected_gas_left: i64 = switch (status) {
         .cold => 6_897,
@@ -325,7 +325,7 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
     defer frame.deinit();
 
     var interpreter = frame.interpreter();
-    const result = interpreter.execute();
+    const result = try interpreter.execute();
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     const expected_gas_left: i64 = switch (status) {
         .cold => 6_891,
