@@ -123,6 +123,7 @@ pub fn staticGas(opcode: Opcode) u16 {
 }
 
 pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
+    @setEvalBranchQuota(5000);
     return switch (opcode_byte) {
         @intFromEnum(Opcode.STOP) => system.stop(frame),
         @intFromEnum(Opcode.ADD) => {
@@ -423,261 +424,17 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             if (!chargeStaticGas(frame, .PUSH0)) return;
             return stack.push0(frame);
         },
-        @intFromEnum(Opcode.PUSH1) => {
-            if (!chargeStaticGas(frame, .PUSH1)) return;
-            return stack.push(frame, 1);
+        inline @intFromEnum(Opcode.PUSH1)...@intFromEnum(Opcode.PUSH32) => |opcode| {
+            if (!chargeGas(frame, 3)) return;
+            return stack.push(frame, opcode - @intFromEnum(Opcode.PUSH0));
         },
-        @intFromEnum(Opcode.PUSH2) => {
-            if (!chargeStaticGas(frame, .PUSH2)) return;
-            return stack.push(frame, 2);
+        inline @intFromEnum(Opcode.DUP1)...@intFromEnum(Opcode.DUP16) => |opcode| {
+            if (!chargeGas(frame, 3)) return;
+            return stack.dup(frame, opcode - @intFromEnum(Opcode.DUP1) + 1);
         },
-        @intFromEnum(Opcode.PUSH3) => {
-            if (!chargeStaticGas(frame, .PUSH3)) return;
-            return stack.push(frame, 3);
-        },
-        @intFromEnum(Opcode.PUSH4) => {
-            if (!chargeStaticGas(frame, .PUSH4)) return;
-            return stack.push(frame, 4);
-        },
-        @intFromEnum(Opcode.PUSH5) => {
-            if (!chargeStaticGas(frame, .PUSH5)) return;
-            return stack.push(frame, 5);
-        },
-        @intFromEnum(Opcode.PUSH6) => {
-            if (!chargeStaticGas(frame, .PUSH6)) return;
-            return stack.push(frame, 6);
-        },
-        @intFromEnum(Opcode.PUSH7) => {
-            if (!chargeStaticGas(frame, .PUSH7)) return;
-            return stack.push(frame, 7);
-        },
-        @intFromEnum(Opcode.PUSH8) => {
-            if (!chargeStaticGas(frame, .PUSH8)) return;
-            return stack.push(frame, 8);
-        },
-        @intFromEnum(Opcode.PUSH9) => {
-            if (!chargeStaticGas(frame, .PUSH9)) return;
-            return stack.push(frame, 9);
-        },
-        @intFromEnum(Opcode.PUSH10) => {
-            if (!chargeStaticGas(frame, .PUSH10)) return;
-            return stack.push(frame, 10);
-        },
-        @intFromEnum(Opcode.PUSH11) => {
-            if (!chargeStaticGas(frame, .PUSH11)) return;
-            return stack.push(frame, 11);
-        },
-        @intFromEnum(Opcode.PUSH12) => {
-            if (!chargeStaticGas(frame, .PUSH12)) return;
-            return stack.push(frame, 12);
-        },
-        @intFromEnum(Opcode.PUSH13) => {
-            if (!chargeStaticGas(frame, .PUSH13)) return;
-            return stack.push(frame, 13);
-        },
-        @intFromEnum(Opcode.PUSH14) => {
-            if (!chargeStaticGas(frame, .PUSH14)) return;
-            return stack.push(frame, 14);
-        },
-        @intFromEnum(Opcode.PUSH15) => {
-            if (!chargeStaticGas(frame, .PUSH15)) return;
-            return stack.push(frame, 15);
-        },
-        @intFromEnum(Opcode.PUSH16) => {
-            if (!chargeStaticGas(frame, .PUSH16)) return;
-            return stack.push(frame, 16);
-        },
-        @intFromEnum(Opcode.PUSH17) => {
-            if (!chargeStaticGas(frame, .PUSH17)) return;
-            return stack.push(frame, 17);
-        },
-        @intFromEnum(Opcode.PUSH18) => {
-            if (!chargeStaticGas(frame, .PUSH18)) return;
-            return stack.push(frame, 18);
-        },
-        @intFromEnum(Opcode.PUSH19) => {
-            if (!chargeStaticGas(frame, .PUSH19)) return;
-            return stack.push(frame, 19);
-        },
-        @intFromEnum(Opcode.PUSH20) => {
-            if (!chargeStaticGas(frame, .PUSH20)) return;
-            return stack.push(frame, 20);
-        },
-        @intFromEnum(Opcode.PUSH21) => {
-            if (!chargeStaticGas(frame, .PUSH21)) return;
-            return stack.push(frame, 21);
-        },
-        @intFromEnum(Opcode.PUSH22) => {
-            if (!chargeStaticGas(frame, .PUSH22)) return;
-            return stack.push(frame, 22);
-        },
-        @intFromEnum(Opcode.PUSH23) => {
-            if (!chargeStaticGas(frame, .PUSH23)) return;
-            return stack.push(frame, 23);
-        },
-        @intFromEnum(Opcode.PUSH24) => {
-            if (!chargeStaticGas(frame, .PUSH24)) return;
-            return stack.push(frame, 24);
-        },
-        @intFromEnum(Opcode.PUSH25) => {
-            if (!chargeStaticGas(frame, .PUSH25)) return;
-            return stack.push(frame, 25);
-        },
-        @intFromEnum(Opcode.PUSH26) => {
-            if (!chargeStaticGas(frame, .PUSH26)) return;
-            return stack.push(frame, 26);
-        },
-        @intFromEnum(Opcode.PUSH27) => {
-            if (!chargeStaticGas(frame, .PUSH27)) return;
-            return stack.push(frame, 27);
-        },
-        @intFromEnum(Opcode.PUSH28) => {
-            if (!chargeStaticGas(frame, .PUSH28)) return;
-            return stack.push(frame, 28);
-        },
-        @intFromEnum(Opcode.PUSH29) => {
-            if (!chargeStaticGas(frame, .PUSH29)) return;
-            return stack.push(frame, 29);
-        },
-        @intFromEnum(Opcode.PUSH30) => {
-            if (!chargeStaticGas(frame, .PUSH30)) return;
-            return stack.push(frame, 30);
-        },
-        @intFromEnum(Opcode.PUSH31) => {
-            if (!chargeStaticGas(frame, .PUSH31)) return;
-            return stack.push(frame, 31);
-        },
-        @intFromEnum(Opcode.PUSH32) => {
-            if (!chargeStaticGas(frame, .PUSH32)) return;
-            return stack.push(frame, 32);
-        },
-        @intFromEnum(Opcode.DUP1) => {
-            if (!chargeStaticGas(frame, .DUP1)) return;
-            return stack.dup(frame, 1);
-        },
-        @intFromEnum(Opcode.DUP2) => {
-            if (!chargeStaticGas(frame, .DUP2)) return;
-            return stack.dup(frame, 2);
-        },
-        @intFromEnum(Opcode.DUP3) => {
-            if (!chargeStaticGas(frame, .DUP3)) return;
-            return stack.dup(frame, 3);
-        },
-        @intFromEnum(Opcode.DUP4) => {
-            if (!chargeStaticGas(frame, .DUP4)) return;
-            return stack.dup(frame, 4);
-        },
-        @intFromEnum(Opcode.DUP5) => {
-            if (!chargeStaticGas(frame, .DUP5)) return;
-            return stack.dup(frame, 5);
-        },
-        @intFromEnum(Opcode.DUP6) => {
-            if (!chargeStaticGas(frame, .DUP6)) return;
-            return stack.dup(frame, 6);
-        },
-        @intFromEnum(Opcode.DUP7) => {
-            if (!chargeStaticGas(frame, .DUP7)) return;
-            return stack.dup(frame, 7);
-        },
-        @intFromEnum(Opcode.DUP8) => {
-            if (!chargeStaticGas(frame, .DUP8)) return;
-            return stack.dup(frame, 8);
-        },
-        @intFromEnum(Opcode.DUP9) => {
-            if (!chargeStaticGas(frame, .DUP9)) return;
-            return stack.dup(frame, 9);
-        },
-        @intFromEnum(Opcode.DUP10) => {
-            if (!chargeStaticGas(frame, .DUP10)) return;
-            return stack.dup(frame, 10);
-        },
-        @intFromEnum(Opcode.DUP11) => {
-            if (!chargeStaticGas(frame, .DUP11)) return;
-            return stack.dup(frame, 11);
-        },
-        @intFromEnum(Opcode.DUP12) => {
-            if (!chargeStaticGas(frame, .DUP12)) return;
-            return stack.dup(frame, 12);
-        },
-        @intFromEnum(Opcode.DUP13) => {
-            if (!chargeStaticGas(frame, .DUP13)) return;
-            return stack.dup(frame, 13);
-        },
-        @intFromEnum(Opcode.DUP14) => {
-            if (!chargeStaticGas(frame, .DUP14)) return;
-            return stack.dup(frame, 14);
-        },
-        @intFromEnum(Opcode.DUP15) => {
-            if (!chargeStaticGas(frame, .DUP15)) return;
-            return stack.dup(frame, 15);
-        },
-        @intFromEnum(Opcode.DUP16) => {
-            if (!chargeStaticGas(frame, .DUP16)) return;
-            return stack.dup(frame, 16);
-        },
-        @intFromEnum(Opcode.SWAP1) => {
-            if (!chargeStaticGas(frame, .SWAP1)) return;
-            return stack.swap(frame, 1);
-        },
-        @intFromEnum(Opcode.SWAP2) => {
-            if (!chargeStaticGas(frame, .SWAP2)) return;
-            return stack.swap(frame, 2);
-        },
-        @intFromEnum(Opcode.SWAP3) => {
-            if (!chargeStaticGas(frame, .SWAP3)) return;
-            return stack.swap(frame, 3);
-        },
-        @intFromEnum(Opcode.SWAP4) => {
-            if (!chargeStaticGas(frame, .SWAP4)) return;
-            return stack.swap(frame, 4);
-        },
-        @intFromEnum(Opcode.SWAP5) => {
-            if (!chargeStaticGas(frame, .SWAP5)) return;
-            return stack.swap(frame, 5);
-        },
-        @intFromEnum(Opcode.SWAP6) => {
-            if (!chargeStaticGas(frame, .SWAP6)) return;
-            return stack.swap(frame, 6);
-        },
-        @intFromEnum(Opcode.SWAP7) => {
-            if (!chargeStaticGas(frame, .SWAP7)) return;
-            return stack.swap(frame, 7);
-        },
-        @intFromEnum(Opcode.SWAP8) => {
-            if (!chargeStaticGas(frame, .SWAP8)) return;
-            return stack.swap(frame, 8);
-        },
-        @intFromEnum(Opcode.SWAP9) => {
-            if (!chargeStaticGas(frame, .SWAP9)) return;
-            return stack.swap(frame, 9);
-        },
-        @intFromEnum(Opcode.SWAP10) => {
-            if (!chargeStaticGas(frame, .SWAP10)) return;
-            return stack.swap(frame, 10);
-        },
-        @intFromEnum(Opcode.SWAP11) => {
-            if (!chargeStaticGas(frame, .SWAP11)) return;
-            return stack.swap(frame, 11);
-        },
-        @intFromEnum(Opcode.SWAP12) => {
-            if (!chargeStaticGas(frame, .SWAP12)) return;
-            return stack.swap(frame, 12);
-        },
-        @intFromEnum(Opcode.SWAP13) => {
-            if (!chargeStaticGas(frame, .SWAP13)) return;
-            return stack.swap(frame, 13);
-        },
-        @intFromEnum(Opcode.SWAP14) => {
-            if (!chargeStaticGas(frame, .SWAP14)) return;
-            return stack.swap(frame, 14);
-        },
-        @intFromEnum(Opcode.SWAP15) => {
-            if (!chargeStaticGas(frame, .SWAP15)) return;
-            return stack.swap(frame, 15);
-        },
-        @intFromEnum(Opcode.SWAP16) => {
-            if (!chargeStaticGas(frame, .SWAP16)) return;
-            return stack.swap(frame, 16);
+        inline @intFromEnum(Opcode.SWAP1)...@intFromEnum(Opcode.SWAP16) => |opcode| {
+            if (!chargeGas(frame, 3)) return;
+            return stack.swap(frame, opcode - @intFromEnum(Opcode.SWAP1) + 1);
         },
         @intFromEnum(Opcode.DUPN) => {
             if (!requireSpec(frame, .amsterdam)) return;
@@ -694,25 +451,10 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             if (!chargeStaticGas(frame, .EXCHANGE)) return;
             return stack.exchange(frame);
         },
-        @intFromEnum(Opcode.LOG0) => {
-            if (!chargeStaticGas(frame, .LOG0)) return;
-            return logging.log(frame, 0);
-        },
-        @intFromEnum(Opcode.LOG1) => {
-            if (!chargeStaticGas(frame, .LOG1)) return;
-            return logging.log(frame, 1);
-        },
-        @intFromEnum(Opcode.LOG2) => {
-            if (!chargeStaticGas(frame, .LOG2)) return;
-            return logging.log(frame, 2);
-        },
-        @intFromEnum(Opcode.LOG3) => {
-            if (!chargeStaticGas(frame, .LOG3)) return;
-            return logging.log(frame, 3);
-        },
-        @intFromEnum(Opcode.LOG4) => {
-            if (!chargeStaticGas(frame, .LOG4)) return;
-            return logging.log(frame, 4);
+        inline @intFromEnum(Opcode.LOG0)...@intFromEnum(Opcode.LOG4) => |opcode| {
+            const topics: u8 = opcode - @intFromEnum(Opcode.LOG0);
+            if (!chargeGas(frame, 375 * (@as(i64, topics) + 1))) return;
+            return logging.log(frame, topics);
         },
         @intFromEnum(Opcode.CREATE) => {
             if (!chargeStaticGas(frame, .CREATE)) return;
@@ -756,7 +498,10 @@ pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
 }
 
 inline fn chargeStaticGas(frame: *CallFrame, comptime opcode: Opcode) bool {
-    const gas = staticGasForSpec(frame.spec, opcode);
+    return chargeGas(frame, staticGasForSpec(frame.spec, opcode));
+}
+
+inline fn chargeGas(frame: *CallFrame, gas: i64) bool {
     frame.trackGas(gas);
     return frame.status == .running;
 }
