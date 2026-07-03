@@ -576,6 +576,7 @@ const FixtureHost = struct {
         var vm = Vm.init(allocator, .{
             .spec = spec,
             .state_reader = store.reader(),
+            .block_hash_source = EestStateBlockHashSource.source(),
             .env = env,
         });
         errdefer vm.deinit();
@@ -605,6 +606,36 @@ const FixtureHost = struct {
         return self.vm.transact(tx);
     }
 };
+
+const EestStateBlockHashSource = struct {
+    var anchor: u8 = 0;
+
+    fn source() evmz.BlockHashSource {
+        return .{ .ptr = &anchor, .vtable = &.{
+            .getBlockHash = getBlockHash,
+        } };
+    }
+
+    fn getBlockHash(_: *anyopaque, number: u64) !?u256 {
+        var decimal: [20]u8 = undefined;
+        const input = try std.fmt.bufPrint(&decimal, "{d}", .{number});
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha3.Keccak256.hash(input, &hash, .{});
+        return evmz.uint256.fromBytes32(&hash);
+    }
+};
+
+test "EEST state block hash source uses state-test convention hashes" {
+    const source = EestStateBlockHashSource.source();
+
+    var expected_zero: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("0", &expected_zero, .{});
+    try std.testing.expectEqual(evmz.uint256.fromBytes32(&expected_zero), (try source.getBlockHash(0)).?);
+
+    var expected_ancestor: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("255", &expected_ancestor, .{});
+    try std.testing.expectEqual(evmz.uint256.fromBytes32(&expected_ancestor), (try source.getBlockHash(255)).?);
+}
 
 fn jsonIndex(value: JsonValue) !usize {
     return switch (value) {

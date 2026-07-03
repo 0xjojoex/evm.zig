@@ -701,6 +701,7 @@ pub fn chargeTransactionCosts(self: *Executor, sender: Address, gas_limit: u64, 
         tx_context.blob_hashes.len,
     ) orelse return false;
     const required_balance = uint256.checkedAdd(upfront_cost, value) orelse return false;
+    if (required_balance == 0) return true;
     const sender_account = try self.state.getAccountOrLoad(sender) orelse return false;
     if (sender_account.balance < required_balance) return false;
     return self.state.subtractBalance(sender, upfront_cost);
@@ -1506,6 +1507,40 @@ test "executor runTopLevelTransaction commits successful call" {
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
     try std.testing.expectEqual(@as(?Host.TxContext, null), executor.tx_context);
+}
+
+test "zero-price top-level transaction materializes missing sender" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(sender, 100_000);
+    var executor = Executor.init(std.testing.allocator, .{
+        .spec = .frontier,
+    });
+    defer executor.deinit();
+
+    const tx = Transaction{ .call = .{
+        .sender = sender,
+        .recipient = recipient,
+        .gas_limit = 100_000,
+    } };
+    try executor.beginTransactionScope(tx_context, tx);
+    const result = try executor.runTopLevelTransaction(tx, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .spec = .frontier,
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .coinbase = tx_context.coinbase,
+        },
+    });
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
+    try std.testing.expectEqual(@as(u256, 0), executor.getAccount(sender).?.balance);
 }
 
 test "executor runTopLevelTransaction increments create nonce after rollback" {
@@ -2803,6 +2838,41 @@ test "selfdestruct charges new-account cost for nonzero balance" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 69_998), result.gas_left);
+}
+
+test "TangerineWhistle selfdestruct charges new-account cost without balance transfer" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const code = evmz.t.bytecode(.{ .PUSH1, 0x00, .SELFDESTRUCT });
+    const cases = [_]struct {
+        spec: evmz.Spec,
+        gas_left: i64,
+    }{
+        .{ .spec = .tangerine_whistle, .gas_left = 69_997 },
+        .{ .spec = .spurious_dragon, .gas_left = 94_997 },
+    };
+
+    for (cases) |case| {
+        const tx_context = testTxContext(sender, 100_000);
+        var executor = Executor.init(std.testing.allocator, .{
+            .spec = case.spec,
+        });
+        defer executor.deinit();
+
+        var sender_account = AccountState.init(std.testing.allocator);
+        sender_account.balance = 1_000_000;
+        try executor.state.accounts.put(sender, sender_account);
+
+        var contract_account = AccountState.init(std.testing.allocator);
+        try contract_account.setCode(std.testing.allocator, &code);
+        try executor.state.accounts.put(contract, contract_account);
+
+        try executor.beginTransaction(tx_context, sender, contract);
+        const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
+
+        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(case.gas_left, result.gas_left);
+    }
 }
 
 test "SELFDESTRUCT refund is removed at London" {

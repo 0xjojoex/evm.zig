@@ -283,7 +283,13 @@ pub fn selfdestruct(frame: *CallFrame) !void {
     const balance = try frame.host.getBalance(frame.msg.recipient);
     const same_address = std.mem.eql(u8, &frame.msg.recipient, &address);
     const transfers_balance = balance > 0 and !same_address;
-    const creates_account = frame.spec.isImpl(.tangerine_whistle) and transfers_balance and !try frame.host.accountExists(address);
+    const charges_new_account = if (!frame.spec.isImpl(.tangerine_whistle) or same_address)
+        false
+    else if (frame.spec.isImpl(.spurious_dragon))
+        transfers_balance
+    else
+        true;
+    const creates_account = charges_new_account and !try frame.host.accountExists(address);
     if (frame.spec.isImpl(.amsterdam)) {
         if (creates_account) {
             frame.trackGas(tx_gas.amsterdam_account_write_cost);
