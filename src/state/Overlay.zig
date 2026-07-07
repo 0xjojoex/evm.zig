@@ -15,15 +15,14 @@ const StorageKey = storage.Key;
 const StateReader = @import("./Reader.zig");
 const Changeset = @import("./Changeset.zig");
 const Journal = @import("./Journal.zig");
+const TouchedHashMap = @import("./TouchedHashMap.zig");
 
 const Overlay = @This();
-const AccountMap = std.AutoHashMap(Address, AccountState);
-const AddressSet = std.AutoHashMap(Address, void);
-const StorageSet = std.AutoHashMap(StorageKey, void);
-const StorageMap = std.AutoHashMap(StorageKey, u256);
-// TSTORE can remove zero values and rewrite the same slots later in a transaction;
-// ArrayHashMap avoids tombstone buildup on that churn-prone path.
-const TransientStorageMap = std.array_hash_map.Auto(StorageKey, u256);
+const AccountMap = TouchedHashMap.Auto(Address, AccountState);
+const AddressSet = TouchedHashMap.Auto(Address, void);
+const StorageSet = TouchedHashMap.Auto(StorageKey, void);
+const StorageMap = TouchedHashMap.Auto(StorageKey, u256);
+const TransientStorageMap = TouchedHashMap.Auto(StorageKey, u256);
 
 pub const LogResources = struct {
     entries: usize,
@@ -79,7 +78,7 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .access_resources = null,
         .original_storage = StorageMap.init(allocator),
         .storage_overlay = StorageMap.init(allocator),
-        .transient_storage = .empty,
+        .transient_storage = TransientStorageMap.init(allocator),
         .transient_storage_entries = null,
         .selfdestructed_accounts = AddressSet.init(allocator),
         .created_contracts = AddressSet.init(allocator),
@@ -101,6 +100,14 @@ pub fn initWithStateReader(allocator: std.mem.Allocator, state_reader: StateRead
     return result;
 }
 
+/// Clear all semantic overlay state while keeping configured backing capacity.
+pub fn reset(self: *Overlay, state_reader: ?StateReader, trace_sink: ?*trace.Sink) void {
+    self.discardChanges();
+    self.state_reader = state_reader;
+    self.trace_sink = trace_sink;
+    self.trace_depth = 0;
+}
+
 pub fn deinit(self: *Overlay) void {
     self.clearLogsRetainingCapacity();
     self.clearAccounts();
@@ -109,7 +116,7 @@ pub fn deinit(self: *Overlay) void {
     self.warm_storage.deinit();
     self.original_storage.deinit();
     self.storage_overlay.deinit();
-    self.transient_storage.deinit(self.allocator);
+    self.transient_storage.deinit();
     self.selfdestructed_accounts.deinit();
     self.created_contracts.deinit();
     self.deleted_accounts.deinit();
@@ -156,7 +163,7 @@ pub fn configureAccessResources(self: *Overlay, resources: ?AccessResources) !vo
 pub fn configureTransientStorageEntries(self: *Overlay, entries: ?usize) !void {
     if (self.transient_storage.count() != 0) return error.ActiveTransientStorage;
     if (entries) |bounded| {
-        try self.transient_storage.ensureTotalCapacity(self.allocator, try transientStorageCapacity(bounded));
+        try self.transient_storage.ensureTotalCapacity(try transientStorageCapacity(bounded));
         self.transient_storage_entries = bounded;
     } else {
         self.transient_storage_entries = null;
@@ -201,8 +208,9 @@ fn accessHashMapCapacity(capacity: usize) !u32 {
     return std.math.cast(u32, physical_capacity) orelse error.AccessCapacityTooLarge;
 }
 
-fn transientStorageCapacity(capacity: usize) !usize {
-    return std.math.add(usize, capacity, 1) catch return error.TransientStorageCapacityTooLarge;
+fn transientStorageCapacity(capacity: usize) !u32 {
+    const physical_capacity = std.math.add(usize, capacity, 1) catch return error.TransientStorageCapacityTooLarge;
+    return std.math.cast(u32, physical_capacity) orelse error.TransientStorageCapacityTooLarge;
 }
 
 pub fn getAccount(self: *Overlay, address: Address) ?*AccountState {
@@ -656,7 +664,7 @@ pub fn setTransientStorage(self: *Overlay, address: Address, key: u256, value: u
         .prev = prev orelse 0,
     } });
     if (value == 0) {
-        _ = self.transient_storage.swapRemove(storage_key);
+        _ = self.transient_storage.remove(storage_key);
     } else {
         try self.putTransientStorage(storage_key, value);
     }
@@ -674,14 +682,14 @@ fn putTransientStorage(self: *Overlay, storage_key: StorageKey, value: u256) !vo
     if (self.transient_storage_entries) |entry_limit| {
         assertBoundedMapSlack(&self.transient_storage, entry_limit);
         const result = self.transient_storage.getOrPutAssumeCapacity(storage_key);
-        if (!result.found_existing and self.transient_storage.count() > entry_limit) {
-            _ = self.transient_storage.swapRemove(storage_key);
+        if (!result.found_existing and @as(usize, self.transient_storage.count()) > entry_limit) {
+            _ = self.transient_storage.remove(storage_key);
             return error.TransientStorageCapacityExceeded;
         }
         result.value_ptr.* = value;
         return;
     }
-    try self.transient_storage.put(self.allocator, storage_key, value);
+    try self.transient_storage.put(storage_key, value);
 }
 
 pub fn emitLog(self: *Overlay, event_log: Host.Log) !void {
@@ -850,7 +858,7 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) !void {
             if (storage_entry.had_value) {
                 try self.putTransientStorage(storage_key, storage_entry.prev);
             } else {
-                _ = self.transient_storage.swapRemove(storage_key);
+                _ = self.transient_storage.remove(storage_key);
             }
         },
         .warm_account => |address| {
@@ -998,7 +1006,7 @@ pub fn snapshot(self: *Overlay) !Snapshot {
         .warm_accounts = AddressSet.init(self.allocator),
         .warm_storage = StorageSet.init(self.allocator),
         .storage_overlay = StorageMap.init(self.allocator),
-        .transient_storage = .empty,
+        .transient_storage = TransientStorageMap.init(self.allocator),
         .selfdestructed_accounts = AddressSet.init(self.allocator),
         .created_contracts = AddressSet.init(self.allocator),
         .deleted_accounts = AddressSet.init(self.allocator),
@@ -1032,7 +1040,7 @@ pub fn snapshot(self: *Overlay) !Snapshot {
 
     var transient_it = self.transient_storage.iterator();
     while (transient_it.next()) |entry| {
-        try result.transient_storage.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        try result.transient_storage.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
     var selfdestruct_it = self.selfdestructed_accounts.keyIterator();
@@ -1316,13 +1324,13 @@ fn journalStorageOverlayRemovedForAddress(
 
 pub fn snapshotTransient(self: *Overlay) !TransientSnapshot {
     var result = TransientSnapshot{
-        .transient_storage = .empty,
+        .transient_storage = TransientStorageMap.init(self.allocator),
     };
     errdefer result.deinit(self.allocator);
 
     var transient_it = self.transient_storage.iterator();
     while (transient_it.next()) |entry| {
-        try result.transient_storage.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        try result.transient_storage.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
     return result;
@@ -1359,7 +1367,7 @@ pub const Snapshot = struct {
         self.warm_accounts.deinit();
         self.warm_storage.deinit();
         self.storage_overlay.deinit();
-        self.transient_storage.deinit(allocator);
+        self.transient_storage.deinit();
         self.selfdestructed_accounts.deinit();
         self.created_contracts.deinit();
         self.deleted_accounts.deinit();
@@ -1371,7 +1379,8 @@ pub const TransientSnapshot = struct {
     transient_storage: TransientStorageMap,
 
     pub fn deinit(self: *TransientSnapshot, allocator: std.mem.Allocator) void {
-        self.transient_storage.deinit(allocator);
+        _ = allocator;
+        self.transient_storage.deinit();
     }
 };
 

@@ -167,6 +167,7 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, profile);
         addBenchCompareDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
+        addBenchDelegate(b, "bench-block-lifecycle", "Run VM block lifecycle benchmark", "block-lifecycle", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, profile);

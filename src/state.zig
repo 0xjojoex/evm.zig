@@ -14,6 +14,7 @@ pub const Reader = @import("./state/Reader.zig");
 pub const Changeset = @import("./state/Changeset.zig");
 pub const Committer = @import("./state/Committer.zig");
 pub const Journal = @import("./state/Journal.zig");
+pub const TouchedHashMap = @import("./state/TouchedHashMap.zig");
 pub const Overlay = @import("./state/Overlay.zig");
 pub const MemoryStore = @import("./state/MemoryStore.zig");
 

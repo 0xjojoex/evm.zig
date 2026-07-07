@@ -106,6 +106,29 @@ for the fixture protocol. The revm VM-loop runner analyzes bytecode and times
 `Interpreter::run_plain()`; it does not include revm transaction validation,
 finalization, or journal/database setup.
 
+## Block lifecycle runner
+
+`zig build block-lifecycle` measures the normal VM ownership shape for one block:
+pre-state is seeded outside timing, then the timed window runs `Vm.init`,
+`beginBlock`, a loop of protocol transactions, optional `commit`, and `Vm.deinit`.
+This lane is for integration-level growable-vs-exact policy checks, not VM-core
+dispatch comparisons.
+
+```sh
+cd bench
+zig build block-lifecycle -- --policy growable --txs 1000 --summary
+zig build block-lifecycle -- --policy exact-120m --txs 1000 --summary
+```
+
+The default case is `sstore-unique`, where each transaction writes a distinct
+storage key through normal transaction execution. Use `--case noop` for lifecycle
+overhead or `--case sstore-same` for repeated writes to the same slot. Stdout is
+CSV:
+
+```text
+suite,policy,case,spec,repeat,txs,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
+```
+
 ## Host-boundary runner
 
 `zig build host-boundary` measures the native Zig host boundary. Direct

@@ -55,6 +55,19 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const block_lifecycle_mod = benchModule(b, "src/block_lifecycle.zig", target, optimize, evmz_mod);
+        const block_lifecycle = b.addExecutable(.{
+            .name = "evmz-block-lifecycle",
+            .root_module = block_lifecycle_mod,
+        });
+        b.installArtifact(block_lifecycle);
+
+        const run_block_lifecycle = b.addRunArtifact(block_lifecycle);
+        if (b.args) |args| run_block_lifecycle.addArgs(args);
+        b.step("block-lifecycle", "Run VM block lifecycle benchmark").dependOn(&run_block_lifecycle.step);
+    }
+
+    {
         const host_boundary_mod = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod);
         const host_boundary = b.addExecutable(.{
             .name = "evmz-host-boundary",
@@ -232,6 +245,9 @@ pub fn build(b: *std.Build) void {
         const vm_loop_tests = b.addTest(.{
             .root_module = vm_loop_test_mod,
         });
+        const block_lifecycle_tests = b.addTest(.{
+            .root_module = benchModule(b, "src/block_lifecycle.zig", target, optimize, evmz_mod),
+        });
         const host_boundary_tests = b.addTest(.{
             .root_module = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod),
         });
@@ -255,6 +271,7 @@ pub fn build(b: *std.Build) void {
         const test_step = b.step("test", "Run benchmark sidecar tests");
         test_step.dependOn(&b.addRunArtifact(common_tests).step);
         test_step.dependOn(&b.addRunArtifact(vm_loop_tests).step);
+        test_step.dependOn(&b.addRunArtifact(block_lifecycle_tests).step);
         test_step.dependOn(&b.addRunArtifact(host_boundary_tests).step);
         test_step.dependOn(&b.addRunArtifact(host_matrix_tests).step);
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);

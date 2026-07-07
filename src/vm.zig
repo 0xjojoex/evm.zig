@@ -64,6 +64,39 @@ pub const Env = struct {
     }
 };
 
+/// Block/environment values for VMs whose block gas limit is a comptime policy.
+///
+/// `gas_limit` is intentionally not exposed here: the VM injects the exact
+/// policy gas limit when it builds the internal `Env`.
+pub const ExactBlockEnv = struct {
+    chain_id: u256 = 1,
+    coinbase: Address = std.mem.zeroes(Address),
+    number: u64 = 0,
+    slot_number: u64 = 0,
+    timestamp: u64 = 0,
+    prev_randao: u256 = 0,
+    base_fee: u256 = 0,
+    blob_base_fee: u256 = 0,
+    /// Optional dynamic chain/fixture override for blob gas rules.
+    /// When null, transaction validation and settlement use the protocol schedule for the active revision.
+    blob_schedule: ?transaction.BlobSchedule = null,
+
+    fn toEnv(self: ExactBlockEnv, gas_limit: u64) Env {
+        return .{
+            .chain_id = self.chain_id,
+            .coinbase = self.coinbase,
+            .number = self.number,
+            .slot_number = self.slot_number,
+            .timestamp = self.timestamp,
+            .gas_limit = gas_limit,
+            .prev_randao = self.prev_randao,
+            .base_fee = self.base_fee,
+            .blob_base_fee = self.blob_base_fee,
+            .blob_schedule = self.blob_schedule,
+        };
+    }
+};
+
 /// Terminal status of a transaction that reached execution.
 pub const TxStatus = enum {
     success,
@@ -148,10 +181,19 @@ pub const SystemCall = struct {
 /// into a block through `BlockSession`, and commits the resulting state diff.
 /// `evm.zig` exposes the mainnet instantiation as `Evm`.
 pub fn Vm(comptime Protocol: type) type {
+    return VmWithOptions(Protocol, .{});
+}
+
+pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype) type {
+    const vm_options = parseVmOptions(options_literal);
+    const exact_block_gas_limit = vm_options.exact_block_gas_limit;
+    const block_policy_max_live_frames = vm_options.max_live_frames;
+
     return struct {
         const Self = @This();
         const Executor = executor_module.Executor(Protocol);
         const tx_protocol = transaction.For(Protocol);
+        const has_exact_block_policy = exact_block_gas_limit != null;
 
         pub const Transaction = Protocol.Transaction.Value;
         pub const TxResult = TxResultFor(Protocol);
@@ -161,16 +203,19 @@ pub fn Vm(comptime Protocol: type) type {
         /// Low-level execution substrate for diagnostics, fixtures, and benchmarks.
         executor: Executor,
         /// Current block/environment values used to build transaction host contexts.
-        env: Env,
+        env: BlockEnv,
         /// Optional sink used by `commit` to persist the overlay diff.
         committer: ?Committer,
+
+        pub const BlockEnv = if (has_exact_block_policy) ExactBlockEnv else Env;
+        pub const InitResult = if (has_exact_block_policy) anyerror!Self else Self;
 
         pub const Init = struct {
             revision: Protocol.Revision,
             state_reader: ?StateReader = null,
             block_hash_source: ?BlockHashSource = null,
             committer: ?Committer = null,
-            env: Env = .{},
+            env: BlockEnv = .{},
             config: evmz.ExecutionConfig = .base,
             trace_sink: ?*evmz.trace.Sink = null,
         };
@@ -209,7 +254,7 @@ pub fn Vm(comptime Protocol: type) type {
                         const next_block_gas = self.block_gas.add(result.gas.block) catch {
                             return self.drop(&pre_tx);
                         };
-                        if (!next_block_gas.withinLimit(self.vm.env.gas_limit)) {
+                        if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
                             return self.drop(&pre_tx);
                         }
 
@@ -232,7 +277,28 @@ pub fn Vm(comptime Protocol: type) type {
             }
 
             pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
-                return self.vm.systemCall(call);
+                var pre_call = try self.vm.executor.snapshot();
+                defer pre_call.deinit(self.vm.executor.allocator);
+
+                const result = try self.vm.executeSystemCall(call);
+                const spent = systemCallGasUsed(call.gas, result.gasLeft());
+                const next_block_gas = self.block_gas.add(transaction.BlockGas.legacy(spent)) catch {
+                    try self.vm.executor.restore(&pre_call);
+                    return error.GasAllowanceExceeded;
+                };
+                const next_gas_used = std.math.add(u64, self.gas_used, spent) catch {
+                    try self.vm.executor.restore(&pre_call);
+                    return error.GasAllowanceExceeded;
+                };
+                const env = self.vm.runtimeEnv();
+                if (!next_block_gas.withinLimit(env.gas_limit)) {
+                    try self.vm.executor.restore(&pre_call);
+                    return error.GasAllowanceExceeded;
+                }
+
+                self.gas_used = next_gas_used;
+                self.block_gas = next_block_gas;
+                return result;
             }
 
             pub fn finish(self: *const BlockSession) BlockResult {
@@ -249,7 +315,13 @@ pub fn Vm(comptime Protocol: type) type {
             }
         };
 
-        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
+        pub fn init(allocator: std.mem.Allocator, options: Init) InitResult {
+            if (comptime has_exact_block_policy) {
+                return initWithRuntimeResourcesInternal(allocator, options, .{
+                    .bounded = try boundedRuntimeResourcesForExactBlockPolicy(options.revision),
+                });
+            }
+
             return .{
                 .executor = Executor.init(allocator, .{
                     .revision = options.revision,
@@ -265,7 +337,14 @@ pub fn Vm(comptime Protocol: type) type {
 
         /// Initialize a VM and reserve reusable execution resources up front.
         pub fn initWithRuntimeResources(allocator: std.mem.Allocator, options: Init, runtime_resources: executor_module.RuntimeResources) !Self {
-            return .{
+            if (comptime has_exact_block_policy) {
+                @compileError("exact block gas policy VMs reserve resources through init");
+            }
+            return initWithRuntimeResourcesInternal(allocator, options, runtime_resources);
+        }
+
+        fn initWithRuntimeResourcesInternal(allocator: std.mem.Allocator, options: Init, runtime_resources: executor_module.RuntimeResources) !Self {
+            var result = Self{
                 .executor = try Executor.initWithRuntimeResources(allocator, .{
                     .revision = options.revision,
                     .state_reader = options.state_reader,
@@ -276,19 +355,52 @@ pub fn Vm(comptime Protocol: type) type {
                 .env = options.env,
                 .committer = options.committer,
             };
+            if (comptime has_exact_block_policy) {
+                result.executor.lockRuntimeResources();
+            }
+            return result;
+        }
+
+        pub fn boundedRuntimeResourcesForExactBlockPolicy(revision: Protocol.Revision) !executor_module.BoundedRuntimeResources {
+            if (comptime !has_exact_block_policy) {
+                @compileError("boundedRuntimeResourcesForExactBlockPolicy requires .block_policy.exact_gas_limit");
+            }
+            const envelope = try tx_protocol.gas_bound.blockEnvelope(.{
+                .spec = revision,
+                .block_gas_limit = exact_block_gas_limit.?,
+                .max_live_frames = block_policy_max_live_frames,
+            });
+            return executor_module.BoundedRuntimeResources.fromGasBoundBlockEnvelope(envelope);
         }
 
         pub fn deinit(self: *Self) void {
             self.executor.deinit();
         }
 
-        pub fn setEnv(self: *Self, env: Env) void {
+        /// Rebind fixture/benchmark inputs while retaining executor capacity.
+        pub fn reset(self: *Self, options: Init) !void {
+            try self.executor.reset(.{
+                .revision = options.revision,
+                .state_reader = options.state_reader,
+                .block_hash_source = options.block_hash_source,
+                .config = options.config,
+                .trace_sink = options.trace_sink,
+            });
+            self.env = options.env;
+            self.committer = options.committer;
+        }
+
+        pub fn setEnv(self: *Self, env: BlockEnv) void {
             self.env = env;
         }
 
-        pub fn beginBlock(self: *Self, env: Env) BlockSession {
+        pub fn beginBlock(self: *Self, env: BlockEnv) BlockSession {
             self.setEnv(env);
             return .{ .vm = self };
+        }
+
+        pub fn envContext(self: *const Self) Env {
+            return self.runtimeEnv();
         }
 
         pub fn getAccount(self: *Self, address_value: Address) !?AccountView {
@@ -314,9 +426,18 @@ pub fn Vm(comptime Protocol: type) type {
 
         /// Execute an explicit non-transaction system call.
         pub fn systemCall(self: *Self, call: SystemCall) !EvmResult {
-            const context_gas_limit = if (self.env.gas_limit == 0) call.gas else self.env.gas_limit;
+            if (comptime has_exact_block_policy) {
+                @compileError("exact block gas policy VMs must execute system calls through BlockSession");
+            }
+            return self.executeSystemCall(call);
+        }
+
+        fn executeSystemCall(self: *Self, call: SystemCall) !EvmResult {
+            const env = self.runtimeEnv();
+            if (env.gas_limit != 0 and call.gas > env.gas_limit) return error.GasAllowanceExceeded;
+            const context_gas_limit = if (env.gas_limit == 0) call.gas else env.gas_limit;
             const result = try self.executor.executeSystemCall(
-                self.env.txContext(call.sender, 0, context_gas_limit, &.{}),
+                env.txContext(call.sender, 0, context_gas_limit, &.{}),
                 call.sender,
                 call.recipient,
                 call.input,
@@ -332,6 +453,9 @@ pub fn Vm(comptime Protocol: type) type {
 
         /// Execute one protocol transaction into the VM overlay.
         pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
+            if (comptime has_exact_block_policy) {
+                @compileError("exact block gas policy VMs must transact through BlockSession");
+            }
             const prepared = try self.prepareTransaction(tx);
             return switch (prepared) {
                 .rejected => |err| .{ .rejected = err },
@@ -341,12 +465,13 @@ pub fn Vm(comptime Protocol: type) type {
 
         fn prepareTransaction(self: *Self, tx: Self.Transaction) !Self.PreparedTransactionResult {
             self.executor.clearLogs();
+            const env = self.runtimeEnv();
             const view = Protocol.Transaction.view(tx);
             const input: transaction.PrepareInput(Protocol) = .{
                 .revision = self.executor.revision(),
                 .tx = tx,
                 .view = view,
-                .env = envFacts(self.env),
+                .env = envFacts(env),
                 .state = try self.stateFacts(view),
             };
             return Protocol.Transaction.prepare(Protocol, input);
@@ -377,6 +502,9 @@ pub fn Vm(comptime Protocol: type) type {
         /// Convenience for one-off callers. Block executors should usually call
         /// `transact` many times, then one `commit`.
         pub fn transactCommit(self: *Self, tx: Self.Transaction) !Self.TxResult {
+            if (comptime has_exact_block_policy) {
+                @compileError("exact block gas policy VMs must transact through BlockSession");
+            }
             const result = try self.transact(tx);
             switch (result) {
                 .rejected => return result,
@@ -439,6 +567,12 @@ pub fn Vm(comptime Protocol: type) type {
             };
         }
 
+        fn systemCallGasUsed(gas: u64, gas_left: i64) u64 {
+            if (gas_left <= 0) return gas;
+            const left = std.math.cast(u64, gas_left) orelse return 0;
+            return gas -| @min(gas, left);
+        }
+
         /// Return the current pending state diff without persisting it.
         pub fn changeset(self: *Self) !Changeset {
             return self.executor.changeset();
@@ -461,7 +595,52 @@ pub fn Vm(comptime Protocol: type) type {
             try committer.commit(&diff);
             self.executor.discardChanges();
         }
+
+        fn applyBlockEnvPolicy(env: BlockEnv) Env {
+            if (comptime has_exact_block_policy) {
+                return env.toEnv(exact_block_gas_limit.?);
+            }
+            return env;
+        }
+
+        fn runtimeEnv(self: *const Self) Env {
+            return applyBlockEnvPolicy(self.env);
+        }
     };
+}
+
+const ParsedVmOptions = struct {
+    exact_block_gas_limit: ?u64 = null,
+    max_live_frames: usize = executor_module.default_max_live_frames,
+};
+
+fn parseVmOptions(comptime options: anytype) ParsedVmOptions {
+    const Options = @TypeOf(options);
+    switch (@typeInfo(Options)) {
+        .@"struct" => {},
+        else => @compileError("Vm options must be a struct literal"),
+    }
+
+    var parsed = ParsedVmOptions{};
+    if (@hasField(Options, "block_policy")) {
+        const block_policy = options.block_policy;
+        const BlockPolicy = @TypeOf(block_policy);
+        switch (@typeInfo(BlockPolicy)) {
+            .@"struct" => {},
+            else => @compileError("Vm block_policy must be a struct literal"),
+        }
+        if (!@hasField(BlockPolicy, "exact_gas_limit")) {
+            @compileError("Vm block_policy must provide exact_gas_limit");
+        }
+        if (block_policy.exact_gas_limit == 0) {
+            @compileError("Vm block_policy.exact_gas_limit must be non-zero");
+        }
+        parsed.exact_block_gas_limit = block_policy.exact_gas_limit;
+        if (@hasField(BlockPolicy, "max_live_frames")) {
+            parsed.max_live_frames = block_policy.max_live_frames;
+        }
+    }
+    return parsed;
 }
 
 const Default = evmz.Evm;

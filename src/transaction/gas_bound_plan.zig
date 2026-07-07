@@ -1,9 +1,9 @@
 //! Gas-derived resource upper-bound planner for bounded execution.
 //!
 //! This module is intentionally a pure estimator. It does not configure
-//! `Executor`, allocate pools, or decide final production capacities. The goal
-//! is to make the protocol-shaped worst-case math visible before wiring it into
-//! runtime resource policy.
+//! `Executor` or allocate pools. The exact block policy uses `blockEnvelope` as
+//! a reproducible checkpoint, but this remains an experimental gas-formula input
+//! rather than the general bounded-resource policy API.
 //!
 //! The bounds are conservative sizing inputs, not consensus gas accounting. Some
 //! resources have crisp gas formulas, such as EVM memory expansion, log data,
@@ -143,12 +143,35 @@ pub fn For(comptime Protocol: type) type {
         };
         pub const Plan = PlanFor(Protocol.Revision);
 
+        pub const BlockInput = struct {
+            spec: Protocol.Revision = defaultRevisionForProtocol(Protocol),
+            block_gas_limit: u64,
+            max_live_frames: usize = default_max_live_frames,
+        };
+
+        pub const BlockResourceBound = struct {
+            spec: Protocol.Revision,
+            gas_limit: u64,
+            effective_gas_limit: u64,
+            state: StateBound,
+        };
+
+        pub const BlockEnvelope = struct {
+            spec: Protocol.Revision,
+            block_gas_limit: u64,
+            /// Block-wide provisioning envelope for state that can accumulate
+            /// across transactions before commit/discard.
+            block: Self.BlockResourceBound,
+            /// Largest single transaction sub-scope allowed inside the block.
+            transaction: Self.Plan,
+        };
+
         /// Estimate bounded-runtime resource capacities from a gas budget.
         ///
-        /// No runtime path consumes this function yet. A later integration must still
-        /// respect lifetime: stack is per-frame, but EVM linear memory is
-        /// transaction-wide live memory. Do not wire `memory.one_frame_bytes` as a
-        /// per-frame executor cap.
+        /// Keep lifetime separate when mapping this plan into runtime resources:
+        /// stack is per-frame, but EVM linear memory is transaction-wide live
+        /// memory. Do not wire `memory.one_frame_bytes` as a per-frame executor
+        /// cap.
         pub fn estimate(input: Input) Error!Plan {
             if (input.max_live_frames == 0) return error.InvalidMaxLiveFrames;
 
@@ -198,6 +221,35 @@ pub fn For(comptime Protocol: type) type {
             };
         }
 
+        pub fn blockEnvelope(input: Self.BlockInput) Error!Self.BlockEnvelope {
+            const initial_warm_accounts = protocolWarmAccountReserve(input.spec);
+            const block_plan = try Self.estimate(.{
+                .spec = input.spec,
+                .gas_limit = input.block_gas_limit,
+                .scope = .gas_budget,
+                .max_live_frames = input.max_live_frames,
+                .initial_warm_accounts = initial_warm_accounts,
+            });
+            const tx_plan = try Self.estimate(.{
+                .spec = input.spec,
+                .gas_limit = input.block_gas_limit,
+                .scope = .transaction,
+                .max_live_frames = input.max_live_frames,
+                .initial_warm_accounts = initial_warm_accounts,
+            });
+            return .{
+                .spec = input.spec,
+                .block_gas_limit = input.block_gas_limit,
+                .block = .{
+                    .spec = block_plan.spec,
+                    .gas_limit = block_plan.gas_limit,
+                    .effective_gas_limit = block_plan.effective_gas_limit,
+                    .state = block_plan.state,
+                },
+                .transaction = tx_plan,
+            };
+        }
+
         pub fn effectiveGasLimit(revision: Protocol.Revision, gas_limit: u64, scope: Scope) u64 {
             return switch (scope) {
                 .transaction => Protocol.Transaction.regularGasLimit(revision, gas_limit),
@@ -230,6 +282,13 @@ pub fn For(comptime Protocol: type) type {
         fn createWarmCost(revision: Protocol.Revision) u64 {
             if (Protocol.Transaction.intrinsicRegularGasLimit(revision) != null) return amsterdam_create_warm_cost;
             return legacy_create_warm_cost;
+        }
+
+        fn protocolWarmAccountReserve(revision: Protocol.Revision) usize {
+            var count: usize = 2; // sender plus recipient or created address.
+            if (Protocol.Block.transactionWarmsCoinbase(revision)) count += 1;
+            if (Protocol.Authorization.warmsDelegatedTarget(revision)) count += 1;
+            return count;
         }
     };
 }

@@ -102,6 +102,37 @@ pub const BoundedRuntimeResources = struct {
     state: ?StateOverlay.StateResources = null,
     transient_storage_entries: ?usize = null,
     result_bytes: ?usize = null,
+
+    /// Experimental adapter from a gas-derived block envelope to the bounded
+    /// executor knobs that already have matching lifetimes. Byte caps stay
+    /// caller-owned until EVM memory and frame/result I/O have transaction-wide
+    /// planners; BAL/witness-derived bounds should feed these knobs directly.
+    pub fn fromGasBoundBlockEnvelope(envelope: anytype) BoundedRuntimeResources {
+        const block = envelope.block;
+        const tx = envelope.transaction;
+        return .{
+            .max_live_frames = tx.max_live_frames,
+            .logs = .{
+                .entries = tx.logs.entries,
+                .data_bytes = tx.logs.data_bytes,
+            },
+            .journal_entries = tx.journal_entries,
+            .access = .{
+                .accounts = tx.access.accounts,
+                .storage_keys = tx.access.storage_keys,
+            },
+            .state = .{
+                .accounts = block.state.accounts,
+                .original_storage_entries = tx.state.original_storage_entries,
+                .storage_overlay_entries = block.state.storage_overlay_entries,
+                .selfdestructed_accounts = tx.state.selfdestructed_accounts,
+                .created_contracts = tx.state.created_contracts,
+                .deleted_accounts = block.state.deleted_accounts,
+                .dirty_accounts = block.state.dirty_accounts,
+            },
+            .transient_storage_entries = tx.transient_storage_entries,
+        };
+    }
 };
 
 pub const RuntimeResources = union(enum) {
@@ -115,6 +146,55 @@ pub const RuntimeResources = union(enum) {
         };
     }
 };
+
+test "gas bound block envelope maps executor resources by lifetime" {
+    const resources = BoundedRuntimeResources.fromGasBoundBlockEnvelope(.{
+        .block = .{ .state = .{
+            .accounts = 101,
+            .original_storage_entries = 102,
+            .storage_overlay_entries = 103,
+            .selfdestructed_accounts = 104,
+            .created_contracts = 105,
+            .deleted_accounts = 106,
+            .dirty_accounts = 107,
+        } },
+        .transaction = .{
+            .max_live_frames = 11,
+            .logs = .{ .entries = 12, .data_bytes = 13 },
+            .journal_entries = 14,
+            .access = .{ .accounts = 15, .storage_keys = 16 },
+            .state = .{
+                .accounts = 201,
+                .original_storage_entries = 202,
+                .storage_overlay_entries = 203,
+                .selfdestructed_accounts = 204,
+                .created_contracts = 205,
+                .deleted_accounts = 206,
+                .dirty_accounts = 207,
+            },
+            .transient_storage_entries = 17,
+        },
+    });
+
+    try std.testing.expectEqual(@as(usize, 11), resources.max_live_frames);
+    try std.testing.expectEqual(@as(usize, 12), resources.logs.?.entries);
+    try std.testing.expectEqual(@as(usize, 13), resources.logs.?.data_bytes);
+    try std.testing.expectEqual(@as(usize, 14), resources.journal_entries.?);
+    try std.testing.expectEqual(@as(usize, 15), resources.access.?.accounts);
+    try std.testing.expectEqual(@as(usize, 16), resources.access.?.storage_keys);
+    try std.testing.expectEqual(@as(usize, 101), resources.state.?.accounts);
+    try std.testing.expectEqual(@as(usize, 202), resources.state.?.original_storage_entries);
+    try std.testing.expectEqual(@as(usize, 103), resources.state.?.storage_overlay_entries);
+    try std.testing.expectEqual(@as(usize, 204), resources.state.?.selfdestructed_accounts);
+    try std.testing.expectEqual(@as(usize, 205), resources.state.?.created_contracts);
+    try std.testing.expectEqual(@as(usize, 106), resources.state.?.deleted_accounts);
+    try std.testing.expectEqual(@as(usize, 107), resources.state.?.dirty_accounts);
+    try std.testing.expectEqual(@as(usize, 17), resources.transient_storage_entries.?);
+    try std.testing.expectEqual(@as(?usize, null), resources.memory_bytes_per_frame);
+    try std.testing.expectEqual(@as(?usize, null), resources.io_bytes_per_frame);
+    try std.testing.expectEqual(@as(?usize, null), resources.scratch_bytes_per_frame);
+    try std.testing.expectEqual(@as(?usize, null), resources.result_bytes);
+}
 
 /// A top-level call whose bytecode has already been prepared by the caller.
 ///
@@ -203,6 +283,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         snapshot_pool: SnapshotPool,
         call_scratch_slots: CallScratchSlots,
         runtime_resources: RuntimeResourcesType = .growable,
+        runtime_resources_locked: bool = false,
         tx_context: ?Host.TxContext = null,
         block_hash_source: ?BlockHashSource = null,
         revision_id: RevisionId,
@@ -320,7 +401,34 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.state.trace_sink = trace_sink;
         }
 
+        /// Rebind fixture/benchmark inputs while retaining configured resources.
+        pub fn reset(self: *Self, options: Init) !void {
+            if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
+
+            const next_revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision);
+            if (self.runtime_resources_locked and self.revision_id != next_revision_id) {
+                return error.RuntimeResourcesLocked;
+            }
+
+            self.state.reset(options.state_reader, options.trace_sink);
+            self.tx_context = null;
+            self.block_hash_source = options.block_hash_source;
+            self.revision_id = next_revision_id;
+            self.config = options.config;
+            self.setTraceSink(options.trace_sink);
+            self.clearLastOutput();
+        }
+
         pub fn configureRuntimeResources(self: *Self, runtime_resources: RuntimeResourcesType) !void {
+            if (self.runtime_resources_locked) return error.RuntimeResourcesLocked;
+            try self.configureRuntimeResourcesUnlocked(runtime_resources);
+        }
+
+        pub fn lockRuntimeResources(self: *Self) void {
+            self.runtime_resources_locked = true;
+        }
+
+        fn configureRuntimeResourcesUnlocked(self: *Self, runtime_resources: RuntimeResourcesType) !void {
             switch (runtime_resources) {
                 .growable => {
                     try self.frame_store.setGrowable(self.allocator);

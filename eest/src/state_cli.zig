@@ -28,6 +28,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--exclude-static")) {
             mode = .classify;
             classify_options.exclude_static = true;
+        } else if (std.mem.eql(u8, arg, "--exact-gas-bound")) {
+            options.exact_gas_bound = true;
         } else if (std.mem.eql(u8, arg, "--limit")) {
             const value = args.next() orelse return error.MissingLimit;
             mode = .classify;
@@ -96,8 +98,20 @@ const Mode = enum {
 };
 
 fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: eest.Options) !eest.Summary {
+    var runner = eest.Runner{};
+    defer runner.deinit();
+    return runPathWithRunner(io, allocator, path, options, &runner);
+}
+
+fn runPathWithRunner(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    options: eest.Options,
+    runner: *eest.Runner,
+) !eest.Summary {
     var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir => return eest.runFile(io, allocator, path, options),
+        error.NotDir => return runner.runFile(io, allocator, path, options),
         else => return err,
     };
     defer dir.close(io);
@@ -109,10 +123,10 @@ fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: 
         defer allocator.free(child);
 
         switch (entry.kind) {
-            .directory => total.add(try runPath(io, allocator, child, options)),
+            .directory => total.add(try runPathWithRunner(io, allocator, child, options, runner)),
             .file => {
                 if (std.mem.endsWith(u8, entry.name, ".json")) {
-                    total.add(try eest.runFile(io, allocator, child, options));
+                    total.add(try runner.runFile(io, allocator, child, options));
                 }
             },
             else => {},
@@ -181,6 +195,7 @@ const Classification = struct {
     allocator: std.mem.Allocator,
     total: Stats = .{},
     files_seen: usize = 0,
+    runner: eest.Runner = .{},
     by_fork: std.StringHashMap(Stats),
     by_group: std.StringHashMap(Stats),
     fail_reasons: [std.meta.fields(eest.FailReason).len]usize = [_]usize{0} ** std.meta.fields(eest.FailReason).len,
@@ -196,6 +211,7 @@ const Classification = struct {
     }
 
     fn deinit(self: *Classification) void {
+        self.runner.deinit();
         freeMapKeys(self.allocator, &self.by_fork);
         self.by_fork.deinit();
         freeMapKeys(self.allocator, &self.by_group);
@@ -247,7 +263,7 @@ const Classification = struct {
         if (options.exclude_static and std.mem.indexOf(u8, path, "/static/") != null) return;
 
         self.files_seen += 1;
-        const summary = try eest.runFile(io, self.allocator, path, options.run_options);
+        const summary = try self.runner.runFile(io, self.allocator, path, options.run_options);
         const stats = Stats.fromSummary(summary);
         self.total.add(stats);
 
@@ -324,8 +340,8 @@ const Classification = struct {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build eest -- [--fork Cancun] [--test name-substring] [state-test.json-or-dir...]
-        \\       zig build eest -- --classify [--exclude-static] [--limit N] [--root state_tests_dir]
+        \\usage: zig build eest -- [--exact-gas-bound] [--fork Cancun] [--test name-substring] [state-test.json-or-dir...]
+        \\       zig build eest -- --classify [--exact-gas-bound] [--exclude-static] [--limit N] [--root state_tests_dir]
         \\       zig build eest -- --scope [fixtures_dir]
         \\
         \\Runs the supported subset of EEST state-test fixtures:
@@ -334,6 +350,7 @@ fn printUsage() void {
         \\  - post.state code/storage comparisons
         \\
         \\With no paths, the runner uses eest.lock dest + fixtures/state_tests.
+        \\--exact-gas-bound runs compiled exact block-gas buckets and skips unsupported limits.
         \\
         \\Failed/unchecked vectors are reported separately.
         \\
