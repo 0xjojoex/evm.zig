@@ -1,9 +1,10 @@
 //! Gas-derived resource upper-bound planner for bounded execution.
 //!
 //! This module is intentionally a pure estimator. It does not configure
-//! `Executor` or allocate pools. The exact block policy uses `blockEnvelope` as
-//! a reproducible checkpoint, but this remains an experimental gas-formula input
-//! rather than the general bounded-resource policy API.
+//! `Executor` or allocate pools. The gas-derived block policy uses
+//! `resourceEnvelope` as a reproducible checkpoint, but this remains an
+//! experimental gas-formula input rather than the general bounded-resource
+//! policy API.
 //!
 //! The bounds are conservative sizing inputs, not consensus gas accounting. Some
 //! resources have crisp gas formulas, such as EVM memory expansion, log data,
@@ -14,6 +15,7 @@
 const std = @import("std");
 const Host = @import("../Host.zig");
 const Interpreter = @import("../Interpreter.zig");
+const resource_bound = @import("../executor/resource_bound.zig");
 const uint256 = @import("../uint256.zig");
 
 pub const default_call_depth_limit: usize = Host.max_call_depth;
@@ -144,27 +146,12 @@ pub fn For(comptime Protocol: type) type {
         pub const Plan = PlanFor(Protocol.Revision);
 
         pub const BlockInput = struct {
-            spec: Protocol.Revision = defaultRevisionForProtocol(Protocol),
+            revision: Protocol.Revision = defaultRevisionForProtocol(Protocol),
             block_gas_limit: u64,
             max_live_frames: usize = default_max_live_frames,
         };
 
-        pub const BlockResourceBound = struct {
-            spec: Protocol.Revision,
-            gas_limit: u64,
-            effective_gas_limit: u64,
-            state: StateBound,
-        };
-
-        pub const BlockEnvelope = struct {
-            spec: Protocol.Revision,
-            block_gas_limit: u64,
-            /// Block-wide provisioning envelope for state that can accumulate
-            /// across transactions before commit/discard.
-            block: Self.BlockResourceBound,
-            /// Largest single transaction sub-scope allowed inside the block.
-            transaction: Self.Plan,
-        };
+        pub const ResourceEnvelope = resource_bound.Envelope;
 
         /// Estimate bounded-runtime resource capacities from a gas budget.
         ///
@@ -221,32 +208,35 @@ pub fn For(comptime Protocol: type) type {
             };
         }
 
-        pub fn blockEnvelope(input: Self.BlockInput) Error!Self.BlockEnvelope {
-            const initial_warm_accounts = protocolWarmAccountReserve(input.spec);
+        pub fn resourceEnvelope(input: Self.BlockInput) Error!Self.ResourceEnvelope {
+            const initial_warm_accounts = protocolWarmAccountReserve(input.revision);
             const block_plan = try Self.estimate(.{
-                .spec = input.spec,
+                .revision = input.revision,
                 .gas_limit = input.block_gas_limit,
                 .scope = .gas_budget,
                 .max_live_frames = input.max_live_frames,
                 .initial_warm_accounts = initial_warm_accounts,
             });
             const tx_plan = try Self.estimate(.{
-                .spec = input.spec,
+                .revision = input.revision,
                 .gas_limit = input.block_gas_limit,
                 .scope = .transaction,
                 .max_live_frames = input.max_live_frames,
                 .initial_warm_accounts = initial_warm_accounts,
             });
             return .{
-                .spec = input.spec,
-                .block_gas_limit = input.block_gas_limit,
+                .source = .gas_derived,
                 .block = .{
-                    .spec = block_plan.spec,
-                    .gas_limit = block_plan.gas_limit,
-                    .effective_gas_limit = block_plan.effective_gas_limit,
-                    .state = block_plan.state,
+                    .state = stateResources(block_plan.state),
                 },
-                .transaction = tx_plan,
+                .transaction = .{
+                    .max_live_frames = tx_plan.max_live_frames,
+                    .logs = logResources(tx_plan.logs),
+                    .journal_entries = tx_plan.journal_entries,
+                    .access = accessResources(tx_plan.access),
+                    .state = stateResources(tx_plan.state),
+                    .transient_storage_entries = tx_plan.transient_storage_entries,
+                },
             };
         }
 
@@ -289,6 +279,32 @@ pub fn For(comptime Protocol: type) type {
             if (Protocol.Block.transactionWarmsCoinbase(revision)) count += 1;
             if (Protocol.Authorization.warmsDelegatedTarget(revision)) count += 1;
             return count;
+        }
+
+        fn logResources(logs: LogBound) resource_bound.LogResources {
+            return .{
+                .entries = logs.entries,
+                .data_bytes = logs.data_bytes,
+            };
+        }
+
+        fn accessResources(access: AccessBound) resource_bound.AccessResources {
+            return .{
+                .accounts = access.accounts,
+                .storage_keys = access.storage_keys,
+            };
+        }
+
+        fn stateResources(state: StateBound) resource_bound.StateResources {
+            return .{
+                .accounts = state.accounts,
+                .original_storage_entries = state.original_storage_entries,
+                .storage_overlay_entries = state.storage_overlay_entries,
+                .selfdestructed_accounts = state.selfdestructed_accounts,
+                .created_contracts = state.created_contracts,
+                .deleted_accounts = state.deleted_accounts,
+                .dirty_accounts = state.dirty_accounts,
+            };
         }
     };
 }

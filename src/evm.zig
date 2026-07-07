@@ -36,32 +36,23 @@ pub const empty_code_hash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7b
 // Commonly-used types are flat-aliased here for ergonomics.
 pub const addr = address.addr;
 pub const Address = address.Address;
-pub const AccountView = vm.AccountView;
 pub const Bytecode = code.Bytecode;
-pub const BlockResult = vm.BlockResult;
-pub const BlockSession = Evm.BlockSession;
-pub const BoundedRuntimeResources = vm.BoundedRuntimeResources;
 pub const Committer = vm.Committer;
 pub const Definition = definition.Definition;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;
 pub const Executor = executor.Executor;
-pub const ExactBlockEnv = vm.ExactBlockEnv;
 pub const Log = vm.Log;
 pub const Message = executor.Message;
 pub const Opcode = opcode.Opcode;
 pub const OpcodeInfo = opcode.OpInfo;
 pub const RevisionConfig = definition.RevisionConfig;
 pub const RevisionModel = definition.RevisionModel;
-pub const RuntimeResources = vm.RuntimeResources;
 pub const StateReader = vm.StateReader;
-pub const SystemCall = vm.SystemCall;
 pub const Transaction = EthProtocol.Transaction.Value;
-pub const TxReceiptView = vm.TxReceiptView;
 pub const TxResult = vm.TxResultFor(EthProtocol);
 pub const TxStatus = vm.TxStatus;
 pub const Vm = vm.Vm;
-pub const VmWithOptions = vm.VmWithOptions;
 
 pub const Protocol = protocol.Protocol;
 

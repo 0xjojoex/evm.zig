@@ -14,8 +14,12 @@ const block_gas_limit: u64 = 300_000;
 const sender = evmz.addr(0xaaaa);
 const default_contract = evmz.addr(0xbbbb);
 
-const ExactVm = evmz.VmWithOptions(EthProtocol, .{
-    .block_policy = .{ .exact_gas_limit = block_gas_limit },
+const ExactVm = evmz.vm.VmWithOptions(EthProtocol, .{
+    .block_policy = .{
+        .resource_bound = .{
+            .gas_derived = .{ .block_gas_limit = block_gas_limit },
+        },
+    },
 });
 
 const TxCase = struct {
@@ -108,7 +112,7 @@ test "gas bound checkpoint block overlay fails by block gas not capacity" {
 }
 
 test "gas bound checkpoint documents byte caps still unmodeled" {
-    const resources = try ExactVm.boundedRuntimeResourcesForExactBlockPolicy(.osaka);
+    const resources = try ExactVm.boundedRuntimeResourcesForBlockPolicy(.osaka);
 
     try std.testing.expect(resources.logs != null);
     try std.testing.expect(resources.journal_entries != null);

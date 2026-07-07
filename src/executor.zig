@@ -24,6 +24,7 @@
 const std = @import("std");
 
 const evmz = @import("./evm.zig");
+const resource_bound = @import("./executor/resource_bound.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
 const BlockHashSource = evmz.BlockHashSource;
@@ -103,11 +104,10 @@ pub const BoundedRuntimeResources = struct {
     transient_storage_entries: ?usize = null,
     result_bytes: ?usize = null,
 
-    /// Experimental adapter from a gas-derived block envelope to the bounded
-    /// executor knobs that already have matching lifetimes. Byte caps stay
-    /// caller-owned until EVM memory and frame/result I/O have transaction-wide
-    /// planners; BAL/witness-derived bounds should feed these knobs directly.
-    pub fn fromGasBoundBlockEnvelope(envelope: anytype) BoundedRuntimeResources {
+    /// Convert a source-neutral resource envelope to bounded executor knobs.
+    /// Byte caps stay caller-owned until EVM memory and frame/result I/O have
+    /// transaction-wide planners.
+    pub fn fromResourceEnvelope(envelope: resource_bound.Envelope) BoundedRuntimeResources {
         const block = envelope.block;
         const tx = envelope.transaction;
         return .{
@@ -147,8 +147,9 @@ pub const RuntimeResources = union(enum) {
     }
 };
 
-test "gas bound block envelope maps executor resources by lifetime" {
-    const resources = BoundedRuntimeResources.fromGasBoundBlockEnvelope(.{
+test "resource bound envelope maps executor resources by lifetime" {
+    const resources = BoundedRuntimeResources.fromResourceEnvelope(.{
+        .source = .gas_derived,
         .block = .{ .state = .{
             .accounts = 101,
             .original_storage_entries = 102,

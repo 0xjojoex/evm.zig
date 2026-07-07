@@ -64,7 +64,7 @@ pub fn For(comptime ProtocolType: type) type {
         pub const Protocol = ProtocolType;
         pub const blob = blob_mod.For(ProtocolType);
         pub const gas = gas_mod.For(ProtocolType);
-        /// Experimental gas-derived block envelope used by exact-policy fixtures.
+        /// Gas-derived producer for source-neutral resource-bound envelopes.
         pub const gas_bound = gas_bound_plan.For(ProtocolType);
         pub const prepare = prepare_mod.For(ProtocolType);
         pub const settlement = settlement_mod.For(ProtocolType);

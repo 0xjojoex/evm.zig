@@ -207,8 +207,12 @@ fn runExactLifecycle(
     options: Options,
     comptime gas_limit: u64,
 ) !RunResult {
-    const ExactVm = evmz.VmWithOptions(Protocol, .{
-        .block_policy = .{ .exact_gas_limit = gas_limit },
+    const ExactVm = evmz.vm.VmWithOptions(Protocol, .{
+        .block_policy = .{
+            .resource_bound = .{
+                .gas_derived = .{ .block_gas_limit = gas_limit },
+            },
+        },
     });
 
     var memory = MemoryStore.init(allocator);
@@ -220,11 +224,11 @@ fn runExactLifecycle(
         .revision = options.spec,
         .state_reader = memory.reader(),
         .committer = memory.committer(),
-        .env = exactEnv(),
+        .env = policyEnv(),
     });
     errdefer vm.deinit();
 
-    var block = vm.beginBlock(exactEnv());
+    var block = vm.beginBlock(policyEnv());
     const block_result = try runTransactions(&block, options);
     if (options.commit) try vm.commit();
     vm.deinit();
@@ -246,7 +250,7 @@ fn seedState(allocator: std.mem.Allocator, memory: *MemoryStore, case: Case) !vo
     try contract.setCode(allocator, contractCode(case));
 }
 
-fn runTransactions(block: anytype, options: Options) !evmz.BlockResult {
+fn runTransactions(block: anytype, options: Options) !evmz.vm.BlockResult {
     var tx_input: [32]u8 = undefined;
     var index: usize = 0;
     while (index < options.txs) : (index += 1) {
@@ -297,7 +301,7 @@ fn growableEnv(block_gas_limit: u64) evmz.Env {
     };
 }
 
-fn exactEnv() evmz.ExactBlockEnv {
+fn policyEnv() evmz.vm.BlockPolicyEnv {
     return .{};
 }
 

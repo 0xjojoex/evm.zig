@@ -778,8 +778,12 @@ const FixtureHost = struct {
 };
 
 fn ExactFixtureHost(comptime gas_limit: u64) type {
-    const ExactVm = evmz.VmWithOptions(EthProtocol, .{
-        .block_policy = .{ .exact_gas_limit = gas_limit },
+    const ExactVm = evmz.vm.VmWithOptions(EthProtocol, .{
+        .block_policy = .{
+            .resource_bound = .{
+                .gas_derived = .{ .block_gas_limit = gas_limit },
+            },
+        },
     });
 
     return struct {
@@ -803,7 +807,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
 
             try seedMemoryStore(allocator, store, pre);
 
-            const block_env = exactBlockEnv(env);
+            const block_env = policyBlockEnv(env);
             var vm = try ExactVm.init(allocator, .{
                 .revision = spec,
                 .state_reader = store.reader(),
@@ -835,7 +839,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.store.clearAccounts();
             try seedMemoryStore(self.allocator, self.store, pre);
 
-            const block_env = exactBlockEnv(env);
+            const block_env = policyBlockEnv(env);
             try self.vm.reset(.{
                 .revision = spec,
                 .state_reader = self.store.reader(),
@@ -845,7 +849,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.env = block_env;
         }
 
-        fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
+        fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
             return self.vm.getAccount(address);
         }
 
@@ -860,7 +864,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
     };
 }
 
-fn exactBlockEnv(env: evmz.Env) evmz.ExactBlockEnv {
+fn policyBlockEnv(env: evmz.Env) evmz.vm.BlockPolicyEnv {
     return .{
         .chain_id = env.chain_id,
         .coinbase = env.coinbase,
