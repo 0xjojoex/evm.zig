@@ -35,7 +35,7 @@ const Options = struct {
     op: Operation = .host_storage_read,
     boundary: Boundary = .zig,
     iterations: usize = default_iterations,
-    spec: evmz.Spec = .latest,
+    spec: evmz.eth.Revision = .latest,
     summary: bool = false,
 };
 
@@ -49,7 +49,7 @@ pub const RunOptions = struct {
     op: Operation,
     boundary: Boundary,
     iterations: usize,
-    spec: evmz.Spec,
+    spec: evmz.eth.Revision,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -328,7 +328,7 @@ fn runBytecodeHostOp(
     allocator: std.mem.Allocator,
     op: Operation,
     iterations: usize,
-    spec: evmz.Spec,
+    spec: evmz.eth.Revision,
 ) !Measurement {
     const bytecode = try storageBytecode(allocator, op, iterations);
     defer allocator.free(bytecode);
@@ -349,11 +349,11 @@ fn runBytecodeHostOp(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
-        .spec = spec,
+        .revision = spec,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

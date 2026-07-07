@@ -1,35 +1,21 @@
 const std = @import("std");
 const Metadata = @import("Metadata.zig");
 const scanner = @import("scanner.zig");
-const Config = @import("../Config.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
 
 const JumpDestMap = @This();
-pub const Strategy = Config.JumpDestStrategy;
-const Word = usize;
-const word_bytes = @sizeOf(Word);
-const word_byte_ones = repeatByte(0x01);
-const word_byte_high_bits = repeatByte(0x80);
-const push_prefix_bits = repeatByte(0x60);
-const push_prefix_mask = repeatByte(0xe0);
 
 bits: Metadata.BitSet,
 analyzed: bool,
-strategy: Strategy,
 
 pub const empty = JumpDestMap{
     .bits = .{},
     .analyzed = false,
-    .strategy = .legacy,
 };
 
-pub fn init(strategy: Strategy) JumpDestMap {
-    return .{
-        .bits = .{},
-        .analyzed = false,
-        .strategy = strategy,
-    };
+pub fn init() JumpDestMap {
+    return empty;
 }
 
 pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
@@ -61,17 +47,7 @@ fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []c
 
     self.bits = try Metadata.BitSet.initEmpty(allocator, bytes.len);
 
-    switch (self.strategy) {
-        .simd_bitmask => self.markValidJumpdestBytesSimdBitmask(bytes),
-        .legacy => {
-            if (shouldUseLinearValidByteScan(bytes)) {
-                self.markValidJumpdestBytesLinear(bytes);
-            } else {
-                self.markValidJumpdestBytes(bytes);
-            }
-        },
-    }
-
+    self.markValidJumpdestBytesSimdBitmask(bytes);
     self.analyzed = true;
 }
 
@@ -91,88 +67,8 @@ fn markValidJumpdestBytesSimdBitmask(self: *JumpDestMap, bytes: []const u8) void
     scanner.markJumpDests(&self.bits, bytes);
 }
 
-fn markValidJumpdestBytes(self: *JumpDestMap, bytes: []const u8) void {
-    var pc: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, bytes, pc, Opcode.JUMPDEST.toByte())) |jumpdest| {
-        if (jumpdest == pc) {
-            pc = self.markContiguousJumpdests(bytes, pc);
-            continue;
-        }
-
-        while (pc < jumpdest) {
-            const opcode: Opcode = @enumFromInt(bytes[pc]);
-            if (hasPushPayload(opcode)) {
-                pc = nextInstructionPc(bytes.len, pc, opcode);
-                if (pc > jumpdest) break;
-                continue;
-            }
-
-            pc = findNextPush(bytes, pc + 1, jumpdest) orelse break;
-        }
-
-        if (pc <= jumpdest) {
-            self.bits.set(jumpdest);
-            pc = jumpdest + 1;
-        }
-    }
-}
-
-fn shouldUseLinearValidByteScan(bytes: []const u8) bool {
-    const sample_len = @min(bytes.len, 1024);
-    var push_bytes: usize = 0;
-    for (bytes[0..sample_len]) |byte| {
-        const opcode: Opcode = @enumFromInt(byte);
-        push_bytes += @intFromBool(hasPushPayload(opcode));
-    }
-    return push_bytes > sample_len / 32;
-}
-
-fn markContiguousJumpdests(self: *JumpDestMap, bytes: []const u8, start: usize) usize {
-    var end = start + 1;
-    while (end < bytes.len and bytes[end] == Opcode.JUMPDEST.toByte()) {
-        end += 1;
-    }
-    self.bits.setRangeValue(.{ .start = start, .end = end }, true);
-    return end;
-}
-
-fn findNextPush(bytes: []const u8, start: usize, end: usize) ?usize {
-    var index = start;
-    while (end - index >= word_bytes) {
-        const word = std.mem.readInt(Word, bytes[index..][0..word_bytes], .little);
-        if (wordMightContainPush(word)) {
-            const chunk_end = index + word_bytes;
-            while (index < chunk_end) : (index += 1) {
-                const opcode: Opcode = @enumFromInt(bytes[index]);
-                if (hasPushPayload(opcode)) return index;
-            }
-        } else {
-            index += word_bytes;
-        }
-    }
-
-    while (index < end) : (index += 1) {
-        const opcode: Opcode = @enumFromInt(bytes[index]);
-        if (hasPushPayload(opcode)) return index;
-    }
-    return null;
-}
-
 fn hasPushPayload(opcode: Opcode) bool {
     return opcode.isPushN();
-}
-
-fn wordMightContainPush(word: Word) bool {
-    const high_bits = (word ^ push_prefix_bits) & push_prefix_mask;
-    return hasZeroByte(high_bits);
-}
-
-fn hasZeroByte(word: Word) bool {
-    return ((word -% word_byte_ones) & ~word & word_byte_high_bits) != 0;
-}
-
-fn repeatByte(comptime byte: u8) Word {
-    return @as(Word, byte) * (~@as(Word, 0) / 0xff);
 }
 
 fn nextInstructionPc(bytes_len: usize, pc: usize, opcode: Opcode) usize {
@@ -226,16 +122,6 @@ test "jumpdest map handles sparse long bytecode" {
     try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 127));
 }
 
-test "jumpdest map finds push bytes with word scanner" {
-    var bytecode = [_]u8{0} ** (word_bytes * 3 + 3);
-
-    try std.testing.expectEqual(@as(?usize, null), findNextPush(&bytecode, 0, bytecode.len));
-
-    const push_index = word_bytes + 2;
-    bytecode[push_index] = Opcode.PUSH17.toByte();
-    try std.testing.expectEqual(@as(?usize, push_index), findNextPush(&bytecode, 0, bytecode.len));
-}
-
 test "simd jumpdest map ignores fake push in PUSH payload" {
     const bytecode = t.bytecode(.{ .PUSH1, .PUSH32, .JUMPDEST });
 
@@ -245,7 +131,7 @@ test "simd jumpdest map ignores fake push in PUSH payload" {
 test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
     {
         const bytecode = t.bytecode(.{ .DUPN, .JUMPDEST });
-        var map = JumpDestMap.init(.simd_bitmask);
+        var map = JumpDestMap.init();
         defer map.deinit(std.testing.allocator);
 
         try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 1));
@@ -254,7 +140,7 @@ test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
 
     {
         const bytecode = t.bytecode(.{ .DUPN, .PUSH1, .JUMPDEST });
-        var map = JumpDestMap.init(.simd_bitmask);
+        var map = JumpDestMap.init();
         defer map.deinit(std.testing.allocator);
 
         try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 2));
@@ -280,14 +166,12 @@ fn expectSimdMatchesLinear(bytes: []const u8) !void {
     var linear = JumpDestMap{
         .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
-        .strategy = .legacy,
     };
     defer linear.deinit(std.testing.allocator);
 
     var simd = JumpDestMap{
         .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
-        .strategy = .simd_bitmask,
     };
     defer simd.deinit(std.testing.allocator);
 

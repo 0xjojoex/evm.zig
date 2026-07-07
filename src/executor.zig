@@ -37,11 +37,17 @@ const TraceSink = trace.Sink;
 const transaction = evmz.transaction;
 const tx_gas = @import("./transaction/gas.zig");
 const uint256 = @import("./uint256.zig");
+const RevisionId = evmz.protocol.RevisionId;
 
-const Executor = @This();
-const CallFramePool = std.heap.MemoryPool(Interpreter.CallFrameSlot);
+pub const FrameStore = @import("./executor/frame_store.zig");
+const call_scratch_storage = @import("./executor/call_scratch.zig");
+const FrameIo = @import("./frame_io.zig");
 const SnapshotPool = std.heap.MemoryPool(Snapshot);
-const CallScratchArenas = std.ArrayList(*std.heap.ArenaAllocator);
+const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
+const runtime_frame_defs = @import("./executor/runtime_frames.zig");
+const RuntimeFrameStack = std.ArrayList(runtime_frame_defs.Frame);
+
+const EthProtocol = evmz.EthProtocol;
 
 pub const eip7702 = @import("./executor/eip7702.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
@@ -53,12 +59,6 @@ const host_callbacks = @import("./executor/host_callbacks.zig");
 pub const Snapshot = StateOverlay.Snapshot;
 pub const TransientSnapshot = StateOverlay.TransientSnapshot;
 pub const code_deposit_gas: i64 = 200;
-pub const max_code_size = 0x6000;
-pub const amsterdam_max_code_size = 0x10000;
-
-pub fn maxCodeSize(spec: evmz.Spec) usize {
-    return if (spec.isImpl(.amsterdam)) amsterdam_max_code_size else max_code_size;
-}
 
 /// Construction options for the execution substrate.
 ///
@@ -66,12 +66,46 @@ pub fn maxCodeSize(spec: evmz.Spec) usize {
 /// from the in-memory overlay. `block_hash_source` is separate because native
 /// BLOCKHASH reads chain history, not account/trie state. `trace_sink` is
 /// threaded through state and interpreter frames when tracing is enabled.
-pub const Init = struct {
-    spec: evmz.Spec,
-    state_reader: ?evmz.state.StateReader = null,
-    block_hash_source: ?BlockHashSource = null,
-    config: evmz.Config = .base,
-    trace_sink: ?*TraceSink = null,
+fn InitFor(comptime Protocol: type) type {
+    return struct {
+        revision: Protocol.Revision,
+        state_reader: ?evmz.state.StateReader = null,
+        block_hash_source: ?BlockHashSource = null,
+        config: evmz.ExecutionConfig = .base,
+        trace_sink: ?*TraceSink = null,
+    };
+}
+
+pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
+
+/// Optional steady-state resource caps for the executor.
+///
+/// These are caller-supplied runtime policy knobs. Growable remains the
+/// default; each configured field means "reserve this backing storage and fail
+/// instead of growing it."
+pub const BoundedRuntimeResources = struct {
+    max_live_frames: usize = default_max_live_frames,
+    memory_bytes_per_frame: ?usize = null,
+    io_bytes_per_frame: ?usize = null,
+    scratch_bytes_per_frame: ?usize = null,
+    logs: ?StateOverlay.LogResources = null,
+    journal_entries: ?usize = null,
+    access: ?StateOverlay.AccessResources = null,
+    state: ?StateOverlay.StateResources = null,
+    transient_storage_entries: ?usize = null,
+    result_bytes: ?usize = null,
+};
+
+pub const RuntimeResources = union(enum) {
+    growable,
+    bounded: BoundedRuntimeResources,
+
+    pub fn maxLiveFrames(self: RuntimeResources) ?usize {
+        return switch (self) {
+            .growable => null,
+            .bounded => |bounded| bounded.max_live_frames,
+        };
+    }
 };
 
 /// A top-level call whose bytecode has already been prepared by the caller.
@@ -119,765 +153,913 @@ pub const EvmResult = Host.Result;
 pub const AuthorizationTuple = transaction.AuthorizationTuple;
 pub const Transaction = transaction.Transaction;
 
-allocator: std.mem.Allocator,
-state: StateOverlay,
-call_frame_pool: CallFramePool,
-snapshot_pool: SnapshotPool,
-call_scratch_arenas: CallScratchArenas,
-tx_context: ?Host.TxContext = null,
-block_hash_source: ?BlockHashSource = null,
-spec: evmz.Spec,
-config: evmz.Config,
-trace_sink: ?*TraceSink = null,
-last_call_output: []u8 = &.{},
+const PreparedCallTransactionType = PreparedCallTransaction;
+const CallType = Call;
+const CreateType = Create;
+const MessageType = Message;
+const EvmResultType = EvmResult;
+const AuthorizationTupleType = AuthorizationTuple;
+const TransactionType = Transaction;
+const SnapshotType = Snapshot;
+const TransientSnapshotType = TransientSnapshot;
+const code_deposit_gas_value = code_deposit_gas;
+const default_max_live_frames_value = default_max_live_frames;
+const RuntimeResourcesType = RuntimeResources;
+const BoundedRuntimeResourcesType = BoundedRuntimeResources;
 
-/// Parameters that belong to transaction settlement rather than bytecode
-/// execution.
-pub const TopLevelTransactionRun = struct {
-    execution: ?transaction.ExecutionGas = null,
-    execution_gas: ?u64 = null,
-    settlement: transaction.Settlement,
+pub fn Executor(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
+        const runtime = call_runtime.For(Self);
+        const callbacks = host_callbacks.For(Self);
+        const tx_protocol = transaction.For(Protocol);
 
-    fn gas(self: TopLevelTransactionRun) ?transaction.ExecutionGas {
-        if (self.execution) |execution| return execution;
-        if (self.execution_gas) |legacy| return transaction.ExecutionGas.legacy(legacy);
-        return null;
-    }
-};
+        pub const Protocol = ProtocolType;
+        pub const Init = InitFor(Protocol);
+        pub const PreparedCallTransaction = PreparedCallTransactionType;
+        pub const Call = CallType;
+        pub const Create = CreateType;
+        pub const Message = MessageType;
+        pub const EvmResult = EvmResultType;
+        pub const AuthorizationTuple = AuthorizationTupleType;
+        pub const Transaction = TransactionType;
+        pub const Snapshot = SnapshotType;
+        pub const TransientSnapshot = TransientSnapshotType;
+        pub const code_deposit_gas = code_deposit_gas_value;
+        pub const default_max_live_frames = default_max_live_frames_value;
+        pub const RuntimeResources = RuntimeResourcesType;
+        pub const BoundedRuntimeResources = BoundedRuntimeResourcesType;
 
-/// Optional execution hook for benchmark/fixture drivers.
-///
-/// Production transaction execution uses `defaultTransactionEngine`; tests and
-/// benchmark harnesses can swap this to time or compare only the message
-/// execution portion while reusing the same transaction accounting shell.
-pub const TransactionEngine = struct {
-    ptr: ?*anyopaque = null,
-    execute: *const fn (
-        ptr: ?*anyopaque,
-        executor: *Executor,
-        tx: Transaction,
-        gas: transaction.ExecutionGas,
-    ) anyerror!Interpreter.Result,
-};
+        allocator: std.mem.Allocator,
+        state: StateOverlay,
+        frame_store: FrameStore,
+        runtime_frames: RuntimeFrameStack,
+        snapshot_pool: SnapshotPool,
+        call_scratch_slots: CallScratchSlots,
+        runtime_resources: RuntimeResourcesType = .growable,
+        tx_context: ?Host.TxContext = null,
+        block_hash_source: ?BlockHashSource = null,
+        revision_id: RevisionId,
+        config: evmz.ExecutionConfig,
+        trace_sink: ?*TraceSink = null,
+        last_call_output: FrameIo.ByteSlot,
 
-const AuthorizationGasAdjustment = struct {
-    regular_refund: u64 = 0,
-    state_refund: u64 = 0,
+        /// Parameters that belong to transaction settlement rather than bytecode
+        /// execution.
+        pub const TopLevelTransactionRun = struct {
+            execution: ?transaction.ExecutionGas = null,
+            execution_gas: ?u64 = null,
+            settlement: Protocol.Settlement.Plan,
 
-    fn add(self: *AuthorizationGasAdjustment, other: AuthorizationGasAdjustment) void {
-        self.regular_refund = std.math.add(u64, self.regular_refund, other.regular_refund) catch std.math.maxInt(u64);
-        self.state_refund = std.math.add(u64, self.state_refund, other.state_refund) catch std.math.maxInt(u64);
-    }
-};
+            fn gas(self: TopLevelTransactionRun) ?transaction.ExecutionGas {
+                if (self.execution) |execution| return execution;
+                if (self.execution_gas) |legacy| return transaction.ExecutionGas.legacy(legacy);
+                return null;
+            }
+        };
 
-/// Execute a raw call inside an already-open tx scope.
-pub const executeCall = call_runtime.executeCall;
-/// Execute a raw call by loading and preparing recipient code first.
-pub const executeCallTransaction = call_runtime.executeCallTransaction;
-/// Execute a raw call with caller-provided prepared bytecode.
-pub const executePreparedCallTransaction = call_runtime.executePreparedCallTransaction;
-/// Execute a raw create inside an already-open create tx scope.
-pub const executeCreateTransaction = call_runtime.executeCreateTransaction;
-/// Execute a raw create/create2 message inside an already-open tx scope.
-pub const executeCreate = call_runtime.executeCreate;
-/// Return this executor's `Host` adapter for interpreter frames.
-pub const host = host_callbacks.host;
+        /// Optional execution hook for benchmark/fixture drivers.
+        ///
+        /// Production transaction execution installs a protocol-bound engine; tests and
+        /// benchmark harnesses can swap this to time or compare only the message
+        /// execution portion while reusing the same transaction accounting shell.
+        pub const TransactionEngine = struct {
+            ptr: ?*anyopaque = null,
+            execute: *const fn (
+                ptr: ?*anyopaque,
+                executor: *Self,
+                tx: Self.Transaction,
+                gas: transaction.ExecutionGas,
+            ) anyerror!Interpreter.Result,
+        };
 
-const SnapshotLease = struct {
-    executor: *Executor,
-    snapshot: *Snapshot,
+        const TransactionFinalizer = struct {
+            revision: Protocol.Revision,
 
-    pub fn deinit(self: *SnapshotLease) void {
-        self.snapshot.deinit(self.executor.allocator);
-        self.executor.snapshot_pool.destroy(self.snapshot);
-        self.* = undefined;
-    }
-};
+            pub fn selfDestructFinalization(
+                self: @This(),
+                created_in_transaction: bool,
+            ) evmz.protocol.interface.SelfDestructFinalization {
+                return Protocol.SelfDestruct.selfDestructFinalization(self.revision, created_in_transaction);
+            }
+        };
 
-/// Initialize an executor with an empty mutable overlay.
-pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
-    var state = if (options.state_reader) |state_reader|
-        StateOverlay.initWithStateReader(allocator, state_reader)
-    else
-        StateOverlay.init(allocator);
-    state.trace_sink = options.trace_sink;
+        const AuthorizationGasAdjustment = evmz.protocol.interface.AuthorizationGasAdjustment;
 
-    return .{
-        .allocator = allocator,
-        .state = state,
-        .call_frame_pool = .empty,
-        .snapshot_pool = .empty,
-        .call_scratch_arenas = .empty,
-        .spec = options.spec,
-        .block_hash_source = options.block_hash_source,
-        .config = options.config,
-        .trace_sink = options.trace_sink,
-    };
-}
+        const SnapshotLease = struct {
+            executor: *Self,
+            snapshot: *Self.Snapshot,
 
-/// Release state, frame pools, scratch arenas, and retained return-data buffers.
-pub fn deinit(self: *Executor) void {
-    self.state.deinit();
-    self.call_frame_pool.deinit(self.allocator);
-    self.snapshot_pool.deinit(self.allocator);
-    for (self.call_scratch_arenas.items) |arena| {
-        arena.deinit();
-        self.allocator.destroy(arena);
-    }
-    self.call_scratch_arenas.deinit(self.allocator);
-    self.allocator.free(self.last_call_output);
-}
+            pub fn deinit(self: *SnapshotLease) void {
+                self.snapshot.deinit(self.executor.allocator);
+                self.executor.snapshot_pool.destroy(self.snapshot);
+                self.* = undefined;
+            }
+        };
 
-fn warmTransactionAccesses(self: *Executor, tx_context: Host.TxContext, sender: Address, recipient: ?Address) !void {
-    try self.warmAccessListAddress(sender);
-    if (recipient) |address| {
-        try self.warmAccessListAddress(address);
-    }
-    if (self.spec.isImpl(.shanghai)) {
-        try self.warmAccessListAddress(tx_context.coinbase);
-    }
-}
+        /// Initialize an executor with an empty mutable overlay.
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
+            var state = if (options.state_reader) |state_reader|
+                StateOverlay.initWithStateReader(allocator, state_reader)
+            else
+                StateOverlay.init(allocator);
+            state.trace_sink = options.trace_sink;
 
-/// Open a manual call transaction scope.
-///
-/// Callers that use this directly must eventually call `commitTransaction`,
-/// `rollbackTransaction`, `closeTransaction`, or another helper that does so.
-/// The scope warms the sender, recipient, and spec-required coinbase account.
-pub fn beginTransaction(self: *Executor, tx_context: Host.TxContext, sender: Address, recipient: Address) !void {
-    self.tx_context = tx_context;
-    self.state.beginTransaction();
-    errdefer self.closeTransaction();
-    try self.warmTransactionAccesses(tx_context, sender, recipient);
-}
-
-/// Open a manual create transaction scope.
-///
-/// This is the create counterpart to `beginTransaction`; there is no recipient
-/// to warm before the create address is derived during execution.
-pub fn beginCreateTransaction(self: *Executor, tx_context: Host.TxContext, sender: Address) !void {
-    self.tx_context = tx_context;
-    self.state.beginTransaction();
-    errdefer self.closeTransaction();
-    try self.warmTransactionAccesses(tx_context, sender, null);
-}
-
-/// Open the correct manual scope for a normalized transaction.
-///
-/// `Vm.transact` and fixture runners use this before `runTopLevelTransaction`.
-pub fn beginTransactionScope(self: *Executor, tx_context: Host.TxContext, tx: Transaction) !void {
-    switch (tx) {
-        .call => |call_tx| try self.beginTransaction(tx_context, call_tx.sender, call_tx.recipient),
-        .create => |create_tx| try self.beginCreateTransaction(tx_context, create_tx.sender),
-    }
-}
-
-fn beginSystemCall(self: *Executor, tx_context: Host.TxContext) !void {
-    self.tx_context = tx_context;
-    self.state.beginTransaction();
-}
-
-/// Mark an account warm in the current transaction scope.
-pub fn warmAccessListAddress(self: *Executor, address: Address) !void {
-    try self.state.warmAccount(address);
-}
-
-/// Mark a storage slot warm in the current transaction scope.
-pub fn warmAccessListStorage(self: *Executor, address: Address, key: u256) !void {
-    try self.state.warmStorage(address, key);
-}
-
-/// Apply a transaction access list to the current scope.
-pub fn warmAccessList(self: *Executor, access_list: []const transaction.AccessListEntry) !void {
-    for (access_list) |entry| {
-        try self.warmAccessListAddress(entry.address);
-        for (entry.storage_keys) |key| {
-            try self.warmAccessListStorage(entry.address, key);
+            return .{
+                .allocator = allocator,
+                .state = state,
+                .frame_store = .{},
+                .runtime_frames = .empty,
+                .snapshot_pool = .empty,
+                .call_scratch_slots = .empty,
+                .runtime_resources = .growable,
+                .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
+                .block_hash_source = options.block_hash_source,
+                .config = options.config,
+                .trace_sink = options.trace_sink,
+                .last_call_output = FrameIo.ByteSlot.initGrowable(allocator),
+            };
         }
-    }
-}
 
-/// Return an account already present in the overlay, without consulting the state reader.
-pub fn getAccount(self: *Executor, address: Address) ?*AccountState {
-    return self.state.getAccount(address);
-}
+        /// Initialize an executor and reserve reusable runtime resources up front.
+        pub fn initWithRuntimeResources(allocator: std.mem.Allocator, options: Init, runtime_resources: RuntimeResourcesType) !Self {
+            var executor = init(allocator, options);
+            errdefer executor.deinit();
+            try executor.configureRuntimeResources(runtime_resources);
+            return executor;
+        }
 
-/// Return an account, loading it from the state reader into the overlay if needed.
-pub fn getAccountOrLoad(self: *Executor, address: Address) !?*AccountState {
-    return self.state.getAccountOrLoad(address);
-}
+        pub fn configureRuntimeResources(self: *Self, runtime_resources: RuntimeResourcesType) !void {
+            switch (runtime_resources) {
+                .growable => {
+                    try self.frame_store.setGrowable(self.allocator);
+                    try self.setGrowableCallScratchSlots();
+                    try self.state.configureLogResources(null);
+                    try self.state.configureJournalEntries(null);
+                    try self.state.configureAccessResources(null);
+                    try self.state.configureStateResources(null);
+                    try self.state.configureTransientStorageEntries(null);
+                    self.last_call_output.setGrowable();
+                    self.runtime_resources = .growable;
+                },
+                .bounded => |bounded| {
+                    if (bounded.max_live_frames == 0) return error.InvalidRuntimeResourcesCapacity;
+                    try self.frame_store.reserveExact(
+                        self.allocator,
+                        bounded.max_live_frames,
+                        bounded.io_bytes_per_frame,
+                        bounded.memory_bytes_per_frame,
+                    );
+                    try self.reserveRuntimeFrames(bounded.max_live_frames);
+                    try self.reserveCallScratchSlots(bounded.max_live_frames, bounded.scratch_bytes_per_frame);
+                    try self.state.configureLogResources(bounded.logs);
+                    try self.state.configureJournalEntries(bounded.journal_entries);
+                    try self.state.configureAccessResources(bounded.access);
+                    try self.state.configureStateResources(bounded.state);
+                    try self.state.configureTransientStorageEntries(bounded.transient_storage_entries);
+                    if (bounded.result_bytes) |result_bytes| {
+                        try self.last_call_output.setBounded(result_bytes);
+                    } else {
+                        self.last_call_output.setGrowable();
+                    }
+                    self.runtime_resources = runtime_resources;
+                },
+            }
+        }
 
-/// Return an account, creating an empty overlay account when none exists.
-pub fn getOrCreateAccount(self: *Executor, address: Address) !*AccountState {
-    return self.state.getOrCreateAccount(address);
-}
+        fn reserveRuntimeFrames(self: *Self, capacity: usize) !void {
+            if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
+            try self.runtime_frames.ensureTotalCapacityPrecise(self.allocator, capacity);
+        }
 
-/// Read storage through the overlay/state-reader view.
-pub fn getStorage(self: *Executor, address: Address, key: u256) !u256 {
-    return self.state.getStorage(address, key);
-}
+        fn reserveCallScratchSlots(self: *Self, capacity: usize, scratch_bytes_per_frame: ?usize) !void {
+            if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
+            try self.call_scratch_slots.ensureTotalCapacityPrecise(self.allocator, capacity);
+            while (self.call_scratch_slots.items.len < capacity) {
+                const slot = try self.allocator.create(call_scratch_storage.Slot);
+                errdefer self.allocator.destroy(slot);
+                slot.* = call_scratch_storage.Slot.initGrowable(self.allocator);
+                errdefer slot.deinit(self.allocator);
+                self.call_scratch_slots.appendAssumeCapacity(slot);
+            }
+            for (self.call_scratch_slots.items[0..capacity]) |slot| {
+                if (scratch_bytes_per_frame) |bytes_per_frame| {
+                    try slot.setBounded(self.allocator, bytes_per_frame);
+                } else {
+                    slot.setGrowable(self.allocator);
+                }
+            }
+        }
 
-pub fn logs(self: *const Executor) []const Host.Log {
-    return self.state.getLogs();
-}
+        fn setGrowableCallScratchSlots(self: *Self) !void {
+            if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
+            for (self.call_scratch_slots.items) |slot| {
+                slot.setGrowable(self.allocator);
+            }
+        }
 
-pub fn clearLogs(self: *Executor) void {
-    self.state.clearLogs();
-}
+        pub inline fn revision(self: *const Self) Protocol.Revision {
+            return evmz.protocol.decodeRevisionForProtocol(Protocol, self.revision_id);
+        }
 
-/// Capture a full overlay snapshot suitable for transaction rollback.
-pub fn snapshot(self: *Executor) !Snapshot {
-    return self.state.snapshot();
-}
+        /// Release state, frame pools, scratch arenas, and retained return-data buffers.
+        pub fn deinit(self: *Self) void {
+            std.debug.assert(self.runtime_frames.items.len == 0);
+            self.state.deinit();
+            self.runtime_frames.deinit(self.allocator);
+            self.frame_store.deinit(self.allocator);
+            self.snapshot_pool.deinit(self.allocator);
+            for (self.call_scratch_slots.items) |slot| {
+                slot.deinit(self.allocator);
+                self.allocator.destroy(slot);
+            }
+            self.call_scratch_slots.deinit(self.allocator);
+            self.last_call_output.deinit();
+        }
 
-fn snapshotLease(self: *Executor) !SnapshotLease {
-    const snapshot_state = try self.snapshot_pool.create(self.allocator);
-    errdefer self.snapshot_pool.destroy(snapshot_state);
-    snapshot_state.* = try self.snapshot();
-    return .{
-        .executor = self,
-        .snapshot = snapshot_state,
-    };
-}
+        fn warmTransactionAccesses(self: *Self, tx_context: Host.TxContext, sender: Address, recipient: ?Address) !void {
+            try self.warmAccessListAddress(sender);
+            if (recipient) |address| {
+                try self.warmAccessListAddress(address);
+            }
+            if (Protocol.Block.transactionWarmsCoinbase(self.revision())) {
+                try self.warmAccessListAddress(tx_context.coinbase);
+            }
+        }
 
-/// Restore the overlay to a previous full snapshot.
-pub fn restore(self: *Executor, snapshot_state: *Snapshot) !void {
-    try self.state.restore(snapshot_state);
-}
+        /// Open a manual call transaction scope.
+        ///
+        /// Callers that use this directly must eventually call `commitTransaction`,
+        /// `rollbackTransaction`, `closeTransaction`, or another helper that does so.
+        /// The scope warms the sender, recipient, and spec-required coinbase account.
+        pub fn beginTransaction(self: *Self, tx_context: Host.TxContext, sender: Address, recipient: Address) !void {
+            self.tx_context = tx_context;
+            self.state.beginTransaction();
+            errdefer self.closeTransaction();
+            try warmTransactionAccesses(self, tx_context, sender, recipient);
+        }
 
-/// Restore only revertible execution effects from a previous snapshot.
-pub fn restoreRevertible(self: *Executor, snapshot_state: *Snapshot) !void {
-    try self.state.restoreRevertible(snapshot_state);
-}
+        /// Open a manual create transaction scope.
+        ///
+        /// This is the create counterpart to `beginTransaction`; there is no recipient
+        /// to warm before the create address is derived during execution.
+        pub fn beginCreateTransaction(self: *Self, tx_context: Host.TxContext, sender: Address) !void {
+            self.tx_context = tx_context;
+            self.state.beginTransaction();
+            errdefer self.closeTransaction();
+            try warmTransactionAccesses(self, tx_context, sender, null);
+        }
 
-/// Commit the current transaction scope.
-///
-/// Kept as a compatibility alias for callers that speak in terms of
-/// "finalizing" a transaction; internally this is `commitTransaction`.
-pub fn finalizeTransaction(self: *Executor) !void {
-    try self.commitTransaction();
-}
+        /// Open the correct manual scope for a normalized transaction.
+        ///
+        /// `Vm.transact` and fixture runners use this before `runTopLevelTransaction`.
+        pub fn beginTransactionScope(self: *Self, tx_context: Host.TxContext, tx: Self.Transaction) !void {
+            switch (tx) {
+                .call => |call_tx| try self.beginTransaction(tx_context, call_tx.sender, call_tx.recipient),
+                .create => |create_tx| try self.beginCreateTransaction(tx_context, create_tx.sender),
+            }
+        }
 
-/// Finalize state changes for the current transaction and close its context.
-pub fn commitTransaction(self: *Executor) !void {
-    try self.state.finalizeTransaction(self.spec);
-    self.closeTransaction();
-}
+        fn beginSystemCall(self: *Self, tx_context: Host.TxContext) !void {
+            self.tx_context = tx_context;
+            self.state.beginTransaction();
+        }
 
-/// Restore from a snapshot and close the current transaction context.
-pub fn rollbackTransaction(self: *Executor, snapshot_state: *Snapshot) !void {
-    try self.restore(snapshot_state);
-    self.closeTransaction();
-}
+        /// Mark an account warm in the current transaction scope.
+        pub fn warmAccessListAddress(self: *Self, address: Address) !void {
+            try self.state.warmAccount(address);
+        }
 
-/// Close the current transaction context without restoring overlay changes.
-pub fn closeTransaction(self: *Executor) void {
-    self.state.closeTransaction();
-    self.tx_context = null;
-}
+        /// Mark a storage slot warm in the current transaction scope.
+        pub fn warmAccessListStorage(self: *Self, address: Address, key: u256) !void {
+            try self.state.warmStorage(address, key);
+        }
 
-/// Return the pending overlay changes without committing them.
-pub fn changeset(self: *Executor) !Changeset {
-    return self.state.changeset();
-}
+        /// Apply a transaction access list to the current scope.
+        pub fn warmAccessList(self: *Self, access_list: []const transaction.AccessListEntry) !void {
+            for (access_list) |entry| {
+                try self.warmAccessListAddress(entry.address);
+                for (entry.storage_keys) |key| {
+                    try self.warmAccessListStorage(entry.address, key);
+                }
+            }
+        }
 
-/// Drop all pending overlay changes and clear any open transaction context.
-pub fn discardChanges(self: *Executor) void {
-    self.state.discardChanges();
-    self.tx_context = null;
-}
+        /// Return an account already present in the overlay, without consulting the state reader.
+        pub fn getAccount(self: *Self, address: Address) ?*AccountState {
+            return self.state.getAccount(address);
+        }
 
-/// Read account code through the overlay/state-reader view.
-pub fn getCode(self: *Executor, address: Address) ![]const u8 {
-    return self.state.getCode(address);
-}
+        /// Return an account, loading it from the state reader into the overlay if needed.
+        pub fn getAccountOrLoad(self: *Self, address: Address) !?*AccountState {
+            return self.state.getAccountOrLoad(address);
+        }
 
-/// Prepare code according to the executor preprocessing configuration.
-pub fn prepareBytecode(self: *const Executor, code: []const u8) !Bytecode {
-    return call_runtime.prepareBytecodeAlloc(self, self.allocator, code);
-}
+        /// Return an account, creating an empty overlay account when none exists.
+        pub fn getOrCreateAccount(self: *Self, address: Address) !*AccountState {
+            return self.state.getOrCreateAccount(address);
+        }
 
-/// Duplicate the effective execution code for an address.
-///
-/// EIP-7702 delegation is resolved here so callers execute target code while
-/// preserving the original message address semantics.
-pub fn dupeExecutionCode(self: *Executor, address: Address) ![]u8 {
-    return call_runtime.dupeExecutionCodeAlloc(self, self.allocator, address);
-}
+        /// Read storage through the overlay/state-reader view.
+        pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
+            return self.state.getStorage(address, key);
+        }
 
-/// Execute a raw call/create message inside an already-open tx scope.
-///
-/// This does not open or close a transaction scope. Use `runStandalone` for the
-/// fully-managed raw-message lifecycle.
-pub fn executeMessage(self: *Executor, message: Message) !EvmResult {
-    return switch (message) {
-        .call => |options| self.executeCall(options),
-        .create => |options| self.executeCreate(options),
-    };
-}
+        pub fn logs(self: *const Self) []const Host.Log {
+            return self.state.getLogs();
+        }
 
-/// Run one raw call/create message as a complete transaction scope.
-///
-/// Lifecycle: open scope -> snapshot -> execute -> commit on success, rollback
-/// on revert/invalid/out-of-gas. This is useful for raw VM calls outside the
-/// full transaction validation/accounting path.
-pub fn runStandalone(self: *Executor, tx_context: Host.TxContext, message: Message) !EvmResult {
-    return switch (message) {
-        .call => |options| self.runStandaloneCall(tx_context, options),
-        .create => |options| self.runStandaloneCreate(tx_context, options),
-    };
-}
+        pub fn clearLogs(self: *Self) void {
+            self.state.clearLogs();
+        }
 
-fn runStandaloneCall(self: *Executor, tx_context: Host.TxContext, options: Call) !EvmResult {
-    try self.beginTransaction(tx_context, options.sender, options.recipient);
-    errdefer self.closeTransaction();
+        /// Capture a full overlay snapshot suitable for transaction rollback.
+        pub fn snapshot(self: *Self) !Self.Snapshot {
+            return self.state.snapshot();
+        }
 
-    var pre_execution = try self.snapshot();
-    defer pre_execution.deinit(self.allocator);
-    errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+        fn snapshotLease(self: *Self) !SnapshotLease {
+            const snapshot_state = try self.snapshot_pool.create(self.allocator);
+            errdefer self.snapshot_pool.destroy(snapshot_state);
+            snapshot_state.* = try self.snapshot();
+            return .{
+                .executor = self,
+                .snapshot = snapshot_state,
+            };
+        }
 
-    const result = try self.executeCall(options);
-    try self.finishStandaloneTransaction(result.status(), &pre_execution);
-    return result;
-}
+        /// Restore the overlay to a previous full snapshot.
+        pub fn restore(self: *Self, snapshot_state: *Self.Snapshot) !void {
+            try self.state.restore(snapshot_state);
+        }
 
-fn runStandaloneCreate(self: *Executor, tx_context: Host.TxContext, options: Create) !EvmResult {
-    try self.beginCreateTransaction(tx_context, options.sender);
-    errdefer self.closeTransaction();
+        /// Finalize state changes for the current transaction and close its context.
+        pub fn commitTransaction(self: *Self) !void {
+            try self.state.finalizeTransaction(TransactionFinalizer{
+                .revision = self.revision(),
+            });
+            self.closeTransaction();
+        }
 
-    var pre_execution = try self.snapshot();
-    defer pre_execution.deinit(self.allocator);
-    errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+        /// Restore from a snapshot and close the current transaction context.
+        pub fn rollbackTransaction(self: *Self, snapshot_state: *Self.Snapshot) !void {
+            try self.restore(snapshot_state);
+            self.closeTransaction();
+        }
 
-    const result = try self.executeCreate(options);
-    try self.finishStandaloneTransaction(result.status(), &pre_execution);
-    return result;
-}
+        /// Close the current transaction context without restoring overlay changes.
+        pub fn closeTransaction(self: *Self) void {
+            self.state.closeTransaction();
+            self.tx_context = null;
+        }
 
-fn finishStandaloneTransaction(self: *Executor, status: Interpreter.Status, snapshot_state: *Snapshot) !void {
-    if (executionRolledBack(status)) {
-        try self.rollbackTransaction(snapshot_state);
-    } else {
-        try self.commitTransaction();
-    }
-}
+        /// Return the pending overlay changes without committing them.
+        pub fn changeset(self: *Self) !Changeset {
+            return self.state.changeset();
+        }
 
-/// Execute the message portion of a normalized transaction.
-///
-/// The caller owns transaction charging, nonce/access/auth handling, settlement,
-/// and final commit/rollback. `runTopLevelTransaction` wraps those pieces.
-pub fn executeTransactionMessage(self: *Executor, tx: Transaction, gas: transaction.ExecutionGas) !Interpreter.Result {
-    return switch (tx) {
-        .call => |call_tx| call_runtime.executeCallTransaction(
-            self,
-            call_tx.sender,
-            call_tx.recipient,
-            call_tx.input,
-            gas,
-            call_tx.value,
-        ),
-        .create => |create_tx| blk: {
-            const result = (try call_runtime.executeCreateTransaction(
-                self,
-                create_tx.sender,
-                create_tx.init_code,
-                gas,
-                create_tx.value,
-            )).expectCreate();
-            var interpreter_result = Interpreter.Result{
+        /// Drop all pending overlay changes and clear any open transaction context.
+        pub fn discardChanges(self: *Self) void {
+            self.state.discardChanges();
+            self.tx_context = null;
+        }
+
+        /// Read account code through the overlay/state-reader view.
+        pub fn getCode(self: *Self, address: Address) ![]const u8 {
+            return self.state.getCode(address);
+        }
+
+        /// Prepare code according to the executor preprocessing configuration.
+        pub fn prepareBytecode(self: *const Self, code: []const u8) !Bytecode {
+            return runtime.prepareBytecodeAlloc(self, self.allocator, code);
+        }
+
+        /// Duplicate the effective execution code for an address.
+        ///
+        /// EIP-7702 delegation is resolved here so callers execute target code while
+        /// preserving the original message address semantics.
+        pub fn dupeExecutionCode(self: *Self, address: Address) ![]u8 {
+            return runtime.dupeExecutionCodeAlloc(self, self.allocator, address);
+        }
+
+        /// Return this executor's `Host` adapter for interpreter frames.
+        pub fn host(self: *Self) Host {
+            return callbacks.host(self);
+        }
+
+        /// Execute a raw call inside an already-open tx scope.
+        pub fn executeCall(self: *Self, options: Self.Call) !Self.EvmResult {
+            return runtime.executeCall(self, options);
+        }
+
+        /// Execute a raw call by loading and preparing recipient code first.
+        pub fn executeCallTransaction(
+            self: *Self,
+            sender: Address,
+            recipient: Address,
+            input: []const u8,
+            gas: transaction.ExecutionGas,
+            value: u256,
+        ) !Interpreter.Result {
+            return runtime.executeCallTransaction(self, sender, recipient, input, gas, value);
+        }
+
+        /// Execute a raw call with caller-provided prepared bytecode.
+        pub fn executePreparedCallTransaction(self: *Self, options: Self.PreparedCallTransaction) !Interpreter.Result {
+            return runtime.executePreparedCallTransaction(self, options);
+        }
+
+        /// Execute a raw create inside an already-open create tx scope.
+        pub fn executeCreateTransaction(
+            self: *Self,
+            sender: Address,
+            init_code: []const u8,
+            gas: transaction.ExecutionGas,
+            value: u256,
+        ) !Self.EvmResult {
+            return runtime.executeCreateTransaction(self, sender, init_code, gas, value);
+        }
+
+        /// Execute a raw create/create2 message inside an already-open tx scope.
+        pub fn executeCreate(self: *Self, options: Self.Create) !Self.EvmResult {
+            return runtime.executeCreate(self, options);
+        }
+
+        /// Execute a raw call/create message inside an already-open tx scope.
+        ///
+        /// This does not open or close a transaction scope. Use `runStandalone` for the
+        /// fully-managed raw-message lifecycle.
+        pub fn executeMessage(self: *Self, message: Self.Message) !Self.EvmResult {
+            return switch (message) {
+                .call => |options| runtime.executeCall(self, options),
+                .create => |options| runtime.executeCreate(self, options),
+            };
+        }
+
+        /// Run one raw call/create message as a complete transaction scope.
+        ///
+        /// Lifecycle: open scope -> snapshot -> execute -> commit on success, rollback
+        /// on revert/invalid/out-of-gas. This is useful for raw VM calls outside the
+        /// full transaction validation/accounting path.
+        pub fn runStandalone(self: *Self, tx_context: Host.TxContext, message: Self.Message) !Self.EvmResult {
+            return switch (message) {
+                .call => |options| self.runStandaloneCall(tx_context, options),
+                .create => |options| self.runStandaloneCreate(tx_context, options),
+            };
+        }
+
+        fn runStandaloneCall(self: *Self, tx_context: Host.TxContext, options: Self.Call) !Self.EvmResult {
+            try self.beginTransaction(tx_context, options.sender, options.recipient);
+            errdefer self.closeTransaction();
+
+            var pre_execution = try self.snapshot();
+            defer pre_execution.deinit(self.allocator);
+            errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+
+            const result = try runtime.executeCall(self, options);
+            try self.finishStandaloneTransaction(result.status(), &pre_execution);
+            return result;
+        }
+
+        fn runStandaloneCreate(self: *Self, tx_context: Host.TxContext, options: Self.Create) !Self.EvmResult {
+            try self.beginCreateTransaction(tx_context, options.sender);
+            errdefer self.closeTransaction();
+
+            var pre_execution = try self.snapshot();
+            defer pre_execution.deinit(self.allocator);
+            errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+
+            const result = try runtime.executeCreate(self, options);
+            try self.finishStandaloneTransaction(result.status(), &pre_execution);
+            return result;
+        }
+
+        fn finishStandaloneTransaction(self: *Self, status: Interpreter.Status, snapshot_state: *Self.Snapshot) !void {
+            if (executionRolledBack(status)) {
+                try self.rollbackTransaction(snapshot_state);
+            } else {
+                try self.commitTransaction();
+            }
+        }
+
+        /// Execute the message portion of a normalized transaction.
+        ///
+        /// The caller owns transaction charging, nonce/access/auth handling, settlement,
+        /// and final commit/rollback. `runTopLevelTransaction` wraps those pieces.
+        pub fn executeTransactionMessage(self: *Self, tx: Self.Transaction, gas: transaction.ExecutionGas) !Interpreter.Result {
+            return switch (tx) {
+                .call => |call_tx| runtime.executeCallTransaction(
+                    self,
+                    call_tx.sender,
+                    call_tx.recipient,
+                    call_tx.input,
+                    gas,
+                    call_tx.value,
+                ),
+                .create => |create_tx| blk: {
+                    const result = (try runtime.executeCreateTransaction(
+                        self,
+                        create_tx.sender,
+                        create_tx.init_code,
+                        gas,
+                        create_tx.value,
+                    )).expectCreate();
+                    var interpreter_result = Interpreter.Result{
+                        .status = result.status,
+                        .gas_left = result.gas_left,
+                        .gas_refund = result.gas_refund,
+                        .gas_reservoir = result.gas_reservoir,
+                        .state_gas_spent = result.state_gas_spent,
+                        .state_gas_from_gas_left = result.state_gas_from_gas_left,
+                        .output_data = self.lastOutputData(),
+                    };
+                    interpreter_result.refillIntrinsicStateGas(result.state_gas_refund);
+                    break :blk interpreter_result;
+                },
+            };
+        }
+
+        /// Run the normal top-level transaction accounting shell.
+        ///
+        /// Callers must first open a matching scope with `beginTransactionScope`. This
+        /// method charges upfront gas, applies nonce/access/authorization effects,
+        /// executes when `execution_gas` is present, commits or restores state, settles
+        /// gas costs, and closes the transaction context.
+        pub fn runTopLevelTransaction(
+            self: *Self,
+            tx: Self.Transaction,
+            run: TopLevelTransactionRun,
+        ) !Interpreter.Result {
+            const Engine = struct {
+                fn execute(
+                    ptr: ?*anyopaque,
+                    executor: *Self,
+                    engine_tx: Self.Transaction,
+                    gas: transaction.ExecutionGas,
+                ) !Interpreter.Result {
+                    _ = ptr;
+                    return executor.executeTransactionMessage(engine_tx, gas);
+                }
+            };
+
+            return self.runTopLevelTransactionWithEngine(tx, run, .{
+                .execute = Engine.execute,
+            });
+        }
+
+        /// Variant of `runTopLevelTransaction` with an injectable execution engine.
+        ///
+        /// Benchmark and fixture drivers use this to swap only the message execution
+        /// step while preserving the same transaction accounting behavior.
+        pub fn runTopLevelTransactionWithEngine(
+            self: *Self,
+            tx: Self.Transaction,
+            run: TopLevelTransactionRun,
+            engine: TransactionEngine,
+        ) !Interpreter.Result {
+            try self.validateSettlementRevision(run.settlement);
+
+            var shell_start_state = try self.snapshot();
+            defer shell_start_state.deinit(self.allocator);
+            errdefer {
+                self.restore(&shell_start_state) catch {};
+                self.closeTransaction();
+            }
+
+            const sender = tx.sender();
+            var execution_gas = run.gas();
+            const transaction_charged = if (execution_gas != null)
+                try self.chargeTransactionCosts(sender, run.settlement)
+            else
+                false;
+            var authorization_gas = AuthorizationGasAdjustment{};
+            if (transaction_charged) {
+                if (!tx.isCreate()) {
+                    try self.incrementNonce(sender);
+                }
+                try self.warmAccessList(tx.accessList());
+                authorization_gas = try self.applyAuthorizationList(tx.authorizationList());
+                authorization_gas.add(malformedAuthorizationGasAdjustment(self, tx));
+                if (authorization_gas.state_refund != 0) {
+                    if (execution_gas) |current_gas| {
+                        const adjusted_gas = transaction.ExecutionGas{
+                            .regular_left = current_gas.regular_left,
+                            .reservoir = std.math.add(u64, current_gas.reservoir, authorization_gas.state_refund) catch std.math.maxInt(u64),
+                        };
+                        execution_gas = adjusted_gas;
+                    }
+                }
+                try warmDelegatedTransactionTarget(self, tx);
+            }
+
+            var pre_execution_state = try self.snapshot();
+            defer pre_execution_state.deinit(self.allocator);
+
+            var result = Interpreter.Result{
+                .status = .out_of_gas,
+                .gas_left = 0,
+                .gas_refund = 0,
+                .output_data = &.{},
+            };
+            if (execution_gas) |gas| {
+                if (!transaction_charged) {
+                    result.status = .invalid;
+                } else {
+                    result = try engine.execute(engine.ptr, self, tx, gas);
+                }
+            }
+            const authorization_refund_i64 = std.math.cast(i64, authorization_gas.regular_refund) orelse std.math.maxInt(i64);
+            result.gas_refund = std.math.add(i64, result.gas_refund, authorization_refund_i64) catch std.math.maxInt(i64);
+            if (authorization_gas.state_refund != 0) {
+                const state_refund_i64 = std.math.cast(i64, authorization_gas.state_refund) orelse std.math.maxInt(i64);
+                result.state_gas_spent = std.math.sub(i64, result.state_gas_spent, state_refund_i64) catch std.math.minInt(i64);
+            }
+
+            if (executionRolledBack(result.status)) {
+                if (tx.isCreate() and transaction_charged) {
+                    result.refillIntrinsicStateGas(Protocol.Create.createTransactionRollbackStateGasRefund(self.revision()));
+                }
+                try self.restore(&pre_execution_state);
+                if (tx.isCreate() and transaction_charged) {
+                    try self.incrementNonce(sender);
+                }
+                self.closeTransaction();
+            } else {
+                try self.commitTransaction();
+            }
+            if (transaction_charged) {
+                try self.settleTransactionCosts(sender, run.settlement, result);
+            }
+
+            return result;
+        }
+
+        /// Execute a system call as its own transaction-like scope.
+        ///
+        /// System calls bypass user transaction charging and value transfer, but still
+        /// run with a tx context, checkpoint state, and commit/rollback semantics.
+        pub fn executeSystemCall(
+            self: *Self,
+            tx_context: Host.TxContext,
+            sender: Address,
+            recipient: Address,
+            input: []const u8,
+            gas: u64,
+        ) !Interpreter.Result {
+            try self.beginSystemCall(tx_context);
+            errdefer self.closeTransaction();
+
+            self.clearLastOutput();
+            const checkpoint_state = self.state.checkpoint();
+            var checkpoint_open = true;
+            errdefer {
+                if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
+            }
+
+            var host_iface = self.host();
+            var scratch = try runtime.callScratch(self, 0);
+            defer scratch.deinit();
+            const code = try runtime.dupeExecutionCodeAlloc(self, scratch.allocator, recipient);
+            var bytecode = try runtime.prepareBytecodeAlloc(self, scratch.allocator, code);
+            const message = Host.Message{
+                .depth = 0,
+                .kind = .call,
+                .gas = std.math.cast(i64, gas) orelse std.math.maxInt(i64),
+                .recipient = recipient,
+                .sender = sender,
+                .input_data = input,
+                .value = 0,
+                .code_address = recipient,
+            };
+
+            var frame = try runtime.acquireBytecodeFrame(self, scratch.allocator, &host_iface, &message, &bytecode);
+            defer frame.deinit();
+            var interpreter = frame.interpreter(Protocol);
+
+            const result = try runtime.executeInterpreter(self, &interpreter, message.depth);
+            _ = try self.setLastOutput(result.output_data);
+
+            if (executionRolledBack(result.status)) {
+                try self.state.revertToCheckpoint(checkpoint_state);
+                checkpoint_open = false;
+                self.closeTransaction();
+            } else {
+                self.state.commitCheckpoint(checkpoint_state);
+                checkpoint_open = false;
+                try self.commitTransaction();
+            }
+
+            return .{
                 .status = result.status,
+                .gas_left = result.gas_left,
+                .gas_refund = result.gas_refund,
+                .output_data = self.lastOutputData(),
+            };
+        }
+
+        /// Transfer value between accounts, returning false on insufficient balance.
+        pub fn transferValue(self: *Self, sender: Address, recipient: Address, value: u256) !bool {
+            if (value == 0) return true;
+            if (!try self.state.subtractBalance(sender, value)) return false;
+            try self.state.addBalance(recipient, value);
+            try transfer_logs.emit(self, sender, recipient, value);
+            return true;
+        }
+
+        /// Increment an account nonce, saturating at `maxInt(u64)`.
+        pub fn incrementNonce(self: *Self, address: Address) !void {
+            const account = try self.getOrCreateAccount(address);
+            try self.state.setNonce(address, std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
+        }
+
+        /// Charge the sender's upfront transaction cost.
+        ///
+        /// Returns false when prepayment overflows or the sender cannot cover gas plus
+        /// value. The caller still decides whether to execute and how to close scope.
+        pub fn chargeTransactionCosts(self: *Self, sender: Address, settlement: Protocol.Settlement.Plan) !bool {
+            try self.validateSettlementRevision(settlement);
+            const precharge = tx_protocol.settlement.planPrecharge(settlement);
+            const required_balance = @max(precharge.minimum_balance, precharge.upfront_debit);
+            if (required_balance == 0) return true;
+            const payer = precharge.payer orelse sender;
+            const payer_account = try self.state.getAccountOrLoad(payer) orelse return false;
+            if (payer_account.balance < required_balance) return false;
+            return self.state.subtractBalance(payer, precharge.upfront_debit);
+        }
+
+        /// Refund unused gas to the sender and pay the block coinbase.
+        pub fn settleTransactionCosts(self: *Self, sender: Address, settlement: Protocol.Settlement.Plan, result: Interpreter.Result) !void {
+            try self.validateSettlementRevision(settlement);
+            const costs = try tx_protocol.settlement.planCosts(settlement, .{
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
                 .gas_reservoir = result.gas_reservoir,
                 .state_gas_spent = result.state_gas_spent,
-                .state_gas_from_gas_left = result.state_gas_from_gas_left,
-                .output_data = self.last_call_output,
-            };
-            interpreter_result.refillIntrinsicStateGas(result.state_gas_refund);
-            break :blk interpreter_result;
-        },
-    };
-}
-
-/// Run the normal top-level transaction accounting shell.
-///
-/// Callers must first open a matching scope with `beginTransactionScope`. This
-/// method charges upfront gas, applies nonce/access/authorization effects,
-/// executes when `execution_gas` is present, commits or restores state, settles
-/// gas costs, and closes the transaction context.
-pub fn runTopLevelTransaction(
-    self: *Executor,
-    tx: Transaction,
-    run: TopLevelTransactionRun,
-) !Interpreter.Result {
-    return self.runTopLevelTransactionWithEngine(tx, run, .{
-        .execute = defaultTransactionEngine,
-    });
-}
-
-/// Variant of `runTopLevelTransaction` with an injectable execution engine.
-///
-/// Benchmark and fixture drivers use this to swap only the message execution
-/// step while preserving the same transaction accounting behavior.
-pub fn runTopLevelTransactionWithEngine(
-    self: *Executor,
-    tx: Transaction,
-    run: TopLevelTransactionRun,
-    engine: TransactionEngine,
-) !Interpreter.Result {
-    var shell_start_state = try self.snapshot();
-    defer shell_start_state.deinit(self.allocator);
-    errdefer {
-        self.restore(&shell_start_state) catch {};
-        self.closeTransaction();
-    }
-
-    const sender = tx.sender();
-    var execution_gas = run.gas();
-    const transaction_charged = if (execution_gas != null)
-        try self.chargeTransactionCosts(sender, tx.gasLimit(), tx.value())
-    else
-        false;
-    var authorization_gas = AuthorizationGasAdjustment{};
-    if (transaction_charged) {
-        if (!tx.isCreate()) {
-            try self.incrementNonce(sender);
-        }
-        try self.warmAccessList(tx.accessList());
-        authorization_gas = try self.applyAuthorizationList(tx.authorizationList());
-        authorization_gas.add(self.malformedAuthorizationGasAdjustment(tx));
-        if (authorization_gas.state_refund != 0) {
-            if (execution_gas) |current_gas| {
-                const adjusted_gas = transaction.ExecutionGas{
-                    .regular_left = current_gas.regular_left,
-                    .reservoir = std.math.add(u64, current_gas.reservoir, authorization_gas.state_refund) catch std.math.maxInt(u64),
-                };
-                execution_gas = adjusted_gas;
-            }
-        }
-        try self.warmDelegatedTransactionTarget(tx);
-    }
-
-    var pre_execution_state = try self.snapshot();
-    defer pre_execution_state.deinit(self.allocator);
-
-    var result = Interpreter.Result{
-        .status = .out_of_gas,
-        .gas_left = 0,
-        .gas_refund = 0,
-        .output_data = &.{},
-    };
-    if (execution_gas) |gas| {
-        if (!transaction_charged) {
-            result.status = .invalid;
-        } else {
-            result = try engine.execute(engine.ptr, self, tx, gas);
-        }
-    }
-    const authorization_refund_i64 = std.math.cast(i64, authorization_gas.regular_refund) orelse std.math.maxInt(i64);
-    result.gas_refund = std.math.add(i64, result.gas_refund, authorization_refund_i64) catch std.math.maxInt(i64);
-    if (authorization_gas.state_refund != 0) {
-        const state_refund_i64 = std.math.cast(i64, authorization_gas.state_refund) orelse std.math.maxInt(i64);
-        result.state_gas_spent = std.math.sub(i64, result.state_gas_spent, state_refund_i64) catch std.math.minInt(i64);
-    }
-
-    if (executionRolledBack(result.status)) {
-        if (self.spec.isImpl(.amsterdam) and tx.isCreate() and transaction_charged) {
-            result.refillIntrinsicStateGas(std.math.cast(i64, transaction.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64));
-        }
-        try self.restore(&pre_execution_state);
-        if (tx.isCreate() and transaction_charged) {
-            try self.incrementNonce(sender);
-        }
-        self.closeTransaction();
-    } else {
-        try self.commitTransaction();
-    }
-    if (transaction_charged) {
-        try self.settleTransactionCosts(sender, run.settlement, result);
-    }
-
-    return result;
-}
-
-fn defaultTransactionEngine(
-    ptr: ?*anyopaque,
-    executor: *Executor,
-    tx: Transaction,
-    gas: transaction.ExecutionGas,
-) !Interpreter.Result {
-    _ = ptr;
-    return executor.executeTransactionMessage(tx, gas);
-}
-
-/// Execute a system call as its own transaction-like scope.
-///
-/// System calls bypass user transaction charging and value transfer, but still
-/// run with a tx context, checkpoint state, and commit/rollback semantics.
-pub fn executeSystemCall(
-    self: *Executor,
-    tx_context: Host.TxContext,
-    sender: Address,
-    recipient: Address,
-    input: []const u8,
-    gas: u64,
-) !Interpreter.Result {
-    try self.beginSystemCall(tx_context);
-    errdefer self.closeTransaction();
-
-    self.clearLastOutput();
-    const checkpoint_state = self.state.checkpoint();
-    var checkpoint_open = true;
-    errdefer {
-        if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
-    }
-
-    var host_iface = self.host();
-    var scratch = try call_runtime.callScratch(self, 0);
-    defer scratch.deinit();
-    const code = try call_runtime.dupeExecutionCodeAlloc(self, scratch.allocator, recipient);
-    var bytecode = try call_runtime.prepareBytecodeAlloc(self, scratch.allocator, code);
-    const message = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = std.math.cast(i64, gas) orelse std.math.maxInt(i64),
-        .recipient = recipient,
-        .sender = sender,
-        .input_data = input,
-        .value = 0,
-        .code_address = recipient,
-    };
-
-    var frame = try call_runtime.acquireBytecodeFrame(self, scratch.allocator, &host_iface, &message, &bytecode);
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try call_runtime.executeInterpreter(self, &interpreter, message.depth);
-    self.clearLastOutput();
-    self.last_call_output = try self.allocator.dupe(u8, result.output_data);
-
-    if (executionRolledBack(result.status)) {
-        try self.state.revertToCheckpoint(checkpoint_state);
-        checkpoint_open = false;
-        self.closeTransaction();
-    } else {
-        self.state.commitCheckpoint(checkpoint_state);
-        checkpoint_open = false;
-        try self.commitTransaction();
-    }
-
-    return .{
-        .status = result.status,
-        .gas_left = result.gas_left,
-        .gas_refund = result.gas_refund,
-        .output_data = self.last_call_output,
-    };
-}
-
-/// Transfer value between accounts, returning false on insufficient balance.
-pub fn transferValue(self: *Executor, sender: Address, recipient: Address, value: u256) !bool {
-    if (value == 0) return true;
-    if (!try self.state.subtractBalance(sender, value)) return false;
-    try self.state.addBalance(recipient, value);
-    try transfer_logs.emit(self, sender, recipient, value);
-    return true;
-}
-
-/// Increment an account nonce, saturating at `maxInt(u64)`.
-pub fn incrementNonce(self: *Executor, address: Address) !void {
-    const account = try self.getOrCreateAccount(address);
-    try self.state.setNonce(address, std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
-}
-
-/// Charge the sender's upfront transaction cost.
-///
-/// Returns false when prepayment overflows or the sender cannot cover gas plus
-/// value. The caller still decides whether to execute and how to close scope.
-pub fn chargeTransactionCosts(self: *Executor, sender: Address, gas_limit: u64, value: u256) !bool {
-    const tx_context = try call_runtime.currentTxContext(self);
-    const upfront_cost = transaction.prepaymentCost(
-        gas_limit,
-        tx_context.gas_price,
-        tx_context.blob_base_fee,
-        tx_context.blob_hashes.len,
-    ) orelse return false;
-    const required_balance = uint256.checkedAdd(upfront_cost, value) orelse return false;
-    if (required_balance == 0) return true;
-    const sender_account = try self.state.getAccountOrLoad(sender) orelse return false;
-    if (sender_account.balance < required_balance) return false;
-    return self.state.subtractBalance(sender, upfront_cost);
-}
-
-/// Refund unused gas to the sender and pay the block coinbase.
-pub fn settleTransactionCosts(self: *Executor, sender: Address, settlement: transaction.Settlement, result: Interpreter.Result) !void {
-    const costs = try transaction.settlementCosts(settlement, .{
-        .gas_left = result.gas_left,
-        .gas_refund = result.gas_refund,
-        .gas_reservoir = result.gas_reservoir,
-        .state_gas_spent = result.state_gas_spent,
-    });
-    try self.state.addBalance(sender, costs.sender_refund);
-    try self.state.addBalance(settlement.coinbase, costs.coinbase_payment);
-}
-
-/// Apply all EIP-7702 authorizations and return their gas refund.
-pub fn applyAuthorizationList(self: *Executor, authorization_list: []const AuthorizationTuple) !AuthorizationGasAdjustment {
-    if (!self.spec.isImpl(.prague)) return .{};
-    var adjustment = AuthorizationGasAdjustment{};
-    var pre_delegated = std.AutoHashMap(Address, bool).init(self.allocator);
-    defer pre_delegated.deinit();
-    for (authorization_list) |auth| {
-        adjustment.add(try self.applyAuthorizationTupleTracked(auth, &pre_delegated));
-    }
-    return adjustment;
-}
-
-/// Apply one EIP-7702 authorization tuple.
-///
-/// Invalid tuples are ignored. Before Amsterdam they do not refund; Amsterdam
-/// refills the tuple's intrinsic state-gas slice and refunds ACCOUNT_WRITE.
-pub fn applyAuthorizationTuple(self: *Executor, auth: AuthorizationTuple) !AuthorizationGasAdjustment {
-    return self.applyAuthorizationTupleTracked(auth, null);
-}
-
-fn applyAuthorizationTupleTracked(
-    self: *Executor,
-    auth: AuthorizationTuple,
-    pre_delegated_by_authority: ?*std.AutoHashMap(Address, bool),
-) !AuthorizationGasAdjustment {
-    if (!self.spec.isImpl(.prague)) return .{};
-    if (!eip7702.authorizationSignatureShapeValid(auth.y_parity, auth.legacy_v, auth.r, auth.s)) return self.invalidAuthorizationGasAdjustment();
-    const tx_context = try call_runtime.currentTxContext(self);
-    if (auth.chain_id != 0 and auth.chain_id != tx_context.chain_id) return self.invalidAuthorizationGasAdjustment();
-    if (auth.nonce == std.math.maxInt(u64)) return self.invalidAuthorizationGasAdjustment();
-
-    try self.state.warmAccount(auth.signer);
-
-    const existing_account = try self.state.getAccountOrLoad(auth.signer);
-    const account_exists = existing_account != null;
-    const cur_delegated = if (existing_account) |existing|
-        eip7702.delegationTarget(existing.code) != null
-    else
-        false;
-    const pre_delegated = if (pre_delegated_by_authority) |map| blk: {
-        if (map.get(auth.signer)) |delegated| break :blk delegated;
-        try map.put(auth.signer, cur_delegated);
-        break :blk cur_delegated;
-    } else cur_delegated;
-    if (existing_account) |existing| {
-        if (existing.code.len != 0 and !cur_delegated) return self.invalidAuthorizationGasAdjustment();
-        if (existing.nonce != auth.nonce) return self.invalidAuthorizationGasAdjustment();
-    } else if (auth.nonce != 0) {
-        return self.invalidAuthorizationGasAdjustment();
-    }
-
-    const account = try self.getOrCreateAccount(auth.signer);
-
-    if (std.mem.eql(u8, &auth.target, &evmz.address.zero_address)) {
-        try self.state.clearCode(auth.signer);
-    } else {
-        var code: [eip7702.delegation_code_len]u8 = undefined;
-        eip7702.writeDelegationCode(&code, auth.target);
-        try self.state.setCode(auth.signer, &code);
-    }
-    try self.state.setNonce(auth.signer, account.nonce + 1);
-    if (self.spec.isImpl(.amsterdam)) {
-        var adjustment = AuthorizationGasAdjustment{};
-        if (account_exists) {
-            adjustment.add(.{
-                .regular_refund = tx_gas.amsterdam_account_write_cost,
-                .state_refund = transaction.amsterdam_new_account_state_gas,
             });
-        }
-        const clears_delegation = std.mem.eql(u8, &auth.target, &evmz.address.zero_address);
-        if (clears_delegation) {
-            adjustment.add(.{ .state_refund = tx_gas.amsterdam_auth_base_state_gas });
-            if (cur_delegated and !pre_delegated) {
-                adjustment.add(.{ .state_refund = tx_gas.amsterdam_auth_base_state_gas });
+            const precharge = tx_protocol.settlement.planPrecharge(settlement);
+            try self.state.addBalance(precharge.payer orelse sender, costs.sender_refund);
+            if (costs.coinbase_payment != 0) {
+                const recipient = tx_protocol.settlement.planFeeRecipient(settlement) orelse return error.SettlementFeeRecipientMissing;
+                try self.state.addBalance(recipient, costs.coinbase_payment);
             }
-        } else if (cur_delegated or pre_delegated) {
-            adjustment.add(.{ .state_refund = tx_gas.amsterdam_auth_base_state_gas });
         }
-        return adjustment;
-    }
-    if (!account_exists) return .{};
-    return .{ .regular_refund = transaction.authorization_existing_account_refund_gas };
-}
 
-fn invalidAuthorizationGasAdjustment(self: *const Executor) AuthorizationGasAdjustment {
-    if (!self.spec.isImpl(.amsterdam)) return .{};
-    return .{
-        .regular_refund = tx_gas.amsterdam_account_write_cost,
-        .state_refund = tx_gas.amsterdam_authorization_state_gas,
+        fn validateSettlementRevision(self: *const Self, settlement: Protocol.Settlement.Plan) !void {
+            const settlement_revision_id = tx_protocol.settlement.planRevisionId(settlement) orelse return;
+            if (settlement_revision_id != self.revision_id) return error.SettlementRevisionMismatch;
+        }
+
+        /// Apply all EIP-7702 authorizations and return their gas refund.
+        pub fn applyAuthorizationList(self: *Self, authorization_list: []const Self.AuthorizationTuple) !AuthorizationGasAdjustment {
+            if (!Protocol.Authorization.active(self.revision())) return .{};
+            var adjustment = AuthorizationGasAdjustment{};
+            var pre_delegated = std.AutoHashMap(Address, bool).init(self.allocator);
+            defer pre_delegated.deinit();
+            for (authorization_list) |auth| {
+                adjustment.add(try self.applyAuthorizationTupleTracked(auth, &pre_delegated));
+            }
+            return adjustment;
+        }
+
+        /// Apply one EIP-7702 authorization tuple.
+        ///
+        /// Invalid tuples are ignored. Before Amsterdam they do not refund; Amsterdam
+        /// refills the tuple's intrinsic state-gas slice and refunds ACCOUNT_WRITE.
+        pub fn applyAuthorizationTuple(self: *Self, auth: Self.AuthorizationTuple) !AuthorizationGasAdjustment {
+            return self.applyAuthorizationTupleTracked(auth, null);
+        }
+
+        fn applyAuthorizationTupleTracked(
+            self: *Self,
+            auth: Self.AuthorizationTuple,
+            pre_delegated_by_authority: ?*std.AutoHashMap(Address, bool),
+        ) !AuthorizationGasAdjustment {
+            if (!Protocol.Authorization.active(self.revision())) return .{};
+            if (!eip7702.authorizationSignatureShapeValid(auth.y_parity, auth.legacy_v, auth.r, auth.s)) return invalidAuthorizationGasAdjustment(self);
+            const tx_context = try runtime.currentTxContext(self);
+            if (auth.chain_id != 0 and auth.chain_id != tx_context.chain_id) return invalidAuthorizationGasAdjustment(self);
+            if (auth.nonce == std.math.maxInt(u64)) return invalidAuthorizationGasAdjustment(self);
+
+            try self.state.warmAccount(auth.signer);
+
+            const existing_account = try self.state.getAccountOrLoad(auth.signer);
+            const account_exists = existing_account != null;
+            const cur_delegated = if (existing_account) |existing|
+                eip7702.delegationTarget(existing.code) != null
+            else
+                false;
+            const pre_delegated = if (pre_delegated_by_authority) |map| blk: {
+                if (map.get(auth.signer)) |delegated| break :blk delegated;
+                try map.put(auth.signer, cur_delegated);
+                break :blk cur_delegated;
+            } else cur_delegated;
+            if (existing_account) |existing| {
+                if (existing.code.len != 0 and !cur_delegated) return invalidAuthorizationGasAdjustment(self);
+                if (existing.nonce != auth.nonce) return invalidAuthorizationGasAdjustment(self);
+            } else if (auth.nonce != 0) {
+                return invalidAuthorizationGasAdjustment(self);
+            }
+
+            const account = try self.getOrCreateAccount(auth.signer);
+
+            if (std.mem.eql(u8, &auth.target, &evmz.address.zero_address)) {
+                try self.state.clearCode(auth.signer);
+            } else {
+                var code: [eip7702.delegation_code_len]u8 = undefined;
+                eip7702.writeDelegationCode(&code, auth.target);
+                try self.state.setCode(auth.signer, &code);
+            }
+            try self.state.setNonce(auth.signer, account.nonce + 1);
+            const clears_delegation = std.mem.eql(u8, &auth.target, &evmz.address.zero_address);
+            return Protocol.Authorization.successGasAdjustment(self.revision(), account_exists, clears_delegation, cur_delegated, pre_delegated);
+        }
+
+        fn invalidAuthorizationGasAdjustment(self: *const Self) AuthorizationGasAdjustment {
+            return Protocol.Authorization.invalidGasAdjustment(self.revision());
+        }
+
+        fn malformedAuthorizationGasAdjustment(self: *const Self, tx: Self.Transaction) AuthorizationGasAdjustment {
+            const total_count = tx.authorizationCount();
+            const parsed_count = tx.authorizationList().len;
+            if (total_count <= parsed_count) return .{};
+            return Protocol.Authorization.malformedGasAdjustment(self.revision(), total_count - parsed_count);
+        }
+
+        fn warmDelegatedTransactionTarget(self: *Self, tx: Self.Transaction) !void {
+            if (!Protocol.Authorization.warmsDelegatedTarget(self.revision())) return;
+            switch (tx) {
+                .call => |call_tx| {
+                    // EIP-7702 warms the delegate target when the tx destination is delegated.
+                    const target = eip7702.delegationTarget(try self.getCode(call_tx.recipient)) orelse return;
+                    try self.warmAccessListAddress(target);
+                },
+                .create => {},
+            }
+        }
+
+        /// Snapshot transient storage for nested execution rollback.
+        pub fn snapshotTransient(self: *Self) !Self.TransientSnapshot {
+            return self.state.snapshotTransient();
+        }
+
+        /// Restore transient storage from a previous snapshot.
+        pub fn restoreTransient(self: *Self, snapshot_state: *Self.TransientSnapshot) !void {
+            try self.state.restoreTransient(snapshot_state);
+        }
+
+        /// Return whether an interpreter status should revert execution state.
+        pub fn executionRolledBack(status: Interpreter.Status) bool {
+            return switch (status) {
+                .success => false,
+                .revert, .invalid, .out_of_gas => true,
+            };
+        }
+
+        /// Drop the retained output buffer from the last call/create result.
+        pub fn clearLastOutput(self: *Self) void {
+            _ = self.last_call_output.clear();
+        }
+
+        pub fn lastOutputData(self: *const Self) []u8 {
+            return self.last_call_output.slice();
+        }
+
+        pub fn setLastOutput(self: *Self, output_data: []const u8) ![]u8 {
+            self.clearLastOutput();
+            return self.last_call_output.replace(output_data) catch |err| switch (err) {
+                error.FrameIoCapacityExceeded => error.ResultOutputCapacityExceeded,
+                else => err,
+            };
+        }
+
+        pub fn assumeLastOutputWritten(self: *Self, len: usize) ![]u8 {
+            return self.last_call_output.assumeWritten(len) catch |err| switch (err) {
+                error.FrameIoCapacityExceeded => error.ResultOutputCapacityExceeded,
+                else => err,
+            };
+        }
     };
 }
 
-fn malformedAuthorizationGasAdjustment(self: *const Executor, tx: Transaction) AuthorizationGasAdjustment {
-    if (!self.spec.isImpl(.amsterdam)) return .{};
-    const total_count = tx.authorizationCount();
-    const parsed_count = tx.authorizationList().len;
-    if (total_count <= parsed_count) return .{};
-    const missing_count = total_count - parsed_count;
-    const regular_refund = std.math.mul(u64, tx_gas.amsterdam_account_write_cost, missing_count) catch std.math.maxInt(u64);
-    const state_refund = std.math.mul(u64, tx_gas.amsterdam_authorization_state_gas, missing_count) catch std.math.maxInt(u64);
-    return .{
-        .regular_refund = regular_refund,
-        .state_refund = state_refund,
-    };
-}
-
-fn warmDelegatedTransactionTarget(self: *Executor, tx: Transaction) !void {
-    if (!self.spec.isImpl(.prague)) return;
-    if (self.spec.isImpl(.amsterdam)) return;
-    switch (tx) {
-        .call => |call_tx| {
-            // EIP-7702 warms the delegate target when the tx destination is delegated.
-            const target = eip7702.delegationTarget(try self.getCode(call_tx.recipient)) orelse return;
-            try self.warmAccessListAddress(target);
-        },
-        .create => {},
-    }
-}
-
-/// Snapshot transient storage for nested execution rollback.
-pub fn snapshotTransient(self: *Executor) !TransientSnapshot {
-    return self.state.snapshotTransient();
-}
-
-/// Restore transient storage from a previous snapshot.
-pub fn restoreTransient(self: *Executor, snapshot_state: *TransientSnapshot) !void {
-    try self.state.restoreTransient(snapshot_state);
-}
-
-/// Return whether an interpreter status should revert execution state.
-pub fn executionRolledBack(status: Interpreter.Status) bool {
-    return switch (status) {
-        .success => false,
-        .revert, .invalid, .out_of_gas => true,
-    };
-}
-
-/// Drop the retained output buffer from the last call/create result.
-pub fn clearLastOutput(self: *Executor) void {
-    self.allocator.free(self.last_call_output);
-    self.last_call_output = &.{};
-}
+const Default = Executor(EthProtocol);
+const default_tx_protocol = transaction.For(EthProtocol);
 
 test "executor init options retain code analysis config" {
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .latest,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .latest,
         .config = .advanced,
     });
     defer executor.deinit();
 
-    try std.testing.expectEqual(evmz.Config.Preprocessing.full, executor.config.preprocessing);
+    try std.testing.expectEqual(evmz.ExecutionConfig.Preprocessing.full, executor.config.preprocessing);
 }
 
 test "executor executes prepared bytecode call transaction" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -899,7 +1081,6 @@ test "executor executes prepared bytecode call transaction" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expect(bytecode.jumpdests.analyzed);
-    try std.testing.expect(!bytecode.isAnalyzed());
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
@@ -927,8 +1108,8 @@ test "executor BLOCKHASH reads configured block hash source" {
     var tx_context = testTxContext(sender, 100_000);
     tx_context.number = 1000;
     var block_hashes = TestBlockHashSource{};
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
         .block_hash_source = block_hashes.source(),
     });
     defer executor.deinit();
@@ -958,8 +1139,8 @@ test "executor executeMessage dispatches top-level call" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -982,6 +1163,344 @@ test "executor executeMessage dispatches top-level call" {
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
+test "executor carries comptime protocol through nested host calls" {
+    const IstanbulProtocol = evmz.eth.fork(.istanbul);
+
+    const default_gas_left = try executeNestedBalanceCall(EthProtocol, .istanbul);
+    const istanbul_gas_left = try executeNestedBalanceCall(IstanbulProtocol, .istanbul);
+
+    try std.testing.expectEqual(default_gas_left, istanbul_gas_left);
+}
+
+fn ethereumProtocolWith(comptime definition_name: []const u8, comptime overrides: evmz.eth.DefinitionOptions(evmz.eth.Revision)) type {
+    comptime var options = overrides;
+    options.name = definition_name;
+    const custom_definition = evmz.eth.define(options);
+    return evmz.protocol.binding.Protocol(custom_definition, evmz.eth.Support.all);
+}
+
+test "protocol definition drives call base gas" {
+    const overrides = struct {
+        fn callBaseGas(revision_value: evmz.eth.Revision) i64 {
+            return evmz.eth.Call.callBaseGas(revision_value) + 5;
+        }
+    };
+    const ExpensiveCallProtocol = ethereumProtocolWith("expensive-call-base", .{
+        .Call = .{ .callBaseGas = overrides.callBaseGas },
+    });
+
+    const default_gas_left = try executeNestedBalanceCall(EthProtocol, .frontier);
+    const custom_gas_left = try executeNestedBalanceCall(ExpensiveCallProtocol, .frontier);
+
+    try std.testing.expectEqual(default_gas_left - 5, custom_gas_left);
+}
+
+test "protocol definition drives top-level delegated account access" {
+    const overrides = struct {
+        fn topLevelDelegatedAccountAccess(
+            revision_value: evmz.eth.Revision,
+            target_is_precompile: bool,
+            already_warm: bool,
+        ) ?evmz.protocol.interface.DelegatedAccountAccess {
+            _ = revision_value;
+            _ = target_is_precompile;
+            _ = already_warm;
+            return .{ .status = .cold, .gas = 7 };
+        }
+    };
+    const ExpensiveTopLevelDelegatedAccessProtocol = ethereumProtocolWith("expensive-top-level-delegated-access", .{
+        .Call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
+    });
+
+    const default_gas_left = try executeTopLevelDelegatedCall(EthProtocol);
+    const custom_gas_left = try executeTopLevelDelegatedCall(ExpensiveTopLevelDelegatedAccessProtocol);
+
+    try std.testing.expectEqual(default_gas_left - 7, custom_gas_left);
+}
+
+test "protocol definition drives top-frame value transfer state gas" {
+    const overrides = struct {
+        fn topFrameValueTransferStateGas(
+            revision_value: evmz.eth.Revision,
+            value: u256,
+            same_address: bool,
+            account_exists: bool,
+        ) i64 {
+            _ = revision_value;
+            _ = value;
+            _ = same_address;
+            _ = account_exists;
+            return 9;
+        }
+    };
+    const ExpensiveTopFrameValueTransferProtocol = ethereumProtocolWith("expensive-top-frame-value-transfer", .{
+        .Call = .{ .topFrameValueTransferStateGas = overrides.topFrameValueTransferStateGas },
+    });
+
+    const default_result = try executeTopFrameValueTransfer(EthProtocol);
+    const custom_result = try executeTopFrameValueTransfer(ExpensiveTopFrameValueTransferProtocol);
+
+    try std.testing.expectEqual(default_result.gas_left - 9, custom_result.gas_left);
+    try std.testing.expectEqual(@as(i64, 9), custom_result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 9), custom_result.state_gas_from_gas_left);
+}
+
+test "protocol definition drives empty call recipient touching" {
+    const overrides = struct {
+        fn touchesEmptyCallRecipient(revision_value: evmz.eth.Revision) bool {
+            _ = revision_value;
+            return true;
+        }
+    };
+    const TouchEmptyCallRecipientProtocol = ethereumProtocolWith("touch-empty-call-recipient", .{
+        .Call = .{ .touchesEmptyCallRecipient = overrides.touchesEmptyCallRecipient },
+    });
+
+    try std.testing.expect(!try emptyCallRecipientMaterialized(EthProtocol));
+    try std.testing.expect(try emptyCallRecipientMaterialized(TouchEmptyCallRecipientProtocol));
+}
+
+test "protocol definition drives child call gas forwarding" {
+    const overrides = struct {
+        fn childGas(revision_value: evmz.eth.Revision, requested: i64, available: i64) evmz.protocol.interface.ChildGas {
+            _ = revision_value;
+            _ = requested;
+            _ = available;
+            return .{ .gas = 0 };
+        }
+    };
+    const ZeroChildGasProtocol = ethereumProtocolWith("zero-child-gas", .{
+        .Call = .{ .childGas = overrides.childGas },
+    });
+
+    try std.testing.expectEqual(@as(u256, 1), try executeCallResultStore(EthProtocol));
+    try std.testing.expectEqual(@as(u256, 0), try executeCallResultStore(ZeroChildGasProtocol));
+}
+
+test "protocol definition drives create initcode word gas" {
+    const overrides = struct {
+        fn createInitCodeWordGas(revision_value: evmz.eth.Revision, is_create2: bool) i64 {
+            _ = revision_value;
+            _ = is_create2;
+            return 1_000_000;
+        }
+    };
+    const ExpensiveCreateInitCodeProtocol = ethereumProtocolWith("expensive-create-initcode", .{
+        .Create = .{ .createInitCodeWordGas = overrides.createInitCodeWordGas },
+    });
+
+    try std.testing.expectEqual(Interpreter.Status.success, try executeCreateOpcodeStatus(EthProtocol));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, try executeCreateOpcodeStatus(ExpensiveCreateInitCodeProtocol));
+}
+
+fn executeCreateOpcodeStatus(comptime Protocol: type) !Interpreter.Status {
+    const sender = evmz.addr(0x1111);
+    const contract = evmz.addr(0xaaaa);
+    const code = evmz.t.bytecode(.{
+        .PUSH7, 0x36,    .PUSH0, .MSTORE8, 0x60,   0x01, .PUSH0, .RETURN,
+        .PUSH0, .MSTORE, .PUSH1, 0x07,     .PUSH1, 0x19, .PUSH0, .CREATE,
+        .STOP,
+    });
+
+    const Exec = Executor(Protocol);
+    var executor = Exec.init(std.testing.allocator, .{
+        .revision = .cancun,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var contract_account = AccountState.init(std.testing.allocator);
+    try contract_account.setCode(std.testing.allocator, &code);
+    try executor.state.accounts.put(contract, contract_account);
+
+    return (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas = 100_000,
+    } })).expectCall().status;
+}
+
+fn executeCallResultStore(comptime Protocol: type) !u256 {
+    const sender = evmz.addr(0x1111);
+    const parent = evmz.addr(0xaaaa);
+    const target = evmz.addr(0xbbbb);
+    const Exec = Executor(Protocol);
+    var executor = Exec.init(std.testing.allocator, .{
+        .revision = .frontier,
+    });
+    defer executor.deinit();
+
+    try putFundedSender(&executor, sender);
+
+    var target_account = AccountState.init(std.testing.allocator);
+    try target_account.setCode(std.testing.allocator, &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
+    try executor.state.accounts.put(target, target_account);
+
+    const parent_code = evmz.t.bytecode(.{
+        .PUSH1, 0x00,   .PUSH1, 0x00,    .PUSH1, 0x00,   .PUSH1, 0x00,
+        .PUSH1, 0x00,   .PUSH2, 0xbb,    0xbb,   .PUSH2, 0xff,   0xff,
+        .CALL,  .PUSH1, 0x00,   .SSTORE, .STOP,
+    });
+    var parent_account = AccountState.init(std.testing.allocator);
+    try parent_account.setCode(std.testing.allocator, &parent_code);
+    try executor.state.accounts.put(parent, parent_account);
+
+    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+        .sender = sender,
+        .recipient = parent,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    return executor.getStorage(parent, 0);
+}
+
+fn executeTopLevelDelegatedCall(comptime Protocol: type) !i64 {
+    const sender = evmz.addr(0x1111);
+    const authority = evmz.addr(0x2222);
+    const target = evmz.addr(0x3333);
+    const tx_context = testTxContext(sender, 100_000);
+
+    const Exec = Executor(Protocol);
+    var executor = Exec.init(std.testing.allocator, .{
+        .revision = .prague,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&delegation_code, target);
+    var authority_account = AccountState.init(std.testing.allocator);
+    try authority_account.setCode(std.testing.allocator, &delegation_code);
+    try executor.state.accounts.put(authority, authority_account);
+
+    var target_account = AccountState.init(std.testing.allocator);
+    try target_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
+    try executor.state.accounts.put(target, target_account);
+
+    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+        .sender = sender,
+        .recipient = authority,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    return result.gas_left;
+}
+
+const TopFrameValueTransferResult = struct {
+    gas_left: i64,
+    state_gas_spent: i64,
+    state_gas_from_gas_left: i64,
+};
+
+fn executeTopFrameValueTransfer(comptime Protocol: type) !TopFrameValueTransferResult {
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const tx_context = testTxContext(sender, 100_000);
+
+    const Exec = Executor(Protocol);
+    var executor = Exec.init(std.testing.allocator, .{
+        .revision = .prague,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var recipient_account = AccountState.init(std.testing.allocator);
+    try recipient_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
+    try executor.state.accounts.put(recipient, recipient_account);
+
+    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+        .sender = sender,
+        .recipient = recipient,
+        .gas = 100_000,
+        .value = 1,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    return .{
+        .gas_left = result.gas_left,
+        .state_gas_spent = result.state_gas_spent,
+        .state_gas_from_gas_left = result.state_gas_from_gas_left,
+    };
+}
+
+fn emptyCallRecipientMaterialized(comptime Protocol: type) !bool {
+    const sender = evmz.addr(0x1111);
+    const contract = evmz.addr(0x2222);
+    const recipient = evmz.addr(0x3333);
+    const tx_context = testTxContext(sender, 100_000);
+    const code = evmz.t.bytecode(.{
+        .PUSH1, 0x00,
+        .PUSH1, 0x00,
+        .PUSH1, 0x00,
+        .PUSH1, 0x00,
+        .PUSH1, 0x00,
+        .PUSH2, 0x33,
+        0x33,   .PUSH2,
+        0x27,   0x10,
+        .CALL,  .POP,
+        .STOP,
+    });
+
+    const Exec = Executor(Protocol);
+    var executor = Exec.init(std.testing.allocator, .{
+        .revision = .spurious_dragon,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var contract_account = AccountState.init(std.testing.allocator);
+    try contract_account.setCode(std.testing.allocator, &code);
+    try executor.state.accounts.put(contract, contract_account);
+
+    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    return executor.state.accountExists(recipient);
+}
+
+fn executeNestedBalanceCall(comptime Protocol: type, revision_value: Protocol.Revision) !i64 {
+    const sender = evmz.addr(0x1111);
+    const parent = evmz.addr(0xaaaa);
+    const target = evmz.addr(0xbbbb);
+    var executor = Executor(Protocol).init(std.testing.allocator, .{
+        .revision = revision_value,
+    });
+    defer executor.deinit();
+
+    var sender_account = AccountState.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.accounts.put(sender, sender_account);
+
+    var target_account = AccountState.init(std.testing.allocator);
+    try target_account.setCode(std.testing.allocator, &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
+    try executor.state.accounts.put(target, target_account);
+
+    const parent_code = evmz.t.bytecode(.{
+        .PUSH1, 0x00,  .PUSH1, 0x00, .PUSH1, 0x00,   .PUSH1, 0x00,
+        .PUSH1, 0x00,  .PUSH2, 0xbb, 0xbb,   .PUSH2, 0xff,   0xff,
+        .CALL,  .STOP,
+    });
+    var bytecode = try executor.prepareBytecode(&parent_code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    try executor.beginTransaction(testTxContext(sender, 100_000), sender, parent);
+    const result = try executor.executePreparedCallTransaction(.{
+        .bytecode = &bytecode,
+        .sender = sender,
+        .recipient = parent,
+        .gas = 100_000,
+    });
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    return result.gas_left;
+}
+
 test "executor begins normalized transaction scope and warms access list" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
@@ -989,8 +1508,8 @@ test "executor begins normalized transaction scope and warms access list" {
     const coinbase = evmz.addr(0xdddd);
     var tx_context = testTxContext(sender, 100_000);
     tx_context.coinbase = coinbase;
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .shanghai,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .shanghai,
     });
     defer executor.deinit();
 
@@ -1017,12 +1536,51 @@ test "executor begins normalized transaction scope and warms access list" {
     try std.testing.expect(executor.state.warm_storage.contains(.{ .address = access_address, .key = 2 }));
 }
 
+test "protocol definition drives initial coinbase warm access" {
+    const overrides = struct {
+        fn transactionWarmsCoinbase(revision_value: evmz.eth.Revision) bool {
+            _ = revision_value;
+            return true;
+        }
+    };
+    const WarmCoinbaseProtocol = ethereumProtocolWith("warm-coinbase", .{
+        .Block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const coinbase = evmz.addr(0xcccc);
+    var tx_context = testTxContext(sender, 100_000);
+    tx_context.coinbase = coinbase;
+    const tx = Transaction{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas_limit = 100_000,
+    } };
+
+    var default_executor = Default.init(std.testing.allocator, .{
+        .revision = .frontier,
+    });
+    defer default_executor.deinit();
+    try default_executor.beginTransactionScope(tx_context, tx);
+    defer default_executor.closeTransaction();
+    try std.testing.expect(!default_executor.state.warm_accounts.contains(coinbase));
+
+    const WarmCoinbaseExecutor = Executor(WarmCoinbaseProtocol);
+    var custom_executor = WarmCoinbaseExecutor.init(std.testing.allocator, .{
+        .revision = .frontier,
+    });
+    defer custom_executor.deinit();
+    try custom_executor.beginTransactionScope(tx_context, tx);
+    defer custom_executor.closeTransaction();
+    try std.testing.expect(custom_executor.state.warm_accounts.contains(coinbase));
+}
+
 test "executor executeTransactionMessage dispatches normalized call" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -1049,13 +1607,13 @@ test "executor executeTransactionMessage dispatches normalized call" {
 test "executor settleTransactionCosts applies refund and coinbase payment" {
     const sender = evmz.addr(0xaaaa);
     const coinbase = evmz.addr(0xbbbb);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .london,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .london,
     });
     defer executor.deinit();
 
     try executor.settleTransactionCosts(sender, .{
-        .spec = .london,
+        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.london),
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .intrinsic_state_gas = 0,
@@ -1074,13 +1632,62 @@ test "executor settleTransactionCosts applies refund and coinbase payment" {
     try std.testing.expectEqual(@as(u256, 96), executor.getAccount(coinbase).?.balance);
 }
 
+test "executor upfront charge uses comptime blob gas schedule" {
+    const overrides = struct {
+        fn blobSchedule(revision_value: evmz.eth.Revision) ?evmz.transaction.BlobSchedule {
+            var schedule = evmz.eth.Transaction.blobSchedule(revision_value) orelse return null;
+            schedule.gas_per_blob *= 2;
+            return schedule;
+        }
+    };
+    const DoubleBlobGasProtocol = ethereumProtocolWith("double-blob-gas", .{
+        .Transaction = .{ .blobSchedule = overrides.blobSchedule },
+    });
+
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const blob_hashes = [_]u256{@as(u256, 0x01) << 248};
+    var tx_context = testTxContext(sender, 100_000);
+    tx_context.gas_price = 1;
+    tx_context.blob_base_fee = 1;
+    tx_context.blob_hashes = &blob_hashes;
+
+    const DoubleBlobExecutor = Executor(DoubleBlobGasProtocol);
+    var executor = DoubleBlobExecutor.init(std.testing.allocator, .{
+        .revision = .cancun,
+    });
+    defer executor.deinit();
+
+    var sender_account = AccountState.init(std.testing.allocator);
+    sender_account.balance = 10 + evmz.eth.transaction.blob_gas_per_blob;
+    try executor.state.accounts.put(sender, sender_account);
+
+    try executor.beginTransaction(tx_context, sender, recipient);
+    defer executor.closeTransaction();
+
+    try std.testing.expect(!try executor.chargeTransactionCosts(sender, .{
+        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.cancun),
+        .payer = sender,
+        .gas_limit = 10,
+        .intrinsic_gas = 0,
+        .intrinsic_state_gas = 0,
+        .floor_gas = 0,
+        .gas_price = 1,
+        .priority_fee = 0,
+        .coinbase = tx_context.coinbase,
+        .upfront_debit = 10 + evmz.eth.transaction.blob_gas_per_blob * 2,
+        .minimum_balance = 10 + evmz.eth.transaction.blob_gas_per_blob * 2,
+    }));
+    try std.testing.expectEqual(@as(u256, 10 + evmz.eth.transaction.blob_gas_per_blob), executor.getAccount(sender).?.balance);
+}
+
 test "executor returns EIP-7702 refund for existing authority account" {
     const sender = evmz.addr(0xaaaa);
     const authority = evmz.addr(0xbbbb);
     const target = evmz.addr(0xcccc);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1101,7 +1708,7 @@ test "executor returns EIP-7702 refund for existing authority account" {
         .s = 1,
     });
 
-    try std.testing.expectEqual(@as(u64, transaction.authorization_existing_account_refund_gas), refund.regular_refund);
+    try std.testing.expectEqual(@as(u64, evmz.eth.transaction.authorization_existing_account_refund_gas), refund.regular_refund);
     try std.testing.expectEqual(@as(u64, 0), refund.state_refund);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
     try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
@@ -1113,8 +1720,8 @@ test "executor rejects EIP-7702 max authorization nonce before warming signer" {
     const authority = evmz.addr(0xcccc);
     const target = evmz.addr(0xdddd);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1143,6 +1750,64 @@ test "executor rejects EIP-7702 max authorization nonce before warming signer" {
     try std.testing.expectEqual(@as(usize, 0), executor.getAccount(authority).?.code.len);
 }
 
+test "protocol definition drives authorization activation and success gas adjustment" {
+    const overrides = struct {
+        fn active(revision_value: evmz.eth.Revision) bool {
+            _ = revision_value;
+            return true;
+        }
+
+        fn successGasAdjustment(
+            revision_value: evmz.eth.Revision,
+            account_exists: bool,
+            clears_delegation: bool,
+            cur_delegated: bool,
+            pre_delegated: bool,
+        ) evmz.protocol.interface.AuthorizationGasAdjustment {
+            _ = revision_value;
+            _ = account_exists;
+            _ = clears_delegation;
+            _ = cur_delegated;
+            _ = pre_delegated;
+            return .{ .regular_refund = 17, .state_refund = 19 };
+        }
+    };
+    const CustomAuthorizationProtocol = ethereumProtocolWith("custom-authorization", .{
+        .Authorization = .{
+            .active = overrides.active,
+            .successGasAdjustment = overrides.successGasAdjustment,
+        },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const target = evmz.addr(0xdddd);
+    const tx_context = testTxContext(sender, 100_000);
+    const CustomAuthorizationExecutor = Executor(CustomAuthorizationProtocol);
+    var executor = CustomAuthorizationExecutor.init(std.testing.allocator, .{
+        .revision = .frontier,
+    });
+    defer executor.deinit();
+
+    try executor.beginTransaction(tx_context, sender, recipient);
+    defer executor.closeTransaction();
+
+    const refund = try executor.applyAuthorizationTuple(.{
+        .chain_id = 0,
+        .target = target,
+        .signer = authority,
+        .nonce = 0,
+        .y_parity = 0,
+        .legacy_v = null,
+        .r = 1,
+        .s = 1,
+    });
+
+    try std.testing.expectEqual(@as(u64, 17), refund.regular_refund);
+    try std.testing.expectEqual(@as(u64, 19), refund.state_refund);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+}
+
 test "executor top-level transaction settles EIP-7702 authorization refund" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
@@ -1150,8 +1815,8 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
     const target = evmz.addr(0xdddd);
     var tx_context = testTxContext(sender, 100_000);
     tx_context.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1182,7 +1847,7 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
     const SucceedingEngine = struct {
         fn execute(
             ptr: ?*anyopaque,
-            inner: *Executor,
+            inner: *Default,
             normalized_tx: Transaction,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
@@ -1203,7 +1868,8 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
     const result = try executor.runTopLevelTransactionWithEngine(tx, .{
         .execution_gas = 54_000,
         .settlement = .{
-            .spec = .prague,
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
+            .payer = sender,
             .gas_limit = 100_000,
             .intrinsic_gas = 46_000,
             .intrinsic_state_gas = 0,
@@ -1211,6 +1877,8 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
             .gas_price = 1,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .upfront_debit = 100_000,
+            .minimum_balance = 100_000,
         },
     }, .{ .execute = SucceedingEngine.execute });
 
@@ -1224,8 +1892,8 @@ test "top-level engine errors roll back without gas settlement" {
     const recipient = evmz.addr(0xbbbb);
     var tx_context = testTxContext(sender, 100_000);
     tx_context.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1242,7 +1910,7 @@ test "top-level engine errors roll back without gas settlement" {
     const FailingEngine = struct {
         fn execute(
             ptr: ?*anyopaque,
-            inner: *Executor,
+            inner: *Default,
             normalized_tx: Transaction,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
@@ -1260,7 +1928,8 @@ test "top-level engine errors roll back without gas settlement" {
         executor.runTopLevelTransactionWithEngine(tx, .{
             .execution_gas = 79_000,
             .settlement = .{
-                .spec = .prague,
+                .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
+                .payer = sender,
                 .gas_limit = 100_000,
                 .intrinsic_gas = 21_000,
                 .intrinsic_state_gas = 0,
@@ -1268,6 +1937,8 @@ test "top-level engine errors roll back without gas settlement" {
                 .gas_price = 1,
                 .priority_fee = 0,
                 .coinbase = tx_context.coinbase,
+                .upfront_debit = 100_000,
+                .minimum_balance = 100_000,
             },
         }, .{ .execute = FailingEngine.execute }),
     );
@@ -1284,8 +1955,8 @@ test "Amsterdam malformed authorization count refills intrinsic auth gas" {
     const recipient = evmz.addr(0xbbbb);
     var tx_context = testTxContext(sender, 300_000);
     tx_context.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -1299,14 +1970,14 @@ test "Amsterdam malformed authorization count refills intrinsic auth gas" {
         .gas_limit = 300_000,
         .authorization_count = 1,
     } };
-    const gas_plan = transaction.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
+    const gas_plan = default_tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
         .authorization_count = tx.authorizationCount(),
     });
 
     const SucceedingEngine = struct {
         fn execute(
             ptr: ?*anyopaque,
-            inner: *Executor,
+            inner: *Default,
             normalized_tx: Transaction,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
@@ -1326,16 +1997,18 @@ test "Amsterdam malformed authorization count refills intrinsic auth gas" {
     try executor.beginTransactionScope(tx_context, tx);
     const result = try executor.runTopLevelTransactionWithEngine(tx, .{
         .execution = gas_plan.execution,
-        .settlement = transaction.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = default_tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .payer = sender,
+            .value = tx.value(),
         }),
     }, .{ .execute = SucceedingEngine.execute });
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, tx_gas.amsterdam_account_write_cost), result.gas_refund);
-    try std.testing.expectEqual(-@as(i64, tx_gas.amsterdam_authorization_state_gas), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_account_write_cost), result.gas_refund);
+    try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_authorization_state_gas), result.state_gas_spent);
 }
 
 test "executor warms delegated target for top-level transaction destination" {
@@ -1343,8 +2016,8 @@ test "executor warms delegated target for top-level transaction destination" {
     const authority = evmz.addr(0xbbbb);
     const target = evmz.addr(0xcccc);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1374,7 +2047,7 @@ test "executor warms delegated target for top-level transaction destination" {
 
         fn execute(
             ptr: ?*anyopaque,
-            inner: *Executor,
+            inner: *Default,
             normalized_tx: Transaction,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
@@ -1395,7 +2068,7 @@ test "executor warms delegated target for top-level transaction destination" {
     const result = try executor.runTopLevelTransactionWithEngine(tx, .{
         .execution_gas = 54_000,
         .settlement = .{
-            .spec = .prague,
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
             .gas_limit = 100_000,
             .intrinsic_gas = 46_000,
             .intrinsic_state_gas = 0,
@@ -1410,13 +2083,84 @@ test "executor warms delegated target for top-level transaction destination" {
     try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
 }
 
+test "protocol definition drives delegated transaction target warming" {
+    const overrides = struct {
+        fn warmsDelegatedTarget(revision_value: evmz.eth.Revision) bool {
+            _ = revision_value;
+            return true;
+        }
+    };
+    const WarmDelegatedTargetProtocol = ethereumProtocolWith("warm-delegated-target", .{
+        .Authorization = .{ .warmsDelegatedTarget = overrides.warmsDelegatedTarget },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const authority = evmz.addr(0xbbbb);
+    const target = evmz.addr(0xcccc);
+    const tx_context = testTxContext(sender, 100_000);
+    const WarmDelegatedExecutor = Executor(WarmDelegatedTargetProtocol);
+    var executor = WarmDelegatedExecutor.init(std.testing.allocator, .{
+        .revision = .frontier,
+    });
+    defer executor.deinit();
+
+    var code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&code, target);
+    var authority_account = AccountState.init(std.testing.allocator);
+    try authority_account.setCode(std.testing.allocator, &code);
+    try executor.state.accounts.put(authority, authority_account);
+
+    const tx = Transaction{ .call = .{
+        .sender = sender,
+        .recipient = authority,
+        .gas_limit = 100_000,
+    } };
+    const CheckingEngine = struct {
+        const expected_target = evmz.addr(0xcccc);
+
+        fn execute(
+            ptr: ?*anyopaque,
+            inner: *WarmDelegatedExecutor,
+            normalized_tx: Transaction,
+            gas: transaction.ExecutionGas,
+        ) !Interpreter.Result {
+            _ = ptr;
+            _ = normalized_tx;
+            _ = gas;
+            try std.testing.expect(inner.state.warm_accounts.contains(expected_target));
+            return .{
+                .status = .success,
+                .gas_left = 100_000,
+                .gas_refund = 0,
+                .output_data = &.{},
+            };
+        }
+    };
+
+    try executor.beginTransactionScope(tx_context, tx);
+    const result = try executor.runTopLevelTransactionWithEngine(tx, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.frontier),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .coinbase = tx_context.coinbase,
+        },
+    }, .{ .execute = CheckingEngine.execute });
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+}
+
 test "Prague top-level delegated precompile call can use exactly intrinsic gas" {
     const sender = evmz.addr(0xaaaa);
     const authority = evmz.addr(0xbbbb);
     const precompile_address = evmz.addr(1);
     const tx_context = testTxContext(sender, 46_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -1445,7 +2189,7 @@ test "Prague top-level delegated precompile call can use exactly intrinsic gas" 
         .value = 1,
         .authorization_list = &authorization_list,
     } };
-    const gas_plan = transaction.gasPlan(.prague, &.{}, tx.gasLimit(), .{
+    const gas_plan = default_tx_protocol.gas.gasPlan(.prague, &.{}, tx.gasLimit(), .{
         .authorization_count = authorization_list.len,
         .value = tx.value(),
     });
@@ -1453,10 +2197,12 @@ test "Prague top-level delegated precompile call can use exactly intrinsic gas" 
     try executor.beginTransactionScope(tx_context, tx);
     const result = try executor.runTopLevelTransaction(tx, .{
         .execution = gas_plan.execution,
-        .settlement = transaction.settlementFromGasPlan(.prague, tx.gasLimit(), gas_plan, .{
+        .settlement = default_tx_protocol.settlement.settlementFromGasPlan(.prague, tx.gasLimit(), gas_plan, .{
             .gas_price = 0,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .payer = sender,
+            .value = tx.value(),
         }),
     });
 
@@ -1470,8 +2216,8 @@ test "executor runTopLevelTransaction commits successful call" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -1492,7 +2238,7 @@ test "executor runTopLevelTransaction commits successful call" {
     const result = try executor.runTopLevelTransaction(tx, .{
         .execution_gas = 100_000,
         .settlement = .{
-            .spec = .osaka,
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
             .gas_limit = 100_000,
             .intrinsic_gas = 21_000,
             .intrinsic_state_gas = 0,
@@ -1509,12 +2255,50 @@ test "executor runTopLevelTransaction commits successful call" {
     try std.testing.expectEqual(@as(?Host.TxContext, null), executor.tx_context);
 }
 
+test "executor rejects settlement revision mismatch before execution" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(sender, 100_000);
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+    });
+    defer executor.deinit();
+
+    var sender_account = AccountState.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.accounts.put(sender, sender_account);
+
+    const tx = Transaction{ .call = .{
+        .sender = sender,
+        .recipient = recipient,
+        .gas_limit = 100_000,
+    } };
+    try executor.beginTransactionScope(tx_context, tx);
+    defer executor.closeTransaction();
+
+    try std.testing.expectError(error.SettlementRevisionMismatch, executor.runTopLevelTransaction(tx, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.london),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .coinbase = tx_context.coinbase,
+        },
+    }));
+
+    try std.testing.expectEqual(@as(u64, 0), executor.getAccount(sender).?.nonce);
+}
+
 test "zero-price top-level transaction materializes missing sender" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .frontier,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .frontier,
     });
     defer executor.deinit();
 
@@ -1527,7 +2311,7 @@ test "zero-price top-level transaction materializes missing sender" {
     const result = try executor.runTopLevelTransaction(tx, .{
         .execution_gas = 100_000,
         .settlement = .{
-            .spec = .frontier,
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.frontier),
             .gas_limit = 100_000,
             .intrinsic_gas = 21_000,
             .intrinsic_state_gas = 0,
@@ -1546,8 +2330,8 @@ test "zero-price top-level transaction materializes missing sender" {
 test "executor runTopLevelTransaction increments create nonce after rollback" {
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -1564,7 +2348,7 @@ test "executor runTopLevelTransaction increments create nonce after rollback" {
     const result = try executor.runTopLevelTransaction(tx, .{
         .execution_gas = 100_000,
         .settlement = .{
-            .spec = .osaka,
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
             .gas_limit = 100_000,
             .intrinsic_gas = 53_000,
             .intrinsic_state_gas = 0,
@@ -1580,55 +2364,78 @@ test "executor runTopLevelTransaction increments create nonce after rollback" {
     try std.testing.expectEqual(@as(?Host.TxContext, null), executor.tx_context);
 }
 
-test "recursive call bomb unwinds with default executor" {
-    const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
-    const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
-    const tx_context = testTxContext(sender, 1_000_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+test "protocol definition drives create transaction rollback state gas refund" {
+    const overrides = struct {
+        fn createTransactionRollbackStateGasRefund(revision_value: evmz.eth.Revision) i64 {
+            _ = revision_value;
+            return 11;
+        }
+    };
+    const CreateRollbackRefundProtocol = ethereumProtocolWith("create-rollback-refund", .{
+        .Create = .{ .createTransactionRollbackStateGasRefund = overrides.createTransactionRollbackStateGasRefund },
     });
-    defer executor.deinit();
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
 
-    var sender_account = AccountState.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    const tx = Transaction{ .create = .{
+        .sender = sender,
+        .init_code = &.{},
+        .gas_limit = 100_000,
+    } };
+    const CreateRollbackRefundExecutor = Executor(CreateRollbackRefundProtocol);
+    const FailingEngine = struct {
+        fn execute(
+            ptr: ?*anyopaque,
+            inner: *CreateRollbackRefundExecutor,
+            normalized_tx: Transaction,
+            gas: transaction.ExecutionGas,
+        ) !Interpreter.Result {
+            _ = ptr;
+            _ = inner;
+            _ = normalized_tx;
+            _ = gas;
+            return .{
+                .status = .out_of_gas,
+                .gas_left = 0,
+                .gas_refund = 0,
+                .output_data = &.{},
+            };
+        }
+    };
 
-    const code = evmz.t.bytecode(.{
-        .PUSH1,  0x01,
-        .PUSH1,  0x00,
-        .SLOAD,  .ADD,
-        .PUSH1,  0x00,
-        .SSTORE, .PUSH1,
-        0x00,    .PUSH1,
-        0x00,    .PUSH1,
-        0x00,    .PUSH1,
-        0x00,    .PUSH1,
-        0x00,    .ADDRESS,
-        .PUSH1,  0xe0,
-        .GAS,    .SUB,
-        .CALL,   .PUSH1,
-        0x01,    .SSTORE,
-        .STOP,
+    var custom_executor = CreateRollbackRefundExecutor.init(std.testing.allocator, .{
+        .revision = .prague,
     });
-    var contract_account = AccountState.init(std.testing.allocator);
-    contract_account.balance = 20_000_000;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    defer custom_executor.deinit();
+    try putFundedSender(&custom_executor, sender);
 
-    try executor.beginTransaction(tx_context, sender, contract);
-    const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(979_000), 100_000);
+    try custom_executor.beginTransactionScope(tx_context, tx);
+    const result = try custom_executor.runTopLevelTransactionWithEngine(tx, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 53_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .coinbase = tx_context.coinbase,
+        },
+    }, .{ .execute = FailingEngine.execute });
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(u256, 0x12), try executor.getStorage(contract, 0));
-    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 1));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(i64, 11), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, -11), result.state_gas_spent);
+    try std.testing.expectEqual(@as(u64, 1), custom_executor.getAccount(sender).?.nonce);
 }
 
 test "recursive call bomb unwinds with iterative call runtime" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 1_000_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1679,8 +2486,8 @@ test "iterative call runtime preserves precompile output" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1731,8 +2538,8 @@ test "top-level call transaction executes precompile recipient" {
     const precompile = evmz.precompile.Contract.identity.toAddress();
     const tx_context = testTxContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1766,18 +2573,18 @@ test "legacy precompile calls materialize touched empty account until Spurious D
         .POP,   .STOP,
     });
     const cases = [_]struct {
-        spec: evmz.Spec,
+        revision: evmz.eth.Revision,
         materialized: bool,
         gas_left: i64,
     }{
-        .{ .spec = .frontier, .materialized = true, .gas_left = 64_922 },
-        .{ .spec = .spurious_dragon, .materialized = false, .gas_left = 89_262 },
+        .{ .revision = .frontier, .materialized = true, .gas_left = 64_922 },
+        .{ .revision = .spurious_dragon, .materialized = false, .gas_left = 89_262 },
     };
 
     for (cases) |case| {
         const tx_context = testTxContext(sender, 100_000);
-        var executor = Executor.init(std.testing.allocator, .{
-            .spec = case.spec,
+        var executor = Default.init(std.testing.allocator, .{
+            .revision = case.revision,
         });
         defer executor.deinit();
 
@@ -1824,8 +2631,8 @@ test "prepared call transaction calls to empty account succeed" {
         .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1869,8 +2676,8 @@ test "iterative CALLCODE writes target code in caller storage" {
         .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1920,8 +2727,8 @@ test "iterative DELEGATECALL preserves parent call value" {
         .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -1971,8 +2778,8 @@ test "iterative STATICCALL failure resumes parent with zero result" {
         .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -2021,8 +2828,8 @@ test "prepared call transaction create opcodes deploy code" {
         .PUSH0, .CREATE2, .PUSH1, 0x01,     .SSTORE, .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -2062,8 +2869,8 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
         .PUSH0, .PUSH0, .PUSH0, .GAS, .CREATE2, .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -2107,8 +2914,8 @@ test "iterative trace ends call and create steps after child resume" {
     });
     var recorder = StepOrderRecorder{};
     var sink = recorder.sink();
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
         .trace_sink = &sink,
     });
     defer executor.deinit();
@@ -2152,8 +2959,8 @@ test "iterative trace ends call and create steps after child resume" {
 }
 
 test "top-level transaction execution requires begin tx context" {
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2161,14 +2968,14 @@ test "top-level transaction execution requires begin tx context" {
         error.MissingTxContext,
         executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .legacy(100_000), 0),
     );
-    var amsterdam_executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var amsterdam_executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer amsterdam_executor.deinit();
     try std.testing.expectError(
         error.MissingTxContext,
         amsterdam_executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .{
-            .regular_left = transaction.amsterdam_new_account_state_gas - 1,
+            .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
         }, 1),
     );
     try std.testing.expectError(
@@ -2197,8 +3004,8 @@ test "rollback transaction restores snapshot and closes tx context" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2221,8 +3028,8 @@ test "rollback transaction restores snapshot and closes tx context" {
 test "executor executes top-level create transaction" {
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2247,9 +3054,9 @@ test "executor executes top-level create transaction" {
 }
 
 fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u256) !void {
-    try std.testing.expectEqualSlices(u8, &system_contracts.system_address, &event_log.address);
+    try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &event_log.address);
     try std.testing.expectEqual(@as(usize, 3), event_log.topics.len);
-    try std.testing.expectEqual(transfer_logs.transfer_topic, event_log.topics[0]);
+    try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, event_log.topics[0]);
     try std.testing.expectEqual(evmz.address.toU256(from), event_log.topics[1]);
     try std.testing.expectEqual(evmz.address.toU256(to), event_log.topics[2]);
     try std.testing.expectEqual(@as(usize, 32), event_log.data.len);
@@ -2261,8 +3068,8 @@ fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u2
 test "Amsterdam value transaction emits transfer log" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2273,7 +3080,7 @@ test "Amsterdam value transaction emits transfer log" {
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
         .regular_left = 50_000,
-        .reservoir = transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2284,8 +3091,8 @@ test "Amsterdam value transaction emits transfer log" {
 test "Osaka value transaction does not emit transfer log" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer executor.deinit();
 
@@ -2309,8 +3116,8 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
         .PUSH0, .PUSH0, .REVERT,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2327,7 +3134,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
         .sender = sender,
         .recipient = contract,
         .gas = 90_000,
-        .gas_reservoir = transaction.amsterdam_new_account_state_gas,
+        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     } })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status);
@@ -2343,8 +3150,8 @@ test "Amsterdam CREATE endowment emits transfer log" {
         .PUSH1, 0x00, .PUSH1, 0x00, .PUSH1, 0x07, .CREATE, .POP, .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2360,7 +3167,7 @@ test "Amsterdam CREATE endowment emits transfer log" {
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
-        .reservoir = transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2374,8 +3181,8 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     const beneficiary = evmz.addr(0xcccc);
     const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2391,7 +3198,7 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
-        .reservoir = transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2410,7 +3217,7 @@ fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
     };
 }
 
-fn putFundedSender(executor: *Executor, sender: Address) !void {
+fn putFundedSender(executor: anytype, sender: Address) !void {
     var sender_account = AccountState.init(std.testing.allocator);
     sender_account.balance = 100_000_000;
     try executor.state.accounts.put(sender, sender_account);
@@ -2419,11 +3226,12 @@ fn putFundedSender(executor: *Executor, sender: Address) !void {
 test "Amsterdam raises create runtime code size limit" {
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 20_000_000);
-    const oversized_osaka = initCodeReturningRuntimeSize(Executor.max_code_size + 1);
-    const oversized_amsterdam = initCodeReturningRuntimeSize(Executor.amsterdam_max_code_size + 1);
+    const default_max_code_size = evmz.eth.system.Create.max_code_size;
+    const oversized_osaka = initCodeReturningRuntimeSize(default_max_code_size + 1);
+    const oversized_amsterdam = initCodeReturningRuntimeSize(evmz.eth.system.Create.amsterdam_max_code_size + 1);
 
-    var osaka = Executor.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var osaka = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
     });
     defer osaka.deinit();
     try putFundedSender(&osaka, sender);
@@ -2435,8 +3243,8 @@ test "Amsterdam raises create runtime code size limit" {
     } })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, osaka_result.status);
 
-    var amsterdam = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var amsterdam = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer amsterdam.deinit();
     try putFundedSender(&amsterdam, sender);
@@ -2445,14 +3253,14 @@ test "Amsterdam raises create runtime code size limit" {
         .sender = sender,
         .init_code = &oversized_osaka,
         .gas = 20_000_000,
-        .gas_reservoir = tx_gas.amsterdam_new_account_state_gas + (Executor.max_code_size + 1) * tx_gas.amsterdam_cost_per_state_byte,
+        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas + (default_max_code_size + 1) * evmz.eth.transaction.amsterdam_cost_per_state_byte,
     } })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status);
     try std.testing.expectEqualSlices(u8, &evmz.address.create(sender, 0), &amsterdam_result.address);
-    try std.testing.expectEqual(@as(usize, Executor.max_code_size + 1), amsterdam.getAccount(amsterdam_result.address).?.code.len);
+    try std.testing.expectEqual(@as(usize, default_max_code_size + 1), amsterdam.getAccount(amsterdam_result.address).?.code.len);
 
-    var amsterdam_over = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var amsterdam_over = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer amsterdam_over.deinit();
     try putFundedSender(&amsterdam_over, sender);
@@ -2465,11 +3273,323 @@ test "Amsterdam raises create runtime code size limit" {
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, amsterdam_over_result.status);
 }
 
+test "protocol definition drives create runtime code size limit" {
+    const overrides = struct {
+        fn createCodeSizeLimit(revision_value: evmz.eth.Revision) ?usize {
+            _ = revision_value;
+            return 1;
+        }
+    };
+    const TinyProtocol = ethereumProtocolWith("tiny-code-limit", .{
+        .Create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+    const two_byte_runtime = initCodeReturningRuntimeSize(2);
+
+    const TinyExecutor = Executor(TinyProtocol);
+    var executor = TinyExecutor.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    const result = (try executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &two_byte_runtime,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+}
+
+test "protocol definition drives create runtime prefix rejection" {
+    const overrides = struct {
+        fn rejectsCreateCode(revision_value: evmz.eth.Revision, code: []const u8) bool {
+            _ = revision_value;
+            _ = code;
+            return false;
+        }
+    };
+    const AllowEfProtocol = ethereumProtocolWith("allow-ef-create-code", .{
+        .Create = .{ .rejectsCreateCode = overrides.rejectsCreateCode },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+    const init_code = evmz.t.bytecode(.{
+        .PUSH1, 0xef, .PUSH0, .MSTORE8,
+        .PUSH1, 0x01, .PUSH0, .RETURN,
+    });
+
+    var default_executor = Default.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer default_executor.deinit();
+    try putFundedSender(&default_executor, sender);
+
+    const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &init_code,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.invalid, default_result.status);
+
+    const AllowEfExecutor = Executor(AllowEfProtocol);
+    var custom_executor = AllowEfExecutor.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer custom_executor.deinit();
+    try putFundedSender(&custom_executor, sender);
+
+    const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &init_code,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.success, custom_result.status);
+    try std.testing.expectEqualSlices(u8, &.{0xef}, custom_executor.getAccount(custom_result.address).?.code);
+}
+
+test "protocol definition drives create deposit gas" {
+    const overrides = struct {
+        fn createDepositRegularGas(revision_value: evmz.eth.Revision, runtime_size: i64) ?i64 {
+            _ = revision_value;
+            _ = runtime_size;
+            return 1_000_000;
+        }
+    };
+    const ExpensiveDepositProtocol = ethereumProtocolWith("expensive-create-deposit", .{
+        .Create = .{ .createDepositRegularGas = overrides.createDepositRegularGas },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+    const init_code = initCodeReturningRuntimeSize(1);
+
+    var default_executor = Default.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer default_executor.deinit();
+    try putFundedSender(&default_executor, sender);
+
+    const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &init_code,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.success, default_result.status);
+    try std.testing.expectEqual(@as(usize, 1), default_executor.getAccount(default_result.address).?.code.len);
+
+    const ExpensiveDepositExecutor = Executor(ExpensiveDepositProtocol);
+    var custom_executor = ExpensiveDepositExecutor.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer custom_executor.deinit();
+    try putFundedSender(&custom_executor, sender);
+
+    const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &init_code,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status);
+}
+
+test "protocol definition drives created account initial nonce" {
+    const overrides = struct {
+        fn createInitialNonce(revision_value: evmz.eth.Revision) u64 {
+            _ = revision_value;
+            return 7;
+        }
+    };
+    const NonceSevenProtocol = ethereumProtocolWith("create-nonce-seven", .{
+        .Create = .{ .createInitialNonce = overrides.createInitialNonce },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+    const init_code = initCodeReturningRuntimeSize(1);
+
+    const NonceSevenExecutor = Executor(NonceSevenProtocol);
+    var executor = NonceSevenExecutor.init(std.testing.allocator, .{
+        .revision = .shanghai,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    const result = (try executor.runStandalone(tx_context, .{ .create = .{
+        .sender = sender,
+        .init_code = &init_code,
+        .gas = 100_000,
+    } })).expectCreate();
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(u64, 7), executor.getAccount(result.address).?.nonce);
+}
+
+test "protocol definition drives precompile warm access" {
+    const NoPrecompiles = struct {
+        pub const Entry = evmz.eth.Precompile.Entry;
+
+        pub fn resolve(revision_value: evmz.eth.Revision, target: Address) ?Entry {
+            _ = revision_value;
+            _ = target;
+            return null;
+        }
+
+        pub fn execute(
+            allocator: std.mem.Allocator,
+            revision_value: evmz.eth.Revision,
+            entry: Entry,
+            input_data: []const u8,
+            gas: i64,
+        ) evmz.precompile.Error!evmz.precompile.Result {
+            _ = allocator;
+            _ = revision_value;
+            _ = entry;
+            _ = input_data;
+            _ = gas;
+            return error.NotImplemented;
+        }
+    };
+    const NoPrecompileProtocol = ethereumProtocolWith("no-precompiles", .{
+        .Precompile = NoPrecompiles,
+    });
+    const precompile_address = evmz.addr(0x01);
+
+    var default_executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
+    });
+    defer default_executor.deinit();
+    var default_host = default_executor.host();
+    try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(precompile_address));
+
+    const NoPrecompileExecutor = Executor(NoPrecompileProtocol);
+    var custom_executor = NoPrecompileExecutor.init(std.testing.allocator, .{
+        .revision = .berlin,
+    });
+    defer custom_executor.deinit();
+    var custom_host = custom_executor.host();
+    try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(precompile_address));
+}
+
+test "protocol definition drives precompile execution" {
+    const CustomPrecompileOverrides = struct {
+        const custom_address = evmz.addr(0x1234);
+
+        pub const Precompile = struct {
+            pub const Entry = enum { custom };
+
+            pub fn resolve(revision_value: evmz.eth.Revision, target: Address) ?Entry {
+                _ = revision_value;
+                if (!std.mem.eql(u8, &target, &custom_address)) return null;
+                return .custom;
+            }
+
+            pub fn execute(
+                allocator: std.mem.Allocator,
+                revision_value: evmz.eth.Revision,
+                entry: Entry,
+                input_data: []const u8,
+                gas: i64,
+            ) evmz.precompile.Error!evmz.precompile.Result {
+                _ = revision_value;
+                _ = entry;
+                _ = input_data;
+                return .{
+                    .status = .success,
+                    .output_data = try allocator.dupe(u8, &.{0xaa}),
+                    .gas_left = gas - 7,
+                };
+            }
+        };
+    };
+    const CustomPrecompileProtocol = ethereumProtocolWith("custom-precompile-execution", .{
+        .Precompile = CustomPrecompileOverrides.Precompile,
+    });
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+
+    const CustomPrecompileExecutor = Executor(CustomPrecompileProtocol);
+    var executor = CustomPrecompileExecutor.init(std.testing.allocator, .{
+        .revision = .cancun,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+        .sender = sender,
+        .recipient = CustomPrecompileOverrides.custom_address,
+        .input = &.{0xbb},
+        .gas = 1_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 993), result.gas_left);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+}
+
+test "protocol definition drives selfdestruct host policy" {
+    const overrides = struct {
+        fn selfDestructPolicy(
+            revision_value: evmz.eth.Revision,
+            same_address: bool,
+            created_in_transaction: bool,
+        ) evmz.protocol.interface.SelfDestructPolicy {
+            _ = revision_value;
+            _ = same_address;
+            _ = created_in_transaction;
+            return .{
+                .clear_balance = false,
+                .reset_nonce = false,
+                .mark_selfdestructed = false,
+            };
+        }
+
+        fn selfDestructRefundGas(revision_value: evmz.eth.Revision) i64 {
+            _ = revision_value;
+            return 7;
+        }
+    };
+    const KeepSelfDestructBalanceProtocol = ethereumProtocolWith("keep-selfdestruct-balance", .{
+        .SelfDestruct = .{
+            .selfDestructPolicy = overrides.selfDestructPolicy,
+            .selfDestructRefundGas = overrides.selfDestructRefundGas,
+        },
+    });
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const beneficiary = evmz.addr(0xcccc);
+    const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
+
+    const KeepSelfDestructExecutor = Executor(KeepSelfDestructBalanceProtocol);
+    var executor = KeepSelfDestructExecutor.init(std.testing.allocator, .{
+        .revision = .cancun,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var contract_account = AccountState.init(std.testing.allocator);
+    contract_account.balance = 7;
+    try contract_account.setCode(std.testing.allocator, &code);
+    try executor.state.accounts.put(contract, contract_account);
+
+    _ = try executor.getOrCreateAccount(beneficiary);
+
+    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 7), result.gas_refund);
+    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(contract).?.balance);
+    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(beneficiary).?.balance);
+    try std.testing.expect(!executor.state.selfdestructed_accounts.contains(contract));
+}
+
 test "create warms created address from Berlin" {
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2493,8 +3613,8 @@ test "callcode with insufficient balance fails without executing target code" {
     const tx_context = testTxContext(caller, 100_000);
     var recorder = CheckpointTraceRecorder{};
     var sink = recorder.sink();
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
         .trace_sink = &sink,
     });
     defer executor.deinit();
@@ -2532,8 +3652,8 @@ test "create address collision closes checkpoint without rolling back nonce or w
     const tx_context = testTxContext(sender, 100_000);
     var recorder = CheckpointTraceRecorder{};
     var sink = recorder.sink();
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
         .trace_sink = &sink,
     });
     defer executor.deinit();
@@ -2563,8 +3683,8 @@ test "call-like message at max depth still executes in recipient storage" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .frontier,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .frontier,
     });
     defer executor.deinit();
 
@@ -2597,8 +3717,8 @@ test "value call at max depth returns stipend without child execution" {
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2643,8 +3763,8 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
     const tx_context = testTxContext(caller, 300_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2673,7 +3793,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
-        .gas_reservoir = transaction.amsterdam_new_account_state_gas,
+        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
         .recipient = contract,
         .sender = caller,
         .input_data = &.{},
@@ -2682,7 +3802,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expect(!try executor.state.accountExists(recipient));
 }
@@ -2691,8 +3811,8 @@ test "Amsterdam create at max depth refills new-account state gas" {
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 300_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -2710,7 +3830,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
-        .gas_reservoir = transaction.amsterdam_new_account_state_gas,
+        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
         .recipient = contract,
         .sender = caller,
         .input_data = &.{},
@@ -2719,7 +3839,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
     })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(u64, 0), executor.getAccount(contract).?.nonce);
 }
@@ -2728,8 +3848,8 @@ test "exceptional child call burns forwarded gas" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2761,8 +3881,8 @@ test "exceptional child call rolls back storage via checkpoint" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2793,8 +3913,8 @@ test "exceptional child call rolls back storage via checkpoint" {
 test "contract creation rejects EF-prefixed runtime code from London" {
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .london,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .london,
     });
     defer executor.deinit();
 
@@ -2819,8 +3939,8 @@ test "selfdestruct charges new-account cost for nonzero balance" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .cancun,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .cancun,
     });
     defer executor.deinit();
 
@@ -2845,17 +3965,17 @@ test "TangerineWhistle selfdestruct charges new-account cost without balance tra
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{ .PUSH1, 0x00, .SELFDESTRUCT });
     const cases = [_]struct {
-        spec: evmz.Spec,
+        revision: evmz.eth.Revision,
         gas_left: i64,
     }{
-        .{ .spec = .tangerine_whistle, .gas_left = 69_997 },
-        .{ .spec = .spurious_dragon, .gas_left = 94_997 },
+        .{ .revision = .tangerine_whistle, .gas_left = 69_997 },
+        .{ .revision = .spurious_dragon, .gas_left = 94_997 },
     };
 
     for (cases) |case| {
         const tx_context = testTxContext(sender, 100_000);
-        var executor = Executor.init(std.testing.allocator, .{
-            .spec = case.spec,
+        var executor = Default.init(std.testing.allocator, .{
+            .revision = case.revision,
         });
         defer executor.deinit();
 
@@ -2880,17 +4000,17 @@ test "SELFDESTRUCT refund is removed at London" {
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{ .PUSH1, 0x00, .SELFDESTRUCT });
     const cases = [_]struct {
-        spec: evmz.Spec,
+        revision: evmz.eth.Revision,
         refund: i64,
     }{
-        .{ .spec = .berlin, .refund = 24_000 },
-        .{ .spec = .london, .refund = 0 },
+        .{ .revision = .berlin, .refund = 24_000 },
+        .{ .revision = .london, .refund = 0 },
     };
 
     for (cases) |case| {
         const tx_context = testTxContext(sender, 100_000);
-        var executor = Executor.init(std.testing.allocator, .{
-            .spec = case.spec,
+        var executor = Default.init(std.testing.allocator, .{
+            .revision = case.revision,
         });
         defer executor.deinit();
 
@@ -2912,8 +4032,8 @@ test "SELFDESTRUCT refund is removed at London" {
 
 test "active precompiles are warm but not existing state accounts" {
     const precompile_address = evmz.addr(2);
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
     });
     defer executor.deinit();
 
@@ -2929,9 +4049,9 @@ test "active precompiles are warm but not existing state accounts" {
 test "delegated precompile targets are warm" {
     const authority = evmz.addr(0xbbbb);
     const precompile_address = evmz.addr(2);
-    for ([_]evmz.Spec{ .prague, .amsterdam }) |spec| {
-        var executor = Executor.init(std.testing.allocator, .{
-            .spec = spec,
+    for ([_]evmz.eth.Revision{ .prague, .amsterdam }) |revision_value| {
+        var executor = Default.init(std.testing.allocator, .{
+            .revision = revision_value,
         });
         defer executor.deinit();
 
@@ -2953,8 +4073,8 @@ test "state-only trace sink records state without step tracing" {
 
     var recorder = StateOnlyTraceRecorder{};
     var sink = recorder.sink();
-    var executor = Executor.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
         .trace_sink = &sink,
     });
     defer executor.deinit();
@@ -3129,23 +4249,9 @@ const CheckpointTraceRecorder = struct {
     }
 };
 
-fn testTxContext(origin: Address, gas_limit: u64) Host.TxContext {
-    return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = origin,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = gas_limit,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    };
-}
+const testTxContext = evmz.t.defaultTxContext;
 
-fn executeHostCall(executor: *Executor, msg: Host.Message) !Host.Result {
+fn executeHostCall(executor: anytype, msg: Host.Message) !Host.Result {
     var host_iface = executor.host();
     return host_iface.call(msg);
 }

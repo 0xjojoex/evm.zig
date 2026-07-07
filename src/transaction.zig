@@ -1,80 +1,70 @@
 const std = @import("std");
 
-const blob = @import("./transaction/blob.zig");
-const gas = @import("./transaction/gas.zig");
-const settlement = @import("./transaction/settlement.zig");
-const validation = @import("./transaction/validation.zig");
-const transaction = @import("./transaction/Transaction.zig");
+const blob_mod = @import("./transaction/blob.zig");
+const eth_transaction = @import("./eth/transaction.zig");
+const gas_mod = @import("./transaction/gas.zig");
+const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
+const prepare_mod = @import("./transaction/prepare.zig");
+const settlement_mod = @import("./transaction/settlement.zig");
+const validation_mod = @import("./transaction/validation.zig");
+const transaction_mod = @import("./transaction/Transaction.zig");
 
-pub const blob_gas_per_blob = blob.blob_gas_per_blob;
-pub const min_blob_base_fee = blob.min_blob_base_fee;
-pub const blob_base_cost = blob.blob_base_cost;
-pub const cancun_blob_base_fee_update_fraction = blob.cancun_blob_base_fee_update_fraction;
-pub const prague_blob_base_fee_update_fraction = blob.prague_blob_base_fee_update_fraction;
-pub const blob_base_fee_update_fraction = blob.blob_base_fee_update_fraction;
-pub const authorization_intrinsic_gas = gas.authorization_intrinsic_gas;
-pub const authorization_existing_account_refund_gas = gas.authorization_existing_account_refund_gas;
-pub const access_list_address_gas = gas.access_list_address_gas;
-pub const access_list_storage_key_gas = gas.access_list_storage_key_gas;
-pub const access_list_address_data_gas = gas.access_list_address_data_gas;
-pub const access_list_storage_key_data_gas = gas.access_list_storage_key_data_gas;
-pub const create_transaction_gas = gas.create_transaction_gas;
-pub const amsterdam_new_account_state_gas = gas.amsterdam_new_account_state_gas;
-pub const initcode_word_gas = gas.initcode_word_gas;
-pub const max_initcode_size = gas.max_initcode_size;
-pub const amsterdam_max_initcode_size = gas.amsterdam_max_initcode_size;
-pub const max_transaction_gas_limit = gas.max_transaction_gas_limit;
-pub const maxInitcodeSize = gas.maxInitcodeSize;
+pub const AccessListCounts = transaction_mod.AccessListCounts;
+pub const BlobSchedule = blob_mod.BlobSchedule;
+pub const ExcessBlobGasInput = blob_mod.ExcessBlobGasInput;
+pub const TxKind = transaction_mod.TxKind;
+pub const SenderCodeKind = transaction_mod.SenderCodeKind;
+pub const ValidationError = validation_mod.ValidationError;
+pub const IntrinsicGasOptions = gas_mod.IntrinsicGasOptions;
+pub const GasCharge = gas_mod.GasCharge;
+pub const InitialGas = gas_mod.InitialGas;
+pub const ExecutionGas = gas_mod.ExecutionGas;
+pub const GasPlan = gas_mod.GasPlan;
+pub const AccessListEntry = transaction_mod.AccessListEntry;
+pub const AuthorizationTuple = transaction_mod.AuthorizationTuple;
+pub const FeeFields = transaction_mod.FeeFields;
+pub const ProtocolTransaction = transaction_mod.ProtocolTransaction;
+pub const TransactionView = transaction_mod.TransactionView;
+pub const EnvFacts = transaction_mod.EnvFacts;
+pub const StateFacts = transaction_mod.StateFacts;
+pub const ExecutionContext = transaction_mod.ExecutionContext;
+pub const CallTransaction = transaction_mod.CallTransaction;
+pub const CreateTransaction = transaction_mod.CreateTransaction;
+pub const ExecutionEnvelopeInput = transaction_mod.ExecutionEnvelopeInput;
+pub const NormalizedTransactionInput = transaction_mod.NormalizedTransactionInput;
+pub const ExecutionEnvelope = transaction_mod.ExecutionEnvelope;
+pub const Transaction = transaction_mod.Transaction;
+pub const FeeInput = settlement_mod.FeeInput;
+pub const Settlement = settlement_mod.Settlement;
+pub const SettlementFees = settlement_mod.SettlementFees;
+pub const ExecutionGasResult = settlement_mod.ExecutionGasResult;
+pub const SettlementCosts = settlement_mod.SettlementCosts;
+pub const SettlementPrecharge = settlement_mod.Precharge;
 
-pub const AccessListCounts = transaction.AccessListCounts;
-pub const BlobSchedule = blob.BlobSchedule;
-pub const ExcessBlobGasInput = blob.ExcessBlobGasInput;
-pub const TxKind = transaction.TxKind;
-pub const SenderCodeKind = validation.SenderCodeKind;
-pub const ValidationError = validation.ValidationError;
-pub const IntrinsicGasOptions = gas.IntrinsicGasOptions;
-pub const GasCharge = gas.GasCharge;
-pub const InitialGas = gas.InitialGas;
-pub const ExecutionGas = gas.ExecutionGas;
-pub const GasPlan = gas.GasPlan;
-pub const ValidationInput = validation.ValidationInput;
-pub const AccessListEntry = transaction.AccessListEntry;
-pub const AuthorizationTuple = transaction.AuthorizationTuple;
-pub const CallTransaction = transaction.CallTransaction;
-pub const CreateTransaction = transaction.CreateTransaction;
-pub const NormalizedTransactionInput = transaction.NormalizedTransactionInput;
-pub const Transaction = transaction.Transaction;
-pub const FeeInput = settlement.FeeInput;
-pub const Settlement = settlement.Settlement;
-pub const SettlementFees = settlement.SettlementFees;
-pub const ExecutionGasResult = settlement.ExecutionGasResult;
-pub const SettlementCosts = settlement.SettlementCosts;
+pub const protocolTransactionView = transaction_mod.protocolTransactionView;
+pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
+pub const executionContext = transaction_mod.executionContext;
+pub const executionEnvelope = transaction_mod.executionEnvelope;
+pub const normalizedTransaction = transaction_mod.normalizedTransaction;
+pub const accessListCounts = gas_mod.accessListCounts;
+pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;
+pub const calcExcessBlobGasForSchedule = blob_mod.calcExcessBlobGasForSchedule;
+pub const fakeExponential = blob_mod.fakeExponential;
+pub const checkedGasCost = settlement_mod.checkedGasCost;
+pub const Prepared = transaction_mod.Prepared;
+pub const PrepareInput = transaction_mod.PrepareInput;
+pub const PrepareResult = transaction_mod.PrepareResult;
 
-pub const normalizedTransaction = transaction.normalizedTransaction;
-pub const intrinsicGas = gas.intrinsicGas;
-pub const intrinsicGasForTransaction = gas.intrinsicGasForTransaction;
-pub const accessListCounts = gas.accessListCounts;
-pub const gasPlan = gas.gasPlan;
-pub const minimumGas = gas.minimumGas;
-pub const minimumGasForTransaction = gas.minimumGasForTransaction;
-pub const floorGas = gas.floorGas;
-pub const floorGasForTransaction = gas.floorGasForTransaction;
-pub const validate = validation.validate;
-pub const maxPrepaymentCost = validation.maxPrepaymentCost;
-pub const prepaymentCost = validation.prepaymentCost;
-pub const calldataTokenCount = gas.calldataTokenCount;
-pub const accessListDataCost = gas.accessListDataCost;
-pub const blobSchedule = blob.blobSchedule;
-pub const blobBaseFee = blob.blobBaseFee;
-pub const blobBaseFeeForSpec = blob.blobBaseFeeForSpec;
-pub const blobBaseFeeForSchedule = blob.blobBaseFeeForSchedule;
-pub const calcExcessBlobGas = blob.calcExcessBlobGas;
-pub const calcExcessBlobGasForSchedule = blob.calcExcessBlobGasForSchedule;
-pub const fakeExponential = blob.fakeExponential;
-pub const effectivePriorityFee = settlement.effectivePriorityFee;
-pub const settlementFromGasPlan = settlement.settlementFromGasPlan;
-pub const settlementCosts = settlement.settlementCosts;
-pub const checkedGasCost = settlement.checkedGasCost;
+pub fn For(comptime ProtocolType: type) type {
+    return struct {
+        pub const Protocol = ProtocolType;
+        pub const blob = blob_mod.For(ProtocolType);
+        pub const gas = gas_mod.For(ProtocolType);
+        pub const prepare = prepare_mod.For(ProtocolType);
+        pub const settlement = settlement_mod.For(ProtocolType);
+        pub const validation = validation_mod.For(ProtocolType);
+    };
+}
 
 test "transaction facade exposes normalized transaction shape" {
     const addr = @import("./address.zig").addr;
@@ -116,6 +106,35 @@ test "transaction facade exposes normalized transaction shape" {
     try std.testing.expectEqual(@as(usize, 1), tx.authorizationCount());
 }
 
+test "transaction bound namespace carries comptime protocol" {
+    const DoubleBlobProtocol = struct {
+        pub const Revision = enum { test_revision };
+
+        pub const Transaction = struct {
+            pub fn blobSchedule(revision: Revision) ?BlobSchedule {
+                _ = revision;
+                return .{
+                    .target = 3,
+                    .max = 6,
+                    .max_per_transaction = 6,
+                    .gas_per_blob = eth_transaction.blob_gas_per_blob * 2,
+                    .min_base_fee = eth_transaction.min_blob_base_fee,
+                    .execution_base_cost = eth_transaction.blob_base_cost,
+                    .base_fee_update_fraction = eth_transaction.cancun_blob_base_fee_update_fraction,
+                    .reserve_price_active = false,
+                };
+            }
+        };
+    };
+    const Bound = For(DoubleBlobProtocol);
+
+    try std.testing.expectEqual(
+        @as(u256, 10 + eth_transaction.blob_gas_per_blob * 2),
+        Bound.validation.prepaymentCost(.test_revision, 10, 1, 1, 1).?,
+    );
+}
+
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(gas_bound_plan);
 }

@@ -357,7 +357,7 @@ pub fn parseBlobHashes(allocator: std.mem.Allocator, tx: *const std.json.ObjectM
     return result;
 }
 
-pub fn parseStateFork(name: []const u8) ?evmz.Spec {
+pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
     if (std.ascii.eqlIgnoreCase(name, "Frontier")) return .frontier;
     if (std.ascii.eqlIgnoreCase(name, "Homestead")) return .homestead;
     if (std.ascii.eqlIgnoreCase(name, "EIP150")) return .tangerine_whistle;
@@ -381,7 +381,7 @@ pub fn parseStateFork(name: []const u8) ?evmz.Spec {
     return null;
 }
 
-pub fn parseBenchmarkFork(name: []const u8) ?evmz.Spec {
+pub fn parseBenchmarkFork(name: []const u8) ?evmz.eth.Revision {
     if (std.ascii.eqlIgnoreCase(name, "Shanghai")) return .shanghai;
     if (std.ascii.eqlIgnoreCase(name, "Cancun")) return .cancun;
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
@@ -400,9 +400,9 @@ fn hexDigit(char: u8) !u8 {
 }
 
 test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
-    try std.testing.expectEqual(evmz.Spec.petersburg, parseStateFork("ConstantinopleFix"));
-    try std.testing.expectEqual(evmz.Spec.osaka, parseStateFork("Osaka"));
-    try std.testing.expectEqual(evmz.Spec.amsterdam, parseStateFork("Amsterdam"));
-    try std.testing.expectEqual(evmz.Spec.osaka, parseBenchmarkFork("Osaka"));
-    try std.testing.expectEqual(evmz.Spec.amsterdam, parseBenchmarkFork("Amsterdam"));
+    try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
+    try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
+    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
+    try std.testing.expectEqual(evmz.eth.Revision.osaka, parseBenchmarkFork("Osaka"));
+    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseBenchmarkFork("Amsterdam"));
 }

@@ -1,10 +1,17 @@
 const std = @import("std");
 const evmz = @import("evmz");
+const build_options = @import("build_options");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
-const Executor = evmz.executor;
+const Ethereum = evmz.eth;
+const BenchSupport = Ethereum.Support.range(
+    parseBuildSpec(build_options.support_min),
+    parseBuildSpec(build_options.support_max),
+);
+const BenchProtocol = evmz.Protocol(Ethereum.definition, .{ .support = BenchSupport });
+const Executor = evmz.Executor(BenchProtocol);
 const CountingHost = common.CountingHost;
 const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;
@@ -16,8 +23,10 @@ const Options = struct {
     contract_code_path: ?[]const u8 = null,
     call_data_hex: ?[]const u8 = null,
     num_runs: ?usize = null,
-    spec: evmz.Spec = .latest,
+    gas_limit: ?u64 = null,
+    spec: evmz.eth.Revision = .latest,
     engine: Engine = .evmz,
+    executor_resources: ExecutorResources = .growable,
     host_profile: ?HostProfile = null,
     summary: bool = false,
 };
@@ -27,8 +36,10 @@ const ResolvedOptions = struct {
     contract_code_path: []const u8,
     call_data_hex: []const u8,
     num_runs: usize,
-    spec: evmz.Spec,
+    gas_limit: u64,
+    spec: evmz.eth.Revision,
     engine: Engine,
+    executor_resources: ExecutorResources,
     host_profile: HostProfile,
     summary: bool,
 };
@@ -36,6 +47,22 @@ const ResolvedOptions = struct {
 const Engine = enum {
     evmz,
     evmz_executor,
+};
+
+const ExecutorResources = enum {
+    growable,
+    bounded_frames,
+    bounded_frame_memory,
+    bounded_scratch,
+    bounded_access,
+    bounded_journal,
+    bounded_state,
+    bounded_state_small,
+    bounded_logs,
+    bounded_overlay,
+    bounded_overlay_small,
+    bounded_small,
+    bounded,
 };
 
 const ExecutorRuntimeRunner = struct {
@@ -47,12 +74,15 @@ const ExecutorRuntimeRunner = struct {
     fn init(
         allocator: std.mem.Allocator,
         runtime_code: []const u8,
-        spec: evmz.Spec,
+        spec: evmz.eth.Revision,
+        executor_resources: ExecutorResources,
     ) !ExecutorRuntimeRunner {
-        var executor = Executor.init(allocator, .{
-            .spec = spec,
-            .config = .base,
-        });
+        var executor = switch (executor_resources) {
+            .growable => Executor.init(allocator, .{ .revision = spec }),
+            else => try Executor.initWithRuntimeResources(allocator, .{
+                .revision = spec,
+            }, .{ .bounded = benchBoundedRuntimeResources(executor_resources) }),
+        };
         errdefer executor.deinit();
 
         const sender = try executor.getOrCreateAccount(common.caller_address);
@@ -81,9 +111,9 @@ const ExecutorRuntimeRunner = struct {
         self.executor.deinit();
     }
 
-    fn timeRuntimeCall(self: *ExecutorRuntimeRunner, call_data: []const u8) !u64 {
+    fn timeRuntimeCall(self: *ExecutorRuntimeRunner, call_data: []const u8, gas_limit: u64) !u64 {
         try self.executor.restore(&self.baseline);
-        try self.executor.beginTransaction(executorTxContext(), common.caller_address, common.contract_address);
+        try self.executor.beginTransaction(executorTxContext(gas_limit), common.caller_address, common.contract_address);
 
         var pre_execution = try self.executor.snapshot();
         defer pre_execution.deinit(self.allocator);
@@ -94,7 +124,7 @@ const ExecutorRuntimeRunner = struct {
             .sender = common.caller_address,
             .recipient = common.contract_address,
             .input = call_data,
-            .gas = @intCast(common.max_gas),
+            .gas = gas_limit,
             .value = 0,
         };
         const result = try self.executor.executePreparedCallTransaction(call_options);
@@ -103,7 +133,7 @@ const ExecutorRuntimeRunner = struct {
         if (Executor.executionRolledBack(result.status)) {
             try self.executor.restore(&pre_execution);
         } else {
-            try self.executor.finalizeTransaction();
+            try self.executor.commitTransaction();
         }
         if (result.status != .success) return error.CallFailed;
 
@@ -149,6 +179,11 @@ pub fn main(init: std.process.Init) !void {
             options.num_runs = try common.parseNonZeroUsize(value);
         } else if (common.stripPrefix(arg, "--num-runs=")) |value| {
             options.num_runs = try common.parseNonZeroUsize(value);
+        } else if (std.mem.eql(u8, arg, "--gas-limit")) {
+            const value = args.next() orelse return error.MissingGasLimit;
+            options.gas_limit = try parseNonZeroU64(value);
+        } else if (common.stripPrefix(arg, "--gas-limit=")) |value| {
+            options.gas_limit = try parseNonZeroU64(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
             options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
@@ -159,6 +194,11 @@ pub fn main(init: std.process.Init) !void {
             options.engine = parseEngine(value) orelse return error.InvalidEngine;
         } else if (common.stripPrefix(arg, "--engine=")) |value| {
             options.engine = parseEngine(value) orelse return error.InvalidEngine;
+        } else if (std.mem.eql(u8, arg, "--executor-resources")) {
+            const value = args.next() orelse return error.MissingExecutorResources;
+            options.executor_resources = parseExecutorResources(value) orelse return error.InvalidExecutorResources;
+        } else if (common.stripPrefix(arg, "--executor-resources=")) |value| {
+            options.executor_resources = parseExecutorResources(value) orelse return error.InvalidExecutorResources;
         } else if (std.mem.eql(u8, arg, "--host-profile")) {
             const value = args.next() orelse return error.MissingHostProfile;
             options.host_profile = common.parseHostProfile(value) orelse return error.InvalidHostProfile;
@@ -184,6 +224,13 @@ pub fn main(init: std.process.Init) !void {
         printUsage();
         return error.MissingContractCodePath;
     }
+    if (!BenchProtocol.support.contains(resolved.spec)) {
+        std.debug.print(
+            "spec {s} is outside compiled support range {s}..{s}\n",
+            .{ @tagName(resolved.spec), @tagName(BenchProtocol.support.min), @tagName(BenchProtocol.support.max) },
+        );
+        return error.SpecOutsideSupportRange;
+    }
 
     const contract_code_hex = try std.Io.Dir.cwd().readFileAlloc(
         init.io,
@@ -202,12 +249,12 @@ pub fn main(init: std.process.Init) !void {
     var deploy_host = CountingHost.init(allocator, resolved.host_profile);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec, resolved.engine);
+    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec);
     defer allocator.free(runtime_code);
     try common.rejectNullHostTouches(resolved.host_profile, deploy_host.counters);
 
     var executor_runner: ?ExecutorRuntimeRunner = if (isExecutorEngine(resolved.engine))
-        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.spec)
+        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.spec, resolved.executor_resources)
     else
         null;
     defer {
@@ -222,9 +269,9 @@ pub fn main(init: std.process.Init) !void {
         var run_host_iface = run_host.host();
 
         const elapsed_ns = if (executor_runner) |*runner|
-            try runner.timeRuntimeCall(call_data)
+            try runner.timeRuntimeCall(call_data, resolved.gas_limit)
         else
-            try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.spec, resolved.engine);
+            try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.spec, resolved.gas_limit);
         try common.rejectNullHostTouches(resolved.host_profile, run_host.counters);
         timed_counters.add(run_host.counters);
 
@@ -235,13 +282,16 @@ pub fn main(init: std.process.Init) !void {
 
     if (resolved.summary) {
         std.debug.print(
-            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
+            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} support={s}..{s} gas_limit={d} runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
             .{
                 resolved.fixture_dir orelse "",
                 engineName(resolved.engine),
-                measureScopeName(resolved.engine),
+                measureScopeName(resolved),
                 @tagName(resolved.host_profile),
                 @tagName(resolved.spec),
+                @tagName(BenchProtocol.support.min),
+                @tagName(BenchProtocol.support.max),
+                resolved.gas_limit,
                 runtime_code.len,
                 deploy_host.counters.total(),
                 timed_counters.total(),
@@ -263,11 +313,17 @@ fn printUsage() void {
         \\  --contract-code-path <path>   init-code hex file to deploy once
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
-        \\  --spec <name>                 fork spec, default latest
+        \\  --gas-limit <n>               finite gas for each timed runtime call, default maxInt(i64)
+        \\  --spec <name>                 fork spec, default latest; must be inside compiled support range
         \\  --engine <name>               evmz, evmz-executor
+        \\  --executor-resources <mode>   growable, bounded, or bounded-* probe mode; evmz-executor only
         \\  --host-profile <null|mock>    host boundary, default null
         \\  --summary                     print host callback counts to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp      opt into std.heap.smp_allocator for allocator probes
+        \\
+        \\Build options:
+        \\  -Dbench-support-min=<name>    compiled support range minimum, default frontier
+        \\  -Dbench-support-max=<name>    compiled support range maximum, default latest
         \\
         \\Scopes:
         \\  evmz times direct Interpreter.execute with metadata prepared before timing
@@ -280,7 +336,12 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
     var contract_code_path = options.contract_code_path;
     var call_data_hex = options.call_data_hex;
     var num_runs = options.num_runs;
+    var gas_limit = options.gas_limit;
     var host_profile = options.host_profile;
+
+    if (options.engine != .evmz_executor and options.executor_resources != .growable) {
+        return error.ExecutorResourcesRequireExecutorEngine;
+    }
 
     if (options.fixture_dir) |fixture_dir| {
         if (contract_code_path == null) {
@@ -292,6 +353,11 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
         if (num_runs == null) {
             if (try readOptionalFixtureText(io, allocator, fixture_dir, "num-runs.txt")) |text| {
                 num_runs = try parseFixtureUsize(text);
+            }
+        }
+        if (gas_limit == null) {
+            if (try readOptionalFixtureText(io, allocator, fixture_dir, "gas-limit.txt")) |text| {
+                gas_limit = try parseFixtureU64(text);
             }
         }
         if (host_profile == null) {
@@ -306,8 +372,10 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
         .contract_code_path = contract_code_path orelse return error.MissingContractCodePath,
         .call_data_hex = call_data_hex orelse "",
         .num_runs = num_runs orelse 1,
+        .gas_limit = gas_limit orelse defaultGasLimit(),
         .spec = options.spec,
         .engine = options.engine,
+        .executor_resources = options.executor_resources,
         .host_profile = host_profile orelse .null,
         .summary = options.summary,
     };
@@ -315,6 +383,13 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
 
 fn parseEngine(value: []const u8) ?Engine {
     inline for (std.meta.fields(Engine)) |field| {
+        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    }
+    return null;
+}
+
+fn parseExecutorResources(value: []const u8) ?ExecutorResources {
+    inline for (std.meta.fields(ExecutorResources)) |field| {
         if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
     }
     return null;
@@ -334,20 +409,152 @@ fn isExecutorEngine(engine: Engine) bool {
     };
 }
 
-fn evmzConfig(engine: Engine) evmz.Config {
-    return switch (engine) {
-        .evmz, .evmz_executor => .base,
-    };
-}
-
-fn measureScopeName(engine: Engine) []const u8 {
-    return switch (engine) {
+fn measureScopeName(options: ResolvedOptions) []const u8 {
+    return switch (options.engine) {
         .evmz => "interpreter-prepared-execute",
-        .evmz_executor => "executor-prepared-call",
+        .evmz_executor => switch (options.executor_resources) {
+            .growable => "executor-prepared-call-growable",
+            .bounded_frames => "executor-prepared-call-bounded-frames",
+            .bounded_frame_memory => "executor-prepared-call-bounded-frame-memory",
+            .bounded_scratch => "executor-prepared-call-bounded-scratch",
+            .bounded_access => "executor-prepared-call-bounded-access",
+            .bounded_journal => "executor-prepared-call-bounded-journal",
+            .bounded_state => "executor-prepared-call-bounded-state",
+            .bounded_state_small => "executor-prepared-call-bounded-state-small",
+            .bounded_logs => "executor-prepared-call-bounded-logs",
+            .bounded_overlay => "executor-prepared-call-bounded-overlay",
+            .bounded_overlay_small => "executor-prepared-call-bounded-overlay-small",
+            .bounded_small => "executor-prepared-call-bounded-small",
+            .bounded => "executor-prepared-call-bounded",
+        },
     };
 }
 
-fn executorTxContext() Host.TxContext {
+fn benchBoundedRuntimeResources(resources: ExecutorResources) Executor.BoundedRuntimeResources {
+    var bounded = Executor.BoundedRuntimeResources{
+        .max_live_frames = Executor.default_max_live_frames,
+    };
+
+    switch (resources) {
+        .growable => unreachable,
+        .bounded_frames => {},
+        .bounded_frame_memory => {
+            bounded.memory_bytes_per_frame = 16 * 1024;
+            bounded.io_bytes_per_frame = 16 * 1024;
+            bounded.result_bytes = 16 * 1024;
+        },
+        .bounded_scratch => {
+            bounded.scratch_bytes_per_frame = 64 * 1024;
+        },
+        .bounded_access => {
+            bounded.access = broadAccessResources();
+        },
+        .bounded_journal => {
+            bounded.journal_entries = 64 * 1024;
+        },
+        .bounded_state => {
+            bounded.state = broadStateResources();
+        },
+        .bounded_state_small => {
+            bounded.state = smallStateResources();
+        },
+        .bounded_logs => {
+            bounded.logs = broadLogResources();
+        },
+        .bounded_overlay => {
+            bounded.logs = broadLogResources();
+            bounded.journal_entries = 64 * 1024;
+            bounded.access = broadAccessResources();
+            bounded.state = broadStateResources();
+            bounded.transient_storage_entries = 64 * 1024;
+        },
+        .bounded_overlay_small => {
+            bounded.logs = smallLogResources();
+            bounded.journal_entries = 32 * 1024;
+            bounded.access = smallAccessResources();
+            bounded.state = smallStateResources();
+            bounded.transient_storage_entries = 8 * 1024;
+        },
+        .bounded_small => {
+            bounded.memory_bytes_per_frame = 16 * 1024;
+            bounded.io_bytes_per_frame = 16 * 1024;
+            bounded.scratch_bytes_per_frame = 64 * 1024;
+            bounded.logs = smallLogResources();
+            bounded.journal_entries = 32 * 1024;
+            bounded.access = smallAccessResources();
+            bounded.state = smallStateResources();
+            bounded.transient_storage_entries = 8 * 1024;
+            bounded.result_bytes = 16 * 1024;
+        },
+        .bounded => {
+            bounded.memory_bytes_per_frame = 16 * 1024;
+            bounded.io_bytes_per_frame = 16 * 1024;
+            bounded.scratch_bytes_per_frame = 64 * 1024;
+            bounded.logs = broadLogResources();
+            bounded.journal_entries = 64 * 1024;
+            bounded.access = broadAccessResources();
+            bounded.state = broadStateResources();
+            bounded.transient_storage_entries = 64 * 1024;
+            bounded.result_bytes = 16 * 1024;
+        },
+    }
+
+    return bounded;
+}
+
+fn broadLogResources() evmz.state.Overlay.LogResources {
+    return .{
+        .entries = 16 * 1024,
+        .data_bytes = 4 * 1024 * 1024,
+    };
+}
+
+fn smallLogResources() evmz.state.Overlay.LogResources {
+    return .{
+        .entries = 8 * 1024,
+        .data_bytes = 2 * 1024 * 1024,
+    };
+}
+
+fn broadAccessResources() evmz.state.Overlay.AccessResources {
+    return .{
+        .accounts = 16 * 1024,
+        .storage_keys = 64 * 1024,
+    };
+}
+
+fn smallAccessResources() evmz.state.Overlay.AccessResources {
+    return .{
+        .accounts = 1024,
+        .storage_keys = 8 * 1024,
+    };
+}
+
+fn broadStateResources() evmz.state.Overlay.StateResources {
+    return .{
+        .accounts = 16 * 1024,
+        .original_storage_entries = 64 * 1024,
+        .storage_overlay_entries = 64 * 1024,
+        .selfdestructed_accounts = 16 * 1024,
+        .created_contracts = 16 * 1024,
+        .deleted_accounts = 16 * 1024,
+        .dirty_accounts = 16 * 1024,
+    };
+}
+
+fn smallStateResources() evmz.state.Overlay.StateResources {
+    return .{
+        .accounts = 1024,
+        .original_storage_entries = 8 * 1024,
+        .storage_overlay_entries = 8 * 1024,
+        .selfdestructed_accounts = 1024,
+        .created_contracts = 1024,
+        .deleted_accounts = 1024,
+        .dirty_accounts = 1024,
+    };
+}
+
+fn executorTxContext(gas_limit: u64) Host.TxContext {
     return .{
         .chain_id = 1,
         .gas_price = 0,
@@ -355,7 +562,7 @@ fn executorTxContext() Host.TxContext {
         .coinbase = evmz.addr(0),
         .number = 0,
         .timestamp = 0,
-        .gas_limit = @intCast(common.max_gas),
+        .gas_limit = gas_limit,
         .prev_randao = 0,
         .base_fee = 0,
         .blob_base_fee = 0,
@@ -398,12 +605,44 @@ fn parseFixtureUsize(text: []const u8) !usize {
     return common.parseNonZeroUsize(trimFixtureText(text));
 }
 
+fn parseFixtureU64(text: []const u8) !u64 {
+    return parseNonZeroU64(trimFixtureText(text));
+}
+
+fn parseNonZeroU64(value: []const u8) !u64 {
+    const parsed = try std.fmt.parseUnsigned(u64, value, 10);
+    if (parsed == 0) return error.InvalidNumber;
+    if (parsed > std.math.maxInt(i64)) return error.GasLimitTooLarge;
+    return parsed;
+}
+
+fn defaultGasLimit() u64 {
+    return @intCast(common.max_gas);
+}
+
+fn parseBuildSpec(comptime value: []const u8) evmz.eth.Revision {
+    inline for (std.meta.fields(evmz.eth.Revision)) |field| {
+        if (comptime tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    }
+    if (comptime std.mem.eql(u8, value, "latest")) return .latest;
+    @compileError("invalid VM-loop support revision: " ++ value);
+}
+
 fn deployRuntime(
     allocator: std.mem.Allocator,
     host: *Host,
     contract_code: []const u8,
-    spec: evmz.Spec,
-    engine: Engine,
+    spec: evmz.eth.Revision,
+) ![]u8 {
+    return deployRuntimeForProtocol(BenchProtocol, allocator, host, contract_code, spec);
+}
+
+fn deployRuntimeForProtocol(
+    comptime Protocol: type,
+    allocator: std.mem.Allocator,
+    host: *Host,
+    contract_code: []const u8,
+    spec: Protocol.Revision,
 ) ![]u8 {
     const msg = Host.Message{
         .depth = 0,
@@ -416,12 +655,11 @@ fn deployRuntime(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(Protocol).init(allocator, .{
         .host = host,
         .msg = &msg,
         .code = contract_code,
-        .spec = spec,
-        .config = evmzConfig(engine),
+        .revision = spec,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -436,13 +674,25 @@ fn timeRuntimeCall(
     host: *Host,
     runtime_code: []const u8,
     call_data: []const u8,
-    spec: evmz.Spec,
-    engine: Engine,
+    spec: evmz.eth.Revision,
+    gas_limit: u64,
+) !u64 {
+    return timeRuntimeCallForProtocol(BenchProtocol, allocator, host, runtime_code, call_data, spec, gas_limit);
+}
+
+fn timeRuntimeCallForProtocol(
+    comptime Protocol: type,
+    allocator: std.mem.Allocator,
+    host: *Host,
+    runtime_code: []const u8,
+    call_data: []const u8,
+    spec: Protocol.Revision,
+    gas_limit: u64,
 ) !u64 {
     const msg = Host.Message{
         .depth = 0,
         .kind = .call,
-        .gas = common.max_gas,
+        .gas = @intCast(gas_limit),
         .recipient = common.contract_address,
         .sender = common.caller_address,
         .input_data = call_data,
@@ -450,17 +700,14 @@ fn timeRuntimeCall(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(Protocol).init(allocator, .{
         .host = host,
         .msg = &msg,
         .code = runtime_code,
-        .spec = spec,
-        .config = evmzConfig(engine),
+        .revision = spec,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
-
-    try prepareTimedMetadata(allocator, &interpreter, runtime_code, engine);
 
     const start_ns = try common.monotonicNowNs();
     const result = try interpreter.execute();
@@ -471,19 +718,6 @@ fn timeRuntimeCall(
     return end_ns - start_ns;
 }
 
-fn prepareTimedMetadata(
-    allocator: std.mem.Allocator,
-    interpreter: *Interpreter,
-    runtime_code: []const u8,
-    engine: Engine,
-) !void {
-    return switch (engine) {
-        .evmz => try interpreter.call_frame.analysis.jumpdests.analyze(allocator, runtime_code),
-
-        .evmz_executor => unreachable,
-    };
-}
-
 test "engine parser accepts aliases" {
     try std.testing.expectEqual(Engine.evmz, parseEngine("evmz").?);
     try std.testing.expectEqual(Engine.evmz_executor, parseEngine("evmz-executor").?);
@@ -492,11 +726,61 @@ test "engine parser accepts aliases" {
     try std.testing.expect(parseEngine("evmz-call-total") == null);
     try std.testing.expect(parseEngine("evmz-advanced") == null);
     try std.testing.expect(parseEngine("evmz-advanced-executor") == null);
+    try std.testing.expectEqual(ExecutorResources.growable, parseExecutorResources("growable").?);
+    try std.testing.expectEqual(ExecutorResources.bounded, parseExecutorResources("bounded").?);
+    try std.testing.expectEqual(ExecutorResources.bounded_frames, parseExecutorResources("bounded-frames").?);
+    try std.testing.expectEqual(ExecutorResources.bounded_frame_memory, parseExecutorResources("bounded-frame-memory").?);
+    try std.testing.expectEqual(ExecutorResources.bounded_overlay, parseExecutorResources("bounded-overlay").?);
+    try std.testing.expectEqual(ExecutorResources.bounded_state_small, parseExecutorResources("bounded-state-small").?);
+    try std.testing.expectEqual(ExecutorResources.bounded_small, parseExecutorResources("bounded-small").?);
+}
+
+test "compiled support range accepts default latest spec" {
+    try std.testing.expect(BenchProtocol.support.contains(.latest));
+}
+
+test "build support spec parser accepts latest and hyphen aliases" {
+    try std.testing.expectEqual(evmz.eth.Revision.latest, parseBuildSpec("latest"));
+    try std.testing.expectEqual(evmz.eth.Revision.tangerine_whistle, parseBuildSpec("tangerine-whistle"));
 }
 
 test "engine scope names make benchmark boundary explicit" {
-    try std.testing.expectEqualStrings("interpreter-prepared-execute", measureScopeName(.evmz));
-    try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.evmz_executor));
+    try std.testing.expectEqualStrings("interpreter-prepared-execute", measureScopeName(.{
+        .fixture_dir = null,
+        .contract_code_path = "x",
+        .call_data_hex = "",
+        .num_runs = 1,
+        .gas_limit = defaultGasLimit(),
+        .spec = .latest,
+        .engine = .evmz,
+        .executor_resources = .growable,
+        .host_profile = .null,
+        .summary = false,
+    }));
+    try std.testing.expectEqualStrings("executor-prepared-call-growable", measureScopeName(.{
+        .fixture_dir = null,
+        .contract_code_path = "x",
+        .call_data_hex = "",
+        .num_runs = 1,
+        .gas_limit = defaultGasLimit(),
+        .spec = .latest,
+        .engine = .evmz_executor,
+        .executor_resources = .growable,
+        .host_profile = .null,
+        .summary = false,
+    }));
+    try std.testing.expectEqualStrings("executor-prepared-call-bounded", measureScopeName(.{
+        .fixture_dir = null,
+        .contract_code_path = "x",
+        .call_data_hex = "",
+        .num_runs = 1,
+        .gas_limit = defaultGasLimit(),
+        .spec = .latest,
+        .engine = .evmz_executor,
+        .executor_resources = .bounded,
+        .host_profile = .null,
+        .summary = false,
+    }));
 }
 
 test "deploys runtime and runs empty bytecode under null host" {
@@ -505,7 +789,7 @@ test "deploys runtime and runs empty bytecode under null host" {
     var deploy_host = CountingHost.init(std.testing.allocator, .null);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime = try deployRuntime(std.testing.allocator, &deploy_host_iface, &init_code, .latest, .evmz);
+    const runtime = try deployRuntime(std.testing.allocator, &deploy_host_iface, &init_code, .latest);
     defer std.testing.allocator.free(runtime);
 
     try std.testing.expectEqualSlices(u8, &.{0x00}, runtime);
@@ -513,12 +797,12 @@ test "deploys runtime and runs empty bytecode under null host" {
     var run_host = CountingHost.init(std.testing.allocator, .null);
     defer run_host.deinit();
     var run_host_iface = run_host.host();
-    _ = try timeRuntimeCall(std.testing.allocator, &run_host_iface, runtime, &.{}, .latest, .evmz);
+    _ = try timeRuntimeCall(std.testing.allocator, &run_host_iface, runtime, &.{}, .latest, defaultGasLimit());
     try std.testing.expectEqual(@as(u64, 0), run_host.counters.total());
 
-    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, .latest);
+    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, .latest, .growable);
     defer executor_runner.deinit();
-    _ = try executor_runner.timeRuntimeCall(&.{});
+    _ = try executor_runner.timeRuntimeCall(&.{}, defaultGasLimit());
 }
 
 test "resolves fixture defaults with CLI overrides" {
@@ -533,5 +817,6 @@ test "resolves fixture defaults with CLI overrides" {
     try std.testing.expectEqualSlices(u8, "fixtures/vm-loop/ten-thousand-hashes/init.hex", resolved.contract_code_path);
     try std.testing.expectEqualSlices(u8, "30627b7c", trimFixtureText(resolved.call_data_hex));
     try std.testing.expectEqual(@as(usize, 2), resolved.num_runs);
+    try std.testing.expectEqual(defaultGasLimit(), resolved.gas_limit);
     try std.testing.expectEqual(HostProfile.null, resolved.host_profile);
 }

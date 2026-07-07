@@ -1,6 +1,6 @@
 const std = @import("std");
 const address = @import("address.zig");
-const Spec = @import("spec.zig").Spec;
+const Revision = @import("eth/revision.zig").Revision;
 const uint256 = @import("uint256.zig");
 const ckzg = @import("ckzg");
 const kzg_trusted_setup = @import("kzg_trusted_setup");
@@ -17,6 +17,7 @@ const p256verify_gas: i64 = 6900;
 
 pub const Error = std.mem.Allocator.Error || error{
     NotImplemented,
+    OutputBufferTooSmall,
 };
 
 pub const Status = enum(u8) {
@@ -29,13 +30,15 @@ pub const Result = struct {
     status: Status,
     output_data: []u8,
     gas_left: i64,
+    output_owned: bool = true,
 };
 
 pub const Call = struct {
     allocator: std.mem.Allocator,
-    spec: Spec,
+    revision: Revision,
     input_data: []const u8,
     gas: i64,
+    output_buffer: ?[]u8 = null,
 };
 
 pub const Contract = enum(u16) {
@@ -61,54 +64,9 @@ pub const Contract = enum(u16) {
     pub fn toAddress(c: Contract) Address {
         return address.addr(@as(u160, @intFromEnum(c)));
     }
-    pub fn minimumSpec(c: Contract) Spec {
-        return switch (c) {
-            .ecrecover,
-            .sha256,
-            .ripemd160,
-            .identity,
-            => .frontier,
-
-            .modexp,
-            .bn254_add,
-            .bn254_mul,
-            .bn254_pairing,
-            => .byzantium,
-
-            .blake2f => .istanbul,
-            .kzg_point_evaluation => .cancun,
-
-            .bls12_g1add,
-            .bls12_g1msm,
-            .bls12_g2add,
-            .bls12_g2msm,
-            .bls12_pairing_check,
-            .bls12_map_fp_to_g1,
-            .bls12_map_fp2_to_g2,
-            => .prague,
-
-            .p256verify => .osaka,
-        };
-    }
 };
 
-pub fn activeAt(spec: Spec, target: Address) ?Contract {
-    const contract = contractFromAddress(target) orelse return null;
-    if (!spec.isImpl(contract.minimumSpec())) return null;
-    return contract;
-}
-
-pub fn execute(allocator: std.mem.Allocator, spec: Spec, target: Address, input_data: []const u8, gas: i64) Error!?Result {
-    const contract = activeAt(spec, target) orelse return null;
-    return try dispatch(contract, .{
-        .allocator = allocator,
-        .spec = spec,
-        .input_data = input_data,
-        .gas = gas,
-    });
-}
-
-fn dispatch(contract: Contract, call: Call) Error!Result {
+pub fn executeContract(contract: Contract, call: Call) Error!Result {
     return switch (contract) {
         .ecrecover => ecrecover(call),
         .sha256 => sha256(call),
@@ -131,7 +89,7 @@ fn dispatch(contract: Contract, call: Call) Error!Result {
     };
 }
 
-fn contractFromAddress(target: Address) ?Contract {
+pub fn contractFromAddress(target: Address) ?Contract {
     const contract_id = std.mem.readInt(u160, &target, .big);
     if (contract_id > std.math.maxInt(u16)) return null;
     return switch (@as(u16, @intCast(contract_id))) {
@@ -162,6 +120,38 @@ fn emptyResult(status: Status) Result {
         .status = status,
         .output_data = &.{},
         .gas_left = 0,
+        .output_owned = false,
+    };
+}
+
+fn allocOutput(call: Call, len: usize) Error![]u8 {
+    if (call.output_buffer) |buffer| {
+        if (len > buffer.len) return error.OutputBufferTooSmall;
+        return buffer[0..len];
+    }
+    return call.allocator.alloc(u8, len);
+}
+
+fn dupeOutput(call: Call, bytes: []const u8) Error![]u8 {
+    const output = try allocOutput(call, bytes.len);
+    @memcpy(output, bytes);
+    return output;
+}
+
+fn outputOwned(call: Call) bool {
+    return call.output_buffer == null;
+}
+
+fn freeOutput(call: Call, output: []u8) void {
+    if (outputOwned(call) and output.len != 0) call.allocator.free(output);
+}
+
+fn successOutput(call: Call, output: []u8, gas_left: i64) Result {
+    return .{
+        .status = .success,
+        .output_data = output,
+        .gas_left = gas_left,
+        .output_owned = outputOwned(call),
     };
 }
 
@@ -191,14 +181,10 @@ fn ecrecover(call: Call) Error!Result {
         };
     };
 
-    const output = try call.allocator.alloc(u8, 32);
+    const output = try allocOutput(call, 32);
     @memset(output[0..12], 0);
     @memcpy(output[12..32], &recovered);
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn sha256(call: Call) Error!Result {
@@ -207,12 +193,7 @@ fn sha256(call: Call) Error!Result {
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(call.input_data, &digest, .{});
-    const output = try call.allocator.dupe(u8, &digest);
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, try dupeOutput(call, &digest), gas_left);
 }
 
 fn ripemd160(call: Call) Error!Result {
@@ -220,14 +201,10 @@ fn ripemd160(call: Call) Error!Result {
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
 
     const digest = ripemd160Digest(call.input_data);
-    const output = try call.allocator.alloc(u8, 32);
+    const output = try allocOutput(call, 32);
     @memset(output[0..12], 0);
     @memcpy(output[12..32], &digest);
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn identity(call: Call) Error!Result {
@@ -235,8 +212,9 @@ fn identity(call: Call) Error!Result {
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     return .{
         .status = .success,
-        .output_data = try call.allocator.dupe(u8, call.input_data),
+        .output_data = try dupeOutput(call, call.input_data),
         .gas_left = gas_left,
+        .output_owned = outputOwned(call),
     };
 }
 
@@ -244,13 +222,13 @@ fn modexp(call: Call) Error!Result {
     const base_len = std.mem.readInt(u256, &paddedWord(call.input_data, 0), .big);
     const exponent_len = std.mem.readInt(u256, &paddedWord(call.input_data, 1), .big);
     const modulus_len = std.mem.readInt(u256, &paddedWord(call.input_data, 2), .big);
-    if (call.spec.isImpl(.osaka) and !modexpLengthsWithinOsakaLimit(base_len, exponent_len, modulus_len)) {
+    if (call.revision.isImpl(.osaka) and !modexpLengthsWithinOsakaLimit(base_len, exponent_len, modulus_len)) {
         return emptyResult(.out_of_gas);
     }
 
     const exponent_offset = uint256.checkedAdd(96, base_len) orelse return emptyResult(.out_of_gas);
     const exponent_head = modexpExponentHead(call.input_data, exponent_offset, exponent_len);
-    const cost = modexpGas(call.spec, base_len, exponent_len, modulus_len, exponent_head) orelse {
+    const cost = modexpGas(call.revision, base_len, exponent_len, modulus_len, exponent_head) orelse {
         return emptyResult(.out_of_gas);
     };
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
@@ -281,34 +259,27 @@ fn modexp(call: Call) Error!Result {
     const modulus_bytes = try paddedBytes(call.allocator, call.input_data, modulus_offset, modulus_len_usize);
     defer call.allocator.free(modulus_bytes);
 
-    const output = try call.allocator.alloc(u8, modulus_len_usize);
+    const output = try allocOutput(call, modulus_len_usize);
+    errdefer freeOutput(call, output);
     @memset(output, 0);
     if (allZero(modulus_bytes)) {
-        return .{
-            .status = .success,
-            .output_data = output,
-            .gas_left = gas_left,
-        };
+        return successOutput(call, output, gas_left);
     }
 
     try modexpInto(call.allocator, output, base_bytes, exponent_bytes, modulus_bytes);
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
-fn modexpGas(spec: Spec, base_len: u256, exponent_len: u256, modulus_len: u256, exponent_head: u256) ?i64 {
+fn modexpGas(revision: Revision, base_len: u256, exponent_len: u256, modulus_len: u256, exponent_head: u256) ?i64 {
     const max_len = @max(base_len, modulus_len);
-    if (spec.isImpl(.osaka)) {
+    if (revision.isImpl(.osaka)) {
         const complexity = modexpOsakaMultComplexity(max_len) orelse return null;
         const iteration_count = modexpOsakaIterationCount(exponent_len, exponent_head) orelse return null;
         const cost = uint256.checkedMul(complexity, iteration_count) orelse return null;
         return std.math.cast(i64, @max(cost, 500));
     }
 
-    if (spec.isImpl(.berlin)) {
+    if (revision.isImpl(.berlin)) {
         const words = uint256.ceilDiv(max_len, 8);
         const complexity = uint256.checkedMul(words, words) orelse return null;
         if (complexity == 0) return 200;
@@ -482,70 +453,58 @@ fn mulMod(
 }
 
 fn bn254Add(call: Call) Error!Result {
-    const gas_left = charge(call, bn254AddGas(call.spec)) orelse return emptyResult(.out_of_gas);
-    const output = try call.allocator.alloc(u8, 64);
-    errdefer call.allocator.free(output);
+    const gas_left = charge(call, bn254AddGas(call.revision)) orelse return emptyResult(.out_of_gas);
+    const output = try allocOutput(call, 64);
+    errdefer freeOutput(call, output);
     if (bn254_native.evmz_bn254_add(call.input_data.ptr, call.input_data.len, output.ptr) != 0) {
-        call.allocator.free(output);
+        freeOutput(call, output);
         return emptyResult(.failure);
     }
 
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn bn254Mul(call: Call) Error!Result {
-    const gas_left = charge(call, bn254MulGas(call.spec)) orelse return emptyResult(.out_of_gas);
-    const output = try call.allocator.alloc(u8, 64);
-    errdefer call.allocator.free(output);
+    const gas_left = charge(call, bn254MulGas(call.revision)) orelse return emptyResult(.out_of_gas);
+    const output = try allocOutput(call, 64);
+    errdefer freeOutput(call, output);
     if (bn254_native.evmz_bn254_mul(call.input_data.ptr, call.input_data.len, output.ptr) != 0) {
-        call.allocator.free(output);
+        freeOutput(call, output);
         return emptyResult(.failure);
     }
 
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn bn254Pairing(call: Call) Error!Result {
-    const cost = bn254PairingGas(call.spec, call.input_data.len) orelse return emptyResult(.out_of_gas);
+    const cost = bn254PairingGas(call.revision, call.input_data.len) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len % bn254_pair_size != 0) return emptyResult(.failure);
 
-    const output = try call.allocator.alloc(u8, 32);
-    errdefer call.allocator.free(output);
+    const output = try allocOutput(call, 32);
+    errdefer freeOutput(call, output);
     if (bn254_native.evmz_bn254_pairing_check(call.input_data.ptr, call.input_data.len, output.ptr) != 0) {
-        call.allocator.free(output);
+        freeOutput(call, output);
         return emptyResult(.failure);
     }
 
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 const bn254_pair_size = 192;
 
-fn bn254AddGas(spec: Spec) i64 {
-    return if (spec.isImpl(.istanbul)) 150 else 500;
+fn bn254AddGas(revision: Revision) i64 {
+    return if (revision.isImpl(.istanbul)) 150 else 500;
 }
 
-fn bn254MulGas(spec: Spec) i64 {
-    return if (spec.isImpl(.istanbul)) 6000 else 40000;
+fn bn254MulGas(revision: Revision) i64 {
+    return if (revision.isImpl(.istanbul)) 6000 else 40000;
 }
 
-fn bn254PairingGas(spec: Spec, input_size: usize) ?i64 {
+fn bn254PairingGas(revision: Revision, input_size: usize) ?i64 {
     const pair_count = input_size / bn254_pair_size;
-    const base: i64 = if (spec.isImpl(.istanbul)) 45_000 else 100_000;
-    const per_pair: i64 = if (spec.isImpl(.istanbul)) 34_000 else 80_000;
+    const base: i64 = if (revision.isImpl(.istanbul)) 45_000 else 100_000;
+    const per_pair: i64 = if (revision.isImpl(.istanbul)) 34_000 else 80_000;
     const pair_count_i64 = std.math.cast(i64, pair_count) orelse return null;
     const variable = std.math.mul(i64, per_pair, pair_count_i64) catch return null;
     return std.math.add(i64, base, variable) catch null;
@@ -579,15 +538,11 @@ fn blake2f(call: Call) Error!Result {
     const t1 = std.mem.readInt(u64, call.input_data[204..212], .little);
     blake2bCompress(rounds, &h, &m, .{ t0, t1 }, final_block);
 
-    const output = try call.allocator.alloc(u8, 64);
+    const output = try allocOutput(call, 64);
     for (h, 0..) |word, i| {
         std.mem.writeInt(u64, output[i * 8 ..][0..8], word, .little);
     }
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 const blake2f_input_size = 213;
@@ -684,14 +639,10 @@ fn kzgPointEvaluation(call: Call) Error!Result {
     const ok = settings.verifyKzgProof(&commitment, &z, &y, &proof) catch false;
     if (!ok) return emptyResult(.failure);
 
-    const output = try call.allocator.alloc(u8, 64);
+    const output = try allocOutput(call, 64);
     std.mem.writeInt(u256, output[0..32], kzg_field_elements_per_blob, .big);
     std.mem.writeInt(u256, output[32..64], kzg_bls_modulus, .big);
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn bls12G1Add(call: Call) Error!Result {
@@ -785,8 +736,9 @@ fn bls12NativeResult(call: Call, gas_left: i64, status_code: c_int, output: []co
     return switch (status_code) {
         bls12_native.EVMZ_BLS12_OK => .{
             .status = .success,
-            .output_data = try call.allocator.dupe(u8, output),
+            .output_data = try dupeOutput(call, output),
             .gas_left = gas_left,
+            .output_owned = outputOwned(call),
         },
         bls12_native.EVMZ_BLS12_INVALID => emptyResult(.failure),
         bls12_native.EVMZ_BLS12_OOM => error.OutOfMemory,
@@ -851,14 +803,10 @@ fn p256Verify(call: Call) Error!Result {
         };
     }
 
-    const output = try call.allocator.alloc(u8, 32);
+    const output = try allocOutput(call, 32);
     @memset(output, 0);
     output[31] = 1;
-    return .{
-        .status = .success,
-        .output_data = output,
-        .gas_left = gas_left,
-    };
+    return successOutput(call, output, gas_left);
 }
 
 fn p256VerifyInput(input: []const u8) bool {
@@ -1097,25 +1045,47 @@ fn ripemd160RightK(round: usize) u32 {
     };
 }
 
-test activeAt {
-    try std.testing.expectEqual(Contract.ecrecover, activeAt(.frontier, Contract.ecrecover.toAddress()).?);
-    try std.testing.expect(activeAt(.frontier, Contract.modexp.toAddress()) == null);
-    try std.testing.expectEqual(Contract.modexp, activeAt(.byzantium, Contract.modexp.toAddress()).?);
-    try std.testing.expect(activeAt(.byzantium, Contract.blake2f.toAddress()) == null);
-    try std.testing.expectEqual(Contract.blake2f, activeAt(.istanbul, Contract.blake2f.toAddress()).?);
-    try std.testing.expect(activeAt(.shanghai, Contract.kzg_point_evaluation.toAddress()) == null);
-    try std.testing.expectEqual(Contract.kzg_point_evaluation, activeAt(.cancun, Contract.kzg_point_evaluation.toAddress()).?);
-    try std.testing.expect(activeAt(.cancun, Contract.bls12_g1add.toAddress()) == null);
-    try std.testing.expectEqual(Contract.bls12_g1add, activeAt(.prague, Contract.bls12_g1add.toAddress()).?);
-    try std.testing.expect(activeAt(.prague, address.addr(0x12)) == null);
-    try std.testing.expect(activeAt(.prague, Contract.p256verify.toAddress()) == null);
-    try std.testing.expectEqual(Contract.p256verify, activeAt(.osaka, Contract.p256verify.toAddress()).?);
+fn executeEthereumPrecompileForTest(allocator: std.mem.Allocator, revision: Revision, target: Address, input_data: []const u8, gas: i64) Error!?Result {
+    const eth_precompile = @import("eth/precompile.zig");
+    const contract = eth_precompile.resolve(revision, target) orelse return null;
+    return try eth_precompile.execute(allocator, revision, contract, input_data, gas);
 }
 
-test execute {
-    try std.testing.expectEqual(null, try execute(std.testing.allocator, .frontier, Contract.modexp.toAddress(), &.{}, 0));
+test "Ethereum precompile activation follows revisions" {
+    const eth_precompile = @import("eth/precompile.zig");
 
-    const result = (try execute(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &.{}, 0)).?;
+    try std.testing.expectEqual(Contract.ecrecover, eth_precompile.resolve(.frontier, Contract.ecrecover.toAddress()).?);
+    try std.testing.expect(eth_precompile.resolve(.frontier, Contract.modexp.toAddress()) == null);
+    try std.testing.expectEqual(Contract.modexp, eth_precompile.resolve(.byzantium, Contract.modexp.toAddress()).?);
+    try std.testing.expect(eth_precompile.resolve(.byzantium, Contract.blake2f.toAddress()) == null);
+    try std.testing.expectEqual(Contract.blake2f, eth_precompile.resolve(.istanbul, Contract.blake2f.toAddress()).?);
+    try std.testing.expect(eth_precompile.resolve(.shanghai, Contract.kzg_point_evaluation.toAddress()) == null);
+    try std.testing.expectEqual(Contract.kzg_point_evaluation, eth_precompile.resolve(.cancun, Contract.kzg_point_evaluation.toAddress()).?);
+    try std.testing.expect(eth_precompile.resolve(.cancun, Contract.bls12_g1add.toAddress()) == null);
+    try std.testing.expectEqual(Contract.bls12_g1add, eth_precompile.resolve(.prague, Contract.bls12_g1add.toAddress()).?);
+    try std.testing.expect(eth_precompile.resolve(.prague, address.addr(0x12)) == null);
+    try std.testing.expect(eth_precompile.resolve(.prague, Contract.p256verify.toAddress()) == null);
+    try std.testing.expectEqual(Contract.p256verify, eth_precompile.resolve(.osaka, Contract.p256verify.toAddress()).?);
+}
+
+test "Ethereum precompile activation gates catalog execution" {
+    try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.modexp.toAddress(), &.{}, 0));
+
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &.{}, 0)).?;
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
+    try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
+}
+
+test "contract execution is independent from Ethereum activation window" {
+    try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.modexp.toAddress(), &.{}, 0));
+
+    const result = try executeContract(.modexp, .{
+        .allocator = std.testing.allocator,
+        .revision = .frontier,
+        .input_data = &.{},
+        .gas = 0,
+    });
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
@@ -1141,7 +1111,7 @@ test ecrecover {
         0x87, 0x56, 0xb7, 0xd7, 0x5a, 0x9c, 0x45, 0x49,
     };
 
-    const result = (try execute(std.testing.allocator, .frontier, Contract.ecrecover.toAddress(), &input, 3000)).?;
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.ecrecover.toAddress(), &input, 3000)).?;
     defer std.testing.allocator.free(result.output_data);
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -1153,7 +1123,7 @@ test ecrecover {
         0xc1, 0x53, 0x31, 0x67, 0x7e, 0x6e, 0xbf, 0x0b,
     }, result.output_data);
 
-    const invalid = (try execute(std.testing.allocator, .frontier, Contract.ecrecover.toAddress(), &.{}, 3001)).?;
+    const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.ecrecover.toAddress(), &.{}, 3001)).?;
     try std.testing.expectEqual(Status.success, invalid.status);
     try std.testing.expectEqual(@as(i64, 1), invalid.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid.output_data.len);
@@ -1161,14 +1131,14 @@ test ecrecover {
 
 test identity {
     const input = "hello";
-    const result = (try execute(std.testing.allocator, .frontier, Contract.identity.toAddress(), input, 18)).?;
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.identity.toAddress(), input, 18)).?;
     defer std.testing.allocator.free(result.output_data);
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqualSlices(u8, input, result.output_data);
 
-    const oog = (try execute(std.testing.allocator, .frontier, Contract.identity.toAddress(), input, 17)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.identity.toAddress(), input, 17)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
     try std.testing.expectEqual(@as(usize, 0), oog.output_data.len);
 }
@@ -1184,31 +1154,31 @@ test modexp {
     var expected: [32]u8 = [_]u8{0} ** 32;
     expected[31] = 1;
 
-    const byzantium = (try execute(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &eip198_input, 13056)).?;
+    const byzantium = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &eip198_input, 13056)).?;
     defer std.testing.allocator.free(byzantium.output_data);
 
     try std.testing.expectEqual(Status.success, byzantium.status);
     try std.testing.expectEqual(@as(i64, 0), byzantium.gas_left);
     try std.testing.expectEqualSlices(u8, &expected, byzantium.output_data);
 
-    const byzantium_oog = (try execute(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &eip198_input, 13055)).?;
+    const byzantium_oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &eip198_input, 13055)).?;
     try std.testing.expectEqual(Status.out_of_gas, byzantium_oog.status);
 
-    const berlin = (try execute(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &eip198_input, 1361)).?;
+    const berlin = (try executeEthereumPrecompileForTest(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &eip198_input, 1361)).?;
     defer std.testing.allocator.free(berlin.output_data);
 
     try std.testing.expectEqual(Status.success, berlin.status);
     try std.testing.expectEqual(@as(i64, 1), berlin.gas_left);
     try std.testing.expectEqualSlices(u8, &expected, berlin.output_data);
 
-    const osaka = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &eip198_input, 4080)).?;
+    const osaka = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &eip198_input, 4080)).?;
     defer std.testing.allocator.free(osaka.output_data);
 
     try std.testing.expectEqual(Status.success, osaka.status);
     try std.testing.expectEqual(@as(i64, 0), osaka.gas_left);
     try std.testing.expectEqualSlices(u8, &expected, osaka.output_data);
 
-    const osaka_oog = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &eip198_input, 4079)).?;
+    const osaka_oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &eip198_input, 4079)).?;
     try std.testing.expectEqual(Status.out_of_gas, osaka_oog.status);
 
     var osaka_zero_head_long_exp: [225]u8 = undefined;
@@ -1218,9 +1188,9 @@ test modexp {
     std.mem.writeInt(u256, osaka_zero_head_long_exp[64..96], 64, .big);
     osaka_zero_head_long_exp[96] = 1;
     @memset(osaka_zero_head_long_exp[161..225], 2);
-    const osaka_zero_head_oog = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_535)).?;
+    const osaka_zero_head_oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_535)).?;
     try std.testing.expectEqual(Status.out_of_gas, osaka_zero_head_oog.status);
-    const osaka_zero_head = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_536)).?;
+    const osaka_zero_head = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &osaka_zero_head_long_exp, 65_536)).?;
     defer std.testing.allocator.free(osaka_zero_head.output_data);
     try std.testing.expectEqual(Status.success, osaka_zero_head.status);
     try std.testing.expectEqual(@as(i64, 0), osaka_zero_head.gas_left);
@@ -1230,20 +1200,20 @@ test modexp {
         "0000000000000000000000000000000000000000000000000000000000000001" ++
         "0000000000000000000000000000000000000000000000000000000000000001" ++
         "02050d");
-    const small = (try execute(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &small_input, 0)).?;
+    const small = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &small_input, 0)).?;
     defer std.testing.allocator.free(small.output_data);
 
     try std.testing.expectEqual(Status.success, small.status);
     try std.testing.expectEqual(@as(i64, 0), small.gas_left);
     try std.testing.expectEqualSlices(u8, &[_]u8{6}, small.output_data);
 
-    const small_berlin_oog = (try execute(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &small_input, 199)).?;
+    const small_berlin_oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &small_input, 199)).?;
     try std.testing.expectEqual(Status.out_of_gas, small_berlin_oog.status);
 
-    const small_osaka_oog = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &small_input, 499)).?;
+    const small_osaka_oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &small_input, 499)).?;
     try std.testing.expectEqual(Status.out_of_gas, small_osaka_oog.status);
 
-    const small_osaka = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &small_input, 500)).?;
+    const small_osaka = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &small_input, 500)).?;
     defer std.testing.allocator.free(small_osaka.output_data);
 
     try std.testing.expectEqual(Status.success, small_osaka.status);
@@ -1255,7 +1225,7 @@ test modexp {
         "0000000000000000000000000000000000000000000000000000000000000000" ++
         "0000000000000000000000000000000000000000000000000000000000000001" ++
         "00");
-    const zero_modulus = (try execute(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &zero_modulus_input, 200)).?;
+    const zero_modulus = (try executeEthereumPrecompileForTest(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &zero_modulus_input, 200)).?;
     defer std.testing.allocator.free(zero_modulus.output_data);
 
     try std.testing.expectEqual(Status.success, zero_modulus.status);
@@ -1263,17 +1233,17 @@ test modexp {
 
     var zero_complexity_input: [96]u8 = [_]u8{0} ** 96;
     zero_complexity_input[32] = 0x80;
-    const zero_complexity = (try execute(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &zero_complexity_input, 200)).?;
+    const zero_complexity = (try executeEthereumPrecompileForTest(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &zero_complexity_input, 200)).?;
     try std.testing.expectEqual(Status.success, zero_complexity.status);
     try std.testing.expectEqual(@as(i64, 0), zero_complexity.gas_left);
     try std.testing.expectEqual(@as(usize, 0), zero_complexity.output_data.len);
 
     var over_osaka_limit_input: [96]u8 = [_]u8{0} ** 96;
     std.mem.writeInt(u256, over_osaka_limit_input[0..32], modexp_osaka_max_input_len + 1, .big);
-    const oversized_prague = (try execute(std.testing.allocator, .prague, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
+    const oversized_prague = (try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
     try std.testing.expectEqual(Status.success, oversized_prague.status);
 
-    const oversized_osaka = (try execute(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
+    const oversized_osaka = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
     try std.testing.expectEqual(Status.out_of_gas, oversized_osaka.status);
 }
 
@@ -1296,12 +1266,12 @@ test "P256VERIFY precompile" {
     @memcpy(input[96..128], public_key[1..33]);
     @memcpy(input[128..160], public_key[33..65]);
 
-    try std.testing.expectEqual(null, try execute(std.testing.allocator, .prague, Contract.p256verify.toAddress(), &input, p256verify_gas));
+    try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.p256verify.toAddress(), &input, p256verify_gas));
 
-    const oog = (try execute(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas - 1)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas - 1)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
 
-    const valid = (try execute(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas + 1)).?;
+    const valid = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas + 1)).?;
     defer std.testing.allocator.free(valid.output_data);
 
     var expected = [_]u8{0} ** 32;
@@ -1312,19 +1282,19 @@ test "P256VERIFY precompile" {
 
     var wrong_hash = input;
     wrong_hash[0] ^= 0x01;
-    const invalid_signature = (try execute(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &wrong_hash, p256verify_gas + 1)).?;
+    const invalid_signature = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &wrong_hash, p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_signature.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_signature.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_signature.output_data.len);
 
-    const invalid_length = (try execute(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), input[0..159], p256verify_gas + 1)).?;
+    const invalid_length = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), input[0..159], p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_length.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_length.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_length.output_data.len);
 
     var infinity_key = input;
     @memset(infinity_key[96..160], 0);
-    const invalid_key = (try execute(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &infinity_key, p256verify_gas + 1)).?;
+    const invalid_key = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &infinity_key, p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_key.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_key.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_key.output_data.len);
@@ -1340,7 +1310,7 @@ test "bn254 add and mul" {
     _ = try std.fmt.hexToBytes(&doubled_expected, "030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd3" ++
         "15ed738c0e0a7c92e7845f96b2ae9c0a68a6a449e3538fc7ff3ebf7a5a18a2c4");
 
-    const add_result = (try execute(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &add_input, 500)).?;
+    const add_result = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &add_input, 500)).?;
     defer std.testing.allocator.free(add_result.output_data);
 
     try std.testing.expectEqual(Status.success, add_result.status);
@@ -1355,14 +1325,14 @@ test "bn254 add and mul" {
     _ = try std.fmt.hexToBytes(&tripled_expected, "0769bf9ac56bea3ff40232bcb1b6bd159315d84715b8e679f2d355961915abf0" ++
         "2ab799bee0489429554fdb7c8d086475319e63b40b9c5b57cdf1ff3dd9fe2261");
 
-    const mul_result = (try execute(std.testing.allocator, .istanbul, Contract.bn254_mul.toAddress(), &mul_input, 6001)).?;
+    const mul_result = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.bn254_mul.toAddress(), &mul_input, 6001)).?;
     defer std.testing.allocator.free(mul_result.output_data);
 
     try std.testing.expectEqual(Status.success, mul_result.status);
     try std.testing.expectEqual(@as(i64, 1), mul_result.gas_left);
     try std.testing.expectEqualSlices(u8, &tripled_expected, mul_result.output_data);
 
-    const invalid = (try execute(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &[_]u8{0xff} ** 32, 500)).?;
+    const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &[_]u8{0xff} ** 32, 500)).?;
     try std.testing.expectEqual(Status.failure, invalid.status);
 }
 
@@ -1370,24 +1340,24 @@ test "bn254 pairing" {
     var true_output = [_]u8{0} ** 32;
     true_output[31] = 1;
 
-    const empty = (try execute(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &.{}, 100_001)).?;
+    const empty = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &.{}, 100_001)).?;
     defer std.testing.allocator.free(empty.output_data);
 
     try std.testing.expectEqual(Status.success, empty.status);
     try std.testing.expectEqual(@as(i64, 1), empty.gas_left);
     try std.testing.expectEqualSlices(u8, &true_output, empty.output_data);
 
-    const repriced = (try execute(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &.{}, 45_000)).?;
+    const repriced = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &.{}, 45_000)).?;
     defer std.testing.allocator.free(repriced.output_data);
 
     try std.testing.expectEqual(Status.success, repriced.status);
     try std.testing.expectEqual(@as(i64, 0), repriced.gas_left);
     try std.testing.expectEqualSlices(u8, &true_output, repriced.output_data);
 
-    const oog = (try execute(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &.{}, 44_999)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &.{}, 44_999)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
 
-    const malformed = (try execute(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &[_]u8{0}, 45_000)).?;
+    const malformed = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.bn254_pairing.toAddress(), &[_]u8{0}, 45_000)).?;
     try std.testing.expectEqual(Status.failure, malformed.status);
 }
 
@@ -1395,7 +1365,7 @@ test "bn254 pairing rejects field elements outside modulus" {
     var input = [_]u8{0} ** bn254_pair_size;
     _ = try std.fmt.hexToBytes(input[0..32], "30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47");
 
-    const invalid = (try execute(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &input, 180_000)).?;
+    const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &input, 180_000)).?;
     try std.testing.expectEqual(Status.failure, invalid.status);
     try std.testing.expectEqual(@as(i64, 0), invalid.gas_left);
 }
@@ -1415,7 +1385,7 @@ test blake2f {
     _ = try std.fmt.hexToBytes(&expected, "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1" ++
         "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923");
 
-    const result = (try execute(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 12)).?;
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 12)).?;
     defer std.testing.allocator.free(result.output_data);
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -1426,7 +1396,7 @@ test blake2f {
     input[3] = 0x00;
     _ = try std.fmt.hexToBytes(&expected, "689419d2bf32b5a9901a2c733b9946727026a60d8773117eabb35f04a52cdcf1" ++
         "b8fb4473454cf03d46c36a10b3f784aae4dc80a24424960e66a8ad5a8c2bfb30");
-    const long_rounds = (try execute(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 1024)).?;
+    const long_rounds = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 1024)).?;
     defer std.testing.allocator.free(long_rounds.output_data);
 
     try std.testing.expectEqual(Status.success, long_rounds.status);
@@ -1434,16 +1404,16 @@ test blake2f {
 
     input[2] = 0x00;
     input[3] = 0x0c;
-    const oog = (try execute(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 11)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 11)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
 
     input[212] = 2;
-    const invalid_flag = (try execute(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 12)).?;
+    const invalid_flag = (try executeEthereumPrecompileForTest(std.testing.allocator, .istanbul, Contract.blake2f.toAddress(), &input, 12)).?;
     try std.testing.expectEqual(Status.failure, invalid_flag.status);
 }
 
 test sha256 {
-    const result = (try execute(std.testing.allocator, .frontier, Contract.sha256.toAddress(), &.{}, 60)).?;
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.sha256.toAddress(), &.{}, 60)).?;
     defer std.testing.allocator.free(result.output_data);
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -1455,7 +1425,7 @@ test sha256 {
         0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
     }, result.output_data);
 
-    const oog = (try execute(std.testing.allocator, .frontier, Contract.sha256.toAddress(), &.{}, 59)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.sha256.toAddress(), &.{}, 59)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
     try std.testing.expectEqual(@as(usize, 0), oog.output_data.len);
 }
@@ -1484,7 +1454,7 @@ test ripemd160Digest {
 }
 
 test ripemd160 {
-    const result = (try execute(std.testing.allocator, .frontier, Contract.ripemd160.toAddress(), "abc", 720)).?;
+    const result = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.ripemd160.toAddress(), "abc", 720)).?;
     defer std.testing.allocator.free(result.output_data);
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -1496,7 +1466,7 @@ test ripemd160 {
         0x98, 0xc6, 0xb0, 0x87, 0xf1, 0x5a, 0x0b, 0xfc,
     }, result.output_data);
 
-    const oog = (try execute(std.testing.allocator, .frontier, Contract.ripemd160.toAddress(), "abc", 719)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.ripemd160.toAddress(), "abc", 719)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
     try std.testing.expectEqual(@as(usize, 0), oog.output_data.len);
 }

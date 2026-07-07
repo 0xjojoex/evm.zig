@@ -11,6 +11,7 @@ const Address = evmz.Address;
 const StorageKey = storage.Key;
 
 items: std.ArrayList(Entry),
+capacity_limit: ?usize,
 
 pub const Checkpoint = struct {
     journal_len: usize,
@@ -76,7 +77,10 @@ pub const Entry = union(enum) {
 };
 
 pub fn init() Journal {
-    return .{ .items = .empty };
+    return .{
+        .items = .empty,
+        .capacity_limit = null,
+    };
 }
 
 pub fn deinit(self: *Journal, allocator: std.mem.Allocator) void {
@@ -95,7 +99,23 @@ pub fn len(self: *const Journal) usize {
     return self.items.items.len;
 }
 
+pub fn configureCapacity(self: *Journal, allocator: std.mem.Allocator, capacity: ?usize) !void {
+    if (self.items.items.len != 0) return error.ActiveJournal;
+    if (capacity) |limit| {
+        try self.items.ensureTotalCapacityPrecise(allocator, limit);
+        self.capacity_limit = limit;
+    } else {
+        self.capacity_limit = null;
+    }
+}
+
 pub fn append(self: *Journal, allocator: std.mem.Allocator, entry: Entry) !void {
+    if (self.capacity_limit) |limit| {
+        if (self.items.items.len >= limit) return error.JournalCapacityExceeded;
+        std.debug.assert(self.items.capacity >= limit);
+        self.items.appendAssumeCapacity(entry);
+        return;
+    }
     try self.items.append(allocator, entry);
 }
 
@@ -128,4 +148,32 @@ test "checkpoint records journal and log lengths" {
 
     try std.testing.expectEqual(@as(usize, 1), checkpoint_state.journal_len);
     try std.testing.expectEqual(@as(usize, 7), checkpoint_state.logs_len);
+}
+
+test "bounded journal reports capacity exhaustion" {
+    var journal = Journal.init();
+    defer journal.deinit(std.testing.allocator);
+
+    try journal.configureCapacity(std.testing.allocator, 1);
+    try journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(1) });
+    try std.testing.expectError(
+        error.JournalCapacityExceeded,
+        journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(2) }),
+    );
+
+    journal.clearRetainingCapacity(std.testing.allocator);
+    try journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(3) });
+}
+
+test "journal can switch back to growable capacity" {
+    var journal = Journal.init();
+    defer journal.deinit(std.testing.allocator);
+
+    try journal.configureCapacity(std.testing.allocator, 0);
+    try std.testing.expectError(
+        error.JournalCapacityExceeded,
+        journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(1) }),
+    );
+    try journal.configureCapacity(std.testing.allocator, null);
+    try journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(1) });
 }

@@ -1,0 +1,8 @@
+handrolled VM-loop fixture: single MSTORE at the 60,000,000 gas memory boundary
+runtime: PUSH1 0xaa; PUSH32 0x5534e0; MSTORE; STOP
+gas limit: 60,000,000
+memory target: 174,504 words = 5,584,128 bytes
+overhead: PUSH1 + PUSH32 + MSTORE = 9 gas
+expected: succeeds at this offset; one additional word is out of gas
+host: null
+runtime bytes: 37

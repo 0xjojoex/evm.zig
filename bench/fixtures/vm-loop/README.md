@@ -5,6 +5,7 @@ Each fixture directory contains:
 - `init.hex`: deploy/init bytecode, deployed once before timing.
 - `calldata.hex`: calldata used for each timed runtime call.
 - `num-runs.txt`: default timed call count.
+- `gas-limit.txt`: optional finite gas limit for each timed runtime call.
 - `host-profile.txt`: `null` or `mock`.
 
 The checked-in evm-bench fixtures were built from

@@ -13,16 +13,39 @@ pub const Expansion = struct {
     next_size: usize,
 };
 
-bytes: ArrayList(u8),
+pub const Storage = ArrayList(u8);
+
+bytes: *Storage,
 allocator: Allocator,
 
-pub fn init(allocator: Allocator) Memory {
-    return .{ .bytes = .empty, .allocator = allocator };
+pub fn init(storage: *Storage, allocator: Allocator) Memory {
+    storage.* = .empty;
+    return .{ .bytes = storage, .allocator = allocator };
+}
+
+pub fn initRetainingCapacity(storage: *Storage, allocator: Allocator) Memory {
+    storage.clearRetainingCapacity();
+    return .{ .bytes = storage, .allocator = allocator };
+}
+
+pub fn reserveCapacity(storage: *Storage, allocator: Allocator, capacity: usize) !void {
+    try storage.ensureTotalCapacityPrecise(allocator, capacity);
+    storage.clearRetainingCapacity();
 }
 
 pub fn deinit(self: *Memory) void {
     self.bytes.deinit(self.allocator);
+    self.bytes.* = .empty;
     self.* = undefined;
+}
+
+pub fn deinitRetainingCapacity(self: *Memory) void {
+    self.bytes.clearRetainingCapacity();
+    self.* = undefined;
+}
+
+pub fn rebindStorage(self: *Memory, storage: *Storage) void {
+    self.bytes = storage;
 }
 
 pub fn read(self: *const Memory, offset: usize) u256 {
@@ -52,7 +75,12 @@ fn resize(self: *Memory, size: usize) !void {
     if (size <= self.len()) {
         return;
     }
-    try self.bytes.appendNTimes(self.allocator, 0, size - self.len());
+    const additional = size - self.len();
+    if (self.bytes.capacity >= size) {
+        self.bytes.appendNTimesAssumeCapacity(0, additional);
+        return;
+    }
+    try self.bytes.appendNTimes(self.allocator, 0, additional);
 }
 
 pub fn write(self: *Memory, offset: usize, value: u256) void {
@@ -162,7 +190,8 @@ pub inline fn memoryCost(expand_size: usize) !i64 {
 }
 
 test Memory {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 64);
@@ -179,8 +208,43 @@ test Memory {
     try std.testing.expectEqual(0xff, value2);
 }
 
+test "bounded memory reuses reserved capacity and rejects growth" {
+    const no_growth_allocator: Allocator = .{
+        .ptr = undefined,
+        .vtable = &.{
+            .alloc = Allocator.noAlloc,
+            .resize = Allocator.noResize,
+            .remap = Allocator.noRemap,
+            .free = Allocator.noFree,
+        },
+    };
+
+    var storage: Storage = .empty;
+    try Memory.reserveCapacity(&storage, std.testing.allocator, 64);
+
+    {
+        var memory = Memory.initRetainingCapacity(&storage, no_growth_allocator);
+        _ = try memory.expand(0, 64);
+        try std.testing.expectEqual(@as(usize, 64), memory.len());
+        try std.testing.expectError(error.OutOfMemory, memory.expand(64, 32));
+        memory.deinitRetainingCapacity();
+    }
+
+    try std.testing.expectEqual(@as(usize, 64), storage.capacity);
+    try std.testing.expectEqual(@as(usize, 0), storage.items.len);
+
+    {
+        var memory = Memory.initRetainingCapacity(&storage, std.testing.allocator);
+        defer memory.deinit();
+        _ = try memory.expand(32, 32);
+        try std.testing.expectEqual(@as(usize, 64), memory.len());
+        try std.testing.expectEqual(@as(usize, 64), storage.capacity);
+    }
+}
+
 test "memory writes overwrite without shifting bytes" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 32);
@@ -196,7 +260,8 @@ test "memory writes overwrite without shifting bytes" {
 }
 
 test "memory byte slice writes overwrite without shifting bytes" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 32);
@@ -210,7 +275,8 @@ test "memory byte slice writes overwrite without shifting bytes" {
 }
 
 test "empty memory byte writes are no-ops" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     memory.writeBytes(1024, &.{});
@@ -218,7 +284,8 @@ test "empty memory byte writes are no-ops" {
 }
 
 test "memory byte writes use low byte of word" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 1);
@@ -227,7 +294,8 @@ test "memory byte writes use low byte of word" {
 }
 
 test "padded memory byte writes only zero missing source bytes" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 32);
@@ -242,7 +310,8 @@ test "padded memory byte writes only zero missing source bytes" {
 }
 
 test "memory copy is overlap safe" {
-    var memory = Memory.init(std.testing.allocator);
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
     _ = try memory.expand(0, 32);

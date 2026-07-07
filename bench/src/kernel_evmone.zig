@@ -19,7 +19,7 @@ pub const Measurement = struct {
     host_calls: u64,
 };
 
-pub fn measure(code: []const u8, spec: evmz.Spec, mode: Mode) !Measurement {
+pub fn measure(code: []const u8, spec: evmz.eth.Revision, mode: Mode) !Measurement {
     const vm = evmc_create_evmone() orelse return error.EvmoneCreateFailed;
     defer vm.*.destroy.?(vm);
 
@@ -251,7 +251,7 @@ fn releaseResult(result: *const evmc.evmc_result) void {
     if (result.release) |release| release(result);
 }
 
-fn revFromSpec(spec: evmz.Spec) evmc.evmc_revision {
+fn revFromSpec(spec: evmz.eth.Revision) evmc.evmc_revision {
     return switch (spec) {
         .frontier => evmc.EVMC_FRONTIER,
         .frontier_thawing => evmc.EVMC_FRONTIER,

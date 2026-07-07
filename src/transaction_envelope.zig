@@ -1,7 +1,9 @@
 const std = @import("std");
+const definition_support = @import("./protocol/support.zig");
 const rlp = @import("./rlp.zig");
-const Spec = @import("./spec.zig").Spec;
+const EthRevision = @import("./eth/revision.zig").Revision;
 const eip7702 = @import("./executor/eip7702.zig");
+const tx = @import("./transaction/Transaction.zig");
 
 pub const set_code_transaction_type: u8 = 0x04;
 
@@ -39,27 +41,47 @@ pub fn decodeEnvelope(bytes: []const u8) !TransactionEnvelope {
     return error.InvalidTransactionEnvelope;
 }
 
-pub fn validateRawTransaction(spec: Spec, bytes: []const u8) ?RawValidationError {
-    const envelope = decodeEnvelope(bytes) catch return .type_4_invalid_authorization_format;
-    return switch (envelope) {
-        .legacy => null,
-        .typed => |typed| validateTypedTransaction(spec, typed),
-    };
-}
+pub fn For(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
 
-fn validateTypedTransaction(spec: Spec, typed: TypedEnvelope) ?RawValidationError {
-    return switch (typed.type_id) {
-        set_code_transaction_type => {
-            validateSetCodeTransaction(spec, typed.payload) catch |err| return switch (err) {
-                error.Type4PreFork => .type_4_tx_pre_fork,
-                error.EmptyAuthorizationList => .type_4_empty_authorization_list,
-                error.InvalidAuthorizationFormat => .type_4_invalid_authorization_format,
-                error.InvalidAuthoritySignature => .type_4_invalid_authority_signature,
-                error.InvalidAuthoritySignatureSTooHigh => .type_4_invalid_authority_signature_s_too_high,
+        pub const Protocol = ProtocolType;
+
+        pub fn validateRawTransaction(revision: Protocol.Revision, bytes: []const u8) ?RawValidationError {
+            definition_support.assertRevisionSupported(Protocol, revision);
+            const envelope = decodeEnvelope(bytes) catch return .type_4_invalid_authorization_format;
+            return switch (envelope) {
+                .legacy => null,
+                .typed => |typed| Self.validateTypedTransaction(revision, typed),
             };
-            return null;
-        },
-        else => .unsupported_transaction_type,
+        }
+
+        fn validateTypedTransaction(revision: Protocol.Revision, typed: TypedEnvelope) ?RawValidationError {
+            return switch (typed.type_id) {
+                set_code_transaction_type => {
+                    Self.validateSetCodeTransaction(revision, typed.payload) catch |err| return switch (err) {
+                        error.Type4PreFork => .type_4_tx_pre_fork,
+                        error.EmptyAuthorizationList => .type_4_empty_authorization_list,
+                        error.InvalidAuthorizationFormat => .type_4_invalid_authorization_format,
+                        error.InvalidAuthoritySignature => .type_4_invalid_authority_signature,
+                        error.InvalidAuthoritySignatureSTooHigh => .type_4_invalid_authority_signature_s_too_high,
+                    };
+                    return null;
+                },
+                else => .unsupported_transaction_type,
+            };
+        }
+
+        fn validateSetCodeTransaction(revision: Protocol.Revision, payload: []const u8) DecodeError!void {
+            if (!Protocol.Transaction.kindActive(revision, tx.TxKind.set_code)) return error.Type4PreFork;
+
+            validateSetCodePayload(payload) catch |err| return switch (err) {
+                error.EmptyAuthorizationList => error.EmptyAuthorizationList,
+                error.InvalidAuthoritySignature => error.InvalidAuthoritySignature,
+                error.InvalidAuthoritySignatureSTooHigh => error.InvalidAuthoritySignatureSTooHigh,
+                else => error.InvalidAuthorizationFormat,
+            };
+        }
     };
 }
 
@@ -70,17 +92,6 @@ const DecodeError = error{
     InvalidAuthoritySignature,
     InvalidAuthoritySignatureSTooHigh,
 };
-
-fn validateSetCodeTransaction(spec: Spec, payload: []const u8) DecodeError!void {
-    if (!spec.isImpl(.prague)) return error.Type4PreFork;
-
-    validateSetCodePayload(payload) catch |err| return switch (err) {
-        error.EmptyAuthorizationList => error.EmptyAuthorizationList,
-        error.InvalidAuthoritySignature => error.InvalidAuthoritySignature,
-        error.InvalidAuthoritySignatureSTooHigh => error.InvalidAuthoritySignatureSTooHigh,
-        else => error.InvalidAuthorizationFormat,
-    };
-}
 
 fn validateSetCodePayload(payload: []const u8) !void {
     var cursor = rlp.Cursor.init(payload);
@@ -163,11 +174,36 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
 }
 
 test "set-code transaction rejects empty authorization list" {
+    const ethereum = @import("./eth.zig");
     const hex = "04f86401808007830186a09400000000000000000000000000000000000000008080c0c001a04319a2e8066a9beedd85b227bf40cdecfb6134e6c1254f1e680895bc3131df31a059efad54e662f062d9af60acca08efb1d3d312742e381a600aac7c7989f892cc";
     var bytes: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, hex);
     try std.testing.expectEqual(
         RawValidationError.type_4_empty_authorization_list,
-        validateRawTransaction(.prague, &bytes).?,
+        For(ethereum).validateRawTransaction(.prague, &bytes).?,
+    );
+}
+
+test "raw transaction validation uses comptime transaction kind policy" {
+    const ethereum = @import("./eth.zig");
+    const EarlySetCodeProtocol = struct {
+        pub const Revision = EthRevision;
+
+        pub const Transaction = struct {
+            pub fn kindActive(revision: Revision, kind: tx.TxKind) bool {
+                _ = revision;
+                return kind == .set_code;
+            }
+        };
+    };
+    const malformed_set_code = [_]u8{ 0x04, 0xc0 };
+
+    try std.testing.expectEqual(
+        RawValidationError.type_4_tx_pre_fork,
+        For(ethereum).validateRawTransaction(.cancun, &malformed_set_code).?,
+    );
+    try std.testing.expectEqual(
+        RawValidationError.type_4_invalid_authorization_format,
+        For(EarlySetCodeProtocol).validateRawTransaction(.cancun, &malformed_set_code).?,
     );
 }

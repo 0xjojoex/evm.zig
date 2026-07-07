@@ -6,7 +6,7 @@ pub fn main(init: std.process.Init) !void {
 
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const gas_limit: u64 = 100_000;
+    const gas_limit: u64 = 300_000;
 
     var memory = evmz.state.MemoryStore.init(allocator);
     defer memory.deinit();
@@ -27,8 +27,8 @@ pub fn main(init: std.process.Init) !void {
         0xf3, // RETURN
     });
 
-    var vm = evmz.Vm.init(allocator, .{
-        .spec = .latest,
+    var vm = evmz.Evm.init(allocator, .{
+        .revision = .latest,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = gas_limit },
     });
@@ -41,13 +41,16 @@ pub fn main(init: std.process.Init) !void {
     });
     var diff = try vm.changeset();
     defer diff.deinit(allocator);
+    const stored = storageValue(&diff, contract, 0);
+    if (result.status != .success) return error.ExampleTransactionFailed;
+    if (stored != 42) return error.ExampleStorageMismatch;
 
     std.debug.print("status: {s}\n", .{@tagName(result.status)});
     std.debug.print("gas used: {d}\n", .{result.gas_used});
     std.debug.print("return: 0x", .{});
     printHex(result.output);
     std.debug.print("\n", .{});
-    std.debug.print("storage[0]: {d}\n", .{storageValue(&diff, contract, 0)});
+    std.debug.print("storage[0]: {d}\n", .{stored});
 }
 
 fn printHex(bytes: []const u8) void {

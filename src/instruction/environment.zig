@@ -1,10 +1,9 @@
 const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
-const instruction = evmz.instruction;
-const tx_gas = @import("../transaction/gas.zig");
 const CallFrame = Interpreter.CallFrame;
 const Host = evmz.Host;
+const AccountAccessStatus = evmz.protocol.interface.AccountAccessStatus;
 
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {
@@ -21,24 +20,85 @@ fn sourceFromOffset(source: []const u8, offset_word: u256) []const u8 {
     return source[offset..];
 }
 
-fn coldAccountAccessGas(spec: evmz.Spec) i64 {
-    const access_gas = if (spec.isImpl(.amsterdam))
-        tx_gas.amsterdam_cold_account_access_cost - instruction.warm_storage_read_cost
-    else
-        instruction.cold_account_access_gas;
-    return std.math.cast(i64, access_gas) orelse std.math.maxInt(i64);
+fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
+    return switch (status) {
+        .cold => .cold,
+        .warm => .warm,
+    };
 }
 
-fn codeAccountAccessGas(spec: evmz.Spec, status: Host.AccessStatus) i64 {
-    return switch (status) {
-        .cold => std.math.cast(i64, if (spec.isImpl(.amsterdam))
-            tx_gas.amsterdam_cold_account_access_cost
-        else
-            instruction.cold_account_access_gas) orelse std.math.maxInt(i64),
-        .warm => if (spec.isImpl(.amsterdam))
-            instruction.warm_storage_read_cost
-        else
-            0,
+pub fn For(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
+
+        pub const Protocol = ProtocolType;
+
+        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
+            return Interpreter.For(Protocol).revision(frame);
+        }
+
+        fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.Address) !bool {
+            if (Protocol.Instruction.codeAccountAccessGas(Self.frameRevision(frame), .warm) == null) return true;
+            const access_status = accountAccessStatus(try frame.host.accessAccount(target_address));
+            const access_gas = Protocol.Instruction.codeAccountAccessGas(Self.frameRevision(frame), access_status) orelse 0;
+            frame.trackGas(access_gas);
+            return frame.status == .running;
+        }
+
+        pub fn balance(frame: *CallFrame) !void {
+            const target_address_word = try frame.stack.pop();
+            const target_address = evmz.address.fromWord(target_address_word);
+            if (Protocol.Instruction.accountReadColdAccessGas(Self.frameRevision(frame))) |cold_access_gas| {
+                if (try frame.host.accessAccount(target_address) == .cold) {
+                    frame.trackGas(cold_access_gas);
+                    if (frame.status != .running) return;
+                }
+            }
+            const address_balance = try frame.host.getBalance(target_address);
+            frame.stack.pushUnchecked(address_balance);
+        }
+
+        pub fn extcodesize(frame: *CallFrame) !void {
+            const target_address_word = try frame.stack.pop();
+            const target_address = evmz.address.fromWord(target_address_word);
+            if (!try Self.trackCodeAccountAccessGas(frame, target_address)) return;
+            const size = try frame.host.getCodeSize(target_address);
+            frame.stack.pushUnchecked(size);
+        }
+
+        pub fn extcodecopy(frame: *CallFrame) !void {
+            const address_word, const dest_offset_word, const offset_word, const size_word = try frame.stack.popN(4);
+            const target_address = evmz.address.fromWord(address_word);
+            const size = frame.wordToUsizeOrOog(size_word) orelse return;
+            const dest_offset = frame.memoryOffsetToUsizeOrOog(dest_offset_word, size) orelse return;
+
+            if (!try Self.trackCodeAccountAccessGas(frame, target_address)) return;
+
+            if (!try frame.expandMemory(dest_offset, size)) return;
+            if (!trackCopyGas(frame, size)) return;
+
+            const dest = frame.memory.writeSlice(dest_offset, size);
+            var copied: usize = 0;
+            if (std.math.cast(usize, offset_word)) |offset| {
+                copied = @min(try frame.host.copyCode(target_address, offset, dest), dest.len);
+            }
+            if (copied < dest.len) {
+                @memset(dest[copied..], 0);
+            }
+        }
+
+        pub fn extcodehash(frame: *CallFrame) !void {
+            const address_word = try frame.stack.pop();
+            const target_address = evmz.address.fromWord(address_word);
+            if (Protocol.Instruction.accountReadColdAccessGas(Self.frameRevision(frame))) |cold_access_gas| {
+                if (try frame.host.accessAccount(target_address) == .cold) {
+                    frame.trackGas(cold_access_gas);
+                    if (frame.status != .running) return;
+                }
+            }
+            const code_hash = try frame.host.getCodeHash(target_address);
+            frame.stack.pushUnchecked(code_hash);
+        }
     };
 }
 
@@ -121,17 +181,6 @@ pub fn blockhash(frame: *CallFrame) !void {
     }
 }
 
-pub fn balance(frame: *CallFrame) !void {
-    const target_address_word = try frame.stack.pop();
-    const target_address = evmz.address.fromWord(target_address_word);
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(coldAccountAccessGas(frame.spec));
-        if (frame.status != .running) return;
-    }
-    const address_balance = try frame.host.getBalance(target_address);
-    frame.stack.pushUnchecked(address_balance);
-}
-
 pub fn callvalue(frame: *CallFrame) !void {
     try frame.stack.push(frame.msg.value);
 }
@@ -179,55 +228,80 @@ pub fn codecopy(frame: *CallFrame) !void {
     frame.memory.writePaddedBytes(dest_offset, size, source);
 }
 
-pub fn extcodesize(frame: *CallFrame) !void {
-    const target_address_word = try frame.stack.pop();
-    const target_address = evmz.address.fromWord(target_address_word);
-    if (frame.spec.isImpl(.berlin)) {
-        frame.trackGas(codeAccountAccessGas(frame.spec, try frame.host.accessAccount(target_address)));
-        if (frame.status != .running) return;
-    }
-    const size = try frame.host.getCodeSize(target_address);
-    frame.stack.pushUnchecked(size);
-}
-
-pub fn extcodecopy(frame: *CallFrame) !void {
-    const address_word, const dest_offset_word, const offset_word, const size_word = try frame.stack.popN(4);
-    const target_address = evmz.address.fromWord(address_word);
-    const size = frame.wordToUsizeOrOog(size_word) orelse return;
-    const dest_offset = frame.memoryOffsetToUsizeOrOog(dest_offset_word, size) orelse return;
-
-    if (frame.spec.isImpl(.berlin)) {
-        frame.trackGas(codeAccountAccessGas(frame.spec, try frame.host.accessAccount(target_address)));
-        if (frame.status != .running) return;
-    }
-
-    if (!try frame.expandMemory(dest_offset, size)) return;
-    if (!trackCopyGas(frame, size)) return;
-
-    const dest = frame.memory.writeSlice(dest_offset, size);
-    var copied: usize = 0;
-    if (std.math.cast(usize, offset_word)) |offset| {
-        copied = @min(try frame.host.copyCode(target_address, offset, dest), dest.len);
-    }
-    if (copied < dest.len) {
-        @memset(dest[copied..], 0);
-    }
-}
-
-pub fn extcodehash(frame: *CallFrame) !void {
-    const address_word = try frame.stack.pop();
-    const target_address = evmz.address.fromWord(address_word);
-    if (frame.spec.isImpl(.berlin) and try frame.host.accessAccount(target_address) == .cold) {
-        frame.trackGas(coldAccountAccessGas(frame.spec));
-        if (frame.status != .running) return;
-    }
-    const code_hash = try frame.host.getCodeHash(target_address);
-    frame.stack.pushUnchecked(code_hash);
-}
-
 pub fn selfbalance(frame: *CallFrame) !void {
     const address_balance = try frame.host.getBalance(frame.msg.recipient);
     try frame.stack.push(address_balance);
+}
+
+test "BALANCE cold account access gas comes from comptime protocol" {
+    const CustomProtocol = struct {
+        pub const Revision = evmz.eth.Revision;
+
+        pub const Instruction = struct {
+            pub fn accountReadColdAccessGas(revision: evmz.eth.Revision) ?i64 {
+                _ = revision;
+                return 7;
+            }
+        };
+    };
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{@intFromEnum(evmz.Opcode.BALANCE)};
+
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .frontier,
+    });
+    defer frame.deinit();
+
+    try frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
+    try For(CustomProtocol).balance(frame.frame);
+
+    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
+    try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
+}
+
+test "EXTCODESIZE account access gas comes from comptime protocol" {
+    const CustomProtocol = struct {
+        pub const Revision = evmz.eth.Revision;
+
+        pub const Instruction = struct {
+            pub fn codeAccountAccessGas(revision: evmz.eth.Revision, status: AccountAccessStatus) ?i64 {
+                _ = revision;
+                return switch (status) {
+                    .cold => 9,
+                    .warm => 4,
+                };
+            }
+        };
+    };
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{@intFromEnum(evmz.Opcode.EXTCODESIZE)};
+
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .frontier,
+    });
+    defer frame.deinit();
+
+    try frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
+    try For(CustomProtocol).extcodesize(frame.frame);
+
+    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expectEqual(@as(i64, 99_991), frame.frame.gas_left);
+    try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 
 test "EXTCODECOPY writes directly and zero pads missing code bytes" {
@@ -253,11 +327,11 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
         0x3c, // EXTCODECOPY
     };
 
-    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
-        .spec = .cancun,
+        .revision = .cancun,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();

@@ -106,7 +106,7 @@ const SstoreResult = struct {
     final_storage: u256,
 };
 
-fn runSstoreVector(hex_code: []const u8, original: u256, spec: evmz.Spec) !SstoreResult {
+fn runSstoreVector(hex_code: []const u8, original: u256, revision: evmz.eth.Revision) !SstoreResult {
     var code_buf: [32]u8 = undefined;
     const code = try std.fmt.hexToBytes(&code_buf, hex_code);
 
@@ -117,7 +117,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, spec: evmz.Spec) !Sstor
     var msg = t.defaultMessage();
     msg.gas = test_gas;
 
-    const result = try t.runBytecodeWithHost(&host, &msg, code, spec);
+    const result = try t.runBytecodeWithHost(&host, &msg, code, revision);
     return .{
         .status = result.status,
         .gas_left = result.gas_left,
@@ -126,7 +126,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, spec: evmz.Spec) !Sstor
     };
 }
 
-fn testingFrame() !Interpreter.OwnedCallFrame {
+fn testingFrame() !Interpreter.OwnedCallFrame(evmz.EthProtocol) {
     const code = [_]u8{@intFromEnum(Opcode.STOP)};
     var host: Host = undefined;
     const msg = Host.Message{
@@ -139,10 +139,10 @@ fn testingFrame() !Interpreter.OwnedCallFrame {
         .value = 0,
     };
 
-    return Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    return Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .spec = .latest,
+        .revision = .latest,
     });
 }

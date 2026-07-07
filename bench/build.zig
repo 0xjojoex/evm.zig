@@ -23,9 +23,24 @@ pub fn build(b: *std.Build) void {
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
     const zbench_dep = b.dependency("zbench", .{ .target = target, .optimize = micro_optimize });
     const evmz_mod = evmz_dep.module("evmz");
+    const vm_loop_support_min = b.option(
+        []const u8,
+        "bench-support-min",
+        "Minimum Ethereum revision compiled into the VM-loop benchmark",
+    ) orelse "frontier";
+    const vm_loop_support_max = b.option(
+        []const u8,
+        "bench-support-max",
+        "Maximum Ethereum revision compiled into the VM-loop benchmark",
+    ) orelse "latest";
+    const vm_loop_options = b.addOptions();
+    vm_loop_options.addOption([]const u8, "support_min", vm_loop_support_min);
+    vm_loop_options.addOption([]const u8, "support_max", vm_loop_support_max);
+    const vm_loop_options_mod = vm_loop_options.createModule();
 
     {
         const vm_loop_mod = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod);
+        vm_loop_mod.addImport("build_options", vm_loop_options_mod);
         const vm_loop = b.addExecutable(.{
             .name = "evmz-vm-loop",
             .root_module = vm_loop_mod,
@@ -75,19 +90,6 @@ pub fn build(b: *std.Build) void {
         const run_kernel = b.addRunArtifact(kernel);
         if (b.args) |args| run_kernel.addArgs(args);
         b.step("kernel", "Run pure opcode kernel benchmark").dependOn(&run_kernel.step);
-    }
-
-    {
-        const code_analysis_mod = benchModule(b, "src/code_analysis.zig", target, optimize, evmz_mod);
-        const code_analysis = b.addExecutable(.{
-            .name = "evmz-code-analysis",
-            .root_module = code_analysis_mod,
-        });
-        b.installArtifact(code_analysis);
-
-        const run_code_analysis = b.addRunArtifact(code_analysis);
-        if (b.args) |args| run_code_analysis.addArgs(args);
-        b.step("code-analysis", "Run code-analysis morphology and timing report").dependOn(&run_code_analysis.step);
     }
 
     {
@@ -213,8 +215,10 @@ pub fn build(b: *std.Build) void {
         const common_tests = b.addTest(.{
             .root_module = benchModule(b, "src/common.zig", target, optimize, evmz_mod),
         });
+        const vm_loop_test_mod = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod);
+        vm_loop_test_mod.addImport("build_options", vm_loop_options_mod);
         const vm_loop_tests = b.addTest(.{
-            .root_module = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod),
+            .root_module = vm_loop_test_mod,
         });
         const host_boundary_tests = b.addTest(.{
             .root_module = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod),
@@ -229,9 +233,6 @@ pub fn build(b: *std.Build) void {
                 break :blk kernel_test_mod;
             },
         });
-        const code_analysis_tests = b.addTest(.{
-            .root_module = benchModule(b, "src/code_analysis.zig", target, optimize, evmz_mod),
-        });
         const compare_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/compare.zig"),
@@ -245,7 +246,6 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(host_boundary_tests).step);
         test_step.dependOn(&b.addRunArtifact(host_matrix_tests).step);
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
-        test_step.dependOn(&b.addRunArtifact(code_analysis_tests).step);
         test_step.dependOn(&b.addRunArtifact(compare_tests).step);
     }
 }

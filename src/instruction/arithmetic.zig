@@ -57,16 +57,26 @@ pub fn mulmod(frame: *CallFrame) !void {
     frame.stack.pushUnchecked(uint256.mulMod(a, b, c));
 }
 
-pub fn exp(frame: *CallFrame) !void {
-    const a, const exponent = try frame.stack.popN(2);
+pub fn For(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
 
-    const exp_cost: u8 = if (frame.spec.isImpl(.spurious_dragon)) 50 else 10;
+        pub const Protocol = ProtocolType;
 
-    const exponent_byte_size = countSignificantBytesSize(exponent);
-    frame.trackGas(@as(i64, exp_cost) * exponent_byte_size);
+        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
+            return Interpreter.For(Protocol).revision(frame);
+        }
 
-    const result = wrapExp(a, exponent);
-    frame.stack.pushUnchecked(result);
+        pub fn exp(frame: *CallFrame) !void {
+            const a, const exponent = try frame.stack.popN(2);
+
+            const exponent_byte_size = countSignificantBytesSize(exponent);
+            frame.trackGas(Protocol.Instruction.expByteGas(Self.frameRevision(frame)) * exponent_byte_size);
+
+            const result = wrapExp(a, exponent);
+            frame.stack.pushUnchecked(result);
+        }
+    };
 }
 
 pub fn signextend(frame: *CallFrame) !void {
@@ -161,6 +171,42 @@ test wrapExp {
     const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
     const result = wrapExp(a, exponent);
     try std.testing.expectEqual(@as(u256, 0), result);
+}
+
+test "EXP byte gas comes from comptime protocol" {
+    const CheapExpProtocol = struct {
+        pub const Revision = evmz.eth.Revision;
+
+        pub const Instruction = struct {
+            pub fn expByteGas(revision: evmz.eth.Revision) i64 {
+                _ = revision;
+                return 1;
+            }
+        };
+    };
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{@intFromEnum(evmz.Opcode.EXP)};
+
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .spurious_dragon,
+    });
+    defer frame.deinit();
+
+    try frame.frame.stack.push(0x0100);
+    try frame.frame.stack.push(2);
+
+    try For(CheapExpProtocol).exp(frame.frame);
+
+    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expectEqual(@as(i64, 99_998), frame.frame.gas_left);
+    try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 
 /// Returns how many bytes are needed to represent the significant part of a 256-bit integer.

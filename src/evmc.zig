@@ -75,7 +75,7 @@ fn execute(
 ) callconv(.c) evmc.evmc_result {
     _ = vm;
 
-    const spec = revToSpec(rev) catch |err| {
+    const revision = evmcRevisionToEthereumRevision(rev) catch |err| {
         log.err("execute failed: {}", .{err});
         return evmc.evmc_result{
             .status_code = evmc.EVMC_FAILURE,
@@ -118,11 +118,11 @@ fn execute(
         .code_address = fromEvmcAddress(msg.*.code_address),
     };
 
-    var frame = evmz.Interpreter.OwnedCallFrame.init(std.heap.c_allocator, .{
+    var frame = evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.heap.c_allocator, .{
         .host = &host_,
         .msg = &message,
         .code = code[0..code_size],
-        .spec = spec,
+        .revision = revision,
     }) catch |err| {
         log.err("execute failed: {}", .{err});
         return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
@@ -226,24 +226,6 @@ fn setOption(
     _ = vm;
     _ = name;
     _ = value;
-    // const self: *Evmz = @fieldParentPtr("vm", vm);
-
-    // const name_str = std.mem.span(@as([*:0]const u8, @ptrCast(name)));
-    // const value_str = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
-
-    // log.debug("set_option {s} {s}", .{ name, value });
-    // if (std.mem.eql(u8, name_str, "rev")) {
-    //     const number = std.fmt.parseInt(c_uint, value_str, 10) catch {
-    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-    //     };
-
-    //     self.spec = revToSpec(number) catch |err| {
-    //         log.err("set_option failed: {}", .{err});
-    //         return evmc.EVMC_SET_OPTION_INVALID_VALUE;
-    //     };
-    //     return evmc.EVMC_SET_OPTION_SUCCESS;
-    // }
-
     return evmc.EVMC_SET_OPTION_INVALID_NAME;
 }
 
@@ -523,7 +505,7 @@ fn accessStatusFromEvmc(status: evmc.evmc_access_status) !evmz.Host.AccessStatus
     };
 }
 
-fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
+fn evmcRevisionToEthereumRevision(rev: evmc.evmc_revision) error{UnmatchedRevision}!evmz.eth.Revision {
     return switch (rev) {
         evmc.EVMC_FRONTIER => .frontier,
         evmc.EVMC_HOMESTEAD => .homestead,
@@ -541,7 +523,7 @@ fn revToSpec(rev: evmc.evmc_revision) error{UnmatchedSpec}!evmz.Spec {
         evmc.EVMC_PRAGUE => .prague,
         evmc.EVMC_OSAKA => .osaka,
         evmc.EVMC_AMSTERDAM => .amsterdam,
-        else => return error.UnmatchedSpec,
+        else => return error.UnmatchedRevision,
     };
 }
 
@@ -575,8 +557,8 @@ test "EVMC execute returns owned output through mock host" {
     try std.testing.expectEqual(@as(u8, 0x2a), result.output_data[31]);
 }
 
-test "EVMC Paris revision maps to Merge spec" {
-    try std.testing.expectEqual(evmz.Spec.merge, try revToSpec(evmc.EVMC_PARIS));
+test "EVMC Paris revision maps to Merge revision" {
+    try std.testing.expectEqual(evmz.eth.Revision.merge, try evmcRevisionToEthereumRevision(evmc.EVMC_PARIS));
 }
 
 test "EVMC execute carries blob hashes through tx context" {

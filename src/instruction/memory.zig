@@ -93,8 +93,8 @@ pub fn mcopy(frame: *CallFrame) !void {
 }
 
 test "MCOPY is only enabled from Cancun" {
-    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .shanghai, .invalid);
-    try evmz.t.expectBytecodeStatusBySpec(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .cancun, .success);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .shanghai, .invalid);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .cancun, .success);
 }
 
 test "MCOPY expands destination" {

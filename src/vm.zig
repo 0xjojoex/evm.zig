@@ -9,7 +9,7 @@ const std = @import("std");
 
 const evmz = @import("evm.zig");
 const address = @import("./address.zig");
-const Executor = @import("./executor.zig");
+const executor_module = @import("./executor.zig");
 const Host = @import("./Host.zig");
 const Interpreter = @import("./Interpreter.zig");
 const transaction = @import("./transaction.zig");
@@ -20,18 +20,9 @@ const Changeset = evmz.state.Changeset;
 const AccountState = evmz.state.Account;
 const MemoryStore = evmz.state.MemoryStore;
 
-const Vm = @This();
-
-/// Low-level execution substrate for diagnostics, fixtures, and benchmarks.
-executor: Executor,
-/// Current block/environment values used to build transaction host contexts.
-env: Env,
-/// Optional sink used by `commit` to persist the overlay diff.
-committer: ?Committer,
-
-pub const StateReader = Executor.state_io.StateReader;
+pub const StateReader = executor_module.state_io.StateReader;
 pub const BlockHashSource = evmz.BlockHashSource;
-pub const Committer = Executor.state_io.Committer;
+pub const Committer = executor_module.state_io.Committer;
 pub const Log = Host.Log;
 
 /// Block/environment values supplied by the caller.
@@ -70,35 +61,6 @@ pub const Env = struct {
     }
 };
 
-pub const Init = struct {
-    spec: evmz.Spec,
-    state_reader: ?StateReader = null,
-    block_hash_source: ?BlockHashSource = null,
-    committer: ?Committer = null,
-    env: Env = .{},
-    config: evmz.Config = .base,
-    trace_sink: ?*evmz.trace.Sink = null,
-};
-
-/// Protocol-level transaction input for `Vm.transact`.
-pub const Transaction = struct {
-    kind: transaction.TxKind = .legacy,
-    sender: Address,
-    nonce: ?u64 = null,
-    gas_limit: u64,
-    to: ?Address = null,
-    value: u256 = 0,
-    input: []const u8 = &.{},
-    gas_price: u256 = 0,
-    max_fee_per_gas: ?u256 = null,
-    max_priority_fee_per_gas: ?u256 = null,
-    max_fee_per_blob_gas: ?u256 = null,
-    blob_hashes: []const u256 = &.{},
-    access_list: []const transaction.AccessListEntry = &.{},
-    authorization_list: []const transaction.AuthorizationTuple = &.{},
-    authorization_count: ?usize = null,
-};
-
 pub const TxStatus = enum {
     success,
     revert,
@@ -111,28 +73,17 @@ pub const TxStatus = enum {
 ///
 /// `output` is borrowed from the VM and remains valid until the next VM call
 /// that can replace call output.
-pub const TxResult = struct {
-    status: TxStatus,
-    gas_used: u64 = 0,
-    block_gas_used: u64 = 0,
-    gas_refunded: u64 = 0,
-    output: []const u8 = &.{},
-    created_address: ?Address = null,
-    validation_error: ?transaction.ValidationError = null,
-};
-
-const PreparedTransaction = struct {
-    created_address: ?Address,
-    host_context: Host.TxContext,
-    normalized_tx: transaction.Transaction,
-    gas_plan: transaction.GasPlan,
-    settlement: transaction.Settlement,
-};
-
-const PreparedTransactionResult = union(enum) {
-    rejected: TxResult,
-    executable: PreparedTransaction,
-};
+pub fn TxResultFor(comptime Protocol: type) type {
+    return struct {
+        status: TxStatus,
+        gas_used: u64 = 0,
+        block_gas_used: u64 = 0,
+        gas_refunded: u64 = 0,
+        output: []const u8 = &.{},
+        created_address: ?Address = null,
+        validation_error: ?Protocol.Transaction.ValidationError = null,
+    };
+}
 
 /// Borrowed transaction receipt view for client/fixture receipt builders.
 ///
@@ -153,73 +104,6 @@ pub const BlockResult = struct {
     tx_count: u64 = 0,
 };
 
-pub const BlockSession = struct {
-    vm: *Vm,
-    gas_used: u64 = 0,
-    block_gas_used: u64 = 0,
-    tx_count: u64 = 0,
-
-    pub fn transact(self: *BlockSession, tx: Transaction) !TxResult {
-        const prepared = try self.vm.prepareTransaction(tx);
-        switch (prepared) {
-            .rejected => |result| return result,
-            .executable => |executable| {
-                var pre_tx = try self.vm.executor.snapshot();
-                defer pre_tx.deinit(self.vm.executor.allocator);
-
-                const result = try self.vm.executePreparedTransaction(executable);
-                const next_block_gas = std.math.add(u64, self.block_gas_used, result.block_gas_used) catch {
-                    try self.vm.executor.restore(&pre_tx);
-                    return .{
-                        .status = .rejected,
-                        .validation_error = .gas_allowance_exceeded,
-                    };
-                };
-                if (self.vm.env.gas_limit != 0 and next_block_gas > self.vm.env.gas_limit) {
-                    try self.vm.executor.restore(&pre_tx);
-                    return .{
-                        .status = .rejected,
-                        .validation_error = .gas_allowance_exceeded,
-                    };
-                }
-
-                self.gas_used += result.gas_used;
-                self.block_gas_used = next_block_gas;
-                self.tx_count += 1;
-                return result;
-            },
-        }
-    }
-
-    pub fn receipt(self: *const BlockSession, result: TxResult) TxReceiptView {
-        return .{
-            .status = result.status,
-            .gas_used = result.gas_used,
-            .block_gas_used = result.block_gas_used,
-            .cumulative_gas_used = self.gas_used,
-            .created_address = result.created_address,
-            .logs = if (result.status == .rejected) &.{} else self.vm.logs(),
-        };
-    }
-
-    pub fn transactReceipt(self: *BlockSession, tx: Transaction) !TxReceiptView {
-        const result = try self.transact(tx);
-        return self.receipt(result);
-    }
-
-    pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
-        return self.vm.systemCall(call);
-    }
-
-    pub fn finish(self: *const BlockSession) BlockResult {
-        return .{
-            .gas_used = self.gas_used,
-            .block_gas_used = self.block_gas_used,
-            .tx_count = self.tx_count,
-        };
-    }
-};
-
 /// Read-only account view borrowed from the VM overlay/state-reader cache.
 pub const AccountView = struct {
     nonce: u64,
@@ -227,10 +111,12 @@ pub const AccountView = struct {
     code: []const u8 = &.{},
 };
 
-pub const Call = Executor.Call;
-pub const Create = Executor.Create;
-pub const Message = Executor.Message;
-pub const EvmResult = Executor.EvmResult;
+pub const Call = executor_module.Call;
+pub const Create = executor_module.Create;
+pub const Message = executor_module.Message;
+pub const EvmResult = executor_module.EvmResult;
+pub const RuntimeResources = executor_module.RuntimeResources;
+pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
 
 /// Explicit non-transaction system call for block-hook style operations.
 pub const SystemCall = struct {
@@ -240,291 +126,354 @@ pub const SystemCall = struct {
     gas: u64,
 };
 
-pub fn init(allocator: std.mem.Allocator, options: Init) Vm {
-    return .{
-        .executor = Executor.init(allocator, .{
-            .spec = options.spec,
-            .state_reader = options.state_reader,
-            .block_hash_source = options.block_hash_source,
-            .config = options.config,
-            .trace_sink = options.trace_sink,
-        }),
-        .env = options.env,
-        .committer = options.committer,
+pub fn Vm(comptime Protocol: type) type {
+    return struct {
+        const Self = @This();
+        const Executor = executor_module.Executor(Protocol);
+        const tx_protocol = transaction.For(Protocol);
+
+        pub const Transaction = Protocol.Transaction.Value;
+        pub const TxResult = TxResultFor(Protocol);
+        pub const PreparedTransaction = transaction.Prepared(Protocol);
+        pub const PreparedTransactionResult = transaction.PrepareResult(Protocol);
+
+        /// Low-level execution substrate for diagnostics, fixtures, and benchmarks.
+        executor: Executor,
+        /// Current block/environment values used to build transaction host contexts.
+        env: Env,
+        /// Optional sink used by `commit` to persist the overlay diff.
+        committer: ?Committer,
+
+        pub const Init = struct {
+            revision: Protocol.Revision,
+            state_reader: ?StateReader = null,
+            block_hash_source: ?BlockHashSource = null,
+            committer: ?Committer = null,
+            env: Env = .{},
+            config: evmz.ExecutionConfig = .base,
+            trace_sink: ?*evmz.trace.Sink = null,
+        };
+
+        pub const RuntimeResources = executor_module.RuntimeResources;
+        pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
+
+        pub const BlockSession = struct {
+            vm: *Self,
+            gas_used: u64 = 0,
+            block_gas_used: u64 = 0,
+            tx_count: u64 = 0,
+
+            pub fn transact(self: *BlockSession, tx: Self.Transaction) !Self.TxResult {
+                const prepared = try self.vm.prepareTransaction(tx);
+                switch (prepared) {
+                    .rejected => |err| return .{
+                        .status = .rejected,
+                        .validation_error = err,
+                    },
+                    .executable => |executable| {
+                        var pre_tx = try self.vm.executor.snapshot();
+                        defer pre_tx.deinit(self.vm.executor.allocator);
+
+                        const result = try self.vm.executePreparedTransaction(executable);
+                        const next_block_gas = std.math.add(u64, self.block_gas_used, result.block_gas_used) catch {
+                            try self.vm.executor.restore(&pre_tx);
+                            return .{
+                                .status = .rejected,
+                            };
+                        };
+                        if (self.vm.env.gas_limit != 0 and next_block_gas > self.vm.env.gas_limit) {
+                            try self.vm.executor.restore(&pre_tx);
+                            return .{
+                                .status = .rejected,
+                            };
+                        }
+
+                        self.gas_used += result.gas_used;
+                        self.block_gas_used = next_block_gas;
+                        self.tx_count += 1;
+                        return result;
+                    },
+                }
+            }
+
+            pub fn receipt(self: *const BlockSession, result: Self.TxResult) TxReceiptView {
+                return .{
+                    .status = result.status,
+                    .gas_used = result.gas_used,
+                    .block_gas_used = result.block_gas_used,
+                    .cumulative_gas_used = self.gas_used,
+                    .created_address = result.created_address,
+                    .logs = if (result.status == .rejected) &.{} else self.vm.logs(),
+                };
+            }
+
+            pub fn transactReceipt(self: *BlockSession, tx: Self.Transaction) !TxReceiptView {
+                const result = try self.transact(tx);
+                return self.receipt(result);
+            }
+
+            pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
+                return self.vm.systemCall(call);
+            }
+
+            pub fn finish(self: *const BlockSession) BlockResult {
+                return .{
+                    .gas_used = self.gas_used,
+                    .block_gas_used = self.block_gas_used,
+                    .tx_count = self.tx_count,
+                };
+            }
+        };
+
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
+            return .{
+                .executor = Executor.init(allocator, .{
+                    .revision = options.revision,
+                    .state_reader = options.state_reader,
+                    .block_hash_source = options.block_hash_source,
+                    .config = options.config,
+                    .trace_sink = options.trace_sink,
+                }),
+                .env = options.env,
+                .committer = options.committer,
+            };
+        }
+
+        /// Initialize a VM and reserve reusable execution resources up front.
+        pub fn initWithRuntimeResources(allocator: std.mem.Allocator, options: Init, runtime_resources: executor_module.RuntimeResources) !Self {
+            return .{
+                .executor = try Executor.initWithRuntimeResources(allocator, .{
+                    .revision = options.revision,
+                    .state_reader = options.state_reader,
+                    .block_hash_source = options.block_hash_source,
+                    .config = options.config,
+                    .trace_sink = options.trace_sink,
+                }, runtime_resources),
+                .env = options.env,
+                .committer = options.committer,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.executor.deinit();
+        }
+
+        pub fn setEnv(self: *Self, env: Env) void {
+            self.env = env;
+        }
+
+        pub fn beginBlock(self: *Self, env: Env) BlockSession {
+            self.setEnv(env);
+            return .{ .vm = self };
+        }
+
+        pub fn getAccount(self: *Self, address_value: Address) !?AccountView {
+            const account = try self.executor.getAccountOrLoad(address_value) orelse return null;
+            return .{
+                .nonce = account.nonce,
+                .balance = account.balance,
+                .code = account.code,
+            };
+        }
+
+        pub fn getStorage(self: *Self, address_value: Address, key: u256) !u256 {
+            return self.executor.getStorage(address_value, key);
+        }
+
+        /// Borrow logs emitted by the most recent transaction/system-call scope.
+        ///
+        /// Receipt builders can copy these immediately after `transact`; the slice is
+        /// invalidated by the next transaction, discard, commit, or VM teardown.
+        pub fn logs(self: *const Self) []const Log {
+            return self.executor.logs();
+        }
+
+        /// Execute an explicit non-transaction system call.
+        pub fn systemCall(self: *Self, call: SystemCall) !EvmResult {
+            const context_gas_limit = if (self.env.gas_limit == 0) call.gas else self.env.gas_limit;
+            const result = try self.executor.executeSystemCall(
+                self.env.txContext(call.sender, 0, context_gas_limit, &.{}),
+                call.sender,
+                call.recipient,
+                call.input,
+                call.gas,
+            );
+            return Host.Result.fromCall(.{
+                .status = result.status,
+                .output_data = result.output_data,
+                .gas_left = result.gas_left,
+                .gas_refund = result.gas_refund,
+            });
+        }
+
+        /// Execute one protocol transaction into the VM overlay.
+        pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
+            const prepared = try self.prepareTransaction(tx);
+            return switch (prepared) {
+                .rejected => |err| .{
+                    .status = .rejected,
+                    .validation_error = err,
+                },
+                .executable => |executable| try self.executePreparedTransaction(executable),
+            };
+        }
+
+        fn prepareTransaction(self: *Self, tx: Self.Transaction) !Self.PreparedTransactionResult {
+            self.executor.clearLogs();
+            const view = Protocol.Transaction.view(tx);
+            const input: transaction.PrepareInput(Protocol) = .{
+                .revision = self.executor.revision(),
+                .tx = tx,
+                .view = view,
+                .env = envFacts(self.env),
+                .state = try self.stateFacts(view),
+            };
+            return Protocol.Transaction.prepare(Protocol, input);
+        }
+
+        fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !Self.TxResult {
+            try self.executor.beginTransactionScope(hostContext(prepared.execution_context), prepared.envelope);
+            errdefer self.executor.closeTransaction();
+            const result = try self.executor.runTopLevelTransaction(prepared.envelope, .{
+                .execution = prepared.execution_gas,
+                .settlement = prepared.settlement,
+            });
+
+            const costs = try tx_protocol.settlement.planCosts(prepared.settlement, .{
+                .gas_left = result.gas_left,
+                .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+            });
+            return .{
+                .status = txStatus(result.status),
+                .gas_used = costs.gas_used,
+                .block_gas_used = costs.block_gas_used,
+                .gas_refunded = costs.refunded_gas,
+                .output = result.output_data,
+                .created_address = if (result.status == .success) prepared.created_address else null,
+            };
+        }
+
+        /// Convenience for one-off callers. Block executors should usually call
+        /// `transact` many times, then one `commit`.
+        pub fn transactCommit(self: *Self, tx: Self.Transaction) !Self.TxResult {
+            const result = try self.transact(tx);
+            if (result.status == .rejected) return result;
+            try self.commit();
+            return result;
+        }
+
+        fn stateFacts(self: *Self, view: Protocol.Transaction.View) !transaction.StateFacts {
+            const sender_account = try self.executor.getAccountOrLoad(view.sender);
+            const sender_balance: u256 = if (sender_account) |account| account.balance else 0;
+            const sender_nonce: u64 = if (sender_account) |account| account.nonce else 0;
+            const sender_code_kind = if (sender_account) |account| senderCodeKind(account) else transaction.SenderCodeKind.empty;
+            return .{
+                .sender_balance = sender_balance,
+                .sender_nonce = sender_nonce,
+                .sender_code_kind = sender_code_kind,
+                .value_transfer_creates_account = try self.valueTransferCreatesAccount(view),
+            };
+        }
+
+        fn senderCodeKind(account: *const AccountState) transaction.SenderCodeKind {
+            if (account.code.len == 0) return .empty;
+            if (executor_module.eip7702.delegationTarget(account.code) != null) return .delegation;
+            return .non_delegating;
+        }
+
+        fn valueTransferCreatesAccount(self: *Self, view: Protocol.Transaction.View) !bool {
+            if (view.value == 0 or view.to == null or isSelfTransfer(view)) return false;
+            return (try self.executor.getAccountOrLoad(view.to.?)) == null;
+        }
+
+        fn isSelfTransfer(view: Protocol.Transaction.View) bool {
+            const recipient = view.to orelse return false;
+            return std.mem.eql(u8, &view.sender, &recipient);
+        }
+
+        fn envFacts(env: Env) transaction.EnvFacts {
+            return .{
+                .chain_id = env.chain_id,
+                .coinbase = env.coinbase,
+                .number = env.number,
+                .slot_number = env.slot_number,
+                .timestamp = env.timestamp,
+                .gas_limit = env.gas_limit,
+                .prev_randao = env.prev_randao,
+                .base_fee = env.base_fee,
+                .blob_base_fee = env.blob_base_fee,
+            };
+        }
+
+        fn hostContext(context: transaction.ExecutionContext) Host.TxContext {
+            return .{
+                .chain_id = context.chain_id,
+                .gas_price = context.gas_price,
+                .origin = context.origin,
+                .coinbase = context.coinbase,
+                .number = context.number,
+                .slot_number = context.slot_number,
+                .timestamp = context.timestamp,
+                .gas_limit = context.gas_limit,
+                .prev_randao = context.prev_randao,
+                .base_fee = context.base_fee,
+                .blob_base_fee = context.blob_base_fee,
+                .blob_hashes = context.blob_hashes,
+            };
+        }
+
+        fn txStatus(status: Interpreter.Status) TxStatus {
+            return switch (status) {
+                .success => .success,
+                .revert => .revert,
+                .invalid => .invalid,
+                .out_of_gas => .out_of_gas,
+            };
+        }
+
+        /// Return the current pending state diff without persisting it.
+        pub fn changeset(self: *Self) !Changeset {
+            return self.executor.changeset();
+        }
+
+        /// Drop pending overlay changes without writing them to the commit sink.
+        pub fn discard(self: *Self) void {
+            self.executor.discardChanges();
+        }
+
+        /// Persist the current overlay diff, then rebase the VM to the updated state reader.
+        ///
+        /// The committer is expected to write to the same canonical state observed by
+        /// the reader. After a successful commit, the in-memory overlay is cleared so
+        /// the same VM can process the next block.
+        pub fn commit(self: *Self) !void {
+            const committer = self.committer orelse return error.ReadOnly;
+            var diff = try self.executor.changeset();
+            defer diff.deinit(self.executor.allocator);
+            try committer.commit(&diff);
+            self.executor.discardChanges();
+        }
     };
 }
 
-pub fn deinit(self: *Vm) void {
-    self.executor.deinit();
-}
-
-pub fn setEnv(self: *Vm, env: Env) void {
-    self.env = env;
-}
-
-pub fn beginBlock(self: *Vm, env: Env) BlockSession {
-    self.setEnv(env);
-    return .{ .vm = self };
-}
-
-pub fn getAccount(self: *Vm, address_value: Address) !?AccountView {
-    const account = try self.executor.getAccountOrLoad(address_value) orelse return null;
-    return .{
-        .nonce = account.nonce,
-        .balance = account.balance,
-        .code = account.code,
-    };
-}
-
-pub fn getStorage(self: *Vm, address_value: Address, key: u256) !u256 {
-    return self.executor.getStorage(address_value, key);
-}
-
-/// Borrow logs emitted by the most recent transaction/system-call scope.
-///
-/// Receipt builders can copy these immediately after `transact`; the slice is
-/// invalidated by the next transaction, discard, commit, or VM teardown.
-pub fn logs(self: *const Vm) []const Log {
-    return self.executor.logs();
-}
-
-/// Execute an explicit non-transaction system call.
-pub fn systemCall(self: *Vm, call: SystemCall) !EvmResult {
-    const context_gas_limit = if (self.env.gas_limit == 0) call.gas else self.env.gas_limit;
-    const result = try self.executor.executeSystemCall(
-        self.env.txContext(call.sender, 0, context_gas_limit, &.{}),
-        call.sender,
-        call.recipient,
-        call.input,
-        call.gas,
-    );
-    return Host.Result.fromCall(.{
-        .status = result.status,
-        .output_data = result.output_data,
-        .gas_left = result.gas_left,
-        .gas_refund = result.gas_refund,
-    });
-}
-
-/// Execute one protocol transaction into the VM overlay.
-pub fn transact(self: *Vm, tx: Transaction) !TxResult {
-    const prepared = try self.prepareTransaction(tx);
-    return switch (prepared) {
-        .rejected => |result| result,
-        .executable => |executable| try self.executePreparedTransaction(executable),
-    };
-}
-
-fn prepareTransaction(self: *Vm, tx: Transaction) !PreparedTransactionResult {
-    self.executor.clearLogs();
-    const validation = try validate(&self.executor, self.env, tx);
-    if (validation.err) |err| {
-        return .{ .rejected = .{
-            .status = .rejected,
-            .validation_error = err,
-        } };
-    }
-
-    const created_address = if (tx.to == null) address.create(tx.sender, validation.sender_nonce) else null;
-    const host_context = self.env.txContext(tx.sender, effectiveGasPrice(self.env, tx), self.env.gas_limit, tx.blob_hashes);
-    const normalized_tx = transaction.normalizedTransaction(.{
-        .sender = tx.sender,
-        .to = tx.to,
-        .input = tx.input,
-        .gas_limit = tx.gas_limit,
-        .value = tx.value,
-        .access_list = tx.access_list,
-        .authorization_list = tx.authorization_list,
-        .authorization_count = tx.authorization_count,
-    });
-    const gas_plan = transaction.gasPlan(self.executor.spec, tx.input, tx.gas_limit, validation.intrinsic_options);
-    const settlement = transaction.settlementFromGasPlan(self.executor.spec, tx.gas_limit, gas_plan, .{
-        .gas_price = host_context.gas_price,
-        .priority_fee = transaction.effectivePriorityFee(self.executor.spec, .{
-            .gas_price = host_context.gas_price,
-            .base_fee = self.env.base_fee,
-            .max_fee_per_gas = tx.max_fee_per_gas,
-            .max_priority_fee_per_gas = tx.max_priority_fee_per_gas,
-        }),
-        .coinbase = self.env.coinbase,
-    });
-
-    return .{ .executable = .{
-        .created_address = created_address,
-        .host_context = host_context,
-        .normalized_tx = normalized_tx,
-        .gas_plan = gas_plan,
-        .settlement = settlement,
-    } };
-}
-
-fn executePreparedTransaction(self: *Vm, prepared: PreparedTransaction) !TxResult {
-    try self.executor.beginTransactionScope(prepared.host_context, prepared.normalized_tx);
-    errdefer self.executor.closeTransaction();
-    const result = try self.executor.runTopLevelTransaction(prepared.normalized_tx, .{
-        .execution = prepared.gas_plan.execution,
-        .settlement = prepared.settlement,
-    });
-
-    const costs = try transaction.settlementCosts(prepared.settlement, .{
-        .gas_left = result.gas_left,
-        .gas_refund = result.gas_refund,
-        .gas_reservoir = result.gas_reservoir,
-        .state_gas_spent = result.state_gas_spent,
-    });
-    return .{
-        .status = txStatus(result.status),
-        .gas_used = costs.gas_used,
-        .block_gas_used = costs.block_gas_used,
-        .gas_refunded = costs.refunded_gas,
-        .output = result.output_data,
-        .created_address = if (result.status == .success) prepared.created_address else null,
-    };
-}
-
-/// Convenience for one-off callers. Block executors should usually call
-/// `transact` many times, then one `commit`.
-pub fn transactCommit(self: *Vm, tx: Transaction) !TxResult {
-    const result = try self.transact(tx);
-    if (result.status == .rejected) return result;
-    try self.commit();
-    return result;
-}
-
-const Validation = struct {
-    err: ?transaction.ValidationError = null,
-    sender_nonce: u64 = 0,
-    intrinsic_options: transaction.IntrinsicGasOptions = .{},
-};
-
-fn validate(executor: *Executor, env: Env, tx: Transaction) !Validation {
-    const sender_account = try executor.getAccountOrLoad(tx.sender);
-    const sender_balance: u256 = if (sender_account) |account| account.balance else 0;
-    const sender_nonce: u64 = if (sender_account) |account| account.nonce else 0;
-    const sender_code_kind = if (sender_account) |account| senderCodeKind(account) else transaction.SenderCodeKind.empty;
-    const authorization_count = authorizationCount(tx);
-    const creates_account = try valueTransferCreatesAccount(executor, tx);
-    const intrinsic_options = intrinsicOptions(tx, creates_account);
-
-    return .{
-        .sender_nonce = sender_nonce,
-        .intrinsic_options = intrinsic_options,
-        .err = transaction.validate(.{
-            .spec = executor.spec,
-            .kind = tx.kind,
-            .is_create = tx.to == null,
-            .is_self_transfer = isSelfTransfer(tx),
-            .creates_account = creates_account,
-            .gas_limit = tx.gas_limit,
-            .input = tx.input,
-            .value = tx.value,
-            .gas_price = tx.gas_price,
-            .base_fee = env.base_fee,
-            .block_gas_limit = env.gas_limit,
-            .blob_base_fee = env.blob_base_fee,
-            .max_fee_per_gas = tx.max_fee_per_gas,
-            .max_priority_fee_per_gas = tx.max_priority_fee_per_gas,
-            .max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
-            .sender_balance = sender_balance,
-            .sender_nonce = sender_nonce,
-            .tx_nonce = tx.nonce,
-            .sender_code_kind = sender_code_kind,
-            .authorization_count = authorization_count,
-            .access_list_counts = intrinsic_options.access_list_counts,
-            .blob_hashes = tx.blob_hashes,
-        }),
-    };
-}
-
-fn senderCodeKind(account: *const AccountState) transaction.SenderCodeKind {
-    if (account.code.len == 0) return .empty;
-    if (Executor.eip7702.delegationTarget(account.code) != null) return .delegation;
-    return .non_delegating;
-}
-
-fn intrinsicOptions(tx: Transaction, creates_account: bool) transaction.IntrinsicGasOptions {
-    return .{
-        .authorization_count = authorizationCount(tx),
-        .access_list_counts = transaction.accessListCounts(tx.access_list),
-        .is_create = tx.to == null,
-        .value = tx.value,
-        .is_self_transfer = isSelfTransfer(tx),
-        .creates_account = creates_account,
-    };
-}
-
-fn isSelfTransfer(tx: Transaction) bool {
-    const recipient = tx.to orelse return false;
-    return std.mem.eql(u8, &tx.sender, &recipient);
-}
-
-fn valueTransferCreatesAccount(executor: *Executor, tx: Transaction) !bool {
-    if (tx.value == 0 or tx.to == null or isSelfTransfer(tx)) return false;
-    return (try executor.getAccountOrLoad(tx.to.?)) == null;
-}
-
-fn authorizationCount(tx: Transaction) usize {
-    return tx.authorization_count orelse tx.authorization_list.len;
-}
-
-fn effectiveGasPrice(env: Env, tx: Transaction) u256 {
-    return switch (tx.kind) {
-        .legacy, .access_list => tx.gas_price,
-        .dynamic_fee, .blob, .set_code => blk: {
-            const max_fee = tx.max_fee_per_gas orelse return tx.gas_price;
-            const priority_fee = tx.max_priority_fee_per_gas orelse 0;
-            const capped_priority = std.math.add(u256, env.base_fee, priority_fee) catch std.math.maxInt(u256);
-            break :blk @min(max_fee, capped_priority);
-        },
-    };
-}
-
-fn txStatus(status: Interpreter.Status) TxStatus {
-    return switch (status) {
-        .success => .success,
-        .revert => .revert,
-        .invalid => .invalid,
-        .out_of_gas => .out_of_gas,
-    };
-}
-
-/// Return the current pending state diff without persisting it.
-pub fn changeset(self: *Vm) !Changeset {
-    return self.executor.changeset();
-}
-
-/// Drop pending overlay changes without writing them to the commit sink.
-pub fn discard(self: *Vm) void {
-    self.executor.discardChanges();
-}
-
-/// Persist the current overlay diff, then rebase the VM to the updated state reader.
-///
-/// The committer is expected to write to the same canonical state observed by
-/// the reader. After a successful commit, the in-memory overlay is cleared so
-/// the same VM can process the next block.
-pub fn commit(self: *Vm) !void {
-    const committer = self.committer orelse return error.ReadOnly;
-    var diff = try self.executor.changeset();
-    defer diff.deinit(self.executor.allocator);
-    try committer.commit(&diff);
-    self.executor.discardChanges();
-}
+const Default = evmz.Evm;
 
 test "Vm exposes protocol verbs and low-level executor field" {
-    try std.testing.expect(@hasDecl(Vm, "transact"));
-    try std.testing.expect(@hasDecl(Vm, "beginBlock"));
-    try std.testing.expect(@hasDecl(BlockSession, "receipt"));
-    try std.testing.expect(@hasDecl(BlockSession, "transactReceipt"));
-    try std.testing.expect(@hasDecl(Vm, "systemCall"));
-    try std.testing.expect(@hasDecl(Vm, "logs"));
-    try std.testing.expect(@hasDecl(Vm, "commit"));
-    try std.testing.expect(@hasField(Vm, "executor"));
+    try std.testing.expect(@hasDecl(Default, "transact"));
+    try std.testing.expect(@hasDecl(Default, "beginBlock"));
+    try std.testing.expect(@hasDecl(Default.BlockSession, "receipt"));
+    try std.testing.expect(@hasDecl(Default.BlockSession, "transactReceipt"));
+    try std.testing.expect(@hasDecl(Default, "systemCall"));
+    try std.testing.expect(@hasDecl(Default, "logs"));
+    try std.testing.expect(@hasDecl(Default, "commit"));
+    try std.testing.expect(@hasField(Default, "executor"));
 }
 
 test "Vm initializes and exposes empty changeset" {
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .env = .{ .chain_id = 1 },
     });
     defer vm.deinit();
@@ -545,8 +494,8 @@ test "Vm executor runs low-level standalone call" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
     });
     defer vm.deinit();
@@ -580,8 +529,8 @@ test "Vm executor runs low-level standalone create" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
         .state_reader = memory.reader(),
     });
     defer vm.deinit();
@@ -621,8 +570,8 @@ test "Vm transact validates and executes call transaction" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -678,8 +627,8 @@ test "Vm transact forwards BLOCKHASH to configured block hash source" {
     try contract_account.setCode(std.testing.allocator, &.{ 0x61, 0x03, 0xe7, 0x40, 0x5f, 0x55, 0x00 });
 
     var block_hashes = TestBlockHashSource{};
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .prague,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .prague,
         .state_reader = memory.reader(),
         .block_hash_source = block_hashes.source(),
         .env = .{ .number = 1000, .gas_limit = 1_000_000 },
@@ -710,8 +659,8 @@ test "Vm transact reports successful create address" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 1_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .berlin,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -745,8 +694,8 @@ test "Vm transact returns rejected validation result" {
     sender_account.balance = 10_000_000;
     sender_account.nonce = 7;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -778,8 +727,8 @@ test "Vm rejected transaction preserves pending overlay" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -818,8 +767,8 @@ test "Vm commit applies changeset and rebases overlay" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .committer = memory.committer(),
         .env = .{ .gas_limit = 1_000_000 },
@@ -851,8 +800,8 @@ test "Vm discard drops pending overlay without touching state reader" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -883,8 +832,8 @@ test "Vm read-only commit leaves pending overlay intact" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -914,8 +863,8 @@ test "Vm transactCommit skips commit for rejected transaction" {
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .osaka,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
         .state_reader = memory.reader(),
         .committer = memory.committer(),
         .env = .{ .gas_limit = 1_000_000 },
@@ -953,8 +902,8 @@ test "Vm Amsterdam transaction reports gross block gas separately from receipt g
     try contract_account.storage.put(0, 1);
     try contract_account.setCode(std.testing.allocator, &.{ 0x5f, 0x5f, 0x55, 0x00 });
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -979,8 +928,8 @@ test "Vm exposes borrowed logs for client receipt builders" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -994,8 +943,8 @@ test "Vm exposes borrowed logs for client receipt builders" {
     });
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expectEqual(@as(usize, 1), vm.logs().len);
-    try std.testing.expectEqualSlices(u8, &Executor.system_contracts.system_address, &vm.logs()[0].address);
-    try std.testing.expectEqual(Executor.transfer_logs.transfer_topic, vm.logs()[0].topics[0]);
+    try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &vm.logs()[0].address);
+    try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, vm.logs()[0].topics[0]);
 }
 
 test "Vm rejected transaction clears borrowed log surface" {
@@ -1007,8 +956,8 @@ test "Vm rejected transaction clears borrowed log surface" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
         .env = .{ .gas_limit = 1_000_000 },
     });
@@ -1035,6 +984,289 @@ test "Vm rejected transaction clears borrowed log surface" {
     try std.testing.expectEqual(@as(usize, 0), vm.logs().len);
 }
 
+test "Vm preparation uses comptime transaction gas policy" {
+    const sender = addr(0xaaaa);
+    const recipient = addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 10_000_000;
+
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .london,
+        .state_reader = memory.reader(),
+        .env = .{ .gas_limit = 1_000_000 },
+    });
+    defer vm.deinit();
+
+    const tx = Default.Transaction{
+        .sender = sender,
+        .to = recipient,
+        .gas_limit = 21_000,
+    };
+
+    const default_prepared = try vm.prepareTransaction(tx);
+    switch (default_prepared) {
+        .executable => {},
+        .rejected => return error.UnexpectedRejection,
+    }
+
+    const HighIntrinsicProtocol = struct {
+        pub const Revision = evmz.eth.Revision;
+
+        pub const Transaction = struct {
+            pub const Value = transaction.ProtocolTransaction;
+            pub const View = transaction.TransactionView;
+            pub const ValidationError = transaction.ValidationError;
+
+            pub fn view(value: Value) View {
+                return transaction.protocolTransactionView(value);
+            }
+
+            pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
+                return transaction.For(ProtocolType).prepare.prepare(input);
+            }
+
+            pub fn kindActive(revision: Revision, kind: transaction.TxKind) bool {
+                _ = revision;
+                _ = kind;
+                return true;
+            }
+
+            pub fn allowsContractCreation(revision: Revision, kind: transaction.TxKind) bool {
+                _ = revision;
+                _ = kind;
+                return true;
+            }
+
+            pub fn requiresAuthorizationList(revision: Revision, kind: transaction.TxKind) bool {
+                _ = revision;
+                _ = kind;
+                return false;
+            }
+
+            pub fn rejectsNonDelegatingSenderCode(revision: Revision, kind: transaction.TxKind) bool {
+                _ = revision;
+                _ = kind;
+                return false;
+            }
+
+            pub fn blobSchedule(revision: Revision) ?transaction.BlobSchedule {
+                _ = revision;
+                return null;
+            }
+
+            pub fn blobVersionedHashActive(revision: Revision, version: u8) bool {
+                _ = revision;
+                _ = version;
+                return false;
+            }
+
+            pub fn maxInitcodeSize(revision: Revision) usize {
+                _ = revision;
+                return std.math.maxInt(usize);
+            }
+
+            pub fn intrinsicBaseGas(revision: Revision, options: transaction.IntrinsicGasOptions) ?u64 {
+                _ = revision;
+                _ = options;
+                return 42_000;
+            }
+
+            pub fn createIntrinsicGas(revision: Revision) ?u64 {
+                _ = revision;
+                return 0;
+            }
+
+            pub fn dataByteGas(revision: Revision, byte: u8) u64 {
+                _ = revision;
+                _ = byte;
+                return 0;
+            }
+
+            pub fn accessListAddressGas(revision: Revision) u64 {
+                _ = revision;
+                return 0;
+            }
+
+            pub fn storageKeyGas(revision: Revision) u64 {
+                _ = revision;
+                return 0;
+            }
+
+            pub fn accessListDataGas(revision: Revision, counts: transaction.AccessListCounts) ?u64 {
+                _ = revision;
+                _ = counts;
+                return 0;
+            }
+
+            pub fn initCodeWordGas(revision: Revision) u64 {
+                _ = revision;
+                return 0;
+            }
+
+            pub fn authorizationIntrinsicGas(revision: Revision) u64 {
+                _ = revision;
+                return 0;
+            }
+
+            pub fn intrinsicStateGas(revision: Revision, options: transaction.IntrinsicGasOptions) ?u64 {
+                _ = revision;
+                _ = options;
+                return 0;
+            }
+
+            pub fn floorGas(revision: Revision, input: []const u8, options: transaction.IntrinsicGasOptions) ?u64 {
+                _ = revision;
+                _ = input;
+                _ = options;
+                return null;
+            }
+
+            pub fn regularGasLimit(revision: Revision, gas_limit: u64) u64 {
+                _ = revision;
+                return gas_limit;
+            }
+
+            pub fn intrinsicRegularGasLimit(revision: Revision) ?u64 {
+                _ = revision;
+                return null;
+            }
+
+            pub fn totalGasLimit(revision: Revision) ?u64 {
+                _ = revision;
+                return null;
+            }
+        };
+
+        pub const Settlement = struct {
+            pub const Plan = transaction.Settlement;
+
+            pub fn baseFeeActive(revision: Revision) bool {
+                _ = revision;
+                return true;
+            }
+
+            pub fn gasRefundCapDivisor(revision: Revision) u64 {
+                _ = revision;
+                return 5;
+            }
+
+            pub fn usesStateGasAccounting(revision: Revision) bool {
+                _ = revision;
+                return false;
+            }
+        };
+    };
+
+    const HighIntrinsicVm = Vm(HighIntrinsicProtocol);
+    var custom_vm = HighIntrinsicVm.init(std.testing.allocator, .{
+        .revision = .london,
+        .state_reader = memory.reader(),
+        .env = .{ .gas_limit = 1_000_000 },
+    });
+    defer custom_vm.deinit();
+
+    const custom_prepared = try custom_vm.prepareTransaction(tx);
+    switch (custom_prepared) {
+        .executable => try std.testing.expect(false),
+        .rejected => |err| try std.testing.expectEqual(transaction.ValidationError.intrinsic_gas_too_low, err),
+    }
+}
+
+test "Vm preparation accepts custom transaction value" {
+    const sender = addr(0xaaaa);
+    const recipient = addr(0xbbbb);
+
+    const CustomProtocol = struct {
+        pub const Revision = enum { custom };
+
+        pub const Transaction = struct {
+            pub const Value = struct {
+                from: Address,
+                target: Address,
+                amount: u256 = 0,
+                gas: u64,
+            };
+            pub const View = transaction.TransactionView;
+            pub const ValidationError = enum { rejected };
+
+            pub fn view(value: Value) View {
+                return .{
+                    .sender = value.from,
+                    .to = value.target,
+                    .gas_limit = value.gas,
+                    .value = value.amount,
+                };
+            }
+
+            pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
+                return .{ .executable = .{
+                    .created_address = null,
+                    .execution_context = transaction.executionContext(input.env, input.view.sender, 7, input.env.gas_limit, &.{}),
+                    .envelope = transaction.executionEnvelope(.{
+                        .sender = input.view.sender,
+                        .to = input.view.to,
+                        .gas_limit = input.view.gas_limit,
+                        .value = input.view.value,
+                    }),
+                    .execution_gas = transaction.ExecutionGas.legacy(12_345),
+                    .settlement = .{
+                        .revision = input.revision,
+                        .marker = 9,
+                    },
+                } };
+            }
+        };
+
+        pub const Settlement = struct {
+            pub const Plan = struct {
+                revision: Revision,
+                marker: u8,
+            };
+
+            pub fn costs(comptime ProtocolType: type, plan: Plan, result: transaction.ExecutionGasResult) !transaction.SettlementCosts {
+                _ = ProtocolType;
+                _ = plan;
+                _ = result;
+                return .{
+                    .gas_used = 0,
+                    .block_gas_used = 0,
+                    .refunded_gas = 0,
+                    .sender_refund = 0,
+                    .coinbase_payment = 0,
+                };
+            }
+        };
+    };
+
+    const CustomVm = Vm(CustomProtocol);
+    var vm = CustomVm.init(std.testing.allocator, .{
+        .revision = .custom,
+        .env = .{ .gas_limit = 99_000 },
+    });
+    defer vm.deinit();
+
+    const prepared = try vm.prepareTransaction(.{
+        .from = sender,
+        .target = recipient,
+        .amount = 5,
+        .gas = 50_000,
+    });
+
+    const executable = switch (prepared) {
+        .rejected => return error.UnexpectedRejection,
+        .executable => |value| value,
+    };
+
+    try std.testing.expectEqual(@as(u256, 7), executable.execution_context.gas_price);
+    try std.testing.expectEqual(@as(u64, 12_345), executable.execution_gas.?.regular_left);
+    try std.testing.expectEqual(@as(u8, 9), executable.settlement.marker);
+    try std.testing.expectEqual(@as(u64, 50_000), executable.envelope.gasLimit());
+    try std.testing.expectEqual(@as(u256, 5), executable.envelope.value());
+}
+
 test "BlockSession validation rejection skips rollback snapshot" {
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
@@ -1045,8 +1277,8 @@ test "BlockSession validation rejection skips rollback snapshot" {
     sender_account.balance = 10_000_000;
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var vm = Vm.init(failing_allocator.allocator(), .{
-        .spec = .amsterdam,
+    var vm = Default.init(failing_allocator.allocator(), .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
     });
     defer vm.deinit();
@@ -1067,6 +1299,22 @@ test "BlockSession validation rejection skips rollback snapshot" {
     try std.testing.expectEqual(@as(u64, 0), block.finish().tx_count);
 }
 
+test "Vm systemCall uses bound executor protocol" {
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .prague,
+    });
+    defer vm.deinit();
+
+    const result = try vm.systemCall(.{
+        .sender = addr(0xaaaa),
+        .recipient = addr(0xbbbb),
+        .gas = 50_000,
+    });
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expectEqualSlices(u8, &.{}, result.outputData());
+}
+
 test "BlockSession accumulates block gas and rolls back overflow transaction" {
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
@@ -1076,8 +1324,8 @@ test "BlockSession accumulates block gas and rolls back overflow transaction" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
     });
     defer vm.deinit();
@@ -1098,7 +1346,7 @@ test "BlockSession accumulates block gas and rolls back overflow transaction" {
         .gas_limit = 29_000,
     });
     try std.testing.expectEqual(TxStatus.rejected, rejected.status);
-    try std.testing.expectEqual(transaction.ValidationError.gas_allowance_exceeded, rejected.validation_error.?);
+    try std.testing.expectEqual(@as(?transaction.ValidationError, null), rejected.validation_error);
     try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
 
     var diff = try vm.changeset();
@@ -1118,8 +1366,8 @@ test "BlockSession builds borrowed receipt view with cumulative gas and logs" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
 
-    var vm = Vm.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .amsterdam,
         .state_reader = memory.reader(),
     });
     defer vm.deinit();
@@ -1138,5 +1386,5 @@ test "BlockSession builds borrowed receipt view with cumulative gas and logs" {
     try std.testing.expectEqual(result.block_gas_used, receipt.block_gas_used);
     try std.testing.expectEqual(result.gas_used, receipt.cumulative_gas_used);
     try std.testing.expectEqual(@as(usize, 1), receipt.logs.len);
-    try std.testing.expectEqual(Executor.transfer_logs.transfer_topic, receipt.logs[0].topics[0]);
+    try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, receipt.logs[0].topics[0]);
 }

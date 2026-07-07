@@ -107,7 +107,7 @@ fn runFixture(
 }
 
 fn runVector(
-    spec: evmz.Spec,
+    spec: evmz.eth.Revision,
     tx_bytes: []const u8,
     result: JsonValue,
     summary: *Summary,
@@ -118,7 +118,7 @@ fn runVector(
     else
         null;
 
-    const validation_error = evmz.transaction_envelope.validateRawTransaction(spec, tx_bytes);
+    const validation_error = evmz.transaction_envelope.For(evmz.EthProtocol).validateRawTransaction(spec, tx_bytes);
     if (expected_exception) |expected| {
         if (validation_error) |err| {
             if (tx_validation.rawValidationErrorMatchesEest(err, expected)) {

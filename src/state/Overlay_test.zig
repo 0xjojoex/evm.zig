@@ -10,6 +10,21 @@ const StateReader = @import("./StateReader.zig");
 const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
 
+const EthereumFinalizer = struct {
+    revision: evmz.EthProtocol.Revision,
+
+    pub fn selfDestructFinalization(
+        self: @This(),
+        created_in_transaction: bool,
+    ) evmz.protocol.interface.SelfDestructFinalization {
+        return evmz.EthProtocol.SelfDestruct.selfDestructFinalization(self.revision, created_in_transaction);
+    }
+};
+
+fn ethereumFinalizer(revision: evmz.EthProtocol.Revision) EthereumFinalizer {
+    return .{ .revision = revision };
+}
+
 test "snapshot restores accounts and warm state" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -31,7 +46,7 @@ test "snapshot restores accounts and warm state" {
     try std.testing.expect(overlay.warm_accounts.contains(test_address));
 }
 
-test "revertible snapshot restores warm state" {
+test "snapshot restore drops warm state added after the snapshot" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
 
@@ -46,7 +61,7 @@ test "revertible snapshot restores warm state" {
     try overlay.warm_accounts.put(warm_after, {});
     try overlay.warm_storage.put(.{ .address = warm_after, .key = 2 }, {});
 
-    try overlay.restoreRevertible(&snapshot_state);
+    try overlay.restore(&snapshot_state);
     try std.testing.expect(overlay.warm_accounts.contains(warm_before));
     try std.testing.expect(!overlay.warm_accounts.contains(warm_after));
     try std.testing.expect(overlay.warm_storage.contains(.{ .address = warm_before, .key = 1 }));
@@ -200,6 +215,278 @@ test "journal checkpoint reverts transient storage warm state and logs" {
     try std.testing.expectEqual(@as(usize, 0), overlay.logs.items.len);
 }
 
+test "bounded logs copy into fixed storage and rollback" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureLogResources(.{ .entries = 2, .data_bytes = 3 });
+
+    const address = evmz.addr(0xbeef);
+    const topics = [_]u256{ 1, 2 };
+    const data = [_]u8{ 0xaa, 0xbb };
+
+    overlay.beginTransaction();
+    const checkpoint_state = overlay.checkpoint();
+    try overlay.emitLog(.{
+        .address = address,
+        .topics = &topics,
+        .data = &data,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), overlay.logs.items.len);
+    try std.testing.expectEqualSlices(u256, &topics, overlay.logs.items[0].topics);
+    try std.testing.expectEqualSlices(u8, &data, overlay.logs.items[0].data);
+    try std.testing.expectEqual(@as(usize, 1), overlay.bounded_log_topics.items.len);
+    try std.testing.expectEqual(@as(usize, 2), overlay.bounded_log_data.items.len);
+
+    try overlay.revertToCheckpoint(checkpoint_state);
+    try std.testing.expectEqual(@as(usize, 0), overlay.logs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), overlay.bounded_log_topics.items.len);
+    try std.testing.expectEqual(@as(usize, 0), overlay.bounded_log_data.items.len);
+}
+
+test "bounded logs report capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureLogResources(.{ .entries = 1, .data_bytes = 1 });
+
+    const address = evmz.addr(0xbeef);
+    const topic = [_]u256{42};
+    const data = [_]u8{0xaa};
+    try overlay.emitLog(.{
+        .address = address,
+        .topics = &topic,
+        .data = &data,
+    });
+    try std.testing.expectError(error.LogCapacityExceeded, overlay.emitLog(.{
+        .address = address,
+        .topics = &topic,
+        .data = &.{},
+    }));
+    try std.testing.expectError(error.LogDataCapacityExceeded, blk: {
+        var fresh = Overlay.init(std.testing.allocator);
+        defer fresh.deinit();
+        try fresh.configureLogResources(.{ .entries = 1, .data_bytes = 1 });
+        break :blk fresh.emitLog(.{
+            .address = address,
+            .topics = &topic,
+            .data = &[_]u8{ 0xaa, 0xbb },
+        });
+    });
+    try std.testing.expectError(error.LogTopicCapacityExceeded, blk: {
+        var fresh = Overlay.init(std.testing.allocator);
+        defer fresh.deinit();
+        try fresh.configureLogResources(.{ .entries = 1, .data_bytes = 0 });
+        const too_many_topics = [_]u256{ 1, 2, 3, 4, 5 };
+        break :blk fresh.emitLog(.{
+            .address = address,
+            .topics = &too_many_topics,
+            .data = &.{},
+        });
+    });
+}
+
+test "bounded journal rows report capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(1);
+
+    overlay.beginTransaction();
+    try overlay.warmAccount(evmz.addr(1));
+    try std.testing.expectError(error.JournalCapacityExceeded, overlay.warmAccount(evmz.addr(2)));
+
+    overlay.closeTransaction();
+    try overlay.warmAccount(evmz.addr(3));
+}
+
+test "bounded warm access sets report capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(4);
+    try overlay.configureAccessResources(.{ .accounts = 1, .storage_keys = 1 });
+
+    overlay.beginTransaction();
+    try overlay.warmAccount(evmz.addr(1));
+    try std.testing.expectError(error.WarmAccountCapacityExceeded, overlay.warmAccount(evmz.addr(2)));
+
+    try overlay.warmStorage(evmz.addr(1), 1);
+    try std.testing.expectError(error.WarmStorageCapacityExceeded, overlay.warmStorage(evmz.addr(1), 2));
+
+    overlay.closeTransaction();
+    try overlay.warmAccount(evmz.addr(3));
+    try overlay.warmStorage(evmz.addr(3), 3);
+}
+
+test "bounded transient storage reports unique-entry capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(8);
+    try overlay.configureTransientStorageEntries(1);
+
+    overlay.beginTransaction();
+    try overlay.setTransientStorage(evmz.addr(1), 1, 11);
+    try overlay.setTransientStorage(evmz.addr(1), 1, 12);
+    try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
+    try std.testing.expectEqual(@as(u256, 12), overlay.getTransientStorage(evmz.addr(1), 1));
+    try std.testing.expectError(
+        error.TransientStorageCapacityExceeded,
+        overlay.setTransientStorage(evmz.addr(1), 2, 22),
+    );
+
+    overlay.closeTransaction();
+    try overlay.setTransientStorage(evmz.addr(2), 1, 33);
+    try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
+}
+
+test "bounded state resources report account capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(4);
+    try overlay.configureStateResources(.{ .accounts = 1 });
+
+    _ = try overlay.getOrCreateAccount(evmz.addr(1));
+    try std.testing.expectError(error.AccountCapacityExceeded, overlay.getOrCreateAccount(evmz.addr(2)));
+    try std.testing.expectEqual(@as(usize, 1), overlay.accounts.count());
+}
+
+test "bounded state resources report storage map capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(8);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .original_storage_entries = 2,
+        .storage_overlay_entries = 1,
+    });
+
+    const address = evmz.addr(0xbeef);
+    _ = try overlay.getOrCreateAccount(address);
+    overlay.beginTransaction();
+
+    try std.testing.expectEqual(Host.StorageStatus.added, try overlay.setStorage(address, 1, 11));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try overlay.setStorage(address, 1, 12));
+    try std.testing.expectError(error.StorageOverlayCapacityExceeded, overlay.setStorage(address, 2, 22));
+    try std.testing.expectEqual(@as(usize, 1), overlay.storage_overlay.count());
+    try std.testing.expect(!overlay.storage_overlay.contains(.{ .address = address, .key = 2 }));
+    try std.testing.expect(!overlay.original_storage.contains(.{ .address = address, .key = 2 }));
+
+    var original_limited = Overlay.init(std.testing.allocator);
+    defer original_limited.deinit();
+    try original_limited.configureJournalEntries(8);
+    try original_limited.configureStateResources(.{
+        .accounts = 1,
+        .original_storage_entries = 1,
+        .storage_overlay_entries = 2,
+    });
+    _ = try original_limited.getOrCreateAccount(address);
+    original_limited.beginTransaction();
+    try std.testing.expectEqual(Host.StorageStatus.added, try original_limited.setStorage(address, 1, 11));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try original_limited.setStorage(address, 1, 12));
+    try std.testing.expectError(error.OriginalStorageCapacityExceeded, original_limited.setStorage(address, 2, 22));
+    try std.testing.expectEqual(@as(usize, 1), original_limited.original_storage.count());
+    try std.testing.expectEqual(@as(usize, 1), original_limited.storage_overlay.count());
+}
+
+test "bounded state resource failure rolls back newly created balance account" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(8);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .dirty_accounts = 0,
+    });
+
+    const address = evmz.addr(0xbeef);
+    try std.testing.expectError(error.DirtyAccountCapacityExceeded, overlay.setBalance(address, 1));
+    try std.testing.expect(overlay.getAccount(address) == null);
+    try std.testing.expectEqual(@as(usize, 0), overlay.accounts.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
+}
+
+test "bounded state resource failure rolls back newly created storage account" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(8);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .original_storage_entries = 1,
+        .storage_overlay_entries = 0,
+    });
+
+    const address = evmz.addr(0xcafe);
+    try std.testing.expectError(error.StorageOverlayCapacityExceeded, overlay.setStorage(address, 1, 11));
+    try std.testing.expect(overlay.getAccount(address) == null);
+    try std.testing.expectEqual(@as(usize, 0), overlay.accounts.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.original_storage.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.storage_overlay.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
+}
+
+test "bounded state resource failure rolls back code ownership" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(8);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .dirty_accounts = 0,
+    });
+
+    const address = evmz.addr(0xc0de);
+    const account = try overlay.getOrCreateAccount(address);
+    try account.setCode(std.testing.allocator, &.{0xaa});
+    overlay.closeTransaction();
+
+    try std.testing.expectError(error.DirtyAccountCapacityExceeded, overlay.setCode(address, &.{0xbb}));
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, overlay.getAccount(address).?.code);
+    try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
+}
+
+test "bounded state resources report marker capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(16);
+    try overlay.configureStateResources(.{
+        .accounts = 2,
+        .created_contracts = 1,
+        .selfdestructed_accounts = 1,
+        .dirty_accounts = 1,
+    });
+
+    const first = evmz.addr(1);
+    const second = evmz.addr(2);
+    try overlay.markCreatedContract(first);
+    try std.testing.expectError(error.CreatedContractCapacityExceeded, overlay.markCreatedContract(second));
+    try overlay.markSelfdestructed(first);
+    try std.testing.expectError(error.SelfdestructCapacityExceeded, overlay.markSelfdestructed(second));
+
+    _ = try overlay.getOrCreateAccount(first);
+    _ = try overlay.getOrCreateAccount(second);
+    try overlay.setBalance(first, 1);
+    try std.testing.expectError(error.DirtyAccountCapacityExceeded, overlay.setBalance(second, 1));
+    try std.testing.expectEqual(@as(usize, 1), overlay.dirty_accounts.count());
+}
+
+test "bounded state resources report deleted account capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(16);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .selfdestructed_accounts = 1,
+        .deleted_accounts = 0,
+    });
+
+    const address = evmz.addr(0xdead);
+    _ = try overlay.getOrCreateAccount(address);
+    try overlay.markSelfdestructed(address);
+    const Finalizer = struct {
+        pub fn selfDestructFinalization(_: @This(), created_in_transaction: bool) evmz.protocol.interface.SelfDestructFinalization {
+            return evmz.eth.SelfDestruct.selfDestructFinalization(.london, created_in_transaction);
+        }
+    };
+    try std.testing.expectError(error.DeletedAccountCapacityExceeded, overlay.finalizeTransaction(Finalizer{}));
+    try std.testing.expectEqual(@as(usize, 0), overlay.deleted_accounts.count());
+}
+
 test "journal checkpoint restores existing account fields" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -306,7 +593,7 @@ test "journal checkpoint reverts finalized selfdestruct cleanup" {
     try overlay.markCreatedContract(other_created);
 
     const checkpoint_state = overlay.checkpoint();
-    try overlay.finalizeTransaction(.london);
+    try overlay.finalizeTransaction(ethereumFinalizer(.london));
 
     try std.testing.expect(overlay.getAccount(address) == null);
     try std.testing.expect(!overlay.storage_overlay.contains(key));
@@ -335,7 +622,7 @@ test "journal checkpoint reverts Cancun skipped selfdestruct marker clearing" {
     try overlay.markSelfdestructed(address);
 
     const checkpoint_state = overlay.checkpoint();
-    try overlay.finalizeTransaction(.cancun);
+    try overlay.finalizeTransaction(ethereumFinalizer(.cancun));
 
     try std.testing.expect(overlay.getAccount(address) != null);
     try std.testing.expect(!overlay.deleted_accounts.contains(address));
@@ -345,6 +632,42 @@ test "journal checkpoint reverts Cancun skipped selfdestruct marker clearing" {
     try std.testing.expect(overlay.getAccount(address) != null);
     try std.testing.expect(!overlay.deleted_accounts.contains(address));
     try std.testing.expect(overlay.selfdestructed_accounts.contains(address));
+}
+
+test "selfdestruct finalization policy comes from comptime protocol" {
+    const CustomFinalizer = struct {
+        pub fn selfDestructFinalization(
+            self: @This(),
+            created_in_transaction: bool,
+        ) evmz.protocol.interface.SelfDestructFinalization {
+            _ = self;
+            _ = created_in_transaction;
+            return .{
+                .clear_storage = true,
+                .reset_account = true,
+            };
+        }
+    };
+
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xf17a);
+    const key = StorageKey{ .address = address, .key = 7 };
+    var account = try overlay.getOrCreateAccount(address);
+    account.nonce = 3;
+    try account.setCode(std.testing.allocator, &.{0xaa});
+    try overlay.storage_overlay.put(key, 10);
+    try overlay.markSelfdestructed(address);
+
+    try overlay.finalizeTransaction(CustomFinalizer{});
+
+    const finalized = overlay.getAccount(address).?;
+    try std.testing.expectEqual(@as(u64, 0), finalized.nonce);
+    try std.testing.expectEqualSlices(u8, &.{}, finalized.code);
+    try std.testing.expect(!overlay.storage_overlay.contains(key));
+    try std.testing.expect(!overlay.deleted_accounts.contains(address));
+    try std.testing.expect(!overlay.selfdestructed_accounts.contains(address));
 }
 
 test "changeset emits sorted account updates and storage writes" {
@@ -464,7 +787,7 @@ test "changeset emits finalized account deletes without deleted storage writes" 
     try overlay.storage_overlay.put(key, 9);
     try overlay.markSelfdestructed(address);
 
-    try overlay.finalizeTransaction(.london);
+    try overlay.finalizeTransaction(ethereumFinalizer(.london));
 
     var delta = try overlay.changeset();
     defer delta.deinit(std.testing.allocator);

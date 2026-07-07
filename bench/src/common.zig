@@ -322,8 +322,8 @@ pub fn parseHostProfile(value: []const u8) ?HostProfile {
     return null;
 }
 
-pub fn parseSpec(value: []const u8) ?evmz.Spec {
-    inline for (std.meta.fields(evmz.Spec)) |field| {
+pub fn parseSpec(value: []const u8) ?evmz.eth.Revision {
+    inline for (std.meta.fields(evmz.eth.Revision)) |field| {
         if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
     }
     if (std.mem.eql(u8, value, "latest")) return .latest;

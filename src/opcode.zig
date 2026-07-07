@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// Shared ISA metadata / fork-neutral vocabulary
 pub const Opcode = enum(u8) {
     STOP = 0x00,
     ADD = 0x01,
@@ -178,9 +179,8 @@ pub const Opcode = enum(u8) {
     }
 };
 
-/// Control-flow class of an instruction. Mirrors `Analysis.BlockExit` so the two
-/// can later be unified. `.eof` is never produced per-opcode — the block layer
-/// derives it when a fallthrough instruction runs off the end of the code.
+/// Control-flow class of an instruction. `.eof` is never produced per-opcode;
+/// callers that group code into blocks derive it when fallthrough reaches EOF.
 pub const ExitKind = enum(u8) {
     fallthrough,
     jump,
@@ -193,8 +193,8 @@ pub const ExitKind = enum(u8) {
     eof,
 };
 
-/// Per-opcode behavioral flags. Mirrors `Analysis.BlockFlags` minus
-/// `unknown_opcode`, which is derived from `!OpInfo.defined` at the block layer.
+/// Per-opcode behavioral flags. Unknown opcode handling is derived from
+/// `!OpInfo.defined` by callers that need that classification.
 pub const Flags = struct {
     uses_gas_left: bool = false,
     has_dynamic_gas: bool = false,
@@ -206,6 +206,9 @@ pub const Flags = struct {
 /// truth that the gas / stack / flags / exit / push-width switches collapse into.
 /// Indexed by raw byte via `table`; undefined bytes get the default (invalid) row.
 pub const OpInfo = struct {
+    /// Definition-owned mnemonic. Ethereum-known rows get the base enum tag;
+    /// custom definitions may use chain-local names without extending `Opcode`.
+    name: ?[]const u8 = null,
     /// false for the 106 unused byte values in 0x00..0xff (and only those;
     /// INVALID/0xfe is a *defined* opcode with `.exit = .invalid`).
     defined: bool = false,
@@ -232,6 +235,7 @@ pub const table: [256]OpInfo = blk: {
     for (std.enums.values(Opcode)) |op| {
         var row = infoFor(op);
         row.defined = true;
+        row.name = @tagName(op);
         t[@intFromEnum(op)] = row;
     }
     break :blk t;
@@ -463,6 +467,7 @@ test "opcode table reproduces the per-opcode switches" {
 
     // gas + stack delta for a plain binary op
     const add = table[@intFromEnum(Opcode.ADD)];
+    try std.testing.expectEqualStrings("ADD", add.name.?);
     try expectEqual(@as(u16, 3), add.static_gas);
     try expectEqual(@as(i16, -1), add.stackChange());
 
@@ -519,6 +524,7 @@ test "opcode table defined rows match Opcode enum exactly" {
             try std.testing.expectEqual(@as(u8, 0), row.immediate);
             try std.testing.expectEqual(ExitKind.invalid, row.exit);
             try std.testing.expectEqual(Flags{}, row.flags);
+            try std.testing.expect(row.name == null);
         }
     }
     try std.testing.expectEqual(std.enums.values(Opcode).len, defined_count);

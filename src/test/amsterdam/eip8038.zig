@@ -3,12 +3,14 @@ const evmz = @import("../../evm.zig");
 
 const AccountState = evmz.state.AccountState;
 const Address = evmz.Address;
-const Executor = evmz.executor;
+const EthProtocol = evmz.EthProtocol;
+const Executor = evmz.Executor(EthProtocol);
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 const Transaction = Executor.Transaction;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
+const tx_protocol = transaction.For(EthProtocol);
 
 test "Amsterdam cold BALANCE and EXTCODE opcodes charge 3000 total account access gas" {
     try expectAmsterdamColdAccountAccessGas(.BALANCE);
@@ -28,7 +30,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     const create_address = evmz.address.create(contract, std.math.maxInt(u64));
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -42,7 +44,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     try executor.state.accounts.put(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
-    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = transaction.amsterdam_new_account_state_gas }, 0);
+    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expect(!executor.state.warm_accounts.contains(create_address));
@@ -54,7 +56,7 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     const beneficiary = evmz.addr(0xcccc);
     const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -85,7 +87,7 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
     const tx_context = testTxContext(sender, 1_000_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -108,8 +110,8 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
     const result = try executor.executeTransactionMessage(tx, .legacy(100_000));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(-@as(i64, transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
-    try std.testing.expectEqual(@as(i64, transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
 }
 
 test "Amsterdam created contract selfdestruct clears code and keeps account at commit" {
@@ -118,7 +120,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
     const tx_context = testTxContext(sender, 1_000_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -131,15 +133,17 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
         .init_code = &init_code,
         .gas_limit = 1_000_000,
     } };
-    const gas_plan = transaction.gasPlan(.amsterdam, &init_code, tx.gasLimit(), .{ .is_create = true });
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &init_code, tx.gasLimit(), .{ .is_create = true });
 
     try executor.beginTransactionScope(tx_context, tx);
     const result = try executor.runTopLevelTransaction(tx, .{
         .execution = gas_plan.execution,
-        .settlement = transaction.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
             .gas_price = 0,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .payer = sender,
+            .value = tx.value(),
         }),
     });
 
@@ -157,7 +161,7 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
     var tx_context = testTxContext(sender, 300_000);
     tx_context.gas_price = 1;
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -181,7 +185,7 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
         .gas_limit = 300_000,
         .authorization_list = &authorization_list,
     } };
-    const gas_plan = transaction.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{ .authorization_count = 1 });
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{ .authorization_count = 1 });
 
     const CheckingEngine = struct {
         const expected_target = evmz.addr(0xcccc);
@@ -208,10 +212,12 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
     try executor.beginTransactionScope(tx_context, tx);
     const result = try executor.runTopLevelTransactionWithEngine(tx, .{
         .execution = gas_plan.execution,
-        .settlement = transaction.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .payer = sender,
+            .value = tx.value(),
         }),
     }, .{ .execute = CheckingEngine.execute });
 
@@ -225,7 +231,7 @@ test "Amsterdam top-level delegated call charges cold target access" {
     const target = evmz.addr(0xcccc);
     const tx_context = testTxContext(sender, 100_000);
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer executor.deinit();
 
@@ -258,11 +264,11 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer frame.deinit();
 
@@ -284,11 +290,11 @@ fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.Acces
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer frame.deinit();
 
@@ -316,11 +322,11 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
         .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0xcc, 0xcc, .EXTCODECOPY, .STOP,
     });
 
-    var frame = try Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     defer frame.deinit();
 
@@ -334,18 +340,4 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
     try std.testing.expectEqual(expected_gas_left, result.gas_left);
 }
 
-fn testTxContext(origin: Address, gas_limit: u64) Host.TxContext {
-    return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = origin,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = gas_limit,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    };
-}
+const testTxContext = evmz.t.defaultTxContext;

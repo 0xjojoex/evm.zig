@@ -8,6 +8,16 @@ pub fn build(b: *std.Build) void {
         "bench-optimize",
         "Optimization mode forwarded to benchmark runners",
     ) orelse .ReleaseFast;
+    const bench_support_min = b.option(
+        []const u8,
+        "bench-support-min",
+        "Minimum Ethereum revision compiled into the VM-loop benchmark",
+    );
+    const bench_support_max = b.option(
+        []const u8,
+        "bench-support-max",
+        "Maximum Ethereum revision compiled into the VM-loop benchmark",
+    );
     const bench_micro_filter = b.option(
         []const u8,
         "micro-filter",
@@ -136,14 +146,13 @@ pub fn build(b: *std.Build) void {
     }
     if (pathExists(b, "bench/build.zig")) {
         addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null);
-        addBenchDelegate(b, "bench-vm-loop", "Run evmz VM-loop fixture runner", "vm-loop", bench_optimize_name);
+        addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max);
         addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name);
         addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null);
         addBenchDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name);
         addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name);
         addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name);
-        addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name);
         addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null);
         addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name);
         addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter);
@@ -160,6 +169,7 @@ pub fn build(b: *std.Build) void {
         const is_zig = std.mem.endsWith(u8, example_name, ".zig");
         const path = b.fmt("examples/{s}", .{example_name});
         const root_source_file = b.path(path);
+        const example_exe_name = std.fs.path.stem(std.fs.path.basename(example_name));
 
         if (is_zig) {
             const example_mod = b.createModule(.{
@@ -170,7 +180,7 @@ pub fn build(b: *std.Build) void {
             });
             addPrecompileNative(b, example_mod, ckzg_dep, blst_dep, evmone_dep, mcl_dep, trusted_setup_mod);
             const example = b.addExecutable(.{
-                .name = example_name,
+                .name = example_exe_name,
                 .root_module = b.createModule(.{
                     .root_source_file = root_source_file,
                     .target = target,
@@ -185,7 +195,7 @@ pub fn build(b: *std.Build) void {
             run_step.dependOn(&run_example.step);
         } else {
             const example_c = b.addExecutable(.{
-                .name = example_name,
+                .name = example_exe_name,
                 .root_module = b.createModule(.{
                     .target = target,
                     .optimize = optimize,
@@ -269,6 +279,34 @@ fn addBenchDelegate(
     run.setCwd(b.path("bench"));
 
     const step = b.step(step_name, description);
+    step.dependOn(&run.step);
+}
+
+fn addBenchVmLoopDelegate(
+    b: *std.Build,
+    optimize_name: []const u8,
+    support_min: ?[]const u8,
+    support_max: ?[]const u8,
+) void {
+    const run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+    });
+    run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
+    if (support_min) |revision| {
+        run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
+    }
+    if (support_max) |revision| {
+        run.addArg(b.fmt("-Dbench-support-max={s}", .{revision}));
+    }
+    run.addArg("vm-loop");
+    if (b.args) |args| {
+        run.addArg("--");
+        run.addArgs(args);
+    }
+    run.setCwd(b.path("bench"));
+
+    const step = b.step("bench-vm-loop", "Run evmz VM-loop fixture runner");
     step.dependOn(&run.step);
 }
 

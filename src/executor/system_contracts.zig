@@ -2,57 +2,42 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const Address = evmz.Address;
-const Executor = @import("../executor.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 
-/// EIP-4788 and EIP-2935 system caller address.
-/// https://eips.ethereum.org/EIPS/eip-4788
-/// https://eips.ethereum.org/EIPS/eip-2935
-pub const system_address = evmz.addr(0xfffffffffffffffffffffffffffffffffffffffe);
-/// EIP-4788 beacon block root history contract.
-/// https://eips.ethereum.org/EIPS/eip-4788
-pub const beacon_roots_address = evmz.addr(0x000f3df6d732807ef1319fb7b8bb8522d0beac02);
-/// EIP-2935 historical block hash storage contract.
-/// https://eips.ethereum.org/EIPS/eip-2935
-pub const history_storage_address = evmz.addr(0x0000f90827f1c53a10cb7a02335b175320002935);
-/// Gas limit used by EIP system calls.
-pub const system_call_gas: u64 = 30_000_000;
-
 /// Header fields needed by block-start system contract hooks.
-pub const BlockHeader = struct {
-    number: u64,
-    timestamp: u64,
-    parent_hash: ?[32]u8 = null,
-    parent_beacon_block_root: ?[32]u8 = null,
-};
+pub const BlockHeader = evmz.protocol.interface.BlockStartContext;
 
 /// Applies block-start system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
 /// - EIP-2935 stores the previous block hash from Prague onward.
-pub fn applyBlockStart(executor: *Executor, tx_context: Host.TxContext, header: BlockHeader) !void {
-    if (executor.spec.isImpl(.cancun) and header.number > 0) {
-        if (header.parent_beacon_block_root) |root| {
-            try callSystemContract(executor, tx_context, beacon_roots_address, &root);
-        }
-    }
-
-    if (executor.spec.isImpl(.prague) and header.number > 0) {
-        if (header.parent_hash) |hash| {
-            try callSystemContract(executor, tx_context, history_storage_address, &hash);
-        }
+pub fn applyBlockStart(executor: anytype, tx_context: Host.TxContext, header: BlockHeader) !void {
+    const Protocol = @TypeOf(executor.*).Protocol;
+    const calls = Protocol.Block.blockStartSystemCalls(executor.revision(), header);
+    for (calls.slice()) |call| {
+        try callSystemContract(executor, tx_context, call.sender, call.recipient, &call.input, call.gas);
     }
 }
 
-fn callSystemContract(executor: *Executor, tx_context: Host.TxContext, recipient: Address, input: *const [32]u8) !void {
+fn callSystemContract(
+    executor: anytype,
+    tx_context: Host.TxContext,
+    sender: Address,
+    recipient: Address,
+    input: *const [32]u8,
+    gas: u64,
+) !void {
     const has_code = (try executor.getCode(recipient)).len != 0;
-    const result = try executor.executeSystemCall(tx_context, system_address, recipient, input, system_call_gas);
+    const result = try executor.executeSystemCall(tx_context, sender, recipient, input, gas);
     if (has_code and result.status != .success) return error.SystemCallFailed;
 }
 
 test "block start calls Prague and Cancun system contracts" {
+    const ethereum = evmz.eth;
+
+    const Executor = evmz.Executor(evmz.EthProtocol);
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .prague,
+        .revision = .prague,
     });
     defer executor.deinit();
 
@@ -67,9 +52,9 @@ test "block start calls Prague and Cancun system contracts" {
         "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500",
     );
 
-    var history_account = try executor.getOrCreateAccount(history_storage_address);
+    var history_account = try executor.getOrCreateAccount(ethereum.history_storage_address);
     try history_account.setCode(std.testing.allocator, history_code);
-    var beacon_account = try executor.getOrCreateAccount(beacon_roots_address);
+    var beacon_account = try executor.getOrCreateAccount(ethereum.beacon_roots_address);
     try beacon_account.setCode(std.testing.allocator, beacon_code);
 
     var parent_hash = [_]u8{0} ** 32;
@@ -78,6 +63,16 @@ test "block start calls Prague and Cancun system contracts" {
     beacon_root[31] = 0xbb;
 
     const tx_context = testTxContext();
+    const calls = evmz.EthProtocol.Block.blockStartSystemCalls(.prague, .{
+        .number = 1,
+        .timestamp = 12,
+        .parent_hash = parent_hash,
+        .parent_beacon_block_root = beacon_root,
+    });
+    for (calls.slice()) |call| {
+        try std.testing.expectEqualSlices(u8, &ethereum.system_address, &call.sender);
+    }
+
     try applyBlockStart(&executor, tx_context, .{
         .number = 1,
         .timestamp = 12,
@@ -85,16 +80,16 @@ test "block start calls Prague and Cancun system contracts" {
         .parent_beacon_block_root = beacon_root,
     });
 
-    try std.testing.expectEqual(@as(u256, 0xaa), try executor.getStorage(history_storage_address, 0));
-    try std.testing.expectEqual(@as(u256, 12), try executor.getStorage(beacon_roots_address, 12));
-    try std.testing.expectEqual(@as(u256, 0xbb), try executor.getStorage(beacon_roots_address, 8191 + 12));
+    try std.testing.expectEqual(@as(u256, 0xaa), try executor.getStorage(ethereum.history_storage_address, 0));
+    try std.testing.expectEqual(@as(u256, 12), try executor.getStorage(ethereum.beacon_roots_address, 12));
+    try std.testing.expectEqual(@as(u256, 0xbb), try executor.getStorage(ethereum.beacon_roots_address, 8191 + 12));
 
     try std.testing.expectEqual(Interpreter.Status.success, (try executor.executeSystemCall(
         tx_context,
-        system_address,
+        ethereum.system_address,
         evmz.addr(0x1234),
         &parent_hash,
-        system_call_gas,
+        ethereum.system_call_gas,
     )).status);
 }
 

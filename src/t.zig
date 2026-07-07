@@ -57,21 +57,6 @@ fn bytecodeByte(comptime item: anytype) u8 {
     };
 }
 
-pub const MockCall = struct {
-    slot: evmz.Interpreter.CallFrameSlot,
-
-    pub fn init(allocator: std.mem.Allocator, host: *Host, msg: *const Host.Message, code: []const u8, spec: evmz.Spec) !MockCall {
-        var self: MockCall = undefined;
-        try self.slot.init(allocator, .{
-            .host = host,
-            .msg = msg,
-            .code = code,
-            .spec = spec,
-        });
-        return self;
-    }
-};
-
 pub const MockHost = struct {
     const Self = @This();
 
@@ -401,6 +386,22 @@ pub fn defaultMessage() Host.Message {
     };
 }
 
+pub fn defaultTxContext(origin: Address, gas_limit: u64) Host.TxContext {
+    return .{
+        .chain_id = 1,
+        .gas_price = 0,
+        .origin = origin,
+        .coinbase = addr(0),
+        .number = 0,
+        .timestamp = 0,
+        .gas_limit = gas_limit,
+        .prev_randao = 0,
+        .base_fee = 0,
+        .blob_base_fee = 0,
+        .blob_hashes = &.{},
+    };
+}
+
 pub const BytecodeResult = struct {
     status: evmz.Interpreter.Status,
     gas_left: i64,
@@ -408,12 +409,12 @@ pub const BytecodeResult = struct {
     stack_top: ?u256,
 };
 
-pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, spec: evmz.Spec) !BytecodeResult {
-    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, revision: evmz.eth.Revision) !BytecodeResult {
+    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = host,
         .msg = msg,
         .code = code,
-        .spec = spec,
+        .revision = revision,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -427,44 +428,44 @@ pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const 
     };
 }
 
-pub fn expectBytecodeStatusBySpec(comptime items: anytype, spec: evmz.Spec, expected: evmz.Interpreter.Status) !void {
+pub fn expectBytecodeStatusByRevision(comptime items: anytype, revision: evmz.eth.Revision, expected: evmz.Interpreter.Status) !void {
     const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, spec);
+    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
     try std.testing.expectEqual(expected, result.status);
 }
 
 pub fn expectLatestForkBytecodeStatus(comptime items: anytype, expected: evmz.Interpreter.Status) !void {
-    try expectBytecodeStatusBySpec(items, .latest, expected);
+    try expectBytecodeStatusByRevision(items, .latest, expected);
 }
 
-pub fn expectBytecodeStackTopBySpec(comptime items: anytype, spec: evmz.Spec, expected: u256) !void {
+pub fn expectBytecodeStackTopByRevision(comptime items: anytype, revision: evmz.eth.Revision, expected: u256) !void {
     const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, spec);
+    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
 }
 
-pub fn expectStackBySpec(code: []const u8, spec: evmz.Spec, expected: []const u256) !void {
+pub fn expectStackByRevision(code: []const u8, revision: evmz.eth.Revision, expected: []const u256) !void {
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
-        .spec = spec,
+        .revision = revision,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -475,11 +476,11 @@ pub fn expectStackBySpec(code: []const u8, spec: evmz.Spec, expected: []const u2
 }
 
 pub fn expectLatestForkBytecodeStackTop(comptime items: anytype, expected: u256) !void {
-    try expectBytecodeStackTopBySpec(items, .latest, expected);
+    try expectBytecodeStackTopByRevision(items, .latest, expected);
 }
 
 test "mock host persists storage writes" {
-    try expectBytecodeStackTopBySpec(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
+    try expectBytecodeStackTopByRevision(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
 }
 
 test "environment opcodes delegate every tx context access to host" {
@@ -488,11 +489,11 @@ test "environment opcodes delegate every tx context access to host" {
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var frame = try evmz.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode(.{ .ORIGIN, .GASPRICE }),
-        .spec = .latest,
+        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -524,8 +525,8 @@ test "host action errors propagate out of CALL execution" {
     var host = mock_host.host();
     const msg = defaultMessage();
     const code = bytecode(.{
-        .PUSH0, .PUSH0, .PUSH0,      .PUSH0,
-        .PUSH0, .PUSH1, 0x01,        .PUSH2,
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH1, 0x01,   .PUSH2,
         0x27,   0x10,   .CALL,
     });
 

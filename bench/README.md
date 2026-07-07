@@ -6,9 +6,9 @@ This sidecar is for measurement harnesses that are not EEST fixtures.
 
 `zig build compare` is the VM-core scoreboard lane for the VM-loop fixtures. It
 runs each engine through an interpreter-level path: evmz through direct
-`Interpreter.execute`, evmone baseline and advanced through a standalone C++
-runner with analysis prepared once, and revm through the Rust sidecar with
-analyzed `Bytecode`:
+bound-interpreter `execute()`, evmone baseline and advanced through a
+standalone C++ runner with analysis prepared once, and revm through the Rust
+sidecar with analyzed `Bytecode`:
 
 ```sh
 cd bench
@@ -27,7 +27,7 @@ Current VM-core rows:
 
 | engine             | level                         | prepared outside timing                                                                           | timed window                                    | transaction/overlay work |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------ |
-| `evmz`             | direct interpreter            | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | `Interpreter.execute`                           | no                       |
+| `evmz`             | direct interpreter            | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
 | `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
 | `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
 | `revm-interpreter` | raw interpreter loop          | fixture loading, init-code deployment, `Bytecode` legacy analysis; per-run interpreter/host setup | `Interpreter::run_plain`                        | no                       |
@@ -80,9 +80,9 @@ runtime bytecode. Stdout contains one millisecond value per run so external
 harnesses can consume it. Use `--summary` for host callback counts on stderr.
 `--fixture` reads `init.hex`, `calldata.hex`, `num-runs.txt`, and
 `host-profile.txt` from a fixture directory. CLI flags override fixture defaults.
-The default evmz runner is direct `Interpreter.execute()` with metadata prepared
-before timing. Use `--engine evmz-executor` only for the transaction/executor
-diagnostic stub; it prepares bytecode once and times
+The default evmz runner is direct bound-interpreter `execute()` with
+metadata prepared before timing. Use `--engine evmz-executor` only for the
+transaction/executor diagnostic stub; it prepares bytecode once and times
 `Executor.executePreparedCallTransaction` after transaction setup/reset. The
 standalone evmone runner prepares baseline or advanced analysis once and times
 the analyzed execution path.
@@ -135,7 +135,7 @@ use `--include-bytecode` to add `bytecode-sload` and `bytecode-sstore` rows.
 ## Opcode kernel runner
 
 `zig build kernel` generates repeated opcode patterns and times only
-`Interpreter.execute()` after bytecode generation and interpreter
+bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. It uses the null host and fails if a case touches host callbacks.
 The default comparison mode is portable release: Zig uses `ReleaseFast`, evmone
 is compiled into the Zig benchmark binary with the same optimization mode, and
@@ -166,7 +166,7 @@ suite,engine,case,repeat,iterations,bytecode_bytes,elapsed_ns,ns_per_iter,gas_us
 
 The Zig kernel runner supports `evmz`, `evmone-baseline`, and
 `evmone-advanced` (`evmone` is an alias for advanced mode). The `evmz` row
-times only `Interpreter.execute()` after bytecode generation and interpreter
+times only bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. evmone rows time the EVMC `execute` call.
 
 The revm runner is a small Rust sidecar under `bench/revm`. It emits the same

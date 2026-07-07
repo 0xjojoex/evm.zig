@@ -1,6 +1,7 @@
 const std = @import("std");
+const support = @import("../protocol/support.zig");
 
-pub const Spec = enum(u8) {
+pub const Revision = enum(u8) {
     frontier = 0,
     frontier_thawing,
     homestead,
@@ -36,11 +37,16 @@ pub const Spec = enum(u8) {
     }
 };
 
+pub const model = support.Model(Revision);
+pub const Availability = model.Availability;
+pub const Support = model.Support;
+pub const resolveAvailability = model.resolveAvailability;
+
 test "linear fork checks" {
-    try std.testing.expectEqual(Spec.amsterdam, Spec.latest);
-    try std.testing.expectEqual(Spec.osaka, Spec.stable);
-    try std.testing.expect(Spec.amsterdam.isImpl(.osaka));
-    try std.testing.expect(Spec.osaka.isImpl(.prague));
-    try std.testing.expect(Spec.prague.isImpl(.cancun));
-    try std.testing.expect(!Spec.prague.isImpl(.osaka));
+    try std.testing.expectEqual(Revision.amsterdam, Revision.latest);
+    try std.testing.expectEqual(Revision.osaka, Revision.stable);
+    try std.testing.expect(Revision.amsterdam.isImpl(.osaka));
+    try std.testing.expect(Revision.osaka.isImpl(.prague));
+    try std.testing.expect(Revision.prague.isImpl(.cancun));
+    try std.testing.expect(!Revision.prague.isImpl(.osaka));
 }

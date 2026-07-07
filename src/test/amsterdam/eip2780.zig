@@ -3,12 +3,14 @@ const evmz = @import("../../evm.zig");
 
 const AccountState = evmz.state.AccountState;
 const Address = evmz.Address;
-const Executor = evmz.executor;
+const EthProtocol = evmz.EthProtocol;
+const Executor = evmz.Executor(EthProtocol);
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
 const Transaction = Executor.Transaction;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
+const tx_protocol = transaction.For(EthProtocol);
 
 test "Amsterdam value-to-empty account state gas is charged at top frame" {
     const sender = evmz.addr(0xaaaa);
@@ -18,7 +20,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
 
     try executor.beginTransaction(testTxContext(sender, 300_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
-        .regular_left = transaction.amsterdam_new_account_state_gas - 1,
+        .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
     }, 1);
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
@@ -26,7 +28,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
 }
 
 test "Amsterdam value-to-empty account state gas is not intrinsic" {
-    try std.testing.expectEqual(@as(u64, 21_000), transaction.intrinsicGasForTransaction(.amsterdam, &.{}, .{
+    try std.testing.expectEqual(@as(u64, 21_000), tx_protocol.gas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
         .value = 1,
         .creates_account = true,
     }));
@@ -39,7 +41,7 @@ test "Amsterdam value-to-empty account state gas is not intrinsic" {
         .gas_limit = 21_000,
         .value = 1,
     } };
-    const gas_plan = transaction.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
         .value = tx.value(),
         .creates_account = true,
     });
@@ -57,12 +59,12 @@ test "Amsterdam top-frame value-to-empty account spends state gas on success" {
     try executor.beginTransaction(testTxContext(sender, 300_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
         .regular_left = 50_000,
-        .reservoir = transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 1);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
-    try std.testing.expectEqual(@as(i64, transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
 }
 
@@ -96,7 +98,7 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
         .value = 1,
         .authorization_list = &authorization_list,
     } };
-    const gas_plan = transaction.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
         .authorization_count = authorization_list.len,
         .value = tx.value(),
         .creates_account = true,
@@ -105,10 +107,12 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
     try executor.beginTransactionScope(tx_context, tx);
     const result = try executor.runTopLevelTransactionWithEngine(tx, .{
         .execution = gas_plan.execution,
-        .settlement = transaction.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
+            .payer = sender,
+            .value = tx.value(),
         }),
     }, .{ .execute = ExecuteTx.execute });
 
@@ -158,7 +162,7 @@ const ExecuteTx = struct {
 
 fn executorWithSender(sender: Address, balance: u256) !Executor {
     var executor = Executor.init(std.testing.allocator, .{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
     });
     var sender_account = AccountState.init(std.testing.allocator);
     sender_account.balance = balance;
@@ -166,18 +170,4 @@ fn executorWithSender(sender: Address, balance: u256) !Executor {
     return executor;
 }
 
-fn testTxContext(origin: Address, gas_limit: u64) Host.TxContext {
-    return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = origin,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = gas_limit,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    };
-}
+const testTxContext = evmz.t.defaultTxContext;

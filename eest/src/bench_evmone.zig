@@ -6,9 +6,10 @@ const evmc = @cImport({
 });
 
 const Address = evmz.Address;
-const Executor = evmz.executor;
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
+const EthProtocol = evmz.EthProtocol;
+const Executor = evmz.Executor(EthProtocol);
 
 extern fn evmc_create_evmone() ?*evmc.evmc_vm;
 
@@ -105,15 +106,13 @@ pub const Runner = struct {
             result.output_data[0..result.output_size]
         else
             &.{};
-        const output_copy = try executor.allocator.dupe(u8, output);
-        executor.clearLastOutput();
-        executor.last_call_output = output_copy;
+        const output_copy = try executor.setLastOutput(output);
 
         return .{
             .status = statusFromEvmc(result.status_code),
             .gas_left = result.gas_left,
             .gas_refund = result.gas_refund,
-            .output_data = executor.last_call_output,
+            .output_data = output_copy,
         };
     }
 
@@ -123,7 +122,7 @@ pub const Runner = struct {
             self.vm,
             &self.interface,
             self.context.toContext(),
-            revFromSpec(self.context.executor.spec),
+            revFromSpec(self.context.executor.revision()),
             message,
             code_ptr,
             code.len,
@@ -134,14 +133,13 @@ pub const Runner = struct {
             result.output_data[0..result.output_size]
         else
             &.{};
-        self.context.executor.clearLastOutput();
-        self.context.executor.last_call_output = try self.context.executor.allocator.dupe(u8, output);
+        const output_copy = try self.context.executor.setLastOutput(output);
 
         return .{
             .status = statusFromEvmc(result.status_code),
             .gas_left = result.gas_left,
             .gas_refund = result.gas_refund,
-            .output_data = self.context.executor.last_call_output,
+            .output_data = output_copy,
         };
     }
 };
@@ -269,7 +267,7 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         ctx.vm,
         &interface(),
         context,
-        revFromSpec(executor.spec),
+        revFromSpec(executor.revision()),
         message,
         code_ptr,
         code.len,
@@ -280,7 +278,7 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         result.output_data[0..result.output_size]
     else
         &.{};
-    executor.last_call_output = executor.allocator.dupe(u8, output) catch {
+    const output_copy = executor.setLastOutput(output) catch {
         executor.state.revertToCheckpoint(checkpoint_state) catch return failureResult(evmc.EVMC_FAILURE, 0);
         return failureResult(evmc.EVMC_OUT_OF_MEMORY, 0);
     };
@@ -294,8 +292,8 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         .status_code = result.status_code,
         .gas_left = result.gas_left,
         .gas_refund = result.gas_refund,
-        .output_data = if (executor.last_call_output.len == 0) null else executor.last_call_output.ptr,
-        .output_size = executor.last_call_output.len,
+        .output_data = if (output_copy.len == 0) null else output_copy.ptr,
+        .output_size = output_copy.len,
         .release = null,
         .create_address = result.create_address,
     };
@@ -303,7 +301,6 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
 
 fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc.evmc_message) !evmc.evmc_result {
     const executor = ctx.executor;
-    const allocator = executor.allocator;
     const init_code = messageInput(&message);
     const sender = fromEvmcAddress(message.sender);
     const value = fromEvmcBytes32(message.value);
@@ -313,7 +310,8 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         evmc.EVMC_CREATE2 => evmz.address.create2(sender, fromEvmcBytes32(message.create2_salt), init_code),
         else => unreachable,
     };
-    if (executor.spec.isImpl(.berlin)) {
+    const revision = executor.revision();
+    if (revision.isImpl(.berlin)) {
         try executor.warmAccessListAddress(create_address);
     }
 
@@ -340,7 +338,7 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
 
     _ = try executor.state.subtractBalance(sender, value);
     try executor.state.addBalance(create_address, value);
-    try executor.state.setNonce(create_address, if (executor.spec.isImpl(.spurious_dragon)) 1 else 0);
+    try executor.state.setNonce(create_address, if (revision.isImpl(.spurious_dragon)) 1 else 0);
     try executor.state.clearCode(create_address);
     try executor.state.markCreatedContract(create_address);
 
@@ -359,7 +357,7 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         ctx.vm,
         &interface(),
         context,
-        revFromSpec(executor.spec),
+        revFromSpec(revision),
         &child_message,
         code_ptr,
         init_code.len,
@@ -375,24 +373,26 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         try executor.state.revertToCheckpoint(checkpoint_state);
         checkpoint_open = false;
         executor.clearLastOutput();
-        executor.last_call_output = try allocator.dupe(u8, child_output);
+        const output_copy = try executor.setLastOutput(child_output);
         return .{
             .status_code = child_result.status_code,
             .gas_left = child_result.gas_left,
             .gas_refund = child_result.gas_refund,
-            .output_data = if (executor.last_call_output.len == 0) null else executor.last_call_output.ptr,
-            .output_size = executor.last_call_output.len,
+            .output_data = if (output_copy.len == 0) null else output_copy.ptr,
+            .output_size = output_copy.len,
             .release = null,
             .create_address = toEvmcAddress(create_address),
         };
     }
 
-    if (executor.spec.isImpl(.spurious_dragon) and child_output.len > Executor.maxCodeSize(executor.spec)) {
-        try executor.state.revertToCheckpoint(checkpoint_state);
-        checkpoint_open = false;
-        return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
+    if (EthProtocol.Create.createCodeSizeLimit(revision)) |limit| {
+        if (child_output.len > limit) {
+            try executor.state.revertToCheckpoint(checkpoint_state);
+            checkpoint_open = false;
+            return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
+        }
     }
-    if (executor.spec.isImpl(.london) and child_output.len > 0 and child_output[0] == 0xef) {
+    if (revision.isImpl(.london) and child_output.len > 0 and child_output[0] == 0xef) {
         try executor.state.revertToCheckpoint(checkpoint_state);
         checkpoint_open = false;
         return failureResultWithCreate(evmc.EVMC_INVALID_INSTRUCTION, 0, create_address);
@@ -409,7 +409,7 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
         return failureResultWithCreate(evmc.EVMC_OUT_OF_GAS, 0, create_address);
     };
     if (child_result.gas_left < deposit_cost) {
-        if (!executor.spec.isImpl(.homestead)) {
+        if (!revision.isImpl(.homestead)) {
             executor.state.commitCheckpoint(checkpoint_state);
             checkpoint_open = false;
             return .{
@@ -443,7 +443,7 @@ fn executeCreate(ctx: *Context, context: ?*evmc.evmc_host_context, message: evmc
 }
 
 fn createCollision(executor: *Executor, address: Address) !bool {
-    if (evmz.precompile.activeAt(executor.spec, address) != null) return true;
+    if (EthProtocol.Precompile.active(executor.revision(), address)) return true;
     const account = try executor.getAccountOrLoad(address) orelse return false;
     return account.nonce != 0 or account.code.len != 0 or try executor.state.accountHasStorage(address);
 }
@@ -568,7 +568,7 @@ fn statusFromEvmc(status_code: evmc.evmc_status_code) Interpreter.Status {
     };
 }
 
-fn revFromSpec(spec: evmz.Spec) evmc.evmc_revision {
+fn revFromSpec(spec: evmz.eth.Revision) evmc.evmc_revision {
     return switch (spec) {
         .frontier => evmc.EVMC_FRONTIER,
         .frontier_thawing => evmc.EVMC_FRONTIER,

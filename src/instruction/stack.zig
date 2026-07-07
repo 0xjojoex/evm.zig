@@ -14,14 +14,6 @@ pub inline fn push(frame: *CallFrame, comptime n: u8) !void {
     }
 
     const start = frame.pc;
-    if (frame.has_zero_padded_code) {
-        const Int = std.meta.Int(.unsigned, @as(comptime_int, n) * 8);
-        const bytes: *const [n]u8 = @ptrCast(frame.read_code.ptr + start);
-        try frame.stack.push(@as(u256, std.mem.readInt(Int, bytes, .big)));
-        frame.pc += n;
-        return;
-    }
-
     if (comptime n >= 3) {
         if (start <= frame.code.len and frame.code.len - start >= n) {
             const Int = std.meta.Int(.unsigned, @as(comptime_int, n) * 8);
@@ -141,7 +133,6 @@ pub fn exchange(frame: *CallFrame) !void {
 }
 
 fn immediateByte(frame: *CallFrame) u8 {
-    if (frame.has_zero_padded_code) return frame.read_code[frame.pc];
     return if (frame.pc < frame.code.len) frame.code[frame.pc] else 0;
 }
 
@@ -177,7 +168,7 @@ test "EIP-8024 DUPN duplicates a deep stack item" {
     var expected = [_]u256{0} ** 18;
     expected[0] = 1;
     expected[17] = 1;
-    try evmz.t.expectStackBySpec(&code, .amsterdam, &expected);
+    try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
 }
 
 test "EIP-8024 SWAPN swaps the top with a deep stack item" {
@@ -193,19 +184,19 @@ test "EIP-8024 SWAPN swaps the top with a deep stack item" {
     var expected = [_]u256{0} ** 18;
     expected[0] = 2;
     expected[17] = 1;
-    try evmz.t.expectStackBySpec(&code, .amsterdam, &expected);
+    try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
 }
 
 test "EIP-8024 EXCHANGE swaps two non-top stack items" {
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH1, 1, .PUSH1, 2, .EXCHANGE, 0x8e });
     const expected = [_]u256{ 1, 0, 2 };
-    try evmz.t.expectStackBySpec(&code, .amsterdam, &expected);
+    try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
 }
 
 test "EIP-8024 immediates reject jumpdest and push ranges" {
-    try evmz.t.expectBytecodeStatusBySpec(.{ .DUPN, 0x5b }, .amsterdam, .invalid);
-    try evmz.t.expectBytecodeStatusBySpec(.{ .SWAPN, 0x60 }, .amsterdam, .invalid);
-    try evmz.t.expectBytecodeStatusBySpec(.{ .EXCHANGE, 0x52 }, .amsterdam, .invalid);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .DUPN, 0x5b }, .amsterdam, .invalid);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .SWAPN, 0x60 }, .amsterdam, .invalid);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .EXCHANGE, 0x52 }, .amsterdam, .invalid);
 }
 
 test "EIP-8024 missing immediate byte is decoded as zero" {
@@ -213,5 +204,5 @@ test "EIP-8024 missing immediate byte is decoded as zero" {
     code[145] = evmz.Opcode.DUPN.toByte();
 
     const expected = [_]u256{0} ** 146;
-    try evmz.t.expectStackBySpec(&code, .amsterdam, &expected);
+    try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
 }

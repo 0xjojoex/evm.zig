@@ -3,7 +3,6 @@ pub const evmc = @cImport({
 });
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const blob = @import("../transaction/blob.zig");
 
 comptime {
     if (evmc.EVMC_ABI_VERSION != 13) {
@@ -25,7 +24,7 @@ pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
     return std.mem.readInt(u256, &b.bytes, .big);
 }
 
-pub const max_blob_hashes = blob.maxBlobCount(.amsterdam);
+pub const max_blob_hashes = evmz.EthProtocol.Transaction.blobMaxCount(.amsterdam);
 
 pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
     var result = std.mem.zeroes(evmc.evmc_bytes32);

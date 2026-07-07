@@ -52,9 +52,7 @@ const KernelTier = enum {
 
 const Engine = enum {
     evmz,
-    evmz_advanced,
     evmz_call_total,
-    evmz_advanced_call_total,
     evmone_baseline,
     evmone_advanced,
 };
@@ -68,7 +66,7 @@ const Options = struct {
     iterations: usize = default_iterations,
     repeats: usize = default_repeats,
     warmups: usize = default_warmups,
-    spec: evmz.Spec = .latest,
+    spec: evmz.eth.Revision = .latest,
     fixtures_dir: []const u8 = default_fixtures_dir,
     no_header: bool = false,
 };
@@ -206,7 +204,7 @@ fn printUsage() void {
         \\Options:
         \\  --case <name>           case filter; repeatable, default all cases
         \\  --tier <name>           small, edge, large, branch, all; repeatable
-        \\  --engine <name>         evmz, evmz-advanced, evmz-call-total, evmz-advanced-call-total, evmone, evmone-baseline, evmone-advanced
+        \\  --engine <name>         evmz, evmz-call-total, evmone, evmone-baseline, evmone-advanced
         \\  --iterations, -n <n>    repeated opcode pattern count, default 100000
         \\  --repeats <n>           printed samples per case, default 5
         \\  --warmups <n>           unprinted samples before repeats, default 1
@@ -230,17 +228,15 @@ fn measure(
     engine: Engine,
     case: KernelCase,
     iterations: usize,
-    spec: evmz.Spec,
+    spec: evmz.eth.Revision,
     fixtures_dir: []const u8,
 ) !Measurement {
     const code = try kernelBytecode(io, allocator, case, iterations, fixtures_dir);
     defer allocator.free(code);
 
     return switch (engine) {
-        .evmz => try measureEvmz(allocator, code, spec, .execute_only, .base),
-        .evmz_advanced => try measureEvmz(allocator, code, spec, .execute_only, .advanced),
-        .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total, .base),
-        .evmz_advanced_call_total => try measureEvmz(allocator, code, spec, .call_total, .advanced),
+        .evmz => try measureEvmz(allocator, code, spec, .execute_only),
+        .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total),
         .evmone_baseline => blk: {
             const measurement = try kernel_evmone.measure(code, spec, .baseline);
             break :blk .{
@@ -265,9 +261,8 @@ fn measure(
 fn measureEvmz(
     allocator: std.mem.Allocator,
     code: []const u8,
-    spec: evmz.Spec,
+    spec: evmz.eth.Revision,
     scope: EvmzMeasureScope,
-    config: evmz.Config,
 ) !Measurement {
     var counting_host = common.CountingHost.init(allocator, .null);
     defer counting_host.deinit();
@@ -285,23 +280,14 @@ fn measureEvmz(
 
     counting_host.resetCounters();
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
-    var frame = try Interpreter.OwnedCallFrame.init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
-        .spec = spec,
-        .config = config,
+        .revision = spec,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
-
-    switch (config.preprocessing) {
-        .none => {},
-        .jumpdest => try interpreter.call_frame.analysis.jumpdests.analyze(allocator, code),
-        .full => {
-            _ = try interpreter.call_frame.analysis.ensureAnalyzed(allocator, code);
-        },
-    }
 
     const start_ns = if (scope == .execute_only) try common.monotonicNowNs() else total_start_ns;
     const result = try interpreter.execute();
@@ -455,9 +441,7 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
-        .evmz_advanced => "evmz-advanced",
         .evmz_call_total => "evmz-call-total",
-        .evmz_advanced_call_total => "evmz-advanced-call-total",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
     };
@@ -507,8 +491,8 @@ test "engine parser accepts evmone aliases" {
     try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
     try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
     try std.testing.expectEqual(Engine.evmz_call_total, parseEngine("evmz-call-total").?);
-    try std.testing.expectEqual(Engine.evmz_advanced, parseEngine("evmz-advanced").?);
-    try std.testing.expectEqual(Engine.evmz_advanced_call_total, parseEngine("evmz-advanced-call-total").?);
+    try std.testing.expect(parseEngine("evmz-advanced") == null);
+    try std.testing.expect(parseEngine("evmz-advanced-call-total") == null);
 }
 
 test "kernel bytecode repeats pattern and stops" {
@@ -541,10 +525,5 @@ test "branch kernels touch no host" {
 
 test "call total scope touches no host" {
     const measurement = try measure(std.testing.io, std.testing.allocator, .evmz_call_total, .jumpdest_dense, 2, .latest, default_fixtures_dir);
-    try std.testing.expectEqual(@as(u64, 0), measurement.host_calls);
-}
-
-test "advanced evmz kernel scope touches no host" {
-    const measurement = try measure(std.testing.io, std.testing.allocator, .evmz_advanced_call_total, .jumpdest_dense, 2, .latest, default_fixtures_dir);
     try std.testing.expectEqual(@as(u64, 0), measurement.host_calls);
 }

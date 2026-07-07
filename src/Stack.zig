@@ -3,9 +3,10 @@ const std = @import("std");
 
 /// The max stack size is 1024.
 pub const capacity = 1024;
+pub const Storage = [capacity]u256;
 
-/// The stack is an array of 1024 256-bit words
-stacks: [capacity]u256 = undefined,
+/// Stack is a view over caller-owned 256-bit word storage.
+slots: *Storage = undefined,
 len: usize = 0,
 
 const Stack = @This();
@@ -22,17 +23,21 @@ pub const Error = error{
     StackUnderflow,
 };
 
+pub fn init(storage: *Storage) Stack {
+    return .{ .slots = storage, .len = 0 };
+}
+
 pub fn push(self: *Stack, value: u256) Error!void {
     if (self.len >= capacity) {
         return Error.StackOverflow;
     }
-    self.stacks[self.len] = value;
+    self.slots[self.len] = value;
     self.len += 1;
 }
 
 pub inline fn pushUnchecked(self: *Stack, value: u256) void {
     std.debug.assert(self.len < capacity);
-    self.stacks[self.len] = value;
+    self.slots[self.len] = value;
     self.len += 1;
 }
 
@@ -45,7 +50,7 @@ pub inline fn replaceTop(self: *Stack, value: u256) Error!void {
 
 pub inline fn replaceTopUnchecked(self: *Stack, value: u256) void {
     std.debug.assert(self.len != 0);
-    self.stacks[self.len - 1] = value;
+    self.slots[self.len - 1] = value;
 }
 
 pub inline fn pop(self: *Stack) Error!u256 {
@@ -53,7 +58,7 @@ pub inline fn pop(self: *Stack) Error!u256 {
         return Error.StackUnderflow;
     }
     self.len -= 1;
-    return self.stacks[self.len];
+    return self.slots[self.len];
 }
 
 pub inline fn popN(self: *Stack, comptime n: usize) Error!PopN(n) {
@@ -64,7 +69,7 @@ pub inline fn popN(self: *Stack, comptime n: usize) Error!PopN(n) {
 
     var values: PopN(n) = undefined;
     inline for (0..n) |i| {
-        values[i] = self.stacks[self.len + n - 1 - i];
+        values[i] = self.slots[self.len + n - 1 - i];
     }
     return values;
 }
@@ -80,7 +85,7 @@ pub fn swap(self: *Stack, comptime n: usize) Error!void {
     }
 
     const target = self.len - 1 - n;
-    std.mem.swap(u256, &self.stacks[target], &self.stacks[self.len - 1]);
+    std.mem.swap(u256, &self.slots[target], &self.slots[self.len - 1]);
 }
 
 pub fn swapDepth(self: *Stack, n: usize) Error!void {
@@ -89,7 +94,7 @@ pub fn swapDepth(self: *Stack, n: usize) Error!void {
     }
 
     const target = self.len - 1 - n;
-    std.mem.swap(u256, &self.stacks[target], &self.stacks[self.len - 1]);
+    std.mem.swap(u256, &self.slots[target], &self.slots[self.len - 1]);
 }
 
 /// Duplicate the nth element from the top of the stack
@@ -97,14 +102,14 @@ pub fn dup(self: *Stack, comptime n: usize) Error!void {
     if (self.len < n) {
         return Error.StackUnderflow;
     }
-    try self.push(self.stacks[self.len - n]);
+    try self.push(self.slots[self.len - n]);
 }
 
 pub fn dupDepth(self: *Stack, n: usize) Error!void {
     if (self.len < n) {
         return Error.StackUnderflow;
     }
-    try self.push(self.stacks[self.len - n]);
+    try self.push(self.slots[self.len - n]);
 }
 
 pub fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
@@ -112,18 +117,18 @@ pub fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
         return Error.StackUnderflow;
     }
 
-    std.mem.swap(u256, &self.stacks[self.len - 1 - n], &self.stacks[self.len - 1 - m]);
+    std.mem.swap(u256, &self.slots[self.len - 1 - n], &self.slots[self.len - 1 - m]);
 }
 
 pub fn peekN(self: *Stack, n: usize) ?u256 {
     if (self.len < n) {
         return null;
     }
-    return self.stacks[self.len - n];
+    return self.slots[self.len - n];
 }
 
 pub fn asSlice(self: *const Stack) []const u256 {
-    return self.stacks[0..self.len];
+    return self.slots[0..self.len];
 }
 
 pub fn dump(self: *const Stack) void {
@@ -132,7 +137,7 @@ pub fn dump(self: *const Stack) void {
     var i: usize = self.len;
     while (i > 0) {
         i -= 1;
-        std.debug.print("{x}\n", .{self.stacks[i]});
+        std.debug.print("{x}\n", .{self.slots[i]});
     }
     std.debug.print("--\n", .{});
 }
@@ -140,7 +145,8 @@ pub fn dump(self: *const Stack) void {
 const testing = std.testing;
 
 test "push pop and peek use the top stack slot" {
-    var stack = Stack{};
+    var storage: Storage = undefined;
+    var stack = Stack.init(&storage);
 
     try testing.expectEqual(null, stack.peek());
 
@@ -163,7 +169,8 @@ test "push pop and peek use the top stack slot" {
 }
 
 test "replaceTop updates the current top slot" {
-    var stack = Stack{};
+    var storage: Storage = undefined;
+    var stack = Stack.init(&storage);
 
     try testing.expectError(Error.StackUnderflow, stack.replaceTop(1));
 
@@ -178,7 +185,8 @@ test "replaceTop updates the current top slot" {
 
 test "popN checks underflow and preserves repeated-pop operand order" {
     {
-        var stack = Stack{};
+        var storage: Storage = undefined;
+        var stack = Stack.init(&storage);
 
         try testing.expectError(Error.StackUnderflow, stack.popN(2));
 
@@ -196,7 +204,8 @@ test "popN checks underflow and preserves repeated-pop operand order" {
     }
 
     {
-        var stack = Stack{};
+        var storage: Storage = undefined;
+        var stack = Stack.init(&storage);
 
         try testing.expectError(Error.StackUnderflow, stack.popN(3));
 
@@ -217,7 +226,8 @@ test "popN checks underflow and preserves repeated-pop operand order" {
     }
 
     {
-        var stack = Stack{};
+        var storage: Storage = undefined;
+        var stack = Stack.init(&storage);
 
         for (1..8) |value| {
             try stack.push(@intCast(value));
@@ -246,7 +256,8 @@ test "popN checks underflow and preserves repeated-pop operand order" {
 }
 
 test "swap checks depth before computing target slot" {
-    var stack = Stack{};
+    var storage: Storage = undefined;
+    var stack = Stack.init(&storage);
 
     try testing.expectError(Error.StackUnderflow, stack.swap(1));
     try stack.push(1);

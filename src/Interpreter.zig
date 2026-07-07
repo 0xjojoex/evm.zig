@@ -1,14 +1,15 @@
 const std = @import("std");
 const Memory = @import("./Memory.zig");
-const Config = @import("./Config.zig");
 const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
-const CodeAnalysisState = @import("./code/State.zig");
+const JumpDestMap = @import("./code/JumpDestMap.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 const Stack = @import("./Stack.zig");
+const FrameIo = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
 const Opcode = @import("./opcode.zig").Opcode;
+const RevisionId = evmz.protocol.RevisionId;
 
 const Error = anyerror;
 
@@ -125,105 +126,180 @@ pub const RunResult = union(enum) {
     action: Action,
 };
 
-call_frame: *CallFrame,
+pub fn InitFor(comptime Protocol: type) type {
+    return struct {
+        host: *Host,
+        msg: *const Host.Message,
+        code: []const u8 = &.{},
+        bytecode: ?*Bytecode = null,
+        revision: Protocol.Revision,
+        trace_sink: ?*trace.Sink = null,
+        memory_allocator: ?std.mem.Allocator = null,
+        memory_retain_capacity: bool = false,
+        io: ?*FrameIo.Slot = null,
+    };
+}
 
-const Interpreter = @This();
-
-pub const Init = struct {
+const FrameInit = struct {
     host: *Host,
     msg: *const Host.Message,
     code: []const u8 = &.{},
     bytecode: ?*Bytecode = null,
-    spec: evmz.Spec,
-    config: Config = .base,
+    revision_id: RevisionId,
     trace_sink: ?*trace.Sink = null,
+    memory_allocator: ?std.mem.Allocator = null,
+    memory_retain_capacity: bool = false,
+    io: ?*FrameIo.Slot = null,
 };
 
-pub fn init(call_frame: *CallFrame) Interpreter {
-    return .{ .call_frame = call_frame };
-}
-
-pub fn execute(self: *Interpreter) Error!Result {
-    while (true) {
-        switch (try self.executeUntilAction()) {
-            .finished => |result| return result,
-            .action => |action| try self.resolveHostAction(action),
-        }
-    }
-}
-
-pub fn executeUntilAction(self: *Interpreter) Error!RunResult {
-    if (self.call_frame.wantsStepTracing()) {
-        while (self.call_frame.status == .running) {
-            try self.stepTraced();
-        }
-    } else {
-        try self.executeUntraced();
-    }
-
-    if (self.call_frame.takePendingAction()) |action| {
-        return .{ .action = action };
-    }
-    return .{ .finished = self.call_frame.getResult() };
-}
-
-fn executeUntraced(self: *Interpreter) Error!void {
-    var frame = self.call_frame;
-    if (frame.has_zero_padded_code) {
-        try executeUntracedPadded(frame);
-    } else {
-        try executeUntracedBounded(frame);
-    }
-
-    if (frame.status == .running) {
-        frame.status = .success;
-    }
-}
-
-fn executeUntracedPadded(frame: *CallFrame) Error!void {
-    while (frame.status == .running) {
-        const opcode_byte = frame.read_code[frame.pc];
-        frame.pc += 1;
-        try executeOpcode(opcode_byte, frame);
-    }
-}
-
-fn executeUntracedBounded(frame: *CallFrame) Error!void {
-    while (frame.status == .running and frame.pc < frame.code.len) {
-        const opcode_byte = frame.code[frame.pc];
-        frame.pc += 1;
-        try executeOpcode(opcode_byte, frame);
-    }
-}
-
-inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) Error!void {
-    instruction.execute(opcode_byte, frame) catch |err| {
-        if (invalidStatusError(err)) {
-            if (frame.status == .running) {
-                frame.failWithStatus(.invalid);
-            }
-            return;
-        }
-        return err;
+fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
+    return .{
+        .host = options.host,
+        .msg = options.msg,
+        .code = options.code,
+        .bytecode = options.bytecode,
+        .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
+        .trace_sink = options.trace_sink,
+        .memory_allocator = options.memory_allocator,
+        .memory_retain_capacity = options.memory_retain_capacity,
+        .io = options.io,
     };
 }
 
-fn resolveHostAction(self: *Interpreter, action: Action) Error!void {
-    switch (action) {
-        .call => |call_action| {
-            const result = (try self.call_frame.host.call(call_action.msg)).expectCall();
-            try self.call_frame.resumeCallResult(call_action.continuation, result);
-        },
-        .create => |create_action| {
-            const result = (try self.call_frame.host.call(create_action.msg)).expectCreate();
-            try self.call_frame.resumeCreateResult(create_action.continuation, result);
-        },
-    }
+pub fn For(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
+
+        pub const Protocol = ProtocolType;
+
+        call_frame: *CallFrame,
+
+        pub fn init(call_frame: *CallFrame) Self {
+            return .{ .call_frame = call_frame };
+        }
+
+        pub inline fn revision(frame: *const CallFrame) Protocol.Revision {
+            if (comptime @hasDecl(Protocol, "support") and @intFromEnum(Protocol.support.min) == @intFromEnum(Protocol.support.max)) {
+                return Protocol.support.min;
+            }
+            return evmz.protocol.decodeRevisionForProtocol(Protocol, frame.revision_id);
+        }
+
+        pub fn execute(self: *Self) Error!Result {
+            while (true) {
+                switch (try self.executeUntilAction()) {
+                    .finished => |result| return result,
+                    .action => |action| try self.resolveHostAction(action),
+                }
+            }
+        }
+
+        pub fn executeUntilAction(self: *Self) Error!RunResult {
+            if (self.call_frame.wantsStepTracing()) {
+                while (self.call_frame.status == .running) {
+                    try self.stepTraced();
+                }
+            } else {
+                try self.executeUntraced();
+            }
+
+            if (self.call_frame.takePendingAction()) |action| {
+                return .{ .action = action };
+            }
+            return .{ .finished = self.call_frame.getResult() };
+        }
+
+        fn executeUntraced(self: *Self) Error!void {
+            var frame = self.call_frame;
+            if (frame.bytecode) |bytecode| {
+                try executeUntracedPadded(frame, bytecode.read_bytes);
+            } else {
+                try executeUntracedBounded(frame);
+            }
+
+            if (frame.status == .running) {
+                frame.status = .success;
+            }
+        }
+
+        fn executeUntracedPadded(frame: *CallFrame, read_bytes: []const u8) Error!void {
+            while (frame.status == .running) {
+                const opcode_byte = read_bytes[frame.pc];
+                frame.pc += 1;
+                try executeOpcode(opcode_byte, frame);
+            }
+        }
+
+        fn executeUntracedBounded(frame: *CallFrame) Error!void {
+            while (frame.status == .running and frame.pc < frame.code.len) {
+                const opcode_byte = frame.code[frame.pc];
+                frame.pc += 1;
+                try executeOpcode(opcode_byte, frame);
+            }
+        }
+
+        inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) Error!void {
+            instruction.For(Protocol).execute(opcode_byte, frame) catch |err| {
+                if (invalidStatusError(err)) {
+                    if (frame.status == .running) {
+                        frame.failWithStatus(.invalid);
+                    }
+                    return;
+                }
+                return err;
+            };
+        }
+
+        fn resolveHostAction(self: *Self, action: Action) Error!void {
+            switch (action) {
+                .call => |call_action| {
+                    const result = (try self.call_frame.host.call(call_action.msg)).expectCall();
+                    try self.call_frame.resumeCallResult(call_action.continuation, result);
+                },
+                .create => |create_action| {
+                    const result = (try self.call_frame.host.call(create_action.msg)).expectCreate();
+                    try self.call_frame.resumeCreateResult(create_action.continuation, result);
+                },
+            }
+        }
+
+        fn stepTraced(self: *Self) Error!void {
+            if (self.call_frame.pc >= self.call_frame.code.len) {
+                self.call_frame.status = .success;
+                return;
+            }
+
+            const pc = self.call_frame.pc;
+            const opcode_byte = self.call_frame.code[pc];
+            const sink = self.call_frame.trace_sink.?;
+            const wants_start = sink.wantsStepStart();
+            const wants_end = sink.wantsStepEnd();
+            const decoded_opcode = if (sink.wantsDecodedOpcode()) instruction.decode(opcode_byte) else null;
+            const gas_before = if (wants_end and sink.events.step_end.gas_cost) self.call_frame.gas_left else 0;
+            if (wants_start) self.call_frame.traceStepStart(pc, opcode_byte, decoded_opcode);
+            self.call_frame.pc += 1;
+
+            try executeOpcode(opcode_byte, self.call_frame);
+            if (self.call_frame.pc >= self.call_frame.code.len and self.call_frame.status == .running) {
+                self.call_frame.status = .success;
+            }
+            if (self.call_frame.pending_action != null) {
+                if (wants_end) {
+                    self.call_frame.pending_step_end = .{
+                        .pc = pc,
+                        .opcode_byte = opcode_byte,
+                        .decoded_opcode = decoded_opcode,
+                        .gas_before = gas_before,
+                    };
+                }
+            } else if (wants_end) {
+                self.call_frame.traceStepEnd(pc, opcode_byte, decoded_opcode, gas_before);
+            }
+        }
+    };
 }
 
 fn invalidStatusError(err: anyerror) bool {
-    // These are EVM exceptional halts. Host/backend/resource failures must
-    // propagate through the error channel instead of becoming `.invalid`.
     return switch (err) {
         error.StackOverflow,
         error.StackUnderflow,
@@ -242,40 +318,6 @@ const PendingStepEnd = struct {
     gas_before: i64,
 };
 
-fn stepTraced(self: *Interpreter) Error!void {
-    if (self.call_frame.pc >= self.call_frame.code.len) {
-        self.call_frame.status = .success;
-        return;
-    }
-
-    const pc = self.call_frame.pc;
-    const opcode_byte = self.call_frame.code[pc];
-    const sink = self.call_frame.trace_sink.?;
-    const wants_start = sink.wantsStepStart();
-    const wants_end = sink.wantsStepEnd();
-    const decoded_opcode = if (sink.wantsDecodedOpcode()) instruction.decode(opcode_byte) else null;
-    const gas_before = if (wants_end and sink.events.step_end.gas_cost) self.call_frame.gas_left else 0;
-    if (wants_start) self.call_frame.traceStepStart(pc, opcode_byte, decoded_opcode);
-    self.call_frame.pc += 1;
-
-    try executeOpcode(opcode_byte, self.call_frame);
-    if (self.call_frame.pc >= self.call_frame.code.len and self.call_frame.status == .running) {
-        self.call_frame.status = .success;
-    }
-    if (self.call_frame.pending_action != null) {
-        if (wants_end) {
-            self.call_frame.pending_step_end = .{
-                .pc = pc,
-                .opcode_byte = opcode_byte,
-                .decoded_opcode = decoded_opcode,
-                .gas_before = gas_before,
-            };
-        }
-    } else if (wants_end) {
-        self.call_frame.traceStepEnd(pc, opcode_byte, decoded_opcode, gas_before);
-    }
-}
-
 pub const CallFrame = struct {
     status: FrameStatus,
     allocator: std.mem.Allocator,
@@ -291,81 +333,110 @@ pub const CallFrame = struct {
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
     return_data: []u8 = &.{},
+    io: *FrameIo.Slot = undefined,
     output_data: []u8 = &.{},
-    analysis: CodeAnalysisState = .empty,
+    jumpdests: JumpDestMap = .empty,
     bytecode: ?*Bytecode = null,
-    config: Config = .base,
     trace_sink: ?*trace.Sink = null,
-    spec: evmz.Spec = evmz.Spec.latest,
+    revision_id: RevisionId = 0,
     pending_action: ?Action = null,
     pending_step_end: ?PendingStepEnd = null,
-    read_code: []const u8 = &.{},
-    has_zero_padded_code: bool = false,
+
+    pub fn initFor(
+        self: *CallFrame,
+        comptime Protocol: type,
+        allocator: std.mem.Allocator,
+        options: InitFor(Protocol),
+        msg_storage: *Host.Message,
+        stack_storage: *Stack.Storage,
+        memory_storage: *Memory.Storage,
+    ) !void {
+        try self.init(
+            allocator,
+            frameInitFor(Protocol, options),
+            msg_storage,
+            stack_storage,
+            memory_storage,
+        );
+    }
 
     pub fn init(
         self: *CallFrame,
         allocator: std.mem.Allocator,
-        options: Init,
+        options: FrameInit,
         msg_storage: *Host.Message,
+        stack_storage: *Stack.Storage,
+        memory_storage: *Memory.Storage,
     ) !void {
-        const code, const read_code, const has_zero_padded_code = if (options.bytecode) |bytecode|
-            .{ bytecode.bytes, bytecode.read_bytes, true }
+        const code = if (options.bytecode) |bytecode|
+            bytecode.bytes
         else
-            .{ options.code, options.code, false };
-        const analysis = if (options.bytecode == null)
-            try CodeAnalysisState.init(code, options.config)
-        else
-            CodeAnalysisState.empty;
+            options.code;
+        const io = options.io orelse return error.MissingFrameIoStorage;
+        var jumpdests = JumpDestMap.empty;
+        if (options.bytecode == null) {
+            jumpdests = JumpDestMap.init();
+            try jumpdests.analyze(allocator, code);
+        }
 
         self.allocator = allocator;
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
-        self.stack = undefined;
-        self.stack.len = 0;
-        self.memory = Memory.init(allocator);
+        self.stack = Stack.init(stack_storage);
+        const memory_allocator = options.memory_allocator orelse allocator;
+        self.memory = if (options.memory_retain_capacity)
+            Memory.initRetainingCapacity(memory_storage, memory_allocator)
+        else
+            Memory.init(memory_storage, memory_allocator);
         self.pc = 0;
         self.code = code;
-        self.read_code = read_code;
-        self.has_zero_padded_code = has_zero_padded_code;
         self.gas_left = options.msg.gas;
         self.gas_refund = 0;
         self.gas_reservoir = options.msg.gas_reservoir;
         self.state_gas_spent = 0;
         self.state_gas_from_gas_left = 0;
-        self.return_data = &.{};
-        self.output_data = &.{};
-        self.analysis = analysis;
+        self.io = io;
+        self.io.clearFrame();
+        self.return_data = self.io.return_data.slice();
+        self.output_data = self.io.output_data.slice();
+        self.jumpdests = jumpdests;
         self.bytecode = options.bytecode;
-        self.config = options.config;
         self.trace_sink = options.trace_sink;
         self.status = if (code.len == 0) .success else .running;
-        self.spec = options.spec;
+        self.revision_id = options.revision_id;
         self.pending_action = null;
         self.pending_step_end = null;
     }
 
     pub fn deinit(self: *CallFrame) void {
         self.memory.deinit();
-        self.allocator.free(self.return_data);
-        self.allocator.free(self.output_data);
-        self.analysis.deinit(self.allocator);
+        self.deinitOwnedFields();
         self.* = undefined;
     }
 
-    fn replaceOwnedBytes(self: *CallFrame, target: *[]u8, bytes: []const u8) !void {
-        self.allocator.free(target.*);
-        const buf = try self.allocator.alloc(u8, bytes.len);
-        @memcpy(buf, bytes);
-        target.* = buf;
+    pub fn deinitRetainingMemoryCapacity(self: *CallFrame) void {
+        self.memory.deinitRetainingCapacity();
+        self.deinitOwnedFields();
+        self.* = undefined;
+    }
+
+    fn deinitOwnedFields(self: *CallFrame) void {
+        self.io.clearFrame();
+        self.jumpdests.deinit(self.allocator);
     }
 
     pub fn replaceReturnData(self: *CallFrame, return_data: []const u8) !void {
-        try self.replaceOwnedBytes(&self.return_data, return_data);
+        self.return_data = try self.io.return_data.replace(return_data);
     }
 
     pub fn replaceOutputData(self: *CallFrame, output_data: []const u8) !void {
-        try self.replaceOwnedBytes(&self.output_data, output_data);
+        self.output_data = @constCast(output_data);
+    }
+
+    pub fn stabilizeOutputData(self: *CallFrame) ![]u8 {
+        self.output_data = try self.io.output_data.replace(self.output_data);
+        return self.output_data;
     }
 
     pub fn setPendingAction(self: *CallFrame, action: Action) void {
@@ -484,7 +555,7 @@ pub const CallFrame = struct {
         if (self.bytecode) |bytecode| {
             return try bytecode.isValidJumpDest(self.allocator, target);
         }
-        return try self.analysis.isValidJumpDest(self.allocator, self.code, target);
+        return try self.jumpdests.isValid(self.allocator, self.code, target);
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
@@ -521,7 +592,12 @@ pub const CallFrame = struct {
         if (self.status != .running) {
             return false;
         }
-        try self.memory.expandPrepared(expansion);
+        self.memory.expandPrepared(expansion) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.failWithStatus(.out_of_gas);
+                return false;
+            },
+        };
         return true;
     }
 
@@ -585,21 +661,120 @@ pub const CallFrame = struct {
 
 pub const CallFrameSlot = struct {
     frame: CallFrame = undefined,
+    stack_storage: Stack.Storage = undefined,
+    memory_storage: Memory.Storage = .empty,
+    io_storage: FrameIo.Slot = undefined,
     msg: Host.Message = undefined,
 
-    pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
-        try self.frame.init(allocator, options, &self.msg);
+    pub fn initFor(self: *CallFrameSlot, comptime Protocol: type, allocator: std.mem.Allocator, options: InitFor(Protocol)) !void {
+        try self.initRaw(allocator, frameInitFor(Protocol, options));
+    }
+
+    fn initRaw(self: *CallFrameSlot, allocator: std.mem.Allocator, options: FrameInit) !void {
+        self.io_storage = FrameIo.Slot.initGrowable(allocator);
+        errdefer self.io_storage.deinit();
+
+        var frame_options = options;
+        frame_options.io = &self.io_storage;
+        try self.frame.init(allocator, frame_options, &self.msg, &self.stack_storage, &self.memory_storage);
     }
 
     pub fn deinit(self: *CallFrameSlot) void {
         self.frame.deinit();
+        self.io_storage.deinit();
         self.* = undefined;
     }
 
-    pub fn interpreter(self: *CallFrameSlot) Interpreter {
-        return Interpreter.init(&self.frame);
+    pub fn interpreter(self: *CallFrameSlot, comptime Protocol: type) For(Protocol) {
+        return For(Protocol).init(&self.frame);
     }
 };
+
+test "call frame can execute with externally supplied stack storage" {
+    const code = [_]u8{
+        @intFromEnum(Opcode.PUSH1),
+        0x02,
+        @intFromEnum(Opcode.PUSH1),
+        0x03,
+        @intFromEnum(Opcode.ADD),
+        @intFromEnum(Opcode.STOP),
+    };
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+    var msg_storage: Host.Message = undefined;
+    var stack_storage: Stack.Storage = undefined;
+    var memory_storage: Memory.Storage = .empty;
+    var io_storage = FrameIo.Slot.initGrowable(std.testing.allocator);
+    defer io_storage.deinit();
+    var frame: CallFrame = undefined;
+    try frame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
+        .io = &io_storage,
+    }, &msg_storage, &stack_storage, &memory_storage);
+    defer frame.deinit();
+    try std.testing.expect(frame.stack.slots == &stack_storage);
+
+    var interpreter = For(evmz.EthProtocol).init(&frame);
+    const result = try interpreter.execute();
+
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(u256, 5), frame.stack.peek().?);
+    try std.testing.expectEqual(@as(u256, 5), stack_storage[0]);
+}
+
+test "call frame can execute with externally supplied memory storage" {
+    const code = [_]u8{
+        @intFromEnum(Opcode.PUSH1),
+        0x2a,
+        @intFromEnum(Opcode.PUSH1),
+        0x00,
+        @intFromEnum(Opcode.MSTORE),
+        @intFromEnum(Opcode.STOP),
+    };
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+    var msg_storage: Host.Message = undefined;
+    var stack_storage: Stack.Storage = undefined;
+    var memory_storage: Memory.Storage = .empty;
+    var io_storage = FrameIo.Slot.initGrowable(std.testing.allocator);
+    defer io_storage.deinit();
+    var frame: CallFrame = undefined;
+    try frame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
+        .io = &io_storage,
+    }, &msg_storage, &stack_storage, &memory_storage);
+    defer frame.deinit();
+    try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
+
+    var interpreter = For(evmz.EthProtocol).init(&frame);
+    const result = try interpreter.execute();
+
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(usize, 32), memory_storage.items.len);
+    try std.testing.expectEqual(@as(u8, 0x2a), memory_storage.items[31]);
+}
 
 fn decodedOpcode(decoded: ?instruction.Instruction) ?Opcode {
     return if (decoded) |item| item.opcode else null;
@@ -634,11 +809,11 @@ test "interpreter trace sink records step start and end" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sink();
-    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .spec = .latest,
+        .revision = .latest,
         .trace_sink = &sink,
     });
     defer frame.deinit();
@@ -717,7 +892,7 @@ test "interpreter reverts frame-local state gas" {
     frame.failWithStatus(.revert);
     const result = frame.getResult();
 
-    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
+    try std.testing.expectEqual(Status.revert, result.status);
     try std.testing.expectEqual(@as(i64, 10), result.gas_left);
     try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
@@ -737,7 +912,7 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     frame.failWithStatus(.invalid);
     const result = frame.getResult();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(Status.invalid, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
@@ -759,11 +934,11 @@ test "interpreter trace schema controls step emission" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sinkWithoutEvents();
-    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .spec = .latest,
+        .revision = .latest,
         .trace_sink = &sink,
     });
     defer frame.deinit();
@@ -856,52 +1031,53 @@ const TraceRecorder = struct {
     }
 };
 
-pub const OwnedCallFrame = struct {
-    allocator: std.mem.Allocator,
-    slot: *CallFrameSlot,
-    frame: *CallFrame,
+pub fn OwnedCallFrame(comptime ProtocolType: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, options: Init) !OwnedCallFrame {
-        const slot = try allocator.create(CallFrameSlot);
-        errdefer allocator.destroy(slot);
-        try slot.init(allocator, options);
-        return .{
-            .allocator = allocator,
-            .slot = slot,
-            .frame = &slot.frame,
-        };
-    }
+        pub const Protocol = ProtocolType;
+        pub const Init = InitFor(Protocol);
 
-    pub fn deinit(self: *OwnedCallFrame) void {
-        self.slot.deinit();
-        self.allocator.destroy(self.slot);
-        self.* = undefined;
-    }
+        allocator: std.mem.Allocator,
+        slot: *CallFrameSlot,
+        frame: *CallFrame,
 
-    pub fn interpreter(self: *OwnedCallFrame) Interpreter {
-        return Interpreter.init(self.frame);
-    }
-};
+        pub fn init(allocator: std.mem.Allocator, options: Init) !Self {
+            const slot = try allocator.create(CallFrameSlot);
+            errdefer allocator.destroy(slot);
+            try slot.initFor(Protocol, allocator, options);
+            return .{
+                .allocator = allocator,
+                .slot = slot,
+                .frame = &slot.frame,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.slot.deinit();
+            self.allocator.destroy(self.slot);
+            self.* = undefined;
+        }
+
+        pub fn interpreter(self: *Self) For(Protocol) {
+            return For(Protocol).init(self.frame);
+        }
+    };
+}
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        assertLayout(@sizeOf(CallFrame) == 33440, "CallFrame size changed; rerun VM-loop canary benches");
+        assertLayout(@sizeOf(CallFrame) == 512, "CallFrame size changed; rerun VM-loop canary benches");
         assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "stack") == 0, "CallFrame stack moved; rerun arithmetic VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "memory") == 33072, "CallFrame memory moved; rerun memory VM-loop bench");
-        const pc_offset = @offsetOf(CallFrame, "pc");
-        const code_offset = @offsetOf(CallFrame, "code");
-        const gas_left_offset = @offsetOf(CallFrame, "gas_left");
-        const hot_start = @min(pc_offset, @min(code_offset, gas_left_offset));
-        const hot_end = @max(
-            pc_offset + @sizeOf(usize),
-            @max(code_offset + @sizeOf([]const u8), gas_left_offset + @sizeOf(i64)),
-        );
-        assertLayout(hot_start / 64 == (hot_end - 1) / 64, "CallFrame pc/code/gas_left no longer share a 64-byte cache-line window; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "msg") == 33064, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33632, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@offsetOf(CallFrame, "stack") == 288, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "memory") == 304, "CallFrame memory moved; rerun memory VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "gas_left") == 352, "CallFrame gas_left moved; rerun VM-loop canary benches");
+        assertLayout(@offsetOf(CallFrame, "msg") == 280, "CallFrame msg pointer moved; check message ownership layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33600, "CallFrameSlot size changed; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
-        assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame), "CallFrameSlot msg no longer follows frame storage");
+        assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
+        assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");
+        assertLayout(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message), "CallFrameSlot memory storage no longer follows message storage");
     }
 }
 
@@ -912,7 +1088,7 @@ fn assertLayout(comptime ok: bool, comptime message: []const u8) void {
 test "interpreter can execute prepared bytecode jumpdest map" {
     const t = @import("./t.zig");
     const raw = t.bytecode(.{ .PUSH1, 0x04, .JUMP, .STOP, .JUMPDEST });
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .jumpdest);
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
     defer bytecode.deinit(std.testing.allocator);
 
     var mock_host = t.MockHost.init(std.testing.allocator, null);
@@ -928,25 +1104,25 @@ test "interpreter can execute prepared bytecode jumpdest map" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .spec = .latest,
+        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expect(!interpreter.call_frame.analysis.isAnalyzed());
+    try std.testing.expect(!interpreter.call_frame.jumpdests.analyzed);
     try std.testing.expect(bytecode.jumpdests.analyzed);
 }
 
-test "prepared bytecode uses padded read bytes for truncated push" {
+test "prepared bytecode preserves truncated push semantics" {
     const t = @import("./t.zig");
     const raw = t.bytecode(.{ .PUSH32, 0x01 });
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .none);
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
     defer bytecode.deinit(std.testing.allocator);
 
     var mock_host = t.MockHost.init(std.testing.allocator, null);
@@ -962,11 +1138,11 @@ test "prepared bytecode uses padded read bytes for truncated push" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .spec = .latest,
+        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -974,14 +1150,13 @@ test "prepared bytecode uses padded read bytes for truncated push" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(usize, raw.len), interpreter.call_frame.code.len);
-    try std.testing.expectEqual(@as(usize, raw.len + Bytecode.zero_padding_len), interpreter.call_frame.read_code.len);
     try std.testing.expectEqual(@as(u256, 1) << 248, interpreter.call_frame.stack.peek().?);
 }
 
 test "prepared bytecode keeps CODESIZE semantic length" {
     const t = @import("./t.zig");
     const raw = t.bytecode(.{.CODESIZE});
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw, .none);
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
     defer bytecode.deinit(std.testing.allocator);
 
     var mock_host = t.MockHost.init(std.testing.allocator, null);
@@ -997,11 +1172,11 @@ test "prepared bytecode keeps CODESIZE semantic length" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .spec = .latest,
+        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
