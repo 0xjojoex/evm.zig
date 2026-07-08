@@ -208,139 +208,59 @@ pub const CheckpointKind = enum(u8) {
 };
 
 /// Field-level schema for `StepStart`.
-pub const StepStartFields = struct {
-    pc: bool = false,
-    opcode: bool = false,
-    decoded_opcode: bool = false,
-    depth: bool = false,
-    gas_left: bool = false,
-    stack: bool = false,
-    memory_size: bool = false,
-    return_data_size: bool = false,
-
-    pub fn any(self: StepStartFields) bool {
-        return anyBoolField(StepStartFields, self);
-    }
-
-    pub fn all() StepStartFields {
-        return allBoolFields(StepStartFields);
-    }
+pub const StepStartField = enum(u4) {
+    pc,
+    opcode,
+    decoded_opcode,
+    depth,
+    gas_left,
+    stack,
+    memory_size,
+    return_data_size,
 };
+
+pub const StepStartFields = std.enums.EnumSet(StepStartField);
 
 /// Field-level schema for `StepEnd`.
-pub const StepEndFields = struct {
-    pc: bool = false,
-    pc_next: bool = false,
-    opcode: bool = false,
-    decoded_opcode: bool = false,
-    depth: bool = false,
-    status: bool = false,
-    gas_left: bool = false,
-    gas_cost: bool = false,
-    stack: bool = false,
-    memory_size: bool = false,
-    return_data_size: bool = false,
-
-    pub fn any(self: StepEndFields) bool {
-        return anyBoolField(StepEndFields, self);
-    }
-
-    pub fn all() StepEndFields {
-        return allBoolFields(StepEndFields);
-    }
+pub const StepEndField = enum(u4) {
+    pc,
+    pc_next,
+    opcode,
+    decoded_opcode,
+    depth,
+    status,
+    gas_left,
+    gas_cost,
+    stack,
+    memory_size,
+    return_data_size,
 };
+
+pub const StepEndFields = std.enums.EnumSet(StepEndField);
 
 /// Kind-level schema for `StateRead`.
 ///
 /// State read schemas currently select whole union variants. For example,
-/// `.storage = true` enables storage read events with address, key, value, and
-/// depth populated.
-pub const StateReadKinds = struct {
-    account_exists: bool = false,
-    account_has_storage: bool = false,
-    balance: bool = false,
-    code: bool = false,
-    storage: bool = false,
-    transient_storage: bool = false,
-
-    pub fn any(self: StateReadKinds) bool {
-        return anyBoolField(StateReadKinds, self);
-    }
-
-    pub fn all() StateReadKinds {
-        return allBoolFields(StateReadKinds);
-    }
-
-    pub fn accepts(self: StateReadKinds, event: StateReadKind) bool {
-        return switch (event) {
-            .account_exists => self.account_exists,
-            .account_has_storage => self.account_has_storage,
-            .balance => self.balance,
-            .code => self.code,
-            .storage => self.storage,
-            .transient_storage => self.transient_storage,
-        };
-    }
-};
+/// `.initMany(&.{ .storage })` enables storage read events with address, key,
+/// value, and depth populated.
+pub const StateReadKinds = std.enums.EnumSet(StateReadKind);
 
 /// Kind-level schema for `StateWrite`.
 ///
 /// State write schemas currently select whole union variants. For example,
-/// `.storage = true` enables storage write events with address, key, previous,
-/// value, and depth populated.
-pub const StateWriteKinds = struct {
-    balance: bool = false,
-    nonce: bool = false,
-    code: bool = false,
-    storage: bool = false,
-    transient_storage: bool = false,
-    log: bool = false,
-    warm_account: bool = false,
-    warm_storage: bool = false,
-    created_contract: bool = false,
-    selfdestruct: bool = false,
-    account_deleted: bool = false,
-
-    pub fn any(self: StateWriteKinds) bool {
-        return anyBoolField(StateWriteKinds, self);
-    }
-
-    pub fn all() StateWriteKinds {
-        return allBoolFields(StateWriteKinds);
-    }
-
-    pub fn accepts(self: StateWriteKinds, event: StateWriteKind) bool {
-        return switch (event) {
-            .balance => self.balance,
-            .nonce => self.nonce,
-            .code => self.code,
-            .storage => self.storage,
-            .transient_storage => self.transient_storage,
-            .log => self.log,
-            .warm_account => self.warm_account,
-            .warm_storage => self.warm_storage,
-            .created_contract => self.created_contract,
-            .selfdestruct => self.selfdestruct,
-            .account_deleted => self.account_deleted,
-        };
-    }
-};
+/// `.initMany(&.{ .storage })` enables storage write events with address, key,
+/// previous, value, and depth populated.
+pub const StateWriteKinds = std.enums.EnumSet(StateWriteKind);
 
 /// Field-level schema for checkpoint lifecycle events.
-pub const CheckpointFields = struct {
-    kind: bool = false,
-    depth: bool = false,
-    journal_len: bool = false,
-    logs_len: bool = false,
-
-    pub fn any(self: CheckpointFields) bool {
-        return anyBoolField(CheckpointFields, self);
-    }
-
-    pub fn all() CheckpointFields {
-        return allBoolFields(CheckpointFields);
-    }
+pub const CheckpointField = enum(u3) {
+    kind,
+    depth,
+    journal_len,
+    logs_len,
 };
+
+pub const CheckpointFields = std.enums.EnumSet(CheckpointField);
 
 /// Runtime trace schema.
 ///
@@ -356,20 +276,20 @@ pub const Events = struct {
 
     pub fn all() Events {
         return .{
-            .step_start = StepStartFields.all(),
-            .step_end = StepEndFields.all(),
-            .state_read = StateReadKinds.all(),
-            .state_write = StateWriteKinds.all(),
-            .checkpoint = CheckpointFields.all(),
+            .step_start = StepStartFields.full,
+            .step_end = StepEndFields.full,
+            .state_read = StateReadKinds.full,
+            .state_write = StateWriteKinds.full,
+            .checkpoint = CheckpointFields.full,
         };
     }
 
     pub fn wantsStepStart(self: Events) bool {
-        return self.step_start.any();
+        return !self.step_start.eql(.empty);
     }
 
     pub fn wantsStepEnd(self: Events) bool {
-        return self.step_end.any();
+        return !self.step_end.eql(.empty);
     }
 
     pub fn wantsSteps(self: Events) bool {
@@ -377,19 +297,19 @@ pub const Events = struct {
     }
 
     pub fn wantsDecodedOpcode(self: Events) bool {
-        return self.step_start.decoded_opcode or self.step_end.decoded_opcode;
+        return self.step_start.contains(.decoded_opcode) or self.step_end.contains(.decoded_opcode);
     }
 
     pub fn wantsStateRead(self: Events, event: StateReadKind) bool {
-        return self.state_read.accepts(event);
+        return self.state_read.contains(event);
     }
 
     pub fn wantsStateWrite(self: Events, event: StateWriteKind) bool {
-        return self.state_write.accepts(event);
+        return self.state_write.contains(event);
     }
 
     pub fn wantsCheckpoint(self: Events) bool {
-        return self.checkpoint.any();
+        return !self.checkpoint.eql(.empty);
     }
 };
 
@@ -402,15 +322,11 @@ pub const Events = struct {
 /// Minimal state-write recorder shape:
 ///
 /// ```zig
-/// var sink = trace.Sink{
-///     .ptr = &recorder,
-///     .events = .{
-///         .state_write = .{ .storage = true },
-///     },
-///     .vtable = &.{
-///         .stateWrite = Recorder.stateWrite,
-///     },
-/// };
+/// var sink = trace.Sink.init(&recorder, .{
+///     .state_write = trace.StateWriteKinds.initMany(&.{ .storage }),
+/// }, &.{
+///     .stateWrite = Recorder.stateWrite,
+/// });
 /// ```
 ///
 /// Step callbacks receive borrowed stack slices. Copy any data that must live
@@ -419,6 +335,7 @@ pub const Sink = struct {
     ptr: *anyopaque,
     events: Events = .{},
     vtable: *const VTable,
+    cached_flags: Flags = .{},
 
     pub const VTable = struct {
         stepStart: ?*const fn (ptr: *anyopaque, event: StepStart) void = null,
@@ -428,13 +345,56 @@ pub const Sink = struct {
         checkpoint: ?*const fn (ptr: *anyopaque, event: Checkpoint) void = null,
     };
 
+    pub const Flags = struct {
+        configured: bool = false,
+        wants_step_start: bool = false,
+        wants_step_end: bool = false,
+        wants_decoded_opcode: bool = false,
+        wants_state_read: bool = false,
+        wants_state_write: bool = false,
+        wants_checkpoint: bool = false,
+
+        fn from(events: Events, vtable: *const VTable) Flags {
+            const wants_step_start = events.wantsStepStart() and vtable.stepStart != null;
+            const wants_step_end = events.wantsStepEnd() and vtable.stepEnd != null;
+            return .{
+                .configured = true,
+                .wants_step_start = wants_step_start,
+                .wants_step_end = wants_step_end,
+                .wants_decoded_opcode = (wants_step_start and events.step_start.contains(.decoded_opcode)) or
+                    (wants_step_end and events.step_end.contains(.decoded_opcode)),
+                .wants_state_read = !events.state_read.eql(.empty) and vtable.stateRead != null,
+                .wants_state_write = !events.state_write.eql(.empty) and vtable.stateWrite != null,
+                .wants_checkpoint = events.wantsCheckpoint() and vtable.checkpoint != null,
+            };
+        }
+    };
+
+    pub fn init(ptr: *anyopaque, events: Events, vtable: *const VTable) Sink {
+        return .{
+            .ptr = ptr,
+            .events = events,
+            .vtable = vtable,
+            .cached_flags = Flags.from(events, vtable),
+        };
+    }
+
+    pub fn refresh(self: *Sink) void {
+        self.cached_flags = Flags.from(self.events, self.vtable);
+    }
+
+    pub fn flags(self: *const Sink) Flags {
+        if (self.cached_flags.configured) return self.cached_flags;
+        return Flags.from(self.events, self.vtable);
+    }
+
     pub fn stepStart(self: *Sink, event: StepStart) void {
-        if (!self.wantsStepStart()) return;
+        if (!self.flags().wants_step_start) return;
         self.vtable.stepStart.?(self.ptr, event);
     }
 
     pub fn stepEnd(self: *Sink, event: StepEnd) void {
-        if (!self.wantsStepEnd()) return;
+        if (!self.flags().wants_step_end) return;
         self.vtable.stepEnd.?(self.ptr, event);
     }
 
@@ -449,60 +409,45 @@ pub const Sink = struct {
     }
 
     pub fn checkpoint(self: *Sink, event: Checkpoint) void {
-        if (!self.wantsCheckpoint()) return;
+        if (!self.flags().wants_checkpoint) return;
         self.vtable.checkpoint.?(self.ptr, event);
     }
 
     pub fn wantsStepStart(self: *const Sink) bool {
-        return self.events.wantsStepStart() and self.vtable.stepStart != null;
+        return self.flags().wants_step_start;
     }
 
     pub fn wantsStepEnd(self: *const Sink) bool {
-        return self.events.wantsStepEnd() and self.vtable.stepEnd != null;
+        return self.flags().wants_step_end;
     }
 
     pub fn wantsSteps(self: *const Sink) bool {
-        return self.wantsStepStart() or self.wantsStepEnd();
+        const sink_flags = self.flags();
+        return sink_flags.wants_step_start or sink_flags.wants_step_end;
     }
 
     pub fn wantsDecodedOpcode(self: *const Sink) bool {
-        return (self.wantsStepStart() and self.events.step_start.decoded_opcode) or
-            (self.wantsStepEnd() and self.events.step_end.decoded_opcode);
+        return self.flags().wants_decoded_opcode;
     }
 
     pub fn wantsStateReadKind(self: *const Sink, event: StateReadKind) bool {
-        return self.vtable.stateRead != null and self.events.wantsStateRead(event);
+        return self.flags().wants_state_read and self.events.wantsStateRead(event);
     }
 
     pub fn wantsStateWriteKind(self: *const Sink, event: StateWriteKind) bool {
-        return self.vtable.stateWrite != null and self.events.wantsStateWrite(event);
+        return self.flags().wants_state_write and self.events.wantsStateWrite(event);
     }
 
     pub fn wantsCheckpoint(self: *const Sink) bool {
-        return self.vtable.checkpoint != null and self.events.wantsCheckpoint();
+        return self.flags().wants_checkpoint;
     }
 };
 
 pub const NullSink = struct {
     pub fn sink(self: *NullSink) Sink {
-        return .{ .ptr = self, .vtable = &.{} };
+        return Sink.init(self, .{}, &.{});
     }
 };
-
-fn anyBoolField(comptime T: type, value: T) bool {
-    inline for (std.meta.fields(T)) |field| {
-        if (@field(value, field.name)) return true;
-    }
-    return false;
-}
-
-fn allBoolFields(comptime T: type) T {
-    var result: T = .{};
-    inline for (std.meta.fields(T)) |field| {
-        @field(result, field.name) = true;
-    }
-    return result;
-}
 
 test "null sink accepts borrowed step events" {
     var null_sink = NullSink{};
@@ -661,28 +606,28 @@ const SinkDispatchRecorder = struct {
     last_storage_value: u256 = 0,
 
     fn sinkWithoutEvents(self: *SinkDispatchRecorder) Sink {
-        return .{ .ptr = self, .vtable = &.{
+        return Sink.init(self, .{}, &.{
             .stepStart = stepStart,
             .stepEnd = stepEnd,
             .stateWrite = stateWrite,
             .checkpoint = checkpointEvent,
-        } };
+        });
     }
 
     fn sinkWithoutCallbacks(self: *SinkDispatchRecorder) Sink {
-        return .{ .ptr = self, .events = .{
-            .step_start = .{ .pc = true },
-            .state_write = .{ .storage = true },
-            .checkpoint = .{ .kind = true },
-        }, .vtable = &.{} };
+        return Sink.init(self, .{
+            .step_start = StepStartFields.initMany(&.{.pc}),
+            .state_write = StateWriteKinds.initMany(&.{.storage}),
+            .checkpoint = CheckpointFields.initMany(&.{.kind}),
+        }, &.{});
     }
 
     fn storageWriteSink(self: *SinkDispatchRecorder) Sink {
-        return .{ .ptr = self, .events = .{
-            .state_write = .{ .storage = true },
-        }, .vtable = &.{
+        return Sink.init(self, .{
+            .state_write = StateWriteKinds.initMany(&.{.storage}),
+        }, &.{
             .stateWrite = stateWrite,
-        } };
+        });
     }
 
     fn stepStart(ptr: *anyopaque, event: StepStart) void {

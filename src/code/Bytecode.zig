@@ -1,4 +1,5 @@
 const std = @import("std");
+const ExecutionConfig = @import("../ExecutionConfig.zig");
 const JumpDestMap = @import("JumpDestMap.zig");
 const t = @import("../t.zig");
 
@@ -17,6 +18,10 @@ pub const empty = Bytecode{
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
+    return initWithConfig(allocator, bytes, .base);
+}
+
+pub fn initWithConfig(allocator: std.mem.Allocator, bytes: []const u8, config: ExecutionConfig) !Bytecode {
     var self = empty;
     errdefer self.deinit(allocator);
 
@@ -24,8 +29,10 @@ pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
     @memcpy(self.read_bytes[0..bytes.len], bytes);
     @memset(self.read_bytes[bytes.len..], 0);
     self.bytes = self.read_bytes[0..bytes.len];
-    self.jumpdests = JumpDestMap.init();
-    try self.jumpdests.analyze(allocator, self.bytes);
+    self.jumpdests = JumpDestMap.initWithStrategy(config.jumpDestStrategy());
+    if (config.buildsJumpDestMap()) {
+        try self.jumpdests.analyze(allocator, self.bytes);
+    }
 
     return self;
 }
@@ -48,6 +55,27 @@ test "bytecode can precompute jumpdest map" {
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expect(!try bytecode.isValidJumpDest(std.testing.allocator, 1));
     try std.testing.expect(try bytecode.isValidJumpDest(std.testing.allocator, 2));
+}
+
+test "bytecode can opt into SIMD jumpdest map" {
+    const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
+    var bytecode = try Bytecode.initWithConfig(std.testing.allocator, &raw, .{ .jumpdest_strategy = .simd_bitmask });
+    defer bytecode.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(ExecutionConfig.JumpDestStrategy.simd_bitmask, bytecode.jumpdests.strategy);
+    try std.testing.expect(bytecode.jumpdests.analyzed);
+    try std.testing.expect(try bytecode.isValidJumpDest(std.testing.allocator, 2));
+}
+
+test "bytecode can defer jumpdest preprocessing" {
+    const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
+    var bytecode = try Bytecode.initWithConfig(std.testing.allocator, &raw, .{ .preprocessing = .none });
+    defer bytecode.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(ExecutionConfig.JumpDestStrategy.legacy, bytecode.jumpdests.strategy);
+    try std.testing.expect(!bytecode.jumpdests.analyzed);
+    try std.testing.expect(try bytecode.isValidJumpDest(std.testing.allocator, 2));
+    try std.testing.expect(bytecode.jumpdests.analyzed);
 }
 
 test "bytecode keeps semantic bytes separate from padded read bytes" {

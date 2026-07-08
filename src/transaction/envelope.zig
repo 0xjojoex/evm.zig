@@ -1,12 +1,27 @@
-const std = @import("std");
-const definition_support = @import("./protocol/support.zig");
-const rlp = @import("./rlp.zig");
-const EthRevision = @import("./eth/revision.zig").Revision;
-const eip7702 = @import("./executor/eip7702.zig");
-const tx = @import("./transaction/Transaction.zig");
-const tx_type_id = @import("./transaction/type_id.zig");
+//! Typed-transaction envelope decoding and raw-bytes structural validation
+//! (EIP-2718 family).
+//!
+//! `classifyRawTransaction` is an *ingress* gate: it classifies serialized
+//! transaction bytes for well-formedness before execution — the check a node
+//! runs at the RPC/mempool boundary. It renders a whole-transaction verdict, so
+//! a malformed authorization signature (bad scalar range, s-too-high) or an
+//! empty authorization list rejects the entire transaction here.
+//!
+//! This is deliberately NOT the same check as the executor's per-tuple
+//! authorization processing (`executor.applyAuthorizationTuple`). Per EIP-7702,
+//! at execution an invalid authorization tuple is silently skipped and the
+//! transaction still succeeds. Keep the two separate: wiring this hard-reject
+//! into block execution would reject blocks the network considers valid.
 
-pub const set_code_transaction_type = tx_type_id.set_code;
+const std = @import("std");
+const definition_support = @import("../protocol/support.zig");
+const rlp = @import("../rlp.zig");
+const EthRevision = @import("../eth/revision.zig").Revision;
+const eip7702 = @import("../executor/eip7702.zig");
+const tx = @import("./types.zig");
+const tx_type_id = @import("./type_id.zig");
+
+const set_code_transaction_type = tx_type_id.set_code;
 
 pub const TransactionEnvelope = union(enum) {
     legacy: []const u8,
@@ -48,7 +63,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub const Protocol = ProtocolType;
 
-        pub fn validateRawTransaction(revision: Protocol.Revision, bytes: []const u8) ?RawValidationError {
+        pub fn classifyRawTransaction(revision: Protocol.Revision, bytes: []const u8) ?RawValidationError {
             definition_support.assertRevisionSupported(Protocol, revision);
             const envelope = decodeEnvelope(bytes) catch return .type_4_invalid_authorization_format;
             return switch (envelope) {
@@ -175,18 +190,18 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
 }
 
 test "set-code transaction rejects empty authorization list" {
-    const ethereum = @import("./eth.zig");
+    const ethereum = @import("../eth.zig");
     const hex = "04f86401808007830186a09400000000000000000000000000000000000000008080c0c001a04319a2e8066a9beedd85b227bf40cdecfb6134e6c1254f1e680895bc3131df31a059efad54e662f062d9af60acca08efb1d3d312742e381a600aac7c7989f892cc";
     var bytes: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, hex);
     try std.testing.expectEqual(
         RawValidationError.type_4_empty_authorization_list,
-        For(ethereum).validateRawTransaction(.prague, &bytes).?,
+        For(ethereum).classifyRawTransaction(.prague, &bytes).?,
     );
 }
 
 test "raw transaction validation uses comptime transaction kind policy" {
-    const ethereum = @import("./eth.zig");
+    const ethereum = @import("../eth.zig");
     const EarlySetCodeProtocol = struct {
         pub const Revision = EthRevision;
 
@@ -201,10 +216,10 @@ test "raw transaction validation uses comptime transaction kind policy" {
 
     try std.testing.expectEqual(
         RawValidationError.type_4_tx_pre_fork,
-        For(ethereum).validateRawTransaction(.cancun, &malformed_set_code).?,
+        For(ethereum).classifyRawTransaction(.cancun, &malformed_set_code).?,
     );
     try std.testing.expectEqual(
         RawValidationError.type_4_invalid_authorization_format,
-        For(EarlySetCodeProtocol).validateRawTransaction(.cancun, &malformed_set_code).?,
+        For(EarlySetCodeProtocol).classifyRawTransaction(.cancun, &malformed_set_code).?,
     );
 }

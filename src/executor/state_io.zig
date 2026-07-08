@@ -5,6 +5,6 @@
 
 const state = @import("../state.zig");
 
-pub const StateReader = state.StateReader;
+pub const StateReader = state.Reader;
 pub const Changeset = state.Changeset;
 pub const Committer = state.Committer;

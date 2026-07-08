@@ -2,7 +2,7 @@ const std = @import("std");
 
 const tx_blob = @import("../transaction/blob.zig");
 const tx_gas = @import("../transaction/gas.zig");
-const tx = @import("../transaction/Transaction.zig");
+const tx = @import("../transaction/types.zig");
 const tx_prepare = @import("../transaction/prepare.zig");
 const tx_validation = @import("../transaction/validation.zig");
 
@@ -16,18 +16,22 @@ pub fn For(comptime Definition: type) type {
     return struct {
         const Self = @This();
 
-        pub const Value = declOr(DefinitionTransaction, "Value", tx.ProtocolTransaction);
+        /// The concrete transaction struct callers construct and submit — the
+        /// engine default (`tx.Transaction`) unless the definition overrides it.
+        pub const Value = declOr(DefinitionTransaction, "Value", tx.Transaction);
+        /// Read-only projection of a `Value` used by the execution/gas paths.
         pub const View = declOr(DefinitionTransaction, "View", tx.TransactionView);
+        /// Reason a transaction is rejected during pre-execution validation.
         pub const ValidationError = declOr(DefinitionTransaction, "ValidationError", tx_validation.ValidationError);
 
         pub fn view(value: Value) View {
             if (comptime std.meta.hasFn(DefinitionTransaction, "view")) {
                 return DefinitionTransaction.view(value);
             }
-            if (comptime Value != tx.ProtocolTransaction or View != tx.TransactionView) {
+            if (comptime Value != tx.Transaction or View != tx.TransactionView) {
                 @compileError("Definition.Transaction.view is required when overriding Transaction.Value or Transaction.View");
             }
-            return tx.protocolTransactionView(value);
+            return tx.transactionView(value);
         }
 
         pub fn prepare(comptime Protocol: type, input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {

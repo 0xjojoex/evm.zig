@@ -1,3 +1,9 @@
+//! The environment interface the interpreter calls back into.
+//!
+//! `Host` is the boundary between the bytecode interpreter and the outside
+//! world — account/storage access, call context, balances, and sub-calls. The
+//! executor supplies the concrete implementation.
+
 const std = @import("std");
 const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
@@ -191,7 +197,8 @@ pub const TxContext = struct {
     blob_hashes: []const u256,
 };
 
-// incomplete
+/// EVM log payload. `topics` and `data` are borrowed by the host callback;
+/// implementations that retain logs must copy them.
 pub const Log = struct {
     address: Address,
     topics: []const u256,

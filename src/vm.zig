@@ -61,6 +61,10 @@ pub const Env = struct {
     }
 };
 
+/// Terminal status of an executed transaction.
+///
+/// `rejected` means the transaction failed pre-execution validation (never ran);
+/// the other variants are outcomes of a transaction that did execute.
 pub const TxStatus = enum {
     success,
     revert,
@@ -126,6 +130,12 @@ pub const SystemCall = struct {
     gas: u64,
 };
 
+/// The runtime VM bound to a concrete `Protocol`.
+///
+/// Returns the facade described in the module doc: an object held across blocks
+/// that validates and runs `Protocol` transactions via `transact`, groups them
+/// into a block through `BlockSession`, and commits the resulting state diff.
+/// `evm.zig` exposes the mainnet instantiation as `Evm`.
 pub fn Vm(comptime Protocol: type) type {
     return struct {
         const Self = @This();
@@ -157,6 +167,12 @@ pub fn Vm(comptime Protocol: type) type {
         pub const RuntimeResources = executor_module.RuntimeResources;
         pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
 
+        /// A single block's transaction sequence over one `Vm`.
+        ///
+        /// It executes session for multiple txs under one env, Not a Ethereum block processor.
+        /// Feed transactions through `transact` to accumulate block-level gas
+        /// and the transaction count; each call snapshots so a rejected or
+        /// overflowing transaction rolls back without tearing down the block.
         pub const BlockSession = struct {
             vm: *Self,
             gas_used: u64 = 0,
@@ -332,9 +348,9 @@ pub fn Vm(comptime Protocol: type) type {
         }
 
         fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !Self.TxResult {
-            try self.executor.beginTransactionScope(hostContext(prepared.execution_context), prepared.envelope);
+            try self.executor.beginTransactionScope(prepared.scope, prepared.root);
             errdefer self.executor.closeTransaction();
-            const result = try self.executor.runTopLevelTransaction(prepared.envelope, .{
+            const result = try self.executor.runTopLevelTransaction(prepared.scope, prepared.root, .{
                 .execution = prepared.execution_gas,
                 .settlement = prepared.settlement,
             });
@@ -404,23 +420,6 @@ pub fn Vm(comptime Protocol: type) type {
                 .prev_randao = env.prev_randao,
                 .base_fee = env.base_fee,
                 .blob_base_fee = env.blob_base_fee,
-            };
-        }
-
-        fn hostContext(context: transaction.ExecutionContext) Host.TxContext {
-            return .{
-                .chain_id = context.chain_id,
-                .gas_price = context.gas_price,
-                .origin = context.origin,
-                .coinbase = context.coinbase,
-                .number = context.number,
-                .slot_number = context.slot_number,
-                .timestamp = context.timestamp,
-                .gas_limit = context.gas_limit,
-                .prev_randao = context.prev_randao,
-                .base_fee = context.base_fee,
-                .blob_base_fee = context.blob_base_fee,
-                .blob_hashes = context.blob_hashes,
             };
         }
 
@@ -1016,12 +1015,12 @@ test "Vm preparation uses comptime transaction gas policy" {
         pub const Revision = evmz.eth.Revision;
 
         pub const Transaction = struct {
-            pub const Value = transaction.ProtocolTransaction;
+            pub const Value = transaction.Transaction;
             pub const View = transaction.TransactionView;
             pub const ValidationError = transaction.ValidationError;
 
             pub fn view(value: Value) View {
-                return transaction.protocolTransactionView(value);
+                return transaction.transactionView(value);
             }
 
             pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
@@ -1204,8 +1203,10 @@ test "Vm preparation accepts custom transaction value" {
             pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
                 return .{ .executable = .{
                     .created_address = null,
-                    .execution_context = transaction.executionContext(input.env, input.view.sender, 7, input.env.gas_limit, &.{}),
-                    .envelope = transaction.executionEnvelope(.{
+                    .scope = .{
+                        .context = .init(input.env, input.view.sender, 7, input.env.gas_limit, &.{}),
+                    },
+                    .root = .init(.{
                         .sender = input.view.sender,
                         .to = input.view.to,
                         .gas_limit = input.view.gas_limit,
@@ -1260,11 +1261,11 @@ test "Vm preparation accepts custom transaction value" {
         .executable => |value| value,
     };
 
-    try std.testing.expectEqual(@as(u256, 7), executable.execution_context.gas_price);
+    try std.testing.expectEqual(@as(u256, 7), executable.scope.context.gas_price);
     try std.testing.expectEqual(@as(u64, 12_345), executable.execution_gas.?.regular_left);
     try std.testing.expectEqual(@as(u8, 9), executable.settlement.marker);
-    try std.testing.expectEqual(@as(u64, 50_000), executable.envelope.gasLimit());
-    try std.testing.expectEqual(@as(u256, 5), executable.envelope.value());
+    try std.testing.expectEqual(@as(u64, 50_000), executable.root.gasLimit());
+    try std.testing.expectEqual(@as(u256, 5), executable.root.value());
 }
 
 test "BlockSession validation rejection skips rollback snapshot" {

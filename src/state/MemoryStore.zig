@@ -11,7 +11,7 @@ const evmz = @import("../evm.zig");
 const AccountState = @import("./Account.zig");
 const Changeset = @import("./Changeset.zig");
 const Committer = @import("./Committer.zig");
-const StateReader = @import("./StateReader.zig");
+const StateReader = @import("./Reader.zig");
 
 const Address = evmz.Address;
 const addr = evmz.addr;

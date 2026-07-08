@@ -24,16 +24,16 @@ pub const Revision = enum(u8) {
     osaka,
     amsterdam,
 
-    /// The latest supported spec.
+    /// The latest supported revision.
     pub const latest = Self.amsterdam;
 
-    /// The latest stable spec.
+    /// The latest stable revision.
     pub const stable = Self.osaka;
 
     const Self = @This();
 
-    pub fn isImpl(self: Self, spec: Self) bool {
-        return @intFromEnum(self) >= @intFromEnum(spec);
+    pub fn isImpl(self: Self, revision: Self) bool {
+        return @intFromEnum(self) >= @intFromEnum(revision);
     }
 };
 

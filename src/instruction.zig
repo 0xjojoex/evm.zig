@@ -1,3 +1,5 @@
+//! Fork-neutral opcode implementations and their shared gas constants.
+
 const opcode_info = @import("opcode.zig");
 const Opcode = opcode_info.Opcode;
 const std = @import("std");

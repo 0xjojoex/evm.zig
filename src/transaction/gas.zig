@@ -1,6 +1,6 @@
 const std = @import("std");
 const definition_support = @import("../protocol/support.zig");
-const Transaction = @import("./Transaction.zig");
+const Transaction = @import("./types.zig");
 
 pub const AccessListCounts = Transaction.AccessListCounts;
 pub const AccessListEntry = Transaction.AccessListEntry;

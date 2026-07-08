@@ -568,8 +568,8 @@ fn statusFromEvmc(status_code: evmc.evmc_status_code) Interpreter.Status {
     };
 }
 
-fn revFromSpec(spec: evmz.eth.Revision) evmc.evmc_revision {
-    return switch (spec) {
+fn revFromSpec(revision: evmz.eth.Revision) evmc.evmc_revision {
+    return switch (revision) {
         .frontier => evmc.EVMC_FRONTIER,
         .frontier_thawing => evmc.EVMC_FRONTIER,
         .homestead => evmc.EVMC_HOMESTEAD,

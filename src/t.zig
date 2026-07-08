@@ -1,3 +1,5 @@
+//! evmz test helper for testing EVM bytecode execution.
+
 const std = @import("std");
 const evmz = @import("./evm.zig");
 
@@ -111,6 +113,10 @@ pub const MockHost = struct {
     pub fn deinit(self: *Self) void {
         self.store.deinit();
         self.original_store.deinit();
+        for (self.logs.items) |event_log| {
+            self.alloc.free(event_log.topics);
+            self.alloc.free(event_log.data);
+        }
         self.logs.deinit(self.alloc);
         self.local_account.deinit();
         self.removed_account.deinit();
@@ -132,10 +138,14 @@ pub const MockHost = struct {
 
     fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const topics_copy = try self.alloc.dupe(u256, topics);
+        errdefer self.alloc.free(topics_copy);
+        const data_copy = try self.alloc.dupe(u8, data);
+        errdefer self.alloc.free(data_copy);
         try self.logs.append(self.alloc, .{
             .address = address,
-            .topics = topics,
-            .data = data,
+            .topics = topics_copy,
+            .data = data_copy,
         });
     }
 

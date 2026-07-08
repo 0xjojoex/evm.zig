@@ -8,7 +8,7 @@ const std = @import("std");
 const Address = @import("../address.zig").Address;
 const AccountState = @import("./Account.zig");
 
-const StateReader = @This();
+const Reader = @This();
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -20,25 +20,25 @@ pub const VTable = struct {
     accountHasStorage: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
 };
 
-pub fn accountExists(self: StateReader, address: Address) !bool {
+pub fn accountExists(self: Reader, address: Address) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
 
 /// Returns an owned account snapshot. The caller owns any code buffer and the
 /// returned account's storage map.
-pub fn loadAccount(self: StateReader, allocator: std.mem.Allocator, address: Address) !?AccountState {
+pub fn loadAccount(self: Reader, allocator: std.mem.Allocator, address: Address) !?AccountState {
     return self.vtable.loadAccount(self.ptr, allocator, address);
 }
 
-pub fn getStorage(self: StateReader, address: Address, key: u256) !u256 {
+pub fn getStorage(self: Reader, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
 
-pub fn accountHasStorage(self: StateReader, address: Address) !bool {
+pub fn accountHasStorage(self: Reader, address: Address) !bool {
     return self.vtable.accountHasStorage(self.ptr, address);
 }
 
-pub fn empty() StateReader {
+pub fn empty() Reader {
     return .{ .ptr = &empty_context, .vtable = &empty_vtable };
 }
 
@@ -79,7 +79,7 @@ fn emptyAccountHasStorage(ptr: *anyopaque, address: Address) !bool {
 
 test "empty state reader returns empty state" {
     const addr = @import("../address.zig").addr;
-    const reader = StateReader.empty();
+    const reader = Reader.empty();
     try std.testing.expect(!try reader.accountExists(addr(1)));
     try std.testing.expectEqual(@as(?AccountState, null), try reader.loadAccount(std.testing.allocator, addr(1)));
     try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(addr(1), 1));

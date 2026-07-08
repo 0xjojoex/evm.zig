@@ -13,7 +13,58 @@ pub const BuiltinHandler = execution.BuiltinHandler;
 pub const ExecutionOverride = execution.ExecutionOverride;
 pub const ExecutionTarget = execution.ExecutionTarget;
 
-const dispatch_eval_branch_quota = 60_000;
+/// Comptime ceiling for the dispatcher's comptime evaluation roots (the
+/// per-Definition attribute tables below and the per-window table resolve).
+/// `@setEvalBranchQuota` raises a limit, it does not spend a budget, so
+/// over-provisioning is free at compile time and the default keeps headroom.
+/// The worst root measures ~20k for the current eth Definition: the
+/// support-independent attributes are cached in `InstructionTables`, so the
+/// per-window cost is now dominated by static-gas folding, which scales with
+/// the revision count. A Definition with heavier comptime per-opcode logic can
+/// raise the ceiling with `pub const dispatch_eval_branch_quota`.
+fn dispatchEvalBranchQuota(comptime Definition: type) comptime_int {
+    if (@hasDecl(Definition, "dispatch_eval_branch_quota")) return Definition.dispatch_eval_branch_quota;
+    return 256 * 128 + Definition.revisions.len * 512;
+}
+
+/// Support-window-independent per-byte attributes, resolved once per Definition
+/// and cached as container-level constants. `info`, raw `availability`, `tier`,
+/// and `execution_target` depend only on the opcode byte, so the deep comptime
+/// call chains behind them run a single time (each table is its own comptime
+/// evaluation root with its own quota) instead of once per byte per support
+/// window. `resolveDispatchTable` then just indexes these tables and layers the
+/// window-dependent work (availability resolution + static-gas folding) on top.
+fn InstructionTables(comptime Definition: type) type {
+    return struct {
+        pub const info: [256]OpInfo = blk: {
+            @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
+            var t: [256]OpInfo = undefined;
+            for (0..256) |b| t[b] = instruction_mod.info(Definition, instructionFromByte(Definition, @intCast(b)));
+            break :blk t;
+        };
+        pub const raw_availability: [256]Definition.Availability = blk: {
+            @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
+            var t: [256]Definition.Availability = undefined;
+            for (0..256) |b| t[b] = instruction_mod.availability(Definition, instructionFromByte(Definition, @intCast(b)));
+            break :blk t;
+        };
+        pub const tier: [256]OpcodeTier = blk: {
+            @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
+            var t: [256]OpcodeTier = undefined;
+            for (0..256) |b| t[b] = instruction_mod.tier(Definition, instructionFromByte(Definition, @intCast(b)));
+            break :blk t;
+        };
+        pub const execution_target: [256]ExecutionTarget = blk: {
+            @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
+            var t: [256]ExecutionTarget = undefined;
+            for (0..256) |b| {
+                const inst = instructionFromByte(Definition, @intCast(b));
+                t[b] = resolveExecutionTargetInstructionWithInfo(Definition, inst, instruction_mod.info(Definition, inst));
+            }
+            break :blk t;
+        };
+    };
+}
 
 pub const HotColdDispatch = enum {
     enabled,
@@ -76,7 +127,7 @@ pub fn useHotColdDispatch(comptime config: DispatchConfig) bool {
 pub fn resolveDispatchTable(comptime Definition: type, comptime support: Definition.Support) DispatchTable {
     // Zig's default quota is too small for materializing a 256-row table with
     // support-window gas folding and resolved execution targets.
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     support.assertValid();
 
     var table: DispatchTable = undefined;
@@ -93,7 +144,7 @@ pub fn resolveDispatchEntry(comptime Definition: type, comptime support: Definit
 }
 
 pub fn resolveDispatchEntryByte(comptime Definition: type, comptime support: Definition.Support, comptime opcode_byte: u8) DispatchEntry {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     support.assertValid();
 
     return resolveDispatchEntryByteAssumeValid(Definition, support, opcode_byte);
@@ -104,7 +155,7 @@ pub fn resolveDispatchEntryInstruction(
     comptime support: Definition.Support,
     comptime instruction: Instruction(Definition),
 ) DispatchEntry {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     support.assertValid();
 
     return switch (comptime instructionContext(Definition, instruction)) {
@@ -114,14 +165,14 @@ pub fn resolveDispatchEntryInstruction(
 }
 
 fn resolveDispatchEntryByteAssumeValid(comptime Definition: type, comptime support: Definition.Support, comptime opcode_byte: u8) DispatchEntry {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
+    const tables = InstructionTables(Definition);
     const opcode: Opcode = @enumFromInt(opcode_byte);
-    const instruction = instructionFromByte(Definition, opcode_byte);
-    const info = instruction_mod.info(Definition, instruction);
-    const availability = Definition.resolveAvailability(instruction_mod.availability(Definition, instruction), support);
+    const info = tables.info[opcode_byte];
+    const availability = Definition.resolveAvailability(tables.raw_availability[opcode_byte], support);
     const static_gas = resolveStaticGasByteWithInfo(Definition, support, opcode_byte, info);
-    const tier = instruction_mod.tier(Definition, instruction);
-    const execution_target = resolveExecutionTargetInstructionWithInfo(Definition, instruction, info);
+    const tier = tables.tier[opcode_byte];
+    const execution_target = tables.execution_target[opcode_byte];
     return .{
         .opcode_byte = opcode_byte,
         .opcode = opcode,
@@ -140,7 +191,7 @@ fn resolveDispatchEntryCustomInstructionAssumeValid(
     comptime instruction: Instruction(Definition),
     comptime first_byte: u8,
 ) DispatchEntry {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     const opcode: Opcode = @enumFromInt(first_byte);
     const info = instruction_mod.info(Definition, instruction);
     const availability = Definition.resolveAvailability(instruction_mod.availability(Definition, instruction), support);
@@ -211,7 +262,7 @@ pub fn resolveStaticGas(comptime Definition: type, comptime support: Definition.
 }
 
 pub fn resolveStaticGasByte(comptime Definition: type, comptime support: Definition.Support, comptime opcode_byte: u8) StaticGas {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, Definition.opcodeInfoByte(opcode_byte));
 }
 
@@ -220,7 +271,7 @@ pub fn resolveStaticGasInstruction(
     comptime support: Definition.Support,
     comptime instruction: Instruction(Definition),
 ) StaticGas {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     switch (comptime instructionContext(Definition, instruction)) {
         .byte => |opcode_byte| return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, Definition.opcodeInfoByte(opcode_byte)),
         .custom => {},
@@ -264,7 +315,7 @@ fn sourceStaticGasInstruction(
 }
 
 fn resolveStaticGasByteWithInfo(comptime Definition: type, comptime support: Definition.Support, comptime opcode_byte: u8, comptime info: OpInfo) StaticGas {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     if (comptime sourceStaticGasByte(Definition, support, opcode_byte)) |static_gas| return static_gas;
     if (!info.defined) return .{ .constant = 0 };
 
@@ -294,7 +345,7 @@ fn resolveStaticGasInstructionWithInfo(
     comptime instruction: Instruction(Definition),
     comptime info: OpInfo,
 ) StaticGas {
-    @setEvalBranchQuota(dispatch_eval_branch_quota);
+    @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     if (comptime sourceStaticGasInstruction(Definition, support, instruction)) |static_gas| return static_gas;
     if (!info.defined) return .{ .constant = 0 };
 

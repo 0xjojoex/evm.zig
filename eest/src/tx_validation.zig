@@ -2,7 +2,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 
 const transaction = evmz.transaction;
-const transaction_envelope = evmz.transaction_envelope;
+const transaction_envelope = evmz.transaction.envelope;
 
 pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
     return switch (error_value) {

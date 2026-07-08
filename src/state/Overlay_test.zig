@@ -6,7 +6,7 @@ const Address = evmz.Address;
 const AccountState = @import("./Account.zig");
 const storage = @import("./storage.zig");
 const StorageKey = storage.Key;
-const StateReader = @import("./StateReader.zig");
+const StateReader = @import("./Reader.zig");
 const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
 
@@ -922,20 +922,15 @@ const StateEventRecorder = struct {
     last_checkpoint_depth: u16 = 0,
 
     fn sink(self: *StateEventRecorder) trace.Sink {
-        return .{ .ptr = self, .events = .{
-            .state_read = .{
-                .balance = true,
-                .storage = true,
-            },
-            .state_write = .{
-                .storage = true,
-            },
-            .checkpoint = trace.CheckpointFields.all(),
-        }, .vtable = &.{
+        return trace.Sink.init(self, .{
+            .state_read = trace.StateReadKinds.initMany(&.{ .balance, .storage }),
+            .state_write = trace.StateWriteKinds.initMany(&.{.storage}),
+            .checkpoint = trace.CheckpointFields.full,
+        }, &.{
             .stateRead = stateRead,
             .stateWrite = stateWrite,
             .checkpoint = checkpointEvent,
-        } };
+        });
     }
 
     fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {

@@ -1,3 +1,5 @@
+//! The bytecode interpreter: the core execute loop over a single call frame.
+
 const std = @import("std");
 const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
@@ -272,10 +274,11 @@ pub fn For(comptime ProtocolType: type) type {
             const pc = self.call_frame.pc;
             const opcode_byte = self.call_frame.code[pc];
             const sink = self.call_frame.trace_sink.?;
-            const wants_start = sink.wantsStepStart();
-            const wants_end = sink.wantsStepEnd();
-            const decoded_opcode = if (sink.wantsDecodedOpcode()) instruction.decode(opcode_byte) else null;
-            const gas_before = if (wants_end and sink.events.step_end.gas_cost) self.call_frame.gas_left else 0;
+            const trace_flags = sink.flags();
+            const wants_start = trace_flags.wants_step_start;
+            const wants_end = trace_flags.wants_step_end;
+            const decoded_opcode = if (trace_flags.wants_decoded_opcode) instruction.decode(opcode_byte) else null;
+            const gas_before = if (wants_end and sink.events.step_end.contains(.gas_cost)) self.call_frame.gas_left else 0;
             if (wants_start) self.call_frame.traceStepStart(pc, opcode_byte, decoded_opcode);
             self.call_frame.pc += 1;
 
@@ -624,31 +627,31 @@ pub const CallFrame = struct {
     fn traceStepStart(self: *CallFrame, pc: usize, opcode_byte: u8, decoded_opcode: ?instruction.Instruction) void {
         const fields = self.trace_sink.?.events.step_start;
         self.trace_sink.?.stepStart(.{
-            .pc = if (fields.pc) pc else 0,
-            .opcode = if (fields.opcode) opcode_byte else 0,
-            .decoded_opcode = if (fields.decoded_opcode) decodedOpcode(decoded_opcode) else null,
-            .depth = if (fields.depth) self.msg.depth else 0,
-            .gas_left = if (fields.gas_left) self.gas_left else 0,
-            .stack = if (fields.stack) self.stack.asSlice() else &.{},
-            .memory_size = if (fields.memory_size) self.memory.len() else 0,
-            .return_data_size = if (fields.return_data_size) self.return_data.len else 0,
+            .pc = if (fields.contains(.pc)) pc else 0,
+            .opcode = if (fields.contains(.opcode)) opcode_byte else 0,
+            .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(decoded_opcode) else null,
+            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
+            .gas_left = if (fields.contains(.gas_left)) self.gas_left else 0,
+            .stack = if (fields.contains(.stack)) self.stack.asSlice() else &.{},
+            .memory_size = if (fields.contains(.memory_size)) self.memory.len() else 0,
+            .return_data_size = if (fields.contains(.return_data_size)) self.return_data.len else 0,
         });
     }
 
     fn traceStepEnd(self: *CallFrame, pc: usize, opcode_byte: u8, decoded_opcode: ?instruction.Instruction, gas_before: i64) void {
         const fields = self.trace_sink.?.events.step_end;
         self.trace_sink.?.stepEnd(.{
-            .pc = if (fields.pc) pc else 0,
-            .pc_next = if (fields.pc_next) self.pc else 0,
-            .opcode = if (fields.opcode) opcode_byte else 0,
-            .decoded_opcode = if (fields.decoded_opcode) decodedOpcode(decoded_opcode) else null,
-            .depth = if (fields.depth) self.msg.depth else 0,
-            .status = if (fields.status) traceStatus(self.status) else .running,
-            .gas_left = if (fields.gas_left) self.gas_left else 0,
-            .gas_cost = if (fields.gas_cost) gasCost(gas_before, self.gas_left) else 0,
-            .stack = if (fields.stack) self.stack.asSlice() else &.{},
-            .memory_size = if (fields.memory_size) self.memory.len() else 0,
-            .return_data_size = if (fields.return_data_size) self.return_data.len else 0,
+            .pc = if (fields.contains(.pc)) pc else 0,
+            .pc_next = if (fields.contains(.pc_next)) self.pc else 0,
+            .opcode = if (fields.contains(.opcode)) opcode_byte else 0,
+            .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(decoded_opcode) else null,
+            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
+            .status = if (fields.contains(.status)) traceStatus(self.status) else .running,
+            .gas_left = if (fields.contains(.gas_left)) self.gas_left else 0,
+            .gas_cost = if (fields.contains(.gas_cost)) gasCost(gas_before, self.gas_left) else 0,
+            .stack = if (fields.contains(.stack)) self.stack.asSlice() else &.{},
+            .memory_size = if (fields.contains(.memory_size)) self.memory.len() else 0,
+            .return_data_size = if (fields.contains(.return_data_size)) self.return_data.len else 0,
         });
     }
 
@@ -971,34 +974,20 @@ const TraceRecorder = struct {
     last_end_status: trace.StepStatus = .running,
 
     fn sink(self: *TraceRecorder) trace.Sink {
-        return .{ .ptr = self, .events = .{
-            .step_start = .{
-                .pc = true,
-                .opcode = true,
-                .decoded_opcode = true,
-                .depth = true,
-                .gas_left = true,
-                .stack = true,
-            },
-            .step_end = .{
-                .pc = true,
-                .pc_next = true,
-                .status = true,
-                .gas_left = true,
-                .gas_cost = true,
-                .stack = true,
-            },
-        }, .vtable = &.{
+        return trace.Sink.init(self, .{
+            .step_start = trace.StepStartFields.initMany(&.{ .pc, .opcode, .decoded_opcode, .depth, .gas_left, .stack }),
+            .step_end = trace.StepEndFields.initMany(&.{ .pc, .pc_next, .status, .gas_left, .gas_cost, .stack }),
+        }, &.{
             .stepStart = stepStart,
             .stepEnd = stepEnd,
-        } };
+        });
     }
 
     fn sinkWithoutEvents(self: *TraceRecorder) trace.Sink {
-        return .{ .ptr = self, .vtable = &.{
+        return trace.Sink.init(self, .{}, &.{
             .stepStart = stepStart,
             .stepEnd = stepEnd,
-        } };
+        });
     }
 
     fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {

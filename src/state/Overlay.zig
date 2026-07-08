@@ -12,7 +12,7 @@ const Address = evmz.Address;
 const AccountState = @import("./Account.zig");
 const storage = @import("./storage.zig");
 const StorageKey = storage.Key;
-const StateReader = @import("./StateReader.zig");
+const StateReader = @import("./Reader.zig");
 const Changeset = @import("./Changeset.zig");
 const Journal = @import("./Journal.zig");
 

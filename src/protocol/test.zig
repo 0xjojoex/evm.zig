@@ -293,7 +293,7 @@ test "transaction resolver defaults engine protocol shape" {
     assertValidDefinition(eth.definition);
 
     const Cancun = Protocol(eth.definition, eth.Support.at(.cancun));
-    try std.testing.expectEqual(tx.ProtocolTransaction, Cancun.Transaction.Value);
+    try std.testing.expectEqual(tx.Transaction, Cancun.Transaction.Value);
     try std.testing.expectEqual(tx.TransactionView, Cancun.Transaction.View);
     try std.testing.expectEqual(tx.ValidationError, Cancun.Transaction.ValidationError);
 

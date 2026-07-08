@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
-const AccountState = evmz.state.AccountState;
+const AccountState = evmz.state.Account;
 const Address = evmz.Address;
 const Executor = evmz.executor;
 const Host = evmz.Host;
@@ -14,7 +14,7 @@ test "runtime allocation audit sees no traffic for bounded prepared stop after s
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -55,7 +55,7 @@ test "runtime allocation audit sees no traffic for warmed bounded child call" {
     const target = evmz.addr(0xbeef);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 2,
         .memory_bytes_per_frame = 0,
@@ -116,7 +116,7 @@ test "runtime allocation audit exposes omitted top-level scratch cap as growth" 
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -148,7 +148,7 @@ test "runtime allocation audit sees no traffic for bounded top-level scratch" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -181,7 +181,7 @@ test "bounded executor reports scratch capacity exhaustion" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -213,7 +213,7 @@ test "runtime allocation audit exposes omitted evm memory cap as growth" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .io_bytes_per_frame = 32,
@@ -255,7 +255,7 @@ test "runtime allocation audit sees no traffic for bounded evm memory return" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 32,
@@ -298,7 +298,7 @@ test "runtime allocation audit exposes omitted log cap as growth" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 32,
@@ -342,7 +342,7 @@ test "runtime allocation audit sees no traffic for bounded log storage" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 32,
@@ -389,7 +389,7 @@ test "runtime allocation audit exposes omitted state overlay cap as growth" {
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -426,7 +426,7 @@ test "runtime allocation audit sees no traffic for bounded state overlay storage
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -469,7 +469,7 @@ test "runtime allocation audit exposes omitted precompile result cap as growth" 
     const tx_context = testTxContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
     } });
@@ -495,7 +495,7 @@ test "runtime allocation audit sees no traffic for bounded identity precompile o
     const tx_context = testTxContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .result_bytes = input.len,
@@ -522,7 +522,7 @@ test "runtime allocation audit sees no traffic for bounded sha256 precompile out
     const tx_context = testTxContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .result_bytes = 32,
@@ -551,7 +551,7 @@ test "runtime allocation audit exposes omitted precompile scratch cap as growth"
     const tx_context = testTxContext(sender, 100_000);
     const input = smallModexpInput();
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .byzantium,
+        .revision = .byzantium,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .result_bytes = 1,
@@ -578,7 +578,7 @@ test "runtime allocation audit sees no traffic for bounded modexp precompile scr
     const tx_context = testTxContext(sender, 100_000);
     const input = smallModexpInput();
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .byzantium,
+        .revision = .byzantium,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .scratch_bytes_per_frame = 8192,
@@ -606,7 +606,7 @@ test "bounded executor reports precompile scratch capacity exhaustion" {
     const tx_context = testTxContext(sender, 100_000);
     const input = smallModexpInput();
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .byzantium,
+        .revision = .byzantium,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .scratch_bytes_per_frame = 0,
@@ -632,7 +632,7 @@ test "bounded executor reports precompile result output capacity exhaustion" {
     const tx_context = testTxContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
     var executor = try Executor.initWithRuntimeResources(allocator, .{
-        .spec = .cancun,
+        .revision = .cancun,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .result_bytes = input.len - 1,

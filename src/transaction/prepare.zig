@@ -1,7 +1,7 @@
 const address = @import("../address.zig");
 const gas = @import("./gas.zig");
 const settlement = @import("./settlement.zig");
-const tx = @import("./Transaction.zig");
+const tx = @import("./types.zig");
 const validation = @import("./validation.zig");
 
 pub fn For(comptime Protocol: type) type {
@@ -68,16 +68,18 @@ pub fn For(comptime Protocol: type) type {
 
             return .{ .executable = .{
                 .created_address = if (view.to == null) address.create(view.sender, input.state.sender_nonce) else null,
-                .execution_context = tx.executionContext(input.env, view.sender, gas_price, input.env.gas_limit, view.blob_hashes),
-                .envelope = tx.executionEnvelope(.{
+                .scope = .{
+                    .context = .init(input.env, view.sender, gas_price, input.env.gas_limit, view.blob_hashes),
+                    .access_list = view.access_list,
+                    .authorization_list = view.authorization_list,
+                    .authorization_count = view.authorization_count,
+                },
+                .root = .init(.{
                     .sender = view.sender,
                     .to = view.to,
                     .input = view.input,
                     .gas_limit = view.gas_limit,
                     .value = view.value,
-                    .access_list = view.access_list,
-                    .authorization_list = view.authorization_list,
-                    .authorization_count = view.authorization_count,
                 }),
                 .execution_gas = gas_plan.execution,
                 .settlement = settlement_plan,

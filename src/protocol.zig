@@ -1,3 +1,9 @@
+//! Binds a `Definition` value into the runtime dispatch surface.
+//!
+//! `Protocol` turns a fork-config value (`definition.zig`) into the bound
+//! namespace the interpreter, executor, and VM dispatch through: instruction
+//! tables, transaction rules, support window, and revision model.
+
 const definition = @import("./definition.zig");
 const opcode_info = @import("./opcode.zig");
 

@@ -35,7 +35,7 @@ const Options = struct {
     op: Operation = .host_storage_read,
     boundary: Boundary = .zig,
     iterations: usize = default_iterations,
-    spec: evmz.eth.Revision = .latest,
+    revision: evmz.eth.Revision = .latest,
     summary: bool = false,
 };
 
@@ -49,7 +49,7 @@ pub const RunOptions = struct {
     op: Operation,
     boundary: Boundary,
     iterations: usize,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -86,9 +86,9 @@ pub fn main(init: std.process.Init) !void {
             options.iterations = try common.parseNonZeroUsize(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (common.stripPrefix(arg, "--spec=")) |value| {
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             options.summary = true;
         } else {
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         .op = options.op,
         .boundary = options.boundary,
         .iterations = options.iterations,
-        .spec = options.spec,
+        .revision = options.revision,
     });
 
     try printMeasurement(stdout, options.op, options.iterations, measurement);
@@ -129,7 +129,7 @@ pub fn run(allocator: std.mem.Allocator, options: RunOptions) !Measurement {
         .bytecode_sstore,
         => blk: {
             if (options.boundary != .zig) return error.InvalidBoundaryForBytecodeOp;
-            break :blk try runBytecodeHostOp(allocator, options.op, options.iterations, options.spec);
+            break :blk try runBytecodeHostOp(allocator, options.op, options.iterations, options.revision);
         },
     };
 }
@@ -328,7 +328,7 @@ fn runBytecodeHostOp(
     allocator: std.mem.Allocator,
     op: Operation,
     iterations: usize,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
 ) !Measurement {
     const bytecode = try storageBytecode(allocator, op, iterations);
     defer allocator.free(bytecode);
@@ -353,7 +353,7 @@ fn runBytecodeHostOp(
         .host = &host,
         .msg = &msg,
         .code = bytecode,
-        .revision = spec,
+        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

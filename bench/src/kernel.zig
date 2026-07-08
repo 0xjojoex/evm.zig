@@ -66,7 +66,7 @@ const Options = struct {
     iterations: usize = default_iterations,
     repeats: usize = default_repeats,
     warmups: usize = default_warmups,
-    spec: evmz.eth.Revision = .latest,
+    revision: evmz.eth.Revision = .latest,
     fixtures_dir: []const u8 = default_fixtures_dir,
     no_header: bool = false,
 };
@@ -134,9 +134,9 @@ pub fn main(init: std.process.Init) !void {
             options.warmups = try parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (common.stripPrefix(arg, "--spec=")) |value| {
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (std.mem.eql(u8, arg, "--fixtures-dir")) {
             options.fixtures_dir = args.next() orelse return error.MissingFixturesDir;
         } else if (common.stripPrefix(arg, "--fixtures-dir=")) |value| {
@@ -167,12 +167,12 @@ pub fn main(init: std.process.Init) !void {
         for (selected_cases.items) |case| {
             var warmup_index: usize = 0;
             while (warmup_index < options.warmups) : (warmup_index += 1) {
-                _ = try measure(init.io, allocator, engine, case, options.iterations, options.spec, options.fixtures_dir);
+                _ = try measure(init.io, allocator, engine, case, options.iterations, options.revision, options.fixtures_dir);
             }
 
             var repeat_index: usize = 0;
             while (repeat_index < options.repeats) : (repeat_index += 1) {
-                const measurement = try measure(init.io, allocator, engine, case, options.iterations, options.spec, options.fixtures_dir);
+                const measurement = try measure(init.io, allocator, engine, case, options.iterations, options.revision, options.fixtures_dir);
                 const ns_per_iter = @as(f64, @floatFromInt(measurement.elapsed_ns)) /
                     @as(f64, @floatFromInt(options.iterations));
                 try stdout.print(
@@ -228,17 +228,17 @@ fn measure(
     engine: Engine,
     case: KernelCase,
     iterations: usize,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     fixtures_dir: []const u8,
 ) !Measurement {
     const code = try kernelBytecode(io, allocator, case, iterations, fixtures_dir);
     defer allocator.free(code);
 
     return switch (engine) {
-        .evmz => try measureEvmz(allocator, code, spec, .execute_only),
-        .evmz_call_total => try measureEvmz(allocator, code, spec, .call_total),
+        .evmz => try measureEvmz(allocator, code, revision, .execute_only),
+        .evmz_call_total => try measureEvmz(allocator, code, revision, .call_total),
         .evmone_baseline => blk: {
-            const measurement = try kernel_evmone.measure(code, spec, .baseline);
+            const measurement = try kernel_evmone.measure(code, revision, .baseline);
             break :blk .{
                 .elapsed_ns = measurement.elapsed_ns,
                 .bytecode_bytes = code.len,
@@ -247,7 +247,7 @@ fn measure(
             };
         },
         .evmone_advanced => blk: {
-            const measurement = try kernel_evmone.measure(code, spec, .advanced);
+            const measurement = try kernel_evmone.measure(code, revision, .advanced);
             break :blk .{
                 .elapsed_ns = measurement.elapsed_ns,
                 .bytecode_bytes = code.len,
@@ -261,7 +261,7 @@ fn measure(
 fn measureEvmz(
     allocator: std.mem.Allocator,
     code: []const u8,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     scope: EvmzMeasureScope,
 ) !Measurement {
     var counting_host = common.CountingHost.init(allocator, .null);
@@ -284,7 +284,7 @@ fn measureEvmz(
         .host = &host,
         .msg = &msg,
         .code = code,
-        .revision = spec,
+        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

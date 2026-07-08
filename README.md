@@ -145,8 +145,6 @@ zig build test        # unit tests
 zig build eest-test   # spec-test lane
 ```
 
-Architecture notes for working on the engine itself are in `AGENTS.md`.
-
 ## License
 
 MIT — see `LICENSE`.

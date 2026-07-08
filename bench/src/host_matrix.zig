@@ -13,7 +13,7 @@ const Options = struct {
     iterations: usize = host_boundary.default_iterations,
     repeats: usize = default_repeats,
     warmups: usize = default_warmups,
-    spec: evmz.eth.Revision = .latest,
+    revision: evmz.eth.Revision = .latest,
     include_bytecode: bool = false,
     no_header: bool = false,
     explicit_boundary: bool = false,
@@ -70,9 +70,9 @@ pub fn main(init: std.process.Init) !void {
             options.warmups = try parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (common.stripPrefix(arg, "--spec=")) |value| {
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (std.mem.eql(u8, arg, "--include-bytecode")) {
             options.include_bytecode = true;
         } else if (std.mem.eql(u8, arg, "--no-header")) {
@@ -143,7 +143,7 @@ fn runSamples(
             .op = op,
             .boundary = boundary,
             .iterations = options.iterations,
-            .spec = options.spec,
+            .revision = options.revision,
         });
     }
 
@@ -153,7 +153,7 @@ fn runSamples(
             .op = op,
             .boundary = boundary,
             .iterations = options.iterations,
-            .spec = options.spec,
+            .revision = options.revision,
         });
         const ns_per_op = @as(f64, @floatFromInt(measurement.elapsed_ns)) /
             @as(f64, @floatFromInt(options.iterations));

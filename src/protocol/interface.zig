@@ -7,7 +7,7 @@ const opcode_info = @import("../opcode.zig");
 const precompile = @import("../precompile.zig");
 const support = @import("support.zig");
 const transaction_protocol = @import("transaction.zig");
-const tx = @import("../transaction/Transaction.zig");
+const tx = @import("../transaction/types.zig");
 const tx_validation = @import("../transaction/validation.zig");
 
 const Address = address.Address;
@@ -358,7 +358,7 @@ pub fn assertResolvedTransactionDomainTypes(comptime Definition: type, comptime 
 
     const DefinitionTransaction = Definition.Transaction;
     if (!std.meta.hasFn(DefinitionTransaction, "view") and
-        (ResolvedTransaction.Value != tx.ProtocolTransaction or ResolvedTransaction.View != tx.TransactionView))
+        (ResolvedTransaction.Value != tx.Transaction or ResolvedTransaction.View != tx.TransactionView))
     {
         @compileError("Definition.Transaction.view is required when overriding Transaction.Value or Transaction.View");
     }

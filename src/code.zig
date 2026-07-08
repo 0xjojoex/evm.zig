@@ -1,3 +1,5 @@
+//! Bytecode container, jumpdest analysis, and code scanning.
+
 const std = @import("std");
 
 pub const Bytecode = @import("./code/Bytecode.zig");

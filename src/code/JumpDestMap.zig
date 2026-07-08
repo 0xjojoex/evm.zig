@@ -1,4 +1,5 @@
 const std = @import("std");
+const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
 const Metadata = @import("Metadata.zig");
 const scanner = @import("scanner.zig");
 const Opcode = @import("../opcode.zig").Opcode;
@@ -8,14 +9,22 @@ const JumpDestMap = @This();
 
 bits: Metadata.BitSet,
 analyzed: bool,
+strategy: JumpDestStrategy,
 
 pub const empty = JumpDestMap{
     .bits = .{},
     .analyzed = false,
+    .strategy = .scalar_bitmask,
 };
 
 pub fn init() JumpDestMap {
     return empty;
+}
+
+pub fn initWithStrategy(strategy: JumpDestStrategy) JumpDestMap {
+    var self = empty;
+    self.strategy = strategy;
+    return self;
 }
 
 pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
@@ -47,7 +56,11 @@ fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []c
 
     self.bits = try Metadata.BitSet.initEmpty(allocator, bytes.len);
 
-    self.markValidJumpdestBytesSimdBitmask(bytes);
+    switch (self.strategy) {
+        .legacy => self.markValidJumpdestBytesLinear(bytes),
+        .scalar_bitmask => self.markValidJumpdestBytesScalarBitmask(bytes),
+        .simd_bitmask => self.markValidJumpdestBytesSimdBitmask(bytes),
+    }
     self.analyzed = true;
 }
 
@@ -65,6 +78,10 @@ fn markValidJumpdestBytesLinear(self: *JumpDestMap, bytes: []const u8) void {
 
 fn markValidJumpdestBytesSimdBitmask(self: *JumpDestMap, bytes: []const u8) void {
     scanner.markJumpDests(&self.bits, bytes);
+}
+
+fn markValidJumpdestBytesScalarBitmask(self: *JumpDestMap, bytes: []const u8) void {
+    scanner.markJumpDestsScalar(&self.bits, bytes);
 }
 
 fn hasPushPayload(opcode: Opcode) bool {
@@ -122,10 +139,11 @@ test "jumpdest map handles sparse long bytecode" {
     try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 127));
 }
 
-test "simd jumpdest map ignores fake push in PUSH payload" {
+test "configured jumpdest maps ignore fake push in PUSH payload" {
     const bytecode = t.bytecode(.{ .PUSH1, .PUSH32, .JUMPDEST });
 
-    try expectSimdMatchesLinear(&bytecode);
+    try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
+    try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
 }
 
 test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
@@ -135,7 +153,8 @@ test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
         defer map.deinit(std.testing.allocator);
 
         try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 1));
-        try expectSimdMatchesLinear(&bytecode);
+        try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
+        try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
     }
 
     {
@@ -144,11 +163,12 @@ test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
         defer map.deinit(std.testing.allocator);
 
         try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 2));
-        try expectSimdMatchesLinear(&bytecode);
+        try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
+        try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
     }
 }
 
-test "simd jumpdest map carries PUSH payload across chunks" {
+test "configured jumpdest maps carry PUSH payload across chunks" {
     var bytecode = [_]u8{0} ** 48;
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
@@ -159,24 +179,31 @@ test "simd jumpdest map carries PUSH payload across chunks" {
     bytecode[35] = Opcode.JUMPDEST.toByte();
     bytecode[36] = Opcode.JUMPDEST.toByte();
 
-    try expectSimdMatchesLinear(&bytecode);
+    try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
+    try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
 }
 
-fn expectSimdMatchesLinear(bytes: []const u8) !void {
+fn expectStrategyMatchesLinear(bytes: []const u8, strategy: JumpDestStrategy) !void {
     var linear = JumpDestMap{
         .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
+        .strategy = .legacy,
     };
     defer linear.deinit(std.testing.allocator);
 
-    var simd = JumpDestMap{
+    var configured = JumpDestMap{
         .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
+        .strategy = strategy,
     };
-    defer simd.deinit(std.testing.allocator);
+    defer configured.deinit(std.testing.allocator);
 
     linear.markValidJumpdestBytesLinear(bytes);
-    simd.markValidJumpdestBytesSimdBitmask(bytes);
+    switch (strategy) {
+        .legacy => configured.markValidJumpdestBytesLinear(bytes),
+        .scalar_bitmask => configured.markValidJumpdestBytesScalarBitmask(bytes),
+        .simd_bitmask => configured.markValidJumpdestBytesSimdBitmask(bytes),
+    }
 
-    try std.testing.expect(linear.bits.eql(simd.bits));
+    try std.testing.expect(linear.bits.eql(configured.bits));
 }

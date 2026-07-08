@@ -1,3 +1,5 @@
+//! Fork-neutral opcode vocabulary and static per-opcode metadata.
+
 const std = @import("std");
 
 /// Shared ISA metadata / fork-neutral vocabulary
@@ -212,6 +214,9 @@ pub const OpInfo = struct {
     /// false for the 106 unused byte values in 0x00..0xff (and only those;
     /// INVALID/0xfe is a *defined* opcode with `.exit = .invalid`).
     defined: bool = false,
+    /// Baseline fixed gas before definition revision overrides. This is opcode
+    /// metadata, not a fork-resolved gas query; use a bound protocol's static
+    /// gas resolver for execution.
     static_gas: u16 = 0,
     /// Minimum stack height required to execute without underflow.
     stack_in: u8 = 0,
@@ -289,7 +294,7 @@ fn infoFor(op: Opcode) OpInfo {
 
         // 0x30s — environment / calldata / code
         .ADDRESS => .{ .static_gas = 2, .stack_out = 1 },
-        .BALANCE => .{ .static_gas = 100, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .BALANCE => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
         .ORIGIN => .{ .static_gas = 2, .stack_out = 1 },
         .CALLER => .{ .static_gas = 2, .stack_out = 1 },
         .CALLVALUE => .{ .static_gas = 2, .stack_out = 1 },
@@ -299,11 +304,11 @@ fn infoFor(op: Opcode) OpInfo {
         .CODESIZE => .{ .static_gas = 2, .stack_out = 1 },
         .CODECOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
         .GASPRICE => .{ .static_gas = 2, .stack_out = 1 },
-        .EXTCODESIZE => .{ .static_gas = 100, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .EXTCODECOPY => .{ .static_gas = 100, .stack_in = 4, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .EXTCODESIZE => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .EXTCODECOPY => .{ .static_gas = 20, .stack_in = 4, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
         .RETURNDATASIZE => .{ .static_gas = 2, .stack_out = 1 },
         .RETURNDATACOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
-        .EXTCODEHASH => .{ .static_gas = 100, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .EXTCODEHASH => .{ .static_gas = 400, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
 
         // 0x40s — block context
         .BLOCKHASH => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
@@ -324,7 +329,7 @@ fn infoFor(op: Opcode) OpInfo {
         .MLOAD => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true } },
         .MSTORE => .{ .static_gas = 3, .stack_in = 2, .flags = .{ .has_dynamic_gas = true } },
         .MSTORE8 => .{ .static_gas = 3, .stack_in = 2, .flags = .{ .has_dynamic_gas = true } },
-        .SLOAD => .{ .static_gas = 100, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .SLOAD => .{ .static_gas = 50, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
         .SSTORE => .{ .static_gas = 0, .stack_in = 2, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
         .JUMP => .{ .static_gas = 8, .stack_in = 1, .exit = .jump },
         .JUMPI => .{ .static_gas = 10, .stack_in = 2, .exit = .jumpi },
@@ -440,7 +445,7 @@ fn infoFor(op: Opcode) OpInfo {
         .STATICCALL => .{ .static_gas = 40, .stack_in = 6, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
         .REVERT => .{ .static_gas = 0, .stack_in = 2, .exit = .revert, .flags = .{ .has_dynamic_gas = true } },
         .INVALID => .{ .exit = .invalid },
-        .SELFDESTRUCT => .{ .static_gas = 5000, .stack_in = 1, .exit = .selfdestruct, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
+        .SELFDESTRUCT => .{ .static_gas = 0, .stack_in = 1, .exit = .selfdestruct, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
         _ => .{ .exit = .invalid },
     };
 }
@@ -457,7 +462,7 @@ test "Opcode can represent unnamed opcode bytes" {
 test "opcode table reproduces the per-opcode switches" {
     const expectEqual = std.testing.expectEqual;
 
-    // gap byte → undefined, invalid exit, zeroed
+    // gap byte -> undefined, invalid exit, zeroed
     try std.testing.expect(!table[0x0c].defined);
     try expectEqual(ExitKind.invalid, table[0x0c].exit);
 
@@ -470,6 +475,15 @@ test "opcode table reproduces the per-opcode switches" {
     try std.testing.expectEqualStrings("ADD", add.name.?);
     try expectEqual(@as(u16, 3), add.static_gas);
     try expectEqual(@as(i16, -1), add.stackChange());
+
+    // Historically repriced opcodes keep base gas here; fork-resolved gas
+    // belongs to the protocol definition.
+    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.BALANCE)].static_gas);
+    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODESIZE)].static_gas);
+    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODECOPY)].static_gas);
+    try expectEqual(@as(u16, 400), table[@intFromEnum(Opcode.EXTCODEHASH)].static_gas);
+    try expectEqual(@as(u16, 50), table[@intFromEnum(Opcode.SLOAD)].static_gas);
+    try expectEqual(@as(u16, 0), table[@intFromEnum(Opcode.SELFDESTRUCT)].static_gas);
 
     // PUSH immediate width
     try expectEqual(@as(u8, 1), table[@intFromEnum(Opcode.PUSH1)].immediate);

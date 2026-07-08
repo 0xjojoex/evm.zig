@@ -3,7 +3,7 @@ const evmz = @import("evmz");
 
 pub const JsonValue = std.json.Value;
 pub const Address = evmz.Address;
-pub const AccountState = evmz.state.AccountState;
+pub const AccountState = evmz.state.Account;
 pub const MemoryStore = evmz.state.MemoryStore;
 
 pub const AccessListEntry = struct {

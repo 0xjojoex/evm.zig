@@ -144,7 +144,7 @@ fn runFixture(
         }
 
         const vectors = asArray(fork_entry.value_ptr.*) orelse return error.MalformedFixture;
-        const spec = parseFork(fork_name) orelse {
+        const revision = parseFork(fork_name) orelse {
             for (vectors.items) |_| {
                 summary.vectors += 1;
                 summary.countFail(.unsupported_fork);
@@ -154,7 +154,7 @@ fn runFixture(
 
         for (vectors.items) |post| {
             summary.vectors += 1;
-            runVector(allocator, &fixture_obj, post, spec, summary) catch |err| {
+            runVector(allocator, &fixture_obj, post, revision, summary) catch |err| {
                 summary.countFail(switch (err) {
                     error.UnsupportedFixtureKey => .unsupported_fixture_key,
                     else => .malformed_fixture,
@@ -168,7 +168,7 @@ fn runVector(
     allocator: std.mem.Allocator,
     fixture: *const std.json.ObjectMap,
     post: JsonValue,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     summary: *Summary,
 ) !void {
     const post_obj = asObject(post) orelse return error.MalformedFixture;
@@ -212,7 +212,7 @@ fn runVector(
         "currentChainId",
     });
     try rejectUnknownKeys(&indexes, &.{ "data", "gas", "value" });
-    const config = try parseFixtureConfig(fixture, spec);
+    const config = try parseFixtureConfig(fixture, revision);
 
     const data_index = try jsonIndex(indexes.get("data") orelse return error.MalformedFixture);
     const gas_index = try jsonIndex(indexes.get("gas") orelse return error.MalformedFixture);
@@ -242,7 +242,7 @@ fn runVector(
     const blob_hashes = try parseBlobHashes(allocator, &tx);
     defer allocator.free(blob_hashes);
     const recipient = if (is_create) null else try parseAddress(to_string);
-    const vm_env = try parseVmEnv(spec, &env, config);
+    const vm_env = try parseVmEnv(revision, &env, config);
     const public_tx = evmz.Transaction{
         .kind = inferTxKind(&tx),
         .sender = sender,
@@ -261,7 +261,7 @@ fn runVector(
         .authorization_count = authorization_list.count,
     };
 
-    var host = try FixtureHost.init(allocator, &pre, vm_env, spec);
+    var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
     defer host.deinit();
 
     const result = try host.transact(public_tx);
@@ -406,7 +406,7 @@ const FixtureConfig = struct {
     blob_schedule: ?transaction.BlobSchedule = null,
 };
 
-fn parseFixtureConfig(fixture: *const std.json.ObjectMap, spec: evmz.eth.Revision) !FixtureConfig {
+fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth.Revision) !FixtureConfig {
     const config_value = fixture.get("config") orelse return .{};
     const config = asObject(config_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&config, &.{ "chainid", "blobSchedule" });
@@ -418,19 +418,19 @@ fn parseFixtureConfig(fixture: *const std.json.ObjectMap, spec: evmz.eth.Revisio
     if (config.get("blobSchedule")) |schedule_value| {
         const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
         try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
-        const schedule_key: ?[]const u8 = if (spec.isImpl(.amsterdam))
+        const schedule_key: ?[]const u8 = if (revision.isImpl(.amsterdam))
             "Amsterdam"
-        else if (spec.isImpl(.osaka))
+        else if (revision.isImpl(.osaka))
             "Osaka"
-        else if (spec.isImpl(.prague))
+        else if (revision.isImpl(.prague))
             "Prague"
-        else if (spec.isImpl(.cancun))
+        else if (revision.isImpl(.cancun))
             "Cancun"
         else
             null;
         if (schedule_key) |key| {
             if (schedules.get(key)) |value| {
-                result.blob_schedule = try parseBlobSchedule(spec, value);
+                result.blob_schedule = try parseBlobSchedule(revision, value);
             }
         }
     }
@@ -438,10 +438,10 @@ fn parseFixtureConfig(fixture: *const std.json.ObjectMap, spec: evmz.eth.Revisio
     return result;
 }
 
-fn parseBlobSchedule(spec: evmz.eth.Revision, value: JsonValue) !transaction.BlobSchedule {
+fn parseBlobSchedule(revision: evmz.eth.Revision, value: JsonValue) !transaction.BlobSchedule {
     const schedule = asObject(value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = EthProtocol.Transaction.blobSchedule(spec) orelse return error.MalformedFixture;
+    var result = EthProtocol.Transaction.blobSchedule(revision) orelse return error.MalformedFixture;
     result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
     result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
     result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);
@@ -479,7 +479,7 @@ test "EEST fixture config selects Amsterdam blob schedule" {
 }
 
 fn parseVmEnv(
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     env: *const std.json.ObjectMap,
     config: FixtureConfig,
 ) !evmz.Env {
@@ -493,7 +493,7 @@ fn parseVmEnv(
         .gas_limit = if (env.get("currentGasLimit")) |v| try parseU64FromValue(v) else 0,
         .prev_randao = if (env.get("currentRandom")) |v| try parseU256FromValue(v) else if (env.get("currentDifficulty")) |v| try parseU256FromValue(v) else 0,
         .base_fee = base_fee,
-        .blob_base_fee = try parseBlobBaseFee(spec, env, config),
+        .blob_base_fee = try parseBlobBaseFee(revision, env, config),
     };
 }
 
@@ -513,13 +513,13 @@ test "EEST env parser reads Amsterdam slotNumber" {
     try std.testing.expectEqual(@as(u64, 0x1234), parsed_env.slot_number);
 }
 
-fn parseBlobBaseFee(spec: evmz.eth.Revision, env: *const std.json.ObjectMap, config: FixtureConfig) !u256 {
+fn parseBlobBaseFee(revision: evmz.eth.Revision, env: *const std.json.ObjectMap, config: FixtureConfig) !u256 {
     if (env.get("currentBlobBaseFee")) |value| return parseU256FromValue(value);
     const excess_blob_gas = if (env.get("currentExcessBlobGas")) |value| try parseU256FromValue(value) else 0;
     if (config.blob_schedule) |schedule| {
         return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
     }
-    return tx_protocol.blob.blobBaseFeeForRevision(spec, excess_blob_gas) orelse error.Overflow;
+    return tx_protocol.blob.blobBaseFeeForRevision(revision, excess_blob_gas) orelse error.Overflow;
 }
 
 fn selectedU256(tx: *const std.json.ObjectMap, key: []const u8, index: usize) !u256 {
@@ -568,7 +568,7 @@ const FixtureHost = struct {
         allocator: std.mem.Allocator,
         pre: *const std.json.ObjectMap,
         env: evmz.Env,
-        spec: evmz.eth.Revision,
+        revision: evmz.eth.Revision,
     ) !Self {
         const store = try allocator.create(evmz.state.MemoryStore);
         errdefer allocator.destroy(store);
@@ -578,7 +578,7 @@ const FixtureHost = struct {
         try seedMemoryStore(allocator, store, pre);
 
         var vm = Vm.init(allocator, .{
-            .revision = spec,
+            .revision = revision,
             .state_reader = store.reader(),
             .block_hash_source = EestStateBlockHashSource.source(),
             .env = env,
@@ -598,7 +598,7 @@ const FixtureHost = struct {
         self.allocator.destroy(self.store);
     }
 
-    fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
+    fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
         return self.vm.getAccount(address);
     }
 

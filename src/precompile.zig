@@ -1,3 +1,5 @@
+//! Precompiled-contract implementations and address dispatch.
+
 const std = @import("std");
 const address = @import("address.zig");
 const crypto = @import("crypto.zig");

@@ -30,36 +30,36 @@ pub const Settlement = struct {
         return tx_settlement.For(Protocol).settlementCosts(plan, result);
     }
 
-    pub fn baseFeeActive(spec: Revision) bool {
-        return spec.isImpl(.london);
+    pub fn baseFeeActive(revision: Revision) bool {
+        return revision.isImpl(.london);
     }
 
-    pub fn gasRefundCapDivisor(spec: Revision) u64 {
-        return if (spec.isImpl(.london)) 5 else 2;
+    pub fn gasRefundCapDivisor(revision: Revision) u64 {
+        return if (revision.isImpl(.london)) 5 else 2;
     }
 
-    pub fn usesStateGasAccounting(spec: Revision) bool {
-        return spec.isImpl(.amsterdam);
+    pub fn usesStateGasAccounting(revision: Revision) bool {
+        return revision.isImpl(.amsterdam);
     }
 };
 
 pub const Authorization = struct {
-    pub fn warmsDelegatedTarget(spec: Revision) bool {
-        return spec.isImpl(.prague) and !spec.isImpl(.amsterdam);
+    pub fn warmsDelegatedTarget(revision: Revision) bool {
+        return revision.isImpl(.prague) and !revision.isImpl(.amsterdam);
     }
 
-    pub fn active(spec: Revision) bool {
-        return spec.isImpl(.prague);
+    pub fn active(revision: Revision) bool {
+        return revision.isImpl(.prague);
     }
 
     pub fn successGasAdjustment(
-        spec: Revision,
+        revision: Revision,
         account_exists: bool,
         clears_delegation: bool,
         cur_delegated: bool,
         pre_delegated: bool,
     ) contract.AuthorizationGasAdjustment {
-        if (spec.isImpl(.amsterdam)) {
+        if (revision.isImpl(.amsterdam)) {
             var adjustment = contract.AuthorizationGasAdjustment{};
             if (account_exists) {
                 adjustment.add(.{
@@ -81,16 +81,16 @@ pub const Authorization = struct {
         return .{ .regular_refund = tx.authorization_existing_account_refund_gas };
     }
 
-    pub fn invalidGasAdjustment(spec: Revision) contract.AuthorizationGasAdjustment {
-        if (!spec.isImpl(.amsterdam)) return .{};
+    pub fn invalidGasAdjustment(revision: Revision) contract.AuthorizationGasAdjustment {
+        if (!revision.isImpl(.amsterdam)) return .{};
         return .{
             .regular_refund = tx.amsterdam_account_write_cost,
             .state_refund = tx.amsterdam_authorization_state_gas,
         };
     }
 
-    pub fn malformedGasAdjustment(spec: Revision, missing_count: usize) contract.AuthorizationGasAdjustment {
-        if (!spec.isImpl(.amsterdam)) return .{};
+    pub fn malformedGasAdjustment(revision: Revision, missing_count: usize) contract.AuthorizationGasAdjustment {
+        if (!revision.isImpl(.amsterdam)) return .{};
         const count = std.math.cast(u64, missing_count) orelse std.math.maxInt(u64);
         return .{
             .regular_refund = std.math.mul(u64, tx.amsterdam_account_write_cost, count) catch std.math.maxInt(u64),

@@ -1,3 +1,10 @@
+//! Transaction value shapes, in Ethereum terms.
+//!
+//! One transaction flows through several representations. Keep them distinct:
+//!
+//!   raw bytes ─(transaction/envelope.zig)-> Transaction ─(prepare)->
+//!     TransactionView ─> Prepared{scope, root} ─(executor)-> Host.Message
+
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
@@ -52,7 +59,7 @@ pub const FeeFields = struct {
 
 /// Ethereum-shaped protocol transaction value used by the default VM surface.
 /// Custom definitions can provide their own `Definition.Transaction.Value`.
-pub const ProtocolTransaction = struct {
+pub const Transaction = struct {
     kind: TxKind = .legacy,
     sender: Address,
     nonce: ?u64 = null,
@@ -117,9 +124,50 @@ pub const ExecutionContext = struct {
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
     blob_hashes: []const u256 = &.{},
+
+    pub fn init(env: EnvFacts, origin: Address, gas_price: u256, gas_limit: u64, blob_hashes: []const u256) ExecutionContext {
+        return .{
+            .chain_id = env.chain_id,
+            .gas_price = gas_price,
+            .origin = origin,
+            .coinbase = env.coinbase,
+            .number = env.number,
+            .slot_number = env.slot_number,
+            .timestamp = env.timestamp,
+            .gas_limit = gas_limit,
+            .prev_randao = env.prev_randao,
+            .base_fee = env.base_fee,
+            .blob_base_fee = env.blob_base_fee,
+            .blob_hashes = blob_hashes,
+        };
+    }
 };
 
-pub fn protocolTransactionView(tx: ProtocolTransaction) TransactionView {
+/// Transaction-scoped execution environment: the data that belongs to the whole
+/// transaction rather than to the top-level call/create frame.
+///
+/// Mirrors the spec's `TransactionEnvironment` — the executor's transaction
+/// accounting shell warms the `access_list` and applies the `authorization_list`;
+/// the interpreter never sees them. Paired with a `RootFrame` in `Prepared`.
+pub const TransactionScope = struct {
+    context: ExecutionContext,
+    access_list: []const AccessListEntry = &.{},
+    authorization_list: []const AuthorizationTuple = &.{},
+    /// Count of authorization tuples *parsed* from the transaction. May exceed
+    /// `authorization_list.len` (malformed tuples are parsed but dropped from the
+    /// list). Set explicitly — it does NOT default from the list, so a scope built
+    /// by hand with authorizations must fill this or gas accounting under-counts.
+    authorization_count: usize = 0,
+
+    /// The parsed authorization count (see the `authorization_count` field).
+    pub fn authorizationCount(self: TransactionScope) usize {
+        return self.authorization_count;
+    }
+};
+
+/// Project a `Transaction` into the read-only `TransactionView` (fees grouped
+/// into `FeeFields`) consumed by the validation and gas paths.
+pub fn transactionView(tx: Transaction) TransactionView {
     return .{
         .kind = tx.kind,
         .sender = tx.sender,
@@ -153,151 +201,105 @@ pub fn effectiveGasPrice(env: EnvFacts, view: TransactionView) u256 {
     };
 }
 
-pub fn executionContext(env: EnvFacts, origin: Address, gas_price: u256, gas_limit: u64, blob_hashes: []const u256) ExecutionContext {
-    return .{
-        .chain_id = env.chain_id,
-        .gas_price = gas_price,
-        .origin = origin,
-        .coinbase = env.coinbase,
-        .number = env.number,
-        .slot_number = env.slot_number,
-        .timestamp = env.timestamp,
-        .gas_limit = gas_limit,
-        .prev_randao = env.prev_randao,
-        .base_fee = env.base_fee,
-        .blob_base_fee = env.blob_base_fee,
-        .blob_hashes = blob_hashes,
+/// The top-level message a transaction initiates: a call to `to`, or a create.
+///
+/// The pure execution message — sender/target/input/gas/value only. Transaction
+/// -scope data (access list, authorizations, block/tx context) lives on
+/// `TransactionScope`, not here. Built by `rootFrame`, consumed by the executor;
+/// it is the root of the call tree that inner `Host.Message` frames descend from.
+pub const RootFrame = union(enum) {
+    /// A message call to `recipient`.
+    call: Call,
+    /// A contract creation (address derived from sender + nonce).
+    create: Create,
+
+    pub const Call = struct {
+        sender: Address,
+        recipient: Address,
+        input: []const u8 = &.{},
+        gas_limit: u64,
+        value: u256 = 0,
     };
-}
 
-pub const CallTransaction = struct {
-    sender: Address,
-    recipient: Address,
-    input: []const u8 = &.{},
-    gas_limit: u64,
-    value: u256 = 0,
-    access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
-    authorization_count: ?usize = null,
-};
+    pub const Create = struct {
+        sender: Address,
+        init_code: []const u8,
+        gas_limit: u64,
+        value: u256 = 0,
+    };
 
-pub const CreateTransaction = struct {
-    sender: Address,
-    init_code: []const u8,
-    gas_limit: u64,
-    value: u256 = 0,
-    access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
-    authorization_count: ?usize = null,
-};
+    /// Build a `RootFrame` from flat input: `to`-present becomes a `.call`, `to == null`
+    /// becomes a `.create` (with `input` reinterpreted as init code).
+    pub fn init(root_frame_input: struct {
+        sender: Address,
+        to: ?Address = null,
+        input: []const u8 = &.{},
+        gas_limit: u64,
+        value: u256 = 0,
+    }) RootFrame {
+        if (root_frame_input.to) |recipient| {
+            return .{ .call = .{
+                .sender = root_frame_input.sender,
+                .recipient = recipient,
+                .input = root_frame_input.input,
+                .gas_limit = root_frame_input.gas_limit,
+                .value = root_frame_input.value,
+            } };
+        }
+        return .{ .create = .{
+            .sender = root_frame_input.sender,
+            .init_code = root_frame_input.input,
+            .gas_limit = root_frame_input.gas_limit,
+            .value = root_frame_input.value,
+        } };
+    }
 
-pub const ExecutionEnvelope = union(enum) {
-    call: CallTransaction,
-    create: CreateTransaction,
-
-    pub fn sender(self: ExecutionEnvelope) Address {
+    pub fn sender(self: RootFrame) Address {
         return switch (self) {
             .call => |tx| tx.sender,
             .create => |tx| tx.sender,
         };
     }
 
-    pub fn input(self: ExecutionEnvelope) []const u8 {
+    pub fn input(self: RootFrame) []const u8 {
         return switch (self) {
             .call => |tx| tx.input,
             .create => |tx| tx.init_code,
         };
     }
 
-    pub fn gasLimit(self: ExecutionEnvelope) u64 {
+    pub fn gasLimit(self: RootFrame) u64 {
         return switch (self) {
             .call => |tx| tx.gas_limit,
             .create => |tx| tx.gas_limit,
         };
     }
 
-    pub fn value(self: ExecutionEnvelope) u256 {
+    pub fn value(self: RootFrame) u256 {
         return switch (self) {
             .call => |tx| tx.value,
             .create => |tx| tx.value,
         };
     }
 
-    pub fn isCreate(self: ExecutionEnvelope) bool {
+    pub fn isCreate(self: RootFrame) bool {
         return switch (self) {
             .call => false,
             .create => true,
         };
     }
-
-    pub fn accessList(self: ExecutionEnvelope) []const AccessListEntry {
-        return switch (self) {
-            .call => |tx| tx.access_list,
-            .create => |tx| tx.access_list,
-        };
-    }
-
-    pub fn authorizationList(self: ExecutionEnvelope) []const AuthorizationTuple {
-        return switch (self) {
-            .call => |tx| tx.authorization_list,
-            .create => |tx| tx.authorization_list,
-        };
-    }
-
-    pub fn authorizationCount(self: ExecutionEnvelope) usize {
-        return switch (self) {
-            .call => |tx| tx.authorization_count orelse tx.authorization_list.len,
-            .create => |tx| tx.authorization_count orelse tx.authorization_list.len,
-        };
-    }
 };
 
-pub const Transaction = ExecutionEnvelope;
-
-pub const ExecutionEnvelopeInput = struct {
-    sender: Address,
-    to: ?Address = null,
-    input: []const u8 = &.{},
-    gas_limit: u64,
-    value: u256 = 0,
-    access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
-    authorization_count: ?usize = null,
-};
-
-pub const NormalizedTransactionInput = ExecutionEnvelopeInput;
-
-pub fn executionEnvelope(input: ExecutionEnvelopeInput) ExecutionEnvelope {
-    if (input.to) |recipient| {
-        return .{ .call = .{
-            .sender = input.sender,
-            .recipient = recipient,
-            .input = input.input,
-            .gas_limit = input.gas_limit,
-            .value = input.value,
-            .access_list = input.access_list,
-            .authorization_list = input.authorization_list,
-            .authorization_count = input.authorization_count,
-        } };
-    }
-    return .{ .create = .{
-        .sender = input.sender,
-        .init_code = input.input,
-        .gas_limit = input.gas_limit,
-        .value = input.value,
-        .access_list = input.access_list,
-        .authorization_list = input.authorization_list,
-        .authorization_count = input.authorization_count,
-    } };
-}
-
-pub const normalizedTransaction = executionEnvelope;
-
+/// A validated transaction ready to execute: the pipeline output of `prepare`.
 pub fn Prepared(comptime Protocol: type) type {
     return struct {
+        /// Create-transaction target address, resolved up front; null for calls.
         created_address: ?Address = null,
-        execution_context: ExecutionContext,
-        envelope: ExecutionEnvelope,
+        /// Transaction-scope environment (context + access/authorization lists).
+        scope: TransactionScope,
+        /// The top-level call/create the executor runs.
+        root: RootFrame,
+        /// Resolved execution gas; null when the transaction has no execution step.
         execution_gas: ?@import("./gas.zig").ExecutionGas,
         settlement: Protocol.Settlement.Plan,
     };

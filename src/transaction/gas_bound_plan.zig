@@ -31,7 +31,7 @@ const legacy_create_warm_cost: u64 = 32_000;
 const amsterdam_create_warm_cost: u64 = 11_000;
 
 pub const Scope = enum {
-    /// Apply per-transaction execution-gas caps from the selected spec.
+    /// Apply per-transaction execution-gas caps from the selected revision.
     transaction,
     /// Use the supplied gas limit directly. This is useful for block-sized or
     /// prover-mode stress envelopes that are not yet tied to transaction
@@ -41,7 +41,7 @@ pub const Scope = enum {
 
 pub fn InputFor(comptime Revision: type) type {
     return struct {
-        spec: Revision = latestRevision(Revision),
+        revision: Revision = latestRevision(Revision),
         gas_limit: u64,
         scope: Scope = .transaction,
         max_live_frames: usize = default_max_live_frames,
@@ -93,7 +93,7 @@ pub const LogBound = struct {
 
 pub fn PlanFor(comptime Revision: type) type {
     return struct {
-        spec: Revision,
+        revision: Revision,
         scope: Scope,
         gas_limit: u64,
         /// Gas budget used by the planner after applying the selected scope.
@@ -133,7 +133,7 @@ pub fn For(comptime Protocol: type) type {
         const Self = @This();
 
         pub const Input = struct {
-            spec: Protocol.Revision = defaultRevisionForProtocol(Protocol),
+            revision: Protocol.Revision = defaultRevisionForProtocol(Protocol),
             gas_limit: u64,
             scope: Scope = .transaction,
             max_live_frames: usize = default_max_live_frames,
@@ -152,7 +152,7 @@ pub fn For(comptime Protocol: type) type {
         pub fn estimate(input: Input) Error!Plan {
             if (input.max_live_frames == 0) return error.InvalidMaxLiveFrames;
 
-            const effective_gas_limit = Self.effectiveGasLimit(input.spec, input.gas_limit, input.scope);
+            const effective_gas_limit = Self.effectiveGasLimit(input.revision, input.gas_limit, input.scope);
             const stack_slots = try mul(usize, input.max_live_frames, stack_slots_per_frame);
             const stack_bytes = try mul(usize, stack_slots, word_bytes);
             const memory = try memoryBound(effective_gas_limit, input.max_live_frames);
@@ -160,13 +160,13 @@ pub fn For(comptime Protocol: type) type {
             const log_data_bytes = try countFromGas(effective_gas_limit, log_data_byte_gas);
             const journal_entries = try countFromGas(effective_gas_limit, journal_entry_gas);
             const transient_entries = try countFromGas(effective_gas_limit, transient_entry_gas);
-            const warm_accounts_from_gas = try countFromGas(effective_gas_limit, Self.accountWarmCost(input.spec));
+            const warm_accounts_from_gas = try countFromGas(effective_gas_limit, Self.accountWarmCost(input.revision));
             const warm_accounts = try add(usize, input.initial_warm_accounts, warm_accounts_from_gas);
-            const warm_storage_keys = try countFromGas(effective_gas_limit, Self.storageKeyWarmCost(input.spec));
-            const storage_overlay_entries = try countFromGas(effective_gas_limit, Self.storageOverlayEntryCost(input.spec));
+            const warm_storage_keys = try countFromGas(effective_gas_limit, Self.storageKeyWarmCost(input.revision));
+            const storage_overlay_entries = try countFromGas(effective_gas_limit, Self.storageOverlayEntryCost(input.revision));
 
             return .{
-                .spec = input.spec,
+                .revision = input.revision,
                 .scope = input.scope,
                 .gas_limit = input.gas_limit,
                 .effective_gas_limit = effective_gas_limit,
@@ -188,13 +188,13 @@ pub fn For(comptime Protocol: type) type {
                     .original_storage_entries = storage_overlay_entries,
                     .storage_overlay_entries = storage_overlay_entries,
                     .selfdestructed_accounts = warm_accounts,
-                    .created_contracts = try countFromGas(effective_gas_limit, Self.createWarmCost(input.spec)),
+                    .created_contracts = try countFromGas(effective_gas_limit, Self.createWarmCost(input.revision)),
                     .deleted_accounts = warm_accounts,
                     .dirty_accounts = warm_accounts,
                 },
                 .transient_storage_entries = transient_entries,
-                .max_code_bytes = Self.maxCodeSize(input.spec),
-                .max_initcode_bytes = Protocol.Transaction.maxInitcodeSize(input.spec),
+                .max_code_bytes = Self.maxCodeSize(input.revision),
+                .max_initcode_bytes = Protocol.Transaction.maxInitcodeSize(input.revision),
             };
         }
 
@@ -326,13 +326,13 @@ test "bound gas plan input defaults to protocol support max" {
     const Planner = For(Cancun);
     const input = Planner.Input{ .gas_limit = 1_000_000 };
 
-    try std.testing.expectEqual(eth.Revision.cancun, input.spec);
+    try std.testing.expectEqual(eth.Revision.cancun, input.revision);
 }
 
 test "gas bound plan estimates 60M raw gas budget" {
     const Planner = ethereumTestPlanner();
     const plan = try Planner.estimate(.{
-        .spec = .osaka,
+        .revision = .osaka,
         .gas_limit = 60_000_000,
         .scope = .gas_budget,
     });
@@ -358,7 +358,7 @@ test "gas bound plan estimates 60M raw gas budget" {
 test "transaction scope applies Osaka transaction gas cap" {
     const Planner = ethereumTestPlanner();
     const plan = try Planner.estimate(.{
-        .spec = .osaka,
+        .revision = .osaka,
         .gas_limit = 60_000_000,
     });
 
@@ -370,7 +370,7 @@ test "transaction scope applies Osaka transaction gas cap" {
 test "Amsterdam code and initcode limits are represented" {
     const Planner = ethereumTestPlanner();
     const plan = try Planner.estimate(.{
-        .spec = .amsterdam,
+        .revision = .amsterdam,
         .gas_limit = 60_000_000,
         .scope = .gas_budget,
     });

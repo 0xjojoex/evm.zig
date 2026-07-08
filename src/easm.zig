@@ -1,3 +1,5 @@
+//! EVM-assembly disassembler for bytecode inspection and debugging.
+
 const std = @import("std");
 const evmz = @import("evm.zig");
 const instruction = evmz.instruction;

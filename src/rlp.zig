@@ -1,3 +1,5 @@
+//! RLP (Recursive Length Prefix) encoding and decoding.
+
 const std = @import("std");
 
 pub const Error = error{

@@ -1,3 +1,8 @@
+//! Hashing and signature primitives (keccak256, ecrecover).
+//!
+//! The backing provider is selected at build time by the crypto profile
+//! (`native` or `zkvm`), so callers get the same API regardless of target.
+
 const std = @import("std");
 const build_options = @import("build_options");
 const zkvm = @import("zkvm_accelerators.zig");

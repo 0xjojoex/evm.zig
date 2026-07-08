@@ -1,3 +1,5 @@
+//! Protocol-neutral transaction types, gas accounting, and preparation.
+
 const std = @import("std");
 
 const blob_mod = @import("./transaction/blob.zig");
@@ -7,8 +9,9 @@ const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 const prepare_mod = @import("./transaction/prepare.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
+pub const envelope = @import("./transaction/envelope.zig");
 const validation_mod = @import("./transaction/validation.zig");
-const transaction_mod = @import("./transaction/Transaction.zig");
+const transaction_mod = @import("./transaction/types.zig");
 
 pub const AccessListCounts = transaction_mod.AccessListCounts;
 pub const BlobSchedule = blob_mod.BlobSchedule;
@@ -24,17 +27,13 @@ pub const GasPlan = gas_mod.GasPlan;
 pub const AccessListEntry = transaction_mod.AccessListEntry;
 pub const AuthorizationTuple = transaction_mod.AuthorizationTuple;
 pub const FeeFields = transaction_mod.FeeFields;
-pub const ProtocolTransaction = transaction_mod.ProtocolTransaction;
+pub const Transaction = transaction_mod.Transaction;
 pub const TransactionView = transaction_mod.TransactionView;
 pub const EnvFacts = transaction_mod.EnvFacts;
 pub const StateFacts = transaction_mod.StateFacts;
 pub const ExecutionContext = transaction_mod.ExecutionContext;
-pub const CallTransaction = transaction_mod.CallTransaction;
-pub const CreateTransaction = transaction_mod.CreateTransaction;
-pub const ExecutionEnvelopeInput = transaction_mod.ExecutionEnvelopeInput;
-pub const NormalizedTransactionInput = transaction_mod.NormalizedTransactionInput;
-pub const ExecutionEnvelope = transaction_mod.ExecutionEnvelope;
-pub const Transaction = transaction_mod.Transaction;
+pub const TransactionScope = transaction_mod.TransactionScope;
+pub const RootFrame = transaction_mod.RootFrame;
 pub const FeeInput = settlement_mod.FeeInput;
 pub const Settlement = settlement_mod.Settlement;
 pub const SettlementFees = settlement_mod.SettlementFees;
@@ -42,11 +41,8 @@ pub const ExecutionGasResult = settlement_mod.ExecutionGasResult;
 pub const SettlementCosts = settlement_mod.SettlementCosts;
 pub const SettlementPrecharge = settlement_mod.Precharge;
 
-pub const protocolTransactionView = transaction_mod.protocolTransactionView;
+pub const transactionView = transaction_mod.transactionView;
 pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
-pub const executionContext = transaction_mod.executionContext;
-pub const executionEnvelope = transaction_mod.executionEnvelope;
-pub const normalizedTransaction = transaction_mod.normalizedTransaction;
 pub const accessListCounts = gas_mod.accessListCounts;
 pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;
 pub const calcExcessBlobGasForSchedule = blob_mod.calcExcessBlobGasForSchedule;
@@ -67,7 +63,7 @@ pub fn For(comptime ProtocolType: type) type {
     };
 }
 
-test "transaction facade exposes normalized transaction shape" {
+test "transaction facade exposes root frame and transaction scope" {
     const addr = @import("./address.zig").addr;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
@@ -87,24 +83,31 @@ test "transaction facade exposes normalized transaction shape" {
         .r = 1,
         .s = 1,
     }};
-    const tx = Transaction{ .call = .{
+    const root = RootFrame{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .input = &.{0x42},
         .gas_limit = 100_000,
         .value = 3,
+    } };
+    const scope = TransactionScope{
+        .context = .{
+            .origin = sender,
+            .coinbase = recipient,
+        },
         .access_list = &access_list,
         .authorization_list = &authorization_list,
-    } };
+        .authorization_count = authorization_list.len,
+    };
 
-    try std.testing.expect(!tx.isCreate());
-    try std.testing.expectEqualSlices(u8, &sender, &tx.sender());
-    try std.testing.expectEqualSlices(u8, &.{0x42}, tx.input());
-    try std.testing.expectEqual(@as(u64, 100_000), tx.gasLimit());
-    try std.testing.expectEqual(@as(u256, 3), tx.value());
-    try std.testing.expectEqual(@as(usize, 1), tx.accessList().len);
-    try std.testing.expectEqual(@as(usize, 1), tx.authorizationList().len);
-    try std.testing.expectEqual(@as(usize, 1), tx.authorizationCount());
+    try std.testing.expect(!root.isCreate());
+    try std.testing.expectEqualSlices(u8, &sender, &root.sender());
+    try std.testing.expectEqualSlices(u8, &.{0x42}, root.input());
+    try std.testing.expectEqual(@as(u64, 100_000), root.gasLimit());
+    try std.testing.expectEqual(@as(u256, 3), root.value());
+    try std.testing.expectEqual(@as(usize, 1), scope.access_list.len);
+    try std.testing.expectEqual(@as(usize, 1), scope.authorization_list.len);
+    try std.testing.expectEqual(@as(usize, 1), scope.authorizationCount());
 }
 
 test "transaction bound namespace carries comptime protocol" {

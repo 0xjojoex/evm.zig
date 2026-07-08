@@ -96,18 +96,18 @@ fn runFixture(
         }
 
         summary.vectors += 1;
-        const spec = parseFork(fork_name) orelse {
+        const revision = parseFork(fork_name) orelse {
             summary.countFail(.unsupported_fork);
             continue;
         };
-        runVector(spec, tx_bytes, fork_entry.value_ptr.*, summary) catch {
+        runVector(revision, tx_bytes, fork_entry.value_ptr.*, summary) catch {
             summary.countFail(.malformed_fixture);
         };
     }
 }
 
 fn runVector(
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     tx_bytes: []const u8,
     result: JsonValue,
     summary: *Summary,
@@ -118,7 +118,7 @@ fn runVector(
     else
         null;
 
-    const validation_error = evmz.transaction_envelope.For(evmz.EthProtocol).validateRawTransaction(spec, tx_bytes);
+    const validation_error = evmz.transaction.envelope.For(evmz.EthProtocol).classifyRawTransaction(revision, tx_bytes);
     if (expected_exception) |expected| {
         if (validation_error) |err| {
             if (tx_validation.rawValidationErrorMatchesEest(err, expected)) {

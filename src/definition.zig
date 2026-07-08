@@ -1,3 +1,15 @@
+//! Fork-configuration schema: the shape of a protocol `Definition`.
+//!
+//! A `Definition(R)` is a comptime *value* — a bundle of per-domain config
+//! structs (transaction, settlement, call, storage, …) whose fields are
+//! optional `*const fn` hooks keyed on a revision enum `R`. A null hook means
+//! "use the engine default"; a set hook overrides that one rule. `eth/config.zig`
+//! fills this schema in for mainnet; `protocol.zig`'s `Bound`/`Rules` turn a
+//! definition value into the bound namespace the runtime dispatches through.
+//!
+//! This file defines only the schema and its defaults, no Ethereum rules. To
+//! add a variation point: add a field here, implement it in `eth/<domain>.zig`,
+//! and forward it from the matching `Bound*` type.
 const std = @import("std");
 
 const address = @import("address.zig");
@@ -6,7 +18,7 @@ const dispatcher = @import("protocol/dispatcher.zig");
 const interface = @import("protocol/interface.zig");
 const instruction_mod = @import("protocol/instruction.zig");
 const support = @import("protocol/support.zig");
-const tx = @import("transaction/Transaction.zig");
+const tx = @import("transaction/types.zig");
 const tx_blob = @import("transaction/blob.zig");
 const tx_gas = @import("transaction/gas.zig");
 const tx_settlement = @import("transaction/settlement.zig");
@@ -14,6 +26,11 @@ const tx_settlement = @import("transaction/settlement.zig");
 const Address = address.Address;
 const Opcode = opcode_info.Opcode;
 
+/// The fork-configuration value type over a revision enum `R`.
+///
+/// A comptime value of this type bundles the per-domain config structs (each a
+/// set of optional `*const fn` hooks) plus the instruction/precompile namespaces.
+/// `Bound(value)` turns it into the runtime dispatch namespace.
 pub fn Definition(comptime R: type) type {
     return struct {
         pub const Revision = R;
@@ -168,10 +185,14 @@ pub fn SelfDestructConfig(comptime R: type) type {
     };
 }
 
+/// Config block describing a revision enum `R`: its ordering, latest/stable
+/// pins, and implication relation. Held as `Definition.revision`.
 pub fn RevisionConfig(comptime R: type) type {
     return support.ModelConfig(R);
 }
 
+/// Builds the bound revision model (ordering + availability queries) from a
+/// `RevisionConfig`. Consumed by `Bound` to resolve per-revision opcode support.
 pub fn RevisionModel(comptime R: type, comptime cfg: RevisionConfig(R)) type {
     return support.ModelWithConfig(R, cfg);
 }

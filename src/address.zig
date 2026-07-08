@@ -1,6 +1,9 @@
+//! 20-byte Ethereum address type, constructors, and hex parsing.
+
 const std = @import("std");
 const crypto = @import("crypto.zig");
 
+/// A 20-byte Ethereum account address.
 pub const Address = [20]u8;
 
 pub const zero_address: Address = std.mem.zeroes(Address);

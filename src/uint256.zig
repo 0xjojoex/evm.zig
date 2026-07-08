@@ -1,3 +1,5 @@
+//! 256-bit unsigned integer helpers for EVM word arithmetic and byte conversion.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

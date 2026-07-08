@@ -1,3 +1,12 @@
+//! Assembles the Ethereum `Definition` from the per-domain spec tables.
+//!
+//! `Options` is the user-facing override surface; `define`/`defineFor` merge
+//! those overrides onto the mainnet defaults (`defaultTransactionConfig`,
+//! `defaultCallConfig`, …) and return a filled `definition.Definition`. Each
+//! `default*` builder pulls its hooks from the sibling `eth/<domain>.zig`
+//! modules, so this file is the single wiring point between the fork schema
+//! (`definition.zig`) and the concrete Ethereum rules.
+
 const std = @import("std");
 
 const definition = @import("../definition.zig");
@@ -14,6 +23,8 @@ const transaction = @import("transaction.zig");
 pub const Revision = revision.Revision;
 const Opcode = opcode_info.Opcode;
 
+/// Per-domain override surface for `define`; every field defaults to the
+/// mainnet Ethereum rule, so `.{}` yields the standard definition.
 pub fn Options(comptime R: type) type {
     return struct {
         name: []const u8 = "ethereum",

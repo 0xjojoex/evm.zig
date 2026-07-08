@@ -1,5 +1,5 @@
 const std = @import("std");
-const tx = @import("../transaction/Transaction.zig");
+const tx = @import("../transaction/types.zig");
 const tx_blob = @import("../transaction/blob.zig");
 const tx_gas = @import("../transaction/gas.zig");
 const Revision = @import("revision.zig").Revision;
@@ -50,36 +50,36 @@ pub const amsterdam_max_initcode_size = eip8037.max_initcode_size;
 pub const max_transaction_gas_limit = eip8037.max_transaction_gas_limit;
 
 pub const Transaction = struct {
-    pub fn kindActive(spec: Revision, kind: tx.TxKind) bool {
+    pub fn kindActive(revision: Revision, kind: tx.TxKind) bool {
         return switch (kind) {
             .legacy => true,
-            .access_list => spec.isImpl(.berlin),
-            .dynamic_fee => spec.isImpl(.london),
-            .blob => spec.isImpl(.cancun),
-            .set_code => spec.isImpl(.prague),
+            .access_list => revision.isImpl(.berlin),
+            .dynamic_fee => revision.isImpl(.london),
+            .blob => revision.isImpl(.cancun),
+            .set_code => revision.isImpl(.prague),
         };
     }
 
-    pub fn allowsContractCreation(spec: Revision, kind: tx.TxKind) bool {
-        _ = spec;
+    pub fn allowsContractCreation(revision: Revision, kind: tx.TxKind) bool {
+        _ = revision;
         return switch (kind) {
             .legacy, .access_list, .dynamic_fee => true,
             .blob, .set_code => false,
         };
     }
 
-    pub fn requiresAuthorizationList(spec: Revision, kind: tx.TxKind) bool {
-        _ = spec;
+    pub fn requiresAuthorizationList(revision: Revision, kind: tx.TxKind) bool {
+        _ = revision;
         return kind == .set_code;
     }
 
-    pub fn rejectsNonDelegatingSenderCode(spec: Revision, kind: tx.TxKind) bool {
-        return kind == .set_code or spec.isImpl(.london);
+    pub fn rejectsNonDelegatingSenderCode(revision: Revision, kind: tx.TxKind) bool {
+        return kind == .set_code or revision.isImpl(.london);
     }
 
-    pub fn blobSchedule(spec: Revision) ?tx_blob.BlobSchedule {
-        if (!spec.isImpl(.cancun)) return null;
-        if (spec.isImpl(.amsterdam)) {
+    pub fn blobSchedule(revision: Revision) ?tx_blob.BlobSchedule {
+        if (!revision.isImpl(.cancun)) return null;
+        if (revision.isImpl(.amsterdam)) {
             return .{
                 .target = 14,
                 .max = 21,
@@ -91,16 +91,16 @@ pub const Transaction = struct {
                 .reserve_price_active = true,
             };
         }
-        if (spec.isImpl(.prague)) {
+        if (revision.isImpl(.prague)) {
             return .{
                 .target = 6,
                 .max = 9,
-                .max_per_transaction = if (spec.isImpl(.osaka)) 6 else 9,
+                .max_per_transaction = if (revision.isImpl(.osaka)) 6 else 9,
                 .gas_per_blob = blob_gas_per_blob,
                 .min_base_fee = min_blob_base_fee,
                 .execution_base_cost = blob_base_cost,
                 .base_fee_update_fraction = prague_blob_base_fee_update_fraction,
-                .reserve_price_active = spec.isImpl(.osaka),
+                .reserve_price_active = revision.isImpl(.osaka),
             };
         }
         return .{
@@ -115,18 +115,18 @@ pub const Transaction = struct {
         };
     }
 
-    pub fn blobVersionedHashActive(spec: Revision, version: u8) bool {
-        _ = spec;
+    pub fn blobVersionedHashActive(revision: Revision, version: u8) bool {
+        _ = revision;
         return version == 0x01;
     }
 
-    pub fn maxInitcodeSize(spec: Revision) usize {
-        if (!spec.isImpl(.shanghai)) return std.math.maxInt(usize);
-        return if (spec.isImpl(.amsterdam)) amsterdam_max_initcode_size else max_initcode_size;
+    pub fn maxInitcodeSize(revision: Revision) usize {
+        if (!revision.isImpl(.shanghai)) return std.math.maxInt(usize);
+        return if (revision.isImpl(.amsterdam)) amsterdam_max_initcode_size else max_initcode_size;
     }
 
-    pub fn intrinsicBaseGas(spec: Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
-        if (!spec.isImpl(.amsterdam)) return 21_000;
+    pub fn intrinsicBaseGas(revision: Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
+        if (!revision.isImpl(.amsterdam)) return 21_000;
 
         var gas: u64 = amsterdam_tx_base_cost;
         if (options.is_create) {
@@ -144,41 +144,41 @@ pub const Transaction = struct {
         return gas;
     }
 
-    pub fn createIntrinsicGas(spec: Revision) ?u64 {
-        if (!spec.isImpl(.homestead) or spec.isImpl(.amsterdam)) return 0;
+    pub fn createIntrinsicGas(revision: Revision) ?u64 {
+        if (!revision.isImpl(.homestead) or revision.isImpl(.amsterdam)) return 0;
         return create_transaction_gas;
     }
 
-    pub fn dataByteGas(spec: Revision, byte: u8) u64 {
+    pub fn dataByteGas(revision: Revision, byte: u8) u64 {
         if (byte == 0) return 4;
-        return if (spec.isImpl(.istanbul)) 16 else 68;
+        return if (revision.isImpl(.istanbul)) 16 else 68;
     }
 
-    pub fn accessListAddressGas(spec: Revision) u64 {
-        return if (spec.isImpl(.amsterdam)) amsterdam_access_list_address_gas else access_list_address_gas;
+    pub fn accessListAddressGas(revision: Revision) u64 {
+        return if (revision.isImpl(.amsterdam)) amsterdam_access_list_address_gas else access_list_address_gas;
     }
 
-    pub fn storageKeyGas(spec: Revision) u64 {
-        return if (spec.isImpl(.amsterdam)) amsterdam_access_list_storage_key_gas else access_list_storage_key_gas;
+    pub fn storageKeyGas(revision: Revision) u64 {
+        return if (revision.isImpl(.amsterdam)) amsterdam_access_list_storage_key_gas else access_list_storage_key_gas;
     }
 
-    pub fn accessListDataGas(spec: Revision, counts: tx_gas.AccessListCounts) ?u64 {
-        if (!spec.isImpl(.amsterdam)) return 0;
+    pub fn accessListDataGas(revision: Revision, counts: tx_gas.AccessListCounts) ?u64 {
+        if (!revision.isImpl(.amsterdam)) return 0;
         return accessListDataCost(counts);
     }
 
-    pub fn initCodeWordGas(spec: Revision) u64 {
-        return if (spec.isImpl(.shanghai)) initcode_word_gas else 0;
+    pub fn initCodeWordGas(revision: Revision) u64 {
+        return if (revision.isImpl(.shanghai)) initcode_word_gas else 0;
     }
 
-    pub fn authorizationIntrinsicGas(spec: Revision) u64 {
-        if (!spec.isImpl(.prague)) return 0;
-        if (spec.isImpl(.amsterdam)) return amsterdam_account_write_cost + amsterdam_regular_per_auth_base_cost;
+    pub fn authorizationIntrinsicGas(revision: Revision) u64 {
+        if (!revision.isImpl(.prague)) return 0;
+        if (revision.isImpl(.amsterdam)) return amsterdam_account_write_cost + amsterdam_regular_per_auth_base_cost;
         return authorization_intrinsic_gas;
     }
 
-    pub fn intrinsicStateGas(spec: Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
-        if (!spec.isImpl(.amsterdam)) return 0;
+    pub fn intrinsicStateGas(revision: Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
+        if (!revision.isImpl(.amsterdam)) return 0;
 
         var gas: u64 = 0;
         if (options.is_create) {
@@ -189,9 +189,9 @@ pub const Transaction = struct {
         return gas;
     }
 
-    pub fn floorGas(spec: Revision, input: []const u8, options: tx_gas.IntrinsicGasOptions) ?u64 {
-        if (!spec.isImpl(.prague)) return null;
-        const floor_data_cost = if (spec.isImpl(.amsterdam)) blk: {
+    pub fn floorGas(revision: Revision, input: []const u8, options: tx_gas.IntrinsicGasOptions) ?u64 {
+        if (!revision.isImpl(.prague)) return null;
+        const floor_data_cost = if (revision.isImpl(.amsterdam)) blk: {
             const bytes = std.math.cast(u64, input.len) orelse return null;
             const floor_tokens = std.math.mul(u64, bytes, 4) catch return null;
             break :blk std.math.mul(u64, floor_tokens, 16) catch return null;
@@ -199,24 +199,24 @@ pub const Transaction = struct {
             const tokens = calldataTokenCount(input) orelse return null;
             break :blk std.math.mul(u64, tokens, 10) catch return null;
         };
-        const floor_base_gas = if (spec.isImpl(.amsterdam)) amsterdam_tx_base_cost else 21_000;
+        const floor_base_gas = if (revision.isImpl(.amsterdam)) amsterdam_tx_base_cost else 21_000;
         var gas = std.math.add(u64, floor_base_gas, floor_data_cost) catch return null;
-        if (spec.isImpl(.amsterdam)) {
+        if (revision.isImpl(.amsterdam)) {
             gas = std.math.add(u64, gas, accessListDataCost(options.access_list_counts) orelse return null) catch return null;
         }
         return gas;
     }
 
-    pub fn regularGasLimit(spec: Revision, gas_limit: u64) u64 {
-        return if (spec.isImpl(.osaka)) @min(gas_limit, max_transaction_gas_limit) else gas_limit;
+    pub fn regularGasLimit(revision: Revision, gas_limit: u64) u64 {
+        return if (revision.isImpl(.osaka)) @min(gas_limit, max_transaction_gas_limit) else gas_limit;
     }
 
-    pub fn intrinsicRegularGasLimit(spec: Revision) ?u64 {
-        return if (spec.isImpl(.amsterdam)) max_transaction_gas_limit else null;
+    pub fn intrinsicRegularGasLimit(revision: Revision) ?u64 {
+        return if (revision.isImpl(.amsterdam)) max_transaction_gas_limit else null;
     }
 
-    pub fn totalGasLimit(spec: Revision) ?u64 {
-        return if (spec.isImpl(.osaka) and !spec.isImpl(.amsterdam)) max_transaction_gas_limit else null;
+    pub fn totalGasLimit(revision: Revision) ?u64 {
+        return if (revision.isImpl(.osaka) and !revision.isImpl(.amsterdam)) max_transaction_gas_limit else null;
     }
 };
 

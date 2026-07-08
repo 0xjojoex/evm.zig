@@ -1,13 +1,13 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 
-const AccountState = evmz.state.AccountState;
+const AccountState = evmz.state.Account;
 const Address = evmz.Address;
 const EthProtocol = evmz.EthProtocol;
 const Executor = evmz.Executor(EthProtocol);
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
-const Transaction = Executor.Transaction;
+const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
 const tx_protocol = transaction.For(EthProtocol);
@@ -35,14 +35,14 @@ test "Amsterdam value-to-empty account state gas is not intrinsic" {
 
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const tx = Transaction{ .call = .{
+    const root = RootFrame{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .gas_limit = 21_000,
         .value = 1,
     } };
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
-        .value = tx.value(),
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{
+        .value = root.value(),
         .creates_account = true,
     });
 
@@ -91,28 +91,30 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
         .r = 1,
         .s = 1,
     }};
-    const tx = Transaction{ .call = .{
+    const root = RootFrame{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .gas_limit = 300_000,
         .value = 1,
-        .authorization_list = &authorization_list,
     } };
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{
+    const scope = Executor.transactionScope(tx_context, .{
+        .authorization_list = &authorization_list,
+    });
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{
         .authorization_count = authorization_list.len,
-        .value = tx.value(),
+        .value = root.value(),
         .creates_account = true,
     });
 
-    try executor.beginTransactionScope(tx_context, tx);
-    const result = try executor.runTopLevelTransactionWithEngine(tx, .{
+    try executor.beginTransactionScope(scope, root);
+    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
             .payer = sender,
-            .value = tx.value(),
+            .value = root.value(),
         }),
     }, .{ .execute = ExecuteTx.execute });
 
@@ -152,11 +154,11 @@ const ExecuteTx = struct {
     fn execute(
         ptr: ?*anyopaque,
         inner: *Executor,
-        normalized_tx: Transaction,
+        engine_root: RootFrame,
         gas: transaction.ExecutionGas,
     ) !Interpreter.Result {
         _ = ptr;
-        return inner.executeTransactionMessage(normalized_tx, gas);
+        return inner.executeTransactionMessage(engine_root, gas);
     }
 };
 

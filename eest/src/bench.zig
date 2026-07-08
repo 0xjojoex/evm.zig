@@ -230,10 +230,10 @@ fn matchesTest(test_name: []const u8, options: Options) bool {
 
 fn runFixture(allocator: std.mem.Allocator, fixture: JsonValue, options: Options) !FixtureResult {
     var fixture_obj = asObject(fixture) orelse return error.MalformedFixture;
-    const spec = parseFixtureSpec(&fixture_obj) orelse return error.UnsupportedFork;
+    const revision = parseFixtureSpec(&fixture_obj) orelse return error.UnsupportedFork;
     const pre = asObject(fixture_obj.get("pre") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
 
-    var runner = try BenchmarkRunner.init(allocator, &pre, spec, options.engine);
+    var runner = try BenchmarkRunner.init(allocator, &pre, revision, options.engine);
     defer runner.deinit();
     try runner.initEngine();
 
@@ -273,7 +273,7 @@ const BenchmarkRunner = struct {
     engine: Engine,
     evmone: ?evmone_bench.Runner = null,
 
-    fn init(allocator: std.mem.Allocator, pre: *const std.json.ObjectMap, spec: evmz.eth.Revision, engine: Engine) !BenchmarkRunner {
+    fn init(allocator: std.mem.Allocator, pre: *const std.json.ObjectMap, revision: evmz.eth.Revision, engine: Engine) !BenchmarkRunner {
         const store = try allocator.create(evmz.state.MemoryStore);
         errdefer allocator.destroy(store);
         store.* = evmz.state.MemoryStore.init(allocator);
@@ -285,7 +285,7 @@ const BenchmarkRunner = struct {
             .allocator = allocator,
             .store = store,
             .executor = Executor.init(allocator, .{
-                .revision = spec,
+                .revision = revision,
                 .state_reader = store.reader(),
             }),
             .engine = engine,
@@ -349,24 +349,20 @@ const BenchmarkRunner = struct {
         defer access_list.deinit(self.allocator);
         var authorization_list = try parseTransactionAuthorizationList(self.allocator, tx, .error_malformed_list);
         defer authorization_list.deinit(self.allocator);
-        const normalized_tx = if (is_create)
-            transaction.Transaction{ .create = .{
+        const root = if (is_create)
+            transaction.RootFrame{ .create = .{
                 .sender = sender,
                 .init_code = input,
                 .gas_limit = gas_limit,
                 .value = value,
-                .access_list = access_list.entries,
-                .authorization_list = authorization_list.entries,
             } }
         else
-            transaction.Transaction{ .call = .{
+            transaction.RootFrame{ .call = .{
                 .sender = sender,
                 .recipient = recipient.?,
                 .input = input,
                 .gas_limit = gas_limit,
                 .value = value,
-                .access_list = access_list.entries,
-                .authorization_list = authorization_list.entries,
             } };
         const blob_hashes = try parseBlobHashes(self.allocator, tx);
         defer self.allocator.free(blob_hashes);
@@ -384,7 +380,12 @@ const BenchmarkRunner = struct {
 
         const revision = self.executor.revision();
         const tx_context = try parseTxContext(revision, header, tx, sender, blob_hashes);
-        try self.executor.beginTransactionScope(tx_context, normalized_tx);
+        const scope = Executor.transactionScope(tx_context, .{
+            .access_list = access_list.entries,
+            .authorization_list = authorization_list.entries,
+            .authorization_count = authorization_list.count,
+        });
+        try self.executor.beginTransactionScope(scope, root);
         errdefer self.executor.closeTransaction();
 
         const access_list_counts = transaction.accessListCounts(access_list.entries);
@@ -413,7 +414,7 @@ const BenchmarkRunner = struct {
         );
 
         var timed_engine = TimedTransactionEngine{ .runner = self };
-        const result = try self.executor.runTopLevelTransactionWithEngine(normalized_tx, .{
+        const result = try self.executor.runTopLevelTransactionWithEngine(scope, root, .{
             .execution = gas_plan.execution,
             .settlement = settlement,
         }, timed_engine.engine());
@@ -438,7 +439,7 @@ const BenchmarkRunner = struct {
         fn execute(
             ptr: ?*anyopaque,
             executor: *Executor,
-            tx: transaction.Transaction,
+            tx: transaction.RootFrame,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
             const self: *TimedTransactionEngine = @ptrCast(@alignCast(ptr.?));
@@ -521,7 +522,7 @@ fn comparePostState(
 }
 
 fn transactionSettlement(
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     tx: *const std.json.ObjectMap,
     sender: Address,
     gas_limit: u64,
@@ -533,9 +534,9 @@ fn transactionSettlement(
     blob_base_fee: u256,
     blob_count: usize,
 ) !transaction.Settlement {
-    return tx_protocol.settlement.settlementFromGasPlan(spec, gas_limit, gas_plan, .{
+    return tx_protocol.settlement.settlementFromGasPlan(revision, gas_limit, gas_plan, .{
         .gas_price = gas_price,
-        .priority_fee = tx_protocol.settlement.effectivePriorityFee(spec, .{
+        .priority_fee = tx_protocol.settlement.effectivePriorityFee(revision, .{
             .gas_price = gas_price,
             .base_fee = base_fee,
             .max_fee_per_gas = if (tx.get("maxFeePerGas")) |field_value| try parseU256FromValue(field_value) else null,
@@ -550,7 +551,7 @@ fn transactionSettlement(
 }
 
 fn parseTxContext(
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     header: *const std.json.ObjectMap,
     tx: *const std.json.ObjectMap,
     sender: Address,
@@ -576,12 +577,12 @@ fn parseTxContext(
         .gas_limit = if (header.get("gasLimit")) |value| try parseU64FromValue(value) else 0,
         .prev_randao = if (header.get("mixHash")) |value| try parseU256FromValue(value) else 0,
         .base_fee = base_fee,
-        .blob_base_fee = try parseBlobBaseFee(spec, header),
+        .blob_base_fee = try parseBlobBaseFee(revision, header),
         .blob_hashes = blob_hashes,
     };
 }
 
-fn parseBlockTxContext(spec: evmz.eth.Revision, header: *const std.json.ObjectMap) !Host.TxContext {
+fn parseBlockTxContext(revision: evmz.eth.Revision, header: *const std.json.ObjectMap) !Host.TxContext {
     const base_fee = if (header.get("baseFeePerGas")) |value| try parseU256FromValue(value) else 0;
     return Host.TxContext{
         .chain_id = 1,
@@ -593,7 +594,7 @@ fn parseBlockTxContext(spec: evmz.eth.Revision, header: *const std.json.ObjectMa
         .gas_limit = if (header.get("gasLimit")) |value| try parseU64FromValue(value) else 0,
         .prev_randao = if (header.get("mixHash")) |value| try parseU256FromValue(value) else 0,
         .base_fee = base_fee,
-        .blob_base_fee = try parseBlobBaseFee(spec, header),
+        .blob_base_fee = try parseBlobBaseFee(revision, header),
         .blob_hashes = &.{},
     };
 }
@@ -607,9 +608,9 @@ fn parseBlockHeader(header: *const std.json.ObjectMap) !evmz.executor.system_con
     };
 }
 
-fn parseBlobBaseFee(spec: evmz.eth.Revision, header: *const std.json.ObjectMap) !u256 {
+fn parseBlobBaseFee(revision: evmz.eth.Revision, header: *const std.json.ObjectMap) !u256 {
     const excess_blob_gas = if (header.get("excessBlobGas")) |value| try parseU256FromValue(value) else return 0;
-    return tx_protocol.blob.blobBaseFeeForRevision(spec, excess_blob_gas) orelse error.Overflow;
+    return tx_protocol.blob.blobBaseFeeForRevision(revision, excess_blob_gas) orelse error.Overflow;
 }
 
 fn parseFixtureSpec(fixture: *const std.json.ObjectMap) ?evmz.eth.Revision {

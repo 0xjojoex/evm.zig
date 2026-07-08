@@ -1,13 +1,13 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 
-const AccountState = evmz.state.AccountState;
+const AccountState = evmz.state.Account;
 const Address = evmz.Address;
 const EthProtocol = evmz.EthProtocol;
 const Executor = evmz.Executor(EthProtocol);
 const Host = evmz.Host;
 const Interpreter = evmz.Interpreter;
-const Transaction = Executor.Transaction;
+const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
 const tx_protocol = transaction.For(EthProtocol);
@@ -196,24 +196,26 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
         .r = 1,
         .s = 1,
     }};
-    const tx = Transaction{ .call = .{
+    const root = RootFrame{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .gas_limit = 300_000,
-        .authorization_list = &authorization_list,
     } };
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, tx.gasLimit(), .{ .authorization_count = 1 });
+    const scope = Executor.transactionScope(tx_context, .{
+        .authorization_list = &authorization_list,
+    });
+    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{ .authorization_count = 1 });
 
     const CheckingEngine = struct {
         fn execute(
             ptr: ?*anyopaque,
             inner: *Executor,
-            normalized_tx: Transaction,
+            engine_root: RootFrame,
             gas: transaction.ExecutionGas,
         ) !Interpreter.Result {
             _ = ptr;
             _ = inner;
-            _ = normalized_tx;
+            _ = engine_root;
             try std.testing.expectEqual(@as(u64, 50_394), gas.regular_left);
             try std.testing.expectEqual(@as(u64, evmz.eth.transaction.amsterdam_new_account_state_gas), gas.reservoir);
             return .{
@@ -227,15 +229,15 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
         }
     };
 
-    try executor.beginTransactionScope(tx_context, tx);
-    const result = try executor.runTopLevelTransactionWithEngine(tx, .{
+    try executor.beginTransactionScope(scope, root);
+    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, tx.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
             .coinbase = tx_context.coinbase,
             .payer = sender,
-            .value = tx.value(),
+            .value = root.value(),
         }),
     }, .{ .execute = CheckingEngine.execute });
 

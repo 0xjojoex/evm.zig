@@ -572,8 +572,7 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn prepareBytecodeAlloc(self: *const Executor, allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-            _ = self;
-            return Bytecode.init(allocator, code);
+            return Bytecode.initWithConfig(allocator, code, self.config);
         }
 
         pub fn dupeExecutionCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {

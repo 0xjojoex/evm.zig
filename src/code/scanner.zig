@@ -37,6 +37,28 @@ pub fn scan(
     }
 }
 
+pub fn scanScalar(
+    comptime Context: type,
+    context: Context,
+    bytes: []const u8,
+    comptime consume: fn (Context, usize, BoundaryMasks) void,
+) void {
+    var index: usize = 0;
+    var carry_payload: usize = 0;
+
+    while (bytes.len - index >= lanes) : (index += lanes) {
+        const chunk = bytes[index..][0..lanes];
+        const masks = rawScalarMasks(chunk);
+        consume(context, index, resolveBoundaryMasks(chunk, masks.push, masks.jumpdest, &carry_payload));
+    }
+
+    if (index < bytes.len) {
+        const tail = bytes[index..];
+        const masks = rawScalarMasks(tail);
+        consume(context, index, resolveBoundaryMasks(tail, masks.push, masks.jumpdest, &carry_payload));
+    }
+}
+
 pub fn scanFallible(
     comptime Context: type,
     context: Context,
@@ -61,6 +83,10 @@ pub fn scanFallible(
 
 pub fn markJumpDests(map: *Metadata.BitSet, bytes: []const u8) void {
     scan(*Metadata.BitSet, map, bytes, scatterJumpDests);
+}
+
+pub fn markJumpDestsScalar(map: *Metadata.BitSet, bytes: []const u8) void {
+    scanScalar(*Metadata.BitSet, map, bytes, scatterJumpDests);
 }
 
 fn scatterJumpDests(map: *Metadata.BitSet, base: usize, masks: BoundaryMasks) void {

@@ -24,7 +24,7 @@ const Options = struct {
     call_data_hex: ?[]const u8 = null,
     num_runs: ?usize = null,
     gas_limit: ?u64 = null,
-    spec: evmz.eth.Revision = .latest,
+    revision: evmz.eth.Revision = .latest,
     engine: Engine = .evmz,
     executor_resources: ExecutorResources = .growable,
     host_profile: ?HostProfile = null,
@@ -37,7 +37,7 @@ const ResolvedOptions = struct {
     call_data_hex: []const u8,
     num_runs: usize,
     gas_limit: u64,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     engine: Engine,
     executor_resources: ExecutorResources,
     host_profile: HostProfile,
@@ -74,13 +74,13 @@ const ExecutorRuntimeRunner = struct {
     fn init(
         allocator: std.mem.Allocator,
         runtime_code: []const u8,
-        spec: evmz.eth.Revision,
+        revision: evmz.eth.Revision,
         executor_resources: ExecutorResources,
     ) !ExecutorRuntimeRunner {
         var executor = switch (executor_resources) {
-            .growable => Executor.init(allocator, .{ .revision = spec }),
+            .growable => Executor.init(allocator, .{ .revision = revision }),
             else => try Executor.initWithRuntimeResources(allocator, .{
-                .revision = spec,
+                .revision = revision,
             }, .{ .bounded = benchBoundedRuntimeResources(executor_resources) }),
         };
         errdefer executor.deinit();
@@ -186,9 +186,9 @@ pub fn main(init: std.process.Init) !void {
             options.gas_limit = try parseNonZeroU64(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (common.stripPrefix(arg, "--spec=")) |value| {
-            options.spec = common.parseSpec(value) orelse return error.InvalidSpec;
+            options.revision = common.parseSpec(value) orelse return error.InvalidSpec;
         } else if (std.mem.eql(u8, arg, "--engine")) {
             const value = args.next() orelse return error.MissingEngine;
             options.engine = parseEngine(value) orelse return error.InvalidEngine;
@@ -224,10 +224,10 @@ pub fn main(init: std.process.Init) !void {
         printUsage();
         return error.MissingContractCodePath;
     }
-    if (!BenchProtocol.support.contains(resolved.spec)) {
+    if (!BenchProtocol.support.contains(resolved.revision)) {
         std.debug.print(
             "spec {s} is outside compiled support range {s}..{s}\n",
-            .{ @tagName(resolved.spec), @tagName(BenchProtocol.support.min), @tagName(BenchProtocol.support.max) },
+            .{ @tagName(resolved.revision), @tagName(BenchProtocol.support.min), @tagName(BenchProtocol.support.max) },
         );
         return error.SpecOutsideSupportRange;
     }
@@ -249,12 +249,12 @@ pub fn main(init: std.process.Init) !void {
     var deploy_host = CountingHost.init(allocator, resolved.host_profile);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.spec);
+    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.revision);
     defer allocator.free(runtime_code);
     try common.rejectNullHostTouches(resolved.host_profile, deploy_host.counters);
 
     var executor_runner: ?ExecutorRuntimeRunner = if (isExecutorEngine(resolved.engine))
-        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.spec, resolved.executor_resources)
+        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.revision, resolved.executor_resources)
     else
         null;
     defer {
@@ -271,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
         const elapsed_ns = if (executor_runner) |*runner|
             try runner.timeRuntimeCall(call_data, resolved.gas_limit)
         else
-            try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.spec, resolved.gas_limit);
+            try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.revision, resolved.gas_limit);
         try common.rejectNullHostTouches(resolved.host_profile, run_host.counters);
         timed_counters.add(run_host.counters);
 
@@ -288,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
                 engineName(resolved.engine),
                 measureScopeName(resolved),
                 @tagName(resolved.host_profile),
-                @tagName(resolved.spec),
+                @tagName(resolved.revision),
                 @tagName(BenchProtocol.support.min),
                 @tagName(BenchProtocol.support.max),
                 resolved.gas_limit,
@@ -373,7 +373,7 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
         .call_data_hex = call_data_hex orelse "",
         .num_runs = num_runs orelse 1,
         .gas_limit = gas_limit orelse defaultGasLimit(),
-        .spec = options.spec,
+        .revision = options.revision,
         .engine = options.engine,
         .executor_resources = options.executor_resources,
         .host_profile = host_profile orelse .null,
@@ -632,9 +632,9 @@ fn deployRuntime(
     allocator: std.mem.Allocator,
     host: *Host,
     contract_code: []const u8,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
 ) ![]u8 {
-    return deployRuntimeForProtocol(BenchProtocol, allocator, host, contract_code, spec);
+    return deployRuntimeForProtocol(BenchProtocol, allocator, host, contract_code, revision);
 }
 
 fn deployRuntimeForProtocol(
@@ -642,7 +642,7 @@ fn deployRuntimeForProtocol(
     allocator: std.mem.Allocator,
     host: *Host,
     contract_code: []const u8,
-    spec: Protocol.Revision,
+    revision: Protocol.Revision,
 ) ![]u8 {
     const msg = Host.Message{
         .depth = 0,
@@ -659,7 +659,7 @@ fn deployRuntimeForProtocol(
         .host = host,
         .msg = &msg,
         .code = contract_code,
-        .revision = spec,
+        .revision = revision,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -674,10 +674,10 @@ fn timeRuntimeCall(
     host: *Host,
     runtime_code: []const u8,
     call_data: []const u8,
-    spec: evmz.eth.Revision,
+    revision: evmz.eth.Revision,
     gas_limit: u64,
 ) !u64 {
-    return timeRuntimeCallForProtocol(BenchProtocol, allocator, host, runtime_code, call_data, spec, gas_limit);
+    return timeRuntimeCallForProtocol(BenchProtocol, allocator, host, runtime_code, call_data, revision, gas_limit);
 }
 
 fn timeRuntimeCallForProtocol(
@@ -686,7 +686,7 @@ fn timeRuntimeCallForProtocol(
     host: *Host,
     runtime_code: []const u8,
     call_data: []const u8,
-    spec: Protocol.Revision,
+    revision: Protocol.Revision,
     gas_limit: u64,
 ) !u64 {
     const msg = Host.Message{
@@ -704,7 +704,7 @@ fn timeRuntimeCallForProtocol(
         .host = host,
         .msg = &msg,
         .code = runtime_code,
-        .revision = spec,
+        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
@@ -751,7 +751,7 @@ test "engine scope names make benchmark boundary explicit" {
         .call_data_hex = "",
         .num_runs = 1,
         .gas_limit = defaultGasLimit(),
-        .spec = .latest,
+        .revision = .latest,
         .engine = .evmz,
         .executor_resources = .growable,
         .host_profile = .null,
@@ -763,7 +763,7 @@ test "engine scope names make benchmark boundary explicit" {
         .call_data_hex = "",
         .num_runs = 1,
         .gas_limit = defaultGasLimit(),
-        .spec = .latest,
+        .revision = .latest,
         .engine = .evmz_executor,
         .executor_resources = .growable,
         .host_profile = .null,
@@ -775,7 +775,7 @@ test "engine scope names make benchmark boundary explicit" {
         .call_data_hex = "",
         .num_runs = 1,
         .gas_limit = defaultGasLimit(),
-        .spec = .latest,
+        .revision = .latest,
         .engine = .evmz_executor,
         .executor_resources = .bounded,
         .host_profile = .null,
