@@ -1,9 +1,10 @@
 const std = @import("std");
 const address = @import("../address.zig");
+const params = @import("../eth/eip/7702.zig");
 
 pub const Address = address.Address;
-pub const delegation_designator = [_]u8{ 0xef, 0x01, 0x00 };
-pub const delegation_code_len = delegation_designator.len + 20;
+pub const delegation_designator = params.delegation_designator;
+pub const delegation_code_len = params.delegation_code_len;
 
 const secp256k1n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
 const secp256k1_half_n = secp256k1n / 2;

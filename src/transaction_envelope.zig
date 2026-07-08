@@ -4,8 +4,9 @@ const rlp = @import("./rlp.zig");
 const EthRevision = @import("./eth/revision.zig").Revision;
 const eip7702 = @import("./executor/eip7702.zig");
 const tx = @import("./transaction/Transaction.zig");
+const tx_type_id = @import("./transaction/type_id.zig");
 
-pub const set_code_transaction_type: u8 = 0x04;
+pub const set_code_transaction_type = tx_type_id.set_code;
 
 pub const TransactionEnvelope = union(enum) {
     legacy: []const u8,

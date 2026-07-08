@@ -6,6 +6,7 @@ const gas_mod = @import("./transaction/gas.zig");
 const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 const prepare_mod = @import("./transaction/prepare.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
+pub const type_id = @import("./transaction/type_id.zig");
 const validation_mod = @import("./transaction/validation.zig");
 const transaction_mod = @import("./transaction/Transaction.zig");
 
