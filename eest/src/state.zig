@@ -874,6 +874,7 @@ fn policyBlockEnv(env: evmz.Env) evmz.vm.BlockPolicyEnv {
         .prev_randao = env.prev_randao,
         .base_fee = env.base_fee,
         .blob_base_fee = env.blob_base_fee,
+        .blob_schedule = env.blob_schedule,
     };
 }
 

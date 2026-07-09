@@ -18,6 +18,8 @@ const Options = struct {
     txs: usize = 1000,
     tx_gas_limit: u64 = 300_000,
     block_gas_limit: u64 = 120_000_000,
+    access_list_addresses: usize = 0,
+    access_list_storage_keys: usize = 0,
     commit: bool = true,
     summary: bool = false,
 };
@@ -43,6 +45,17 @@ const RunResult = struct {
     gas_used: u64,
     block_gas_used: u64,
     tx_count: u64,
+};
+
+const PreparedAccessList = struct {
+    entries: []evmz.transaction.AccessListEntry = &.{},
+    storage_keys: []u256 = &.{},
+
+    pub fn deinit(self: *PreparedAccessList, allocator: std.mem.Allocator) void {
+        allocator.free(self.entries);
+        allocator.free(self.storage_keys);
+        self.* = .{};
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -98,6 +111,16 @@ pub fn main(init: std.process.Init) !void {
             options.block_gas_limit = try parseNonZeroU64(value);
         } else if (common.stripPrefix(arg, "--block-gas-limit=")) |value| {
             options.block_gas_limit = try parseNonZeroU64(value);
+        } else if (std.mem.eql(u8, arg, "--access-list-addresses")) {
+            const value = args.next() orelse return error.MissingAccessListAddresses;
+            options.access_list_addresses = try parseUsize(value);
+        } else if (common.stripPrefix(arg, "--access-list-addresses=")) |value| {
+            options.access_list_addresses = try parseUsize(value);
+        } else if (std.mem.eql(u8, arg, "--access-list-storage-keys")) {
+            const value = args.next() orelse return error.MissingAccessListStorageKeys;
+            options.access_list_storage_keys = try parseUsize(value);
+        } else if (common.stripPrefix(arg, "--access-list-storage-keys=")) |value| {
+            options.access_list_storage_keys = try parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--no-commit")) {
             options.commit = false;
         } else if (std.mem.eql(u8, arg, "--summary")) {
@@ -116,19 +139,21 @@ pub fn main(init: std.process.Init) !void {
         _ = try runPolicy(allocator, options);
     }
 
-    try stdout.print("suite,policy,case,spec,repeat,txs,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit\n", .{});
+    try stdout.print("suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit\n", .{});
     var repeat: usize = 0;
     while (repeat < options.repeats) : (repeat += 1) {
         const result = try runPolicy(allocator, options);
         const ns_per_tx = @as(f64, @floatFromInt(result.elapsed_ns)) / @as(f64, @floatFromInt(options.txs));
         try stdout.print(
-            "block-lifecycle,{s},{s},{s},{d},{d},{d},{d:.3},{d},{d},{d},{s}\n",
+            "block-lifecycle,{s},{s},{s},{d},{d},{d},{d},{d},{d:.3},{d},{d},{d},{s}\n",
             .{
                 policyName(options.policy),
                 caseName(options.case),
                 @tagName(options.spec),
                 repeat,
                 options.txs,
+                options.access_list_addresses,
+                options.access_list_storage_keys,
                 result.elapsed_ns,
                 ns_per_tx,
                 result.gas_used,
@@ -146,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
             else => exactPolicyGasLimit(options.policy),
         };
         std.debug.print(
-            "policy={s} case={s} spec={s} warmups={d} repeats={d} txs={d} tx_gas_limit={d} block_gas_limit={d} commit={s}\n",
+            "policy={s} case={s} spec={s} warmups={d} repeats={d} txs={d} tx_gas_limit={d} block_gas_limit={d} access_list_addresses={d} access_list_storage_keys={d} commit={s}\n",
             .{
                 policyName(options.policy),
                 caseName(options.case),
@@ -156,6 +181,8 @@ pub fn main(init: std.process.Init) !void {
                 options.txs,
                 options.tx_gas_limit,
                 gas_limit,
+                options.access_list_addresses,
+                options.access_list_storage_keys,
                 if (options.commit) "true" else "false",
             },
         );
@@ -178,6 +205,8 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
     var memory = MemoryStore.init(allocator);
     defer memory.deinit();
     try seedState(allocator, &memory, options.case);
+    var access_list = try prepareAccessList(allocator, options);
+    defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
     var vm = GrowableVm.init(allocator, .{
@@ -189,7 +218,7 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
     errdefer vm.deinit();
 
     var block = vm.beginBlock(growableEnv(options.block_gas_limit));
-    const block_result = try runTransactions(&block, options);
+    const block_result = try runTransactions(&block, options, access_list.entries);
     if (options.commit) try vm.commit();
     vm.deinit();
     const end_ns = try common.monotonicNowNs();
@@ -197,7 +226,7 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
     return .{
         .elapsed_ns = end_ns - start_ns,
         .gas_used = block_result.gas_used,
-        .block_gas_used = block_result.block_gas_used,
+        .block_gas_used = block_result.block_gas.total,
         .tx_count = block_result.tx_count,
     };
 }
@@ -218,6 +247,8 @@ fn runExactLifecycle(
     var memory = MemoryStore.init(allocator);
     defer memory.deinit();
     try seedState(allocator, &memory, options.case);
+    var access_list = try prepareAccessList(allocator, options);
+    defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
     var vm = try ExactVm.init(allocator, .{
@@ -229,7 +260,7 @@ fn runExactLifecycle(
     errdefer vm.deinit();
 
     var block = vm.beginBlock(policyEnv());
-    const block_result = try runTransactions(&block, options);
+    const block_result = try runTransactions(&block, options, access_list.entries);
     if (options.commit) try vm.commit();
     vm.deinit();
     const end_ns = try common.monotonicNowNs();
@@ -237,7 +268,7 @@ fn runExactLifecycle(
     return .{
         .elapsed_ns = end_ns - start_ns,
         .gas_used = block_result.gas_used,
-        .block_gas_used = block_result.block_gas_used,
+        .block_gas_used = block_result.block_gas.total,
         .tx_count = block_result.tx_count,
     };
 }
@@ -250,7 +281,66 @@ fn seedState(allocator: std.mem.Allocator, memory: *MemoryStore, case: Case) !vo
     try contract.setCode(allocator, contractCode(case));
 }
 
-fn runTransactions(block: anytype, options: Options) !evmz.vm.BlockResult {
+fn prepareAccessList(allocator: std.mem.Allocator, options: Options) !PreparedAccessList {
+    const address_entries = options.access_list_addresses;
+    const storage_keys = options.access_list_storage_keys;
+    const entry_count: usize = if (address_entries != 0)
+        address_entries
+    else if (storage_keys != 0)
+        1
+    else
+        0;
+    if (entry_count == 0) return .{};
+
+    const entries = try allocator.alloc(evmz.transaction.AccessListEntry, entry_count);
+    errdefer allocator.free(entries);
+    const keys = try allocator.alloc(u256, storage_keys);
+    errdefer allocator.free(keys);
+
+    for (keys, 0..) |*key, index| {
+        key.* = @as(u256, @intCast(index + 1));
+    }
+
+    var key_offset: usize = 0;
+    for (entries, 0..) |*entry, index| {
+        const key_count = storageKeysForEntry(storage_keys, entry_count, index);
+        const address = if (address_entries == 0)
+            contract_address
+        else
+            syntheticAccessListAddress(index);
+        entry.* = .{
+            .address = address,
+            .storage_keys = keys[key_offset .. key_offset + key_count],
+        };
+        key_offset += key_count;
+    }
+
+    return .{
+        .entries = entries,
+        .storage_keys = keys,
+    };
+}
+
+fn storageKeysForEntry(total_keys: usize, entry_count: usize, index: usize) usize {
+    if (entry_count == 0) return 0;
+    const base = total_keys / entry_count;
+    const remainder = total_keys % entry_count;
+    return base + @intFromBool(index < remainder);
+}
+
+fn syntheticAccessListAddress(index: usize) evmz.Address {
+    var address = [_]u8{0} ** 20;
+    address[0] = 0xaa;
+    var value: u64 = @intCast(index + 1);
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        address[19 - i] = @intCast(value & 0xff);
+        value >>= 8;
+    }
+    return address;
+}
+
+fn runTransactions(block: anytype, options: Options, access_list: []const evmz.transaction.AccessListEntry) !evmz.vm.BlockResult {
     var tx_input: [32]u8 = undefined;
     var index: usize = 0;
     while (index < options.txs) : (index += 1) {
@@ -261,14 +351,17 @@ fn runTransactions(block: anytype, options: Options) !evmz.vm.BlockResult {
             .to = contract_address,
             .gas_limit = options.tx_gas_limit,
             .input = input,
+            .access_list = access_list,
         });
-        if (result.status != .success) {
-            std.debug.print("tx_index={d} status={s}", .{ index, @tagName(result.status) });
-            if (result.validation_error) |err| {
-                std.debug.print(" validation_error={s}", .{@tagName(err)});
-            }
-            std.debug.print("\n", .{});
-            return error.TransactionFailed;
+        switch (result) {
+            .executed => |executed| if (executed.status != .success) {
+                std.debug.print("tx_index={d} status={s}\n", .{ index, @tagName(executed.status) });
+                return error.TransactionFailed;
+            },
+            .rejected => |err| {
+                std.debug.print("tx_index={d} validation_error={s}\n", .{ index, @tagName(err) });
+                return error.TransactionFailed;
+            },
         }
     }
     return block.finish();
@@ -385,6 +478,8 @@ fn printUsage() void {
         \\  --txs <n>                    transactions in one block, default 1000
         \\  --tx-gas-limit <n>           transaction gas limit, default 300000
         \\  --block-gas-limit <n>        growable block gas limit, default 120000000
+        \\  --access-list-addresses <n>  synthetic access-list address entries per tx, default 0
+        \\  --access-list-storage-keys <n> synthetic storage keys spread across entries, default 0
         \\  --no-commit                  skip final vm.commit()
         \\  --summary                    print resolved options to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp     opt into std.heap.smp_allocator for allocator probes
@@ -405,4 +500,31 @@ test "block lifecycle unique calldata encodes tx index" {
     const input = txInput(.sstore_unique, 41, &buffer);
     try std.testing.expectEqual(@as(usize, 32), input.len);
     try std.testing.expectEqual(@as(u8, 42), input[31]);
+}
+
+test "block lifecycle prepares synthetic access list" {
+    var access_list = try prepareAccessList(std.testing.allocator, .{
+        .access_list_addresses = 3,
+        .access_list_storage_keys = 8,
+    });
+    defer access_list.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), access_list.entries.len);
+    try std.testing.expectEqual(@as(usize, 8), access_list.storage_keys.len);
+    try std.testing.expectEqual(@as(usize, 3), access_list.entries[0].storage_keys.len);
+    try std.testing.expectEqual(@as(usize, 3), access_list.entries[1].storage_keys.len);
+    try std.testing.expectEqual(@as(usize, 2), access_list.entries[2].storage_keys.len);
+    try std.testing.expectEqual(@as(u256, 1), access_list.entries[0].storage_keys[0]);
+    try std.testing.expectEqual(@as(u256, 8), access_list.entries[2].storage_keys[1]);
+}
+
+test "block lifecycle storage-only access list uses contract entry" {
+    var access_list = try prepareAccessList(std.testing.allocator, .{
+        .access_list_storage_keys = 2,
+    });
+    defer access_list.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), access_list.entries.len);
+    try std.testing.expectEqualSlices(u8, &contract_address, &access_list.entries[0].address);
+    try std.testing.expectEqual(@as(usize, 2), access_list.entries[0].storage_keys.len);
 }

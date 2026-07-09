@@ -118,15 +118,21 @@ dispatch comparisons.
 cd bench
 zig build block-lifecycle -- --policy growable --txs 1000 --summary
 zig build block-lifecycle -- --policy exact-120m --txs 1000 --summary
+zig build block-lifecycle -- --case noop --txs 50 --access-list-addresses 256 --summary
+zig build block-lifecycle -- --case noop --txs 50 --access-list-storage-keys 256 --summary
 ```
 
 The default case is `sstore-unique`, where each transaction writes a distinct
 storage key through normal transaction execution. Use `--case noop` for lifecycle
-overhead or `--case sstore-same` for repeated writes to the same slot. Stdout is
-CSV:
+overhead or `--case sstore-same` for repeated writes to the same slot. The
+synthetic access-list flags model declared resource hints without changing the
+fixture protocol: `--access-list-addresses` creates distinct account entries,
+while `--access-list-storage-keys` spreads keys across those entries, or uses the
+benchmark contract as the single entry when no address count is supplied. Stdout
+is CSV:
 
 ```text
-suite,policy,case,spec,repeat,txs,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
+suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
 ```
 
 ## Host-boundary runner

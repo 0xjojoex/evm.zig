@@ -316,6 +316,70 @@ test "bounded warm access sets report capacity exhaustion" {
     try overlay.warmStorage(evmz.addr(3), 3);
 }
 
+test "warm access reserve hint does not enable capacity errors" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    try overlay.reserveAccessHint(.{ .accounts = 1, .storage_keys = 1 });
+    try std.testing.expectEqual(@as(u32, 1), overlay.warm_accounts.capacity());
+    try std.testing.expectEqual(@as(u32, 1), overlay.warm_storage.capacity());
+
+    overlay.beginTransaction();
+    try overlay.warmAccount(evmz.addr(1));
+    try overlay.warmAccount(evmz.addr(2));
+    try overlay.warmStorage(evmz.addr(1), 1);
+    try overlay.warmStorage(evmz.addr(1), 2);
+
+    try std.testing.expectEqual(@as(u32, 2), overlay.warm_accounts.count());
+    try std.testing.expectEqual(@as(u32, 2), overlay.warm_storage.count());
+}
+
+test "warm access reserve hint includes existing warm entries" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    try overlay.reserveAccessHint(.{ .accounts = 8, .storage_keys = 8 });
+    overlay.beginTransaction();
+    for (0..8) |index| {
+        try overlay.warmAccount(evmz.addr(@as(u160, @intCast(index + 1))));
+        try overlay.warmStorage(evmz.addr(1), @intCast(index + 1));
+    }
+
+    const account_capacity = overlay.warm_accounts.capacity();
+    const storage_capacity = overlay.warm_storage.capacity();
+    try std.testing.expectEqual(@as(u32, 8), account_capacity);
+    try std.testing.expectEqual(@as(u32, 8), storage_capacity);
+
+    try overlay.reserveAccessHint(.{ .accounts = 1, .storage_keys = 1 });
+    try std.testing.expect(overlay.warm_accounts.capacity() >= 9);
+    try std.testing.expect(overlay.warm_storage.capacity() >= 9);
+
+    const reserved_account_capacity = overlay.warm_accounts.capacity();
+    const reserved_storage_capacity = overlay.warm_storage.capacity();
+    try overlay.warmAccount(evmz.addr(9));
+    try overlay.warmStorage(evmz.addr(1), 9);
+    try std.testing.expectEqual(@as(u32, 9), overlay.warm_accounts.count());
+    try std.testing.expectEqual(@as(u32, 9), overlay.warm_storage.count());
+    try std.testing.expectEqual(reserved_account_capacity, overlay.warm_accounts.capacity());
+    try std.testing.expectEqual(reserved_storage_capacity, overlay.warm_storage.capacity());
+}
+
+test "warm access reserve hint does not relax bounded policy" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(4);
+    try overlay.configureAccessResources(.{ .accounts = 1, .storage_keys = 1 });
+
+    try overlay.reserveAccessHint(.{ .accounts = 8, .storage_keys = 8 });
+
+    overlay.beginTransaction();
+    try overlay.warmAccount(evmz.addr(1));
+    try std.testing.expectError(error.WarmAccountCapacityExceeded, overlay.warmAccount(evmz.addr(2)));
+
+    try overlay.warmStorage(evmz.addr(1), 1);
+    try std.testing.expectError(error.WarmStorageCapacityExceeded, overlay.warmStorage(evmz.addr(1), 2));
+}
+
 test "bounded transient storage reports unique-entry capacity exhaustion" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();

@@ -15,14 +15,14 @@ const StorageKey = storage.Key;
 const StateReader = @import("./Reader.zig");
 const Changeset = @import("./Changeset.zig");
 const Journal = @import("./Journal.zig");
-const TouchedHashMap = @import("./TouchedHashMap.zig");
+const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Overlay = @This();
-const AccountMap = TouchedHashMap.Auto(Address, AccountState);
-const AddressSet = TouchedHashMap.Auto(Address, void);
-const StorageSet = TouchedHashMap.Auto(StorageKey, void);
-const StorageMap = TouchedHashMap.Auto(StorageKey, u256);
-const TransientStorageMap = TouchedHashMap.Auto(StorageKey, u256);
+const AccountMap = SparseHashMap(Address, AccountState);
+const AddressSet = SparseHashMap(Address, void);
+const StorageSet = SparseHashMap(StorageKey, void);
+const StorageMap = SparseHashMap(StorageKey, u256);
+const TransientStorageMap = SparseHashMap(StorageKey, u256);
 
 pub const LogResources = struct {
     entries: usize,
@@ -160,6 +160,14 @@ pub fn configureAccessResources(self: *Overlay, resources: ?AccessResources) !vo
     }
 }
 
+pub fn reserveAccessHint(self: *Overlay, resources: AccessResources) !void {
+    if (self.access_resources != null) return;
+    const account_capacity = std.math.add(usize, self.warm_accounts.count(), resources.accounts) catch return error.AccessCapacityTooLarge;
+    const storage_capacity = std.math.add(usize, self.warm_storage.count(), resources.storage_keys) catch return error.AccessCapacityTooLarge;
+    try self.warm_accounts.ensureTotalCapacity(try accessHintCapacity(account_capacity));
+    try self.warm_storage.ensureTotalCapacity(try accessHintCapacity(storage_capacity));
+}
+
 pub fn configureTransientStorageEntries(self: *Overlay, entries: ?usize) !void {
     if (self.transient_storage.count() != 0) return error.ActiveTransientStorage;
     if (entries) |bounded| {
@@ -206,6 +214,10 @@ fn hashMapCapacity(capacity: usize) !u32 {
 fn accessHashMapCapacity(capacity: usize) !u32 {
     const physical_capacity = std.math.add(usize, capacity, 1) catch return error.AccessCapacityTooLarge;
     return std.math.cast(u32, physical_capacity) orelse error.AccessCapacityTooLarge;
+}
+
+fn accessHintCapacity(capacity: usize) !u32 {
+    return std.math.cast(u32, capacity) orelse error.AccessCapacityTooLarge;
 }
 
 fn transientStorageCapacity(capacity: usize) !u32 {

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const zkvm = @import("zkvm_accelerators.zig");
+const zkvm = @import("./crypto/zkvm_accelerators.zig");
 
 pub const provider_name = build_options.profile;
 

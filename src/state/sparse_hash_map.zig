@@ -1,8 +1,20 @@
-//! Hash map for retained-capacity state that must clear by live entries.
+//! Sparse Hash map for retained-capacity state that must clear by live entries.
+//!
+//! `std.HashMap` clears by walking its full control/index allocation. That is a
+//! poor fit for block/transaction state maps that may reserve for a large bound
+//! but touch only a small subset in a particular transaction. This is a variant of `sparse set`
+//! specializes for Ethereum Address / StorageKey instead of using int key.
+//! It keeps a dense `entries[0..len]` list of live rows and a open-addressed `index` table,
+//! so `clearRetainingCapacity` only visits live rows.
+//!
+//! The tradeoff is a deliberately small API surface. This is for executor state
+//! maps/sets that need retained capacity and predictable reset cost, not a
+//! drop-in replacement for `std.HashMap`.
 
 const std = @import("std");
 
 const default_max_load_percentage = 80;
+const minimum_growth_capacity = 8;
 
 pub fn Auto(comptime K: type, comptime V: type) type {
     return WithContext(K, V, std.hash_map.AutoContext(K));
@@ -17,6 +29,11 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         const Row = struct {
             key: K,
             value: V,
+            /// Current probe-table slot for this row.
+            ///
+            /// Keeping the reverse pointer lets `clearRetainingCapacity` erase
+            /// only slots that were actually touched, and lets `removeSlot`
+            /// update the moved dense row without scanning the index table.
             slot: Index,
         };
 
@@ -74,7 +91,13 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         allocator: std.mem.Allocator,
         context: Context,
+        /// Sparse open-addressed probe table.
+        ///
+        /// Values are one-based indices into `entries`; zero means empty. The
+        /// one-based encoding avoids a parallel occupied bitmap while still
+        /// allowing dense row `0` to be referenced.
         index: []Index,
+        /// Dense live rows. Only `entries[0..len]` are initialized.
         entries: []Row,
         len: Index,
 
@@ -133,7 +156,8 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn ensureUnusedCapacity(self: *Self, additional_count: Index) !void {
             const needed = try std.math.add(Index, self.len, additional_count);
-            try self.ensureTotalCapacity(needed);
+            if (needed <= self.entries.len and slotsCanFit(self.index.len, needed)) return;
+            try self.realloc(try growCapacity(self.capacity(), needed));
         }
 
         pub fn ensureTotalCapacity(self: *Self, expected_count: Index) !void {
@@ -225,6 +249,9 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         }
 
         pub fn clearRetainingCapacity(self: *Self) void {
+            // Clear only the probe slots named by live rows. This is the core
+            // reason this type exists: reset cost is O(live entries), not
+            // O(reserved slots).
             for (self.entries[0..self.len]) |entry| {
                 self.index[entry.slot] = empty_slot;
             }
@@ -266,10 +293,15 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         fn removeSlot(self: *Self, slot: usize) void {
             const removed_entry_index = self.index[slot] - 1;
             self.index[slot] = empty_slot;
+            // Removing from a linear-probed table can split a probe cluster.
+            // Reinsert following occupied slots so lookups that started before
+            // the hole still reach their entries.
             self.reinsertClusterAfterRemove(slot);
 
             const last_entry_index = self.len - 1;
             if (removed_entry_index != last_entry_index) {
+                // Keep entries dense by moving the last row into the removed
+                // row's position, then retarget that row's existing probe slot.
                 self.entries[removed_entry_index] = self.entries[last_entry_index];
                 self.index[self.entries[removed_entry_index].slot] = removed_entry_index + 1;
             }
@@ -337,6 +369,15 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             );
             return std.math.ceilPowerOfTwo(usize, needed) catch error.CapacityTooLarge;
         }
+
+        fn growCapacity(current_capacity: Index, needed_capacity: Index) !Index {
+            var next_capacity = current_capacity;
+            if (next_capacity == 0) next_capacity = minimum_growth_capacity;
+            while (next_capacity < needed_capacity) {
+                next_capacity = try std.math.mul(Index, next_capacity, 2);
+            }
+            return next_capacity;
+        }
     };
 }
 
@@ -357,6 +398,20 @@ test "touched hash map clears only live slots" {
     try map.put(3, {});
     try std.testing.expect(map.contains(3));
     try std.testing.expectEqual(@as(usize, 1), map.debugOccupiedSlots());
+}
+
+test "touched hash map implicit growth is amortized" {
+    var implicit = Auto(u64, void).init(std.testing.allocator);
+    defer implicit.deinit();
+
+    try implicit.ensureUnusedCapacity(1);
+    try std.testing.expectEqual(@as(u32, minimum_growth_capacity), implicit.capacity());
+
+    var explicit = Auto(u64, void).init(std.testing.allocator);
+    defer explicit.deinit();
+
+    try explicit.ensureTotalCapacity(1);
+    try std.testing.expectEqual(@as(u32, 1), explicit.capacity());
 }
 
 test "touched hash map removal preserves probe clusters" {

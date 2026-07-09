@@ -129,10 +129,11 @@ test "gas bound checkpoint documents byte caps still unmodeled" {
 fn expectTxCase(case: TxCase) !void {
     const growable = runGrowableTx(case) catch |err| return failCapacity(case.name, err);
     const bounded = runExactTx(case) catch |err| return failCapacity(case.name, err);
+    const growable_executed = try expectExecuted(growable);
+    const bounded_executed = try expectExecuted(bounded);
 
-    try std.testing.expectEqual(case.expected_status, growable.status);
-    try std.testing.expectEqual(growable.status, bounded.status);
-    try std.testing.expectEqual(growable.validation_error, bounded.validation_error);
+    try std.testing.expectEqual(case.expected_status, growable_executed.status);
+    try std.testing.expectEqual(growable_executed.status, bounded_executed.status);
 }
 
 fn runGrowableTx(case: TxCase) !TxResult {
@@ -231,27 +232,41 @@ fn runStorageOverlayBlock(block: anytype) !BlockRun {
     var accepted: usize = 0;
     var rejected = false;
     for (0..16) |index| {
-        const result = try block.transact(.{
+        const result = block.transact(.{
             .sender = sender,
             .to = contractAddress(index),
             .gas_limit = 80_000,
-        });
-        switch (result.status) {
-            .success => accepted += 1,
-            .rejected => {
-                if (result.validation_error) |err| {
-                    try std.testing.expectEqual(transaction.ValidationError.gas_allowance_exceeded, err);
-                }
+        }) catch |err| switch (err) {
+            error.BlockGasExceeded => {
                 rejected = true;
                 break;
             },
-            else => try std.testing.expect(false),
+            else => return err,
+        };
+        switch (result) {
+            .executed => |executed| switch (executed.status) {
+                .success => accepted += 1,
+                else => try std.testing.expect(false),
+            },
+            .rejected => |err| {
+                try std.testing.expectEqual(transaction.ValidationError.gas_allowance_exceeded, err);
+                rejected = true;
+                break;
+            },
         }
     }
+    const summary = block.finish();
     return .{
         .accepted = accepted,
         .rejected = rejected,
-        .block_gas_used = block.finish().block_gas_used,
+        .block_gas_used = summary.block_gas.total,
+    };
+}
+
+fn expectExecuted(result: TxResult) !evmz.vm.TxExecutionResult {
+    return switch (result) {
+        .executed => |executed| executed,
+        .rejected => error.UnexpectedRejection,
     };
 }
 

@@ -12,7 +12,7 @@ const AccountState = @import("./Account.zig");
 const Changeset = @import("./Changeset.zig");
 const Committer = @import("./Committer.zig");
 const StateReader = @import("./Reader.zig");
-const TouchedHashMap = @import("./TouchedHashMap.zig");
+const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Address = evmz.Address;
 const addr = evmz.addr;
@@ -20,12 +20,12 @@ const addr = evmz.addr;
 const MemoryStore = @This();
 
 allocator: std.mem.Allocator,
-accounts: TouchedHashMap.Auto(Address, AccountState),
+accounts: SparseHashMap(Address, AccountState),
 
 pub fn init(allocator: std.mem.Allocator) MemoryStore {
     return .{
         .allocator = allocator,
-        .accounts = TouchedHashMap.Auto(Address, AccountState).init(allocator),
+        .accounts = SparseHashMap(Address, AccountState).init(allocator),
     };
 }
 

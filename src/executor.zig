@@ -612,6 +612,11 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Apply a transaction access list to the current scope.
         pub fn warmAccessList(self: *Self, access_list: []const transaction.AccessListEntry) !void {
+            const counts = tx_gas.accessListCounts(access_list);
+            try self.state.reserveAccessHint(.{
+                .accounts = counts.addresses,
+                .storage_keys = counts.storage_keys,
+            });
             for (access_list) |entry| {
                 try self.warmAccessListAddress(entry.address);
                 for (entry.storage_keys) |key| {

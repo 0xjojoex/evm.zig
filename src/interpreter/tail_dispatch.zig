@@ -5,6 +5,7 @@ const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
+const instruction = @import("../instruction.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -43,7 +44,7 @@ pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
         const Protocol = ProtocolType;
-        const Instructions = @import("../instruction.zig").For(Protocol);
+        const Instructions = instruction.For(Protocol);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
