@@ -157,7 +157,7 @@ test "execute uses resolved dispatch target for hot opcodes" {
     try std.testing.expectEqual(Interpreter.FrameStatus.invalid, frame.frame.status);
 }
 
-test "untraced interpreter fast loop respects resolved dispatch target" {
+test "untraced interpreter raw fallback respects resolved dispatch target" {
     const OverrideProtocol = DispatchOverrideProtocol(.invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
@@ -176,6 +176,37 @@ test "untraced interpreter fast loop respects resolved dispatch target" {
         .host = &host,
         .msg = &msg,
         .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = try interpreter.execute();
+
+    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+}
+
+test "untraced interpreter tail dispatch respects resolved dispatch target" {
+    const OverrideProtocol = DispatchOverrideProtocol(.invalid);
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{
+        @intFromEnum(Opcode.PUSH1),
+        2,
+        @intFromEnum(Opcode.PUSH1),
+        3,
+        @intFromEnum(Opcode.ADD),
+    };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
         .revision = .latest,
     });
     defer frame.deinit();
@@ -1104,12 +1135,11 @@ pub fn For(comptime ProtocolType: type) type {
             return Self.executeDispatchEntry(Self.dispatchEntryForByte(opcode_byte), frame);
         }
 
-        pub inline fn localFastPathBuiltin(comptime opcode: Opcode) bool {
+        pub inline fn tailFastPathBuiltin(comptime opcode: Opcode) ?definition.Resolution {
             const entry = comptime Self.dispatchEntryForOpcode(opcode);
-            if (comptime entry.availability != .always) return false;
             return switch (comptime entry.dispatchTarget()) {
-                .builtin => |builtin| builtin == opcode,
-                .invalid, .custom => false,
+                .builtin => |builtin| if (builtin == opcode) entry.availability else null,
+                .invalid, .custom => null,
             };
         }
 

@@ -700,10 +700,13 @@ fn timeRuntimeCallForProtocol(
         .code_address = common.contract_address,
     };
 
+    var bytecode = try evmz.Bytecode.init(allocator, runtime_code);
+    defer bytecode.deinit(allocator);
+
     var frame = try Interpreter.OwnedCallFrame(Protocol).init(allocator, .{
         .host = host,
         .msg = &msg,
-        .code = runtime_code,
+        .bytecode = &bytecode,
         .revision = revision,
     });
     errdefer frame.deinit();

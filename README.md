@@ -18,8 +18,8 @@ witness-in, roots-out state-transition function that runs as a zkVM guest.
   (`evmc_create_evmz`).
 - **Programmable** — swap forks, gas tables, opcodes, and precompiles by
   writing a definition type, not by forking the interpreter.
-- **Fast** — benchmarked against evmone and revm; strongest on storage-write
-  and ERC20-style workloads.
+- **Fast** — tail-call fast lane plus pooled executor; leads measured ERC20 and
+  warm-SSTORE fixtures while publishing the losing rows against evmone/revm.
 
 ## Install
 
@@ -104,21 +104,55 @@ State execution is validated against the locked Ethereum Execution Spec Tests
 corpus: `66,668` state vectors, `0` failed, `0` skipped. The EEST runner and
 fixture tooling live in `eest/`.
 
-Portable-release benchmark snapshot (median ms per call, lower is better):
+Fixed-Osaka benchmark snapshot (Apple M1 Max, ReleaseFast, median ms per
+deployed-runtime call; lower is better):
 
-Apple M1 Max
+`zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -- --spec osaka`
 
-| VM-loop fixture     |    evmz | evmone-base | evmone-adv | revm-int |
-| ------------------- | ------: | ----------: | ---------: | -------: |
-| Arithmetic loop     | `0.230` |     `0.090` |    `0.325` |  `0.504` |
-| Keccak loop         | `3.630` |     `3.608` |    `3.712` |  `2.917` |
-| Storage SSTORE loop | `0.359` |     `1.157` |    `1.157` |  `1.150` |
-| ERC20 mint          | `3.452` |     `4.257` |    `5.253` |  `3.977` |
-| ERC20 transfer      | `6.268` |     `6.845` |    `8.089` |  `6.911` |
+| VM-loop fixture          |     evmz | evmone-base | evmone-adv | revm-int |
+| ------------------------ | -------: | ----------: | ---------: | -------: |
+| Arithmetic loop          |  `0.156` |     `0.090` |    `0.325` |  `1.196` |
+| Memory MSTORE loop       |  `0.145` |     `0.089` |    `0.256` |  `0.986` |
+| Keccak loop              |  `3.549` |     `3.555` |    `3.629` |  `5.277` |
+| Ten-thousand hashes      |  `1.179` |     `0.739` |    `1.583` |  `4.313` |
+| Storage SLOAD loop       |  `0.140` |     `0.076` |    `0.101` |  `0.337` |
+| Storage SSTORE loop      |  `0.360` |     `1.136` |    `1.163` |  `1.754` |
+| LOG0 loop                |  `0.098` |     `0.030` |    `0.081` |  `0.134` |
+| ERC20 mint               |  `3.159` |     `4.273` |    `5.157` |  `5.302` |
+| ERC20 transfer           |  `5.673` |     `6.589` |    `7.905` |  `9.703` |
+| ERC20 approval+transfer  |  `4.896` |     `5.240` |    `6.164` |  `8.058` |
+| Snailtracer              | `60.457` |    `57.049` |   `76.005` | `60.559` |
 
-evmz leads on storage-heavy and ERC20 flows; evmone's baseline interpreter
-still wins tight dispatch loops. Full methodology, fixtures, and commands are
-in `bench/README.md`.
+<details>
+<summary>The evmz approach</summary>
+
+evmz bets on compile-time protocol specialization. A protocol (fork range, gas
+schedules, opcode availability, dispatch targets) is a comptime value; the
+256-entry dispatch table, static gas constants, and fork gates are resolved at
+build time and baked into the binary. There is no runtime revision branching on
+the hot path — a fork-gated opcode either compiles to a direct handler
+(available across the whole supported range), a cheap revision check, or falls
+out of the fast lane entirely.
+
+Execution is two-tier. A narrow tail-call fast lane covers the hot,
+always-available opcodes with machine state (instruction pointer, stack pointer,
+gas) carried in registers as tail-call arguments. Everything else — fork-gated
+ops, custom dispatch overrides, CALL/CREATE, tracing — spills to the generic
+handler set that operates on the full CallFrame. The seam is explicit: custom
+fork configurations and opcode overrides never tax the hot lane; they simply
+route to the cold tier.
+
+Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
+messages, and IO buffers live in preallocated slots (optionally hard-bounded for
+embedded/zkVM targets), and the state journal is cheap enough that the full
+executor benches within noise of the raw interpreter. This is why evmz is
+fastest of all measured engines on the realistic fixtures (ERC-20
+mint/transfer, warm-SSTORE) even where it trails on synthetic single-opcode
+loops.
+
+</details>
+
+Full methodology, fixtures, and commands are in `bench/README.md`.
 
 ## Roadmap
 
