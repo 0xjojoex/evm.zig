@@ -20,6 +20,9 @@ From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
 `summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
 The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
 when intentionally testing another shared fork.
+Use repeated `--engine` filters for narrower runs. `--engine evmz` runs only
+evmz, while `--engine evmone` expands to both evmone baseline and advanced, and
+`--engine revm` expands to `revm-interpreter`.
 
 The executor/transaction comparison is intentionally a later lane. For now
 `evmz-executor` remains available as a diagnostic target, but it is not mixed

@@ -34,6 +34,9 @@ const Options = struct {
     zig_exe: []const u8 = "zig",
     optimize: []const u8 = "ReleaseFast",
     profile: []const u8 = "native",
+    support_min: ?[]const u8 = null,
+    support_max: ?[]const u8 = null,
+    engines: std.ArrayList(Engine) = .empty,
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
     spec: ?[]const u8 = "osaka",
@@ -77,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
 
     const options = try parseOptions(init, arena);
     const fixtures = if (options.fixtures.items.len == 0) default_fixtures[0..] else options.fixtures.items;
+    const engines: []const Engine = if (options.engines.items.len == 0) engine_order[0..] else options.engines.items;
     const timestamp = std.Io.Clock.real.now(init.io).nanoseconds;
     const out_dir = options.out_dir orelse try std.fmt.allocPrint(arena, "zig-out/compare/{d}", .{timestamp});
 
@@ -85,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     var rows: std.ArrayList(Row) = .empty;
     for (fixtures) |fixture| {
         const fixture_name = baseName(fixture);
-        for (engine_order) |engine| {
+        for (engines) |engine| {
             const argv = try engineCommand(arena, options, fixture, engine);
             const label = try std.fmt.allocPrint(arena, "{s}-{s}", .{ fixture_name, engineName(engine) });
             const raw = try runCommand(init.io, arena, label, argv, out_dir);
@@ -133,6 +137,21 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.profile = try parseProfile(allocator, value);
         } else if (stripPrefix(arg, "--profile=")) |value| {
             options.profile = try parseProfile(allocator, value);
+        } else if (std.mem.eql(u8, arg, "--support-min")) {
+            const value = args.next() orelse return error.MissingSupportMin;
+            options.support_min = try allocator.dupe(u8, value);
+        } else if (stripPrefix(arg, "--support-min=")) |value| {
+            options.support_min = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--support-max")) {
+            const value = args.next() orelse return error.MissingSupportMax;
+            options.support_max = try allocator.dupe(u8, value);
+        } else if (stripPrefix(arg, "--support-max=")) |value| {
+            options.support_max = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--engine")) {
+            const value = args.next() orelse return error.MissingEngine;
+            try appendEngineFilter(allocator, &options.engines, value);
+        } else if (stripPrefix(arg, "--engine=")) |value| {
+            try appendEngineFilter(allocator, &options.engines, value);
         } else if (std.mem.eql(u8, arg, "--fixture")) {
             const value = args.next() orelse return error.MissingFixture;
             try options.fixtures.append(allocator, try allocator.dupe(u8, value));
@@ -175,6 +194,9 @@ fn printUsage() void {
         \\  --zig-exe <path>       Zig executable used for child bench steps
         \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
         \\  --profile <profile>    evmz build profile forwarded to child Zig builds
+        \\  --support-min <name>   minimum evmz fork compiled into the VM-loop runner
+        \\  --support-max <name>   maximum evmz fork compiled into the VM-loop runner
+        \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, revm, evmone-baseline, evmone-advanced, revm-interpreter
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
         \\  --spec <name>          fork spec forwarded to each engine, default osaka
@@ -182,6 +204,50 @@ fn printUsage() void {
         \\  --json                 print JSON summary instead of markdown table
         \\
     , .{});
+}
+
+fn appendEngineFilter(allocator: std.mem.Allocator, engines: *std.ArrayList(Engine), value: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    var appended = false;
+    while (parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t\r\n");
+        if (part.len == 0) continue;
+
+        if (std.mem.eql(u8, part, "all")) {
+            for (engine_order) |engine| try appendEngineUnique(allocator, engines, engine);
+            appended = true;
+        } else if (std.mem.eql(u8, part, "evmone")) {
+            try appendEngineUnique(allocator, engines, .evmone_baseline);
+            try appendEngineUnique(allocator, engines, .evmone_advanced);
+            appended = true;
+        } else if (std.mem.eql(u8, part, "revm")) {
+            try appendEngineUnique(allocator, engines, .revm_interpreter);
+            appended = true;
+        } else if (parseEngine(part)) |engine| {
+            try appendEngineUnique(allocator, engines, engine);
+            appended = true;
+        } else {
+            std.debug.print("unknown engine: {s}\n", .{part});
+            printUsage();
+            return error.UnknownEngine;
+        }
+    }
+    if (!appended) return error.EmptyEngineFilter;
+}
+
+fn appendEngineUnique(allocator: std.mem.Allocator, engines: *std.ArrayList(Engine), engine: Engine) !void {
+    for (engines.items) |existing| {
+        if (existing == engine) return;
+    }
+    try engines.append(allocator, engine);
+}
+
+fn parseEngine(value: []const u8) ?Engine {
+    if (std.mem.eql(u8, value, "evmz")) return .evmz;
+    if (std.mem.eql(u8, value, "evmone-baseline") or std.mem.eql(u8, value, "evmone-base")) return .evmone_baseline;
+    if (std.mem.eql(u8, value, "evmone-advanced") or std.mem.eql(u8, value, "evmone-adv")) return .evmone_advanced;
+    if (std.mem.eql(u8, value, "revm-interpreter")) return .revm_interpreter;
+    return null;
 }
 
 fn engineCommand(
@@ -202,6 +268,12 @@ fn engineCommand(
     }
     if (engine == .evmz) {
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
+        if (options.support_min) |support_min| {
+            try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-min={s}", .{support_min}));
+        }
+        if (options.support_max) |support_max| {
+            try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-max={s}", .{support_max}));
+        }
     }
 
     try argv.append(allocator, switch (engine) {

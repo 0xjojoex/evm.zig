@@ -1,0 +1,84 @@
+name: Portability
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-test:
+    name: Native Linux tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run unit tests
+        run: zig build test --summary all
+
+  cross-compile:
+    name: Cross compile ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+          - target: aarch64-linux-musl
+          - target: riscv64-linux-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Record target
+        run: |
+          {
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "target=${{ matrix.target }}"
+            echo
+            uname -a
+            echo
+            lscpu
+            echo
+            zig version
+          } | tee portability-${{ matrix.target }}.txt
+
+      - name: Cross compile
+        env:
+          TARGET: ${{ matrix.target }}
+        run: zig build -Dtarget="${TARGET}" -Doptimize=ReleaseFast --summary all

@@ -1,0 +1,157 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      num_runs:
+        description: "Samples per engine/fixture"
+        required: true
+        default: "100"
+      spec:
+        description: "Fork spec forwarded to each engine"
+        required: true
+        default: "osaka"
+      bench_support_min:
+        description: "Minimum compiled evmz benchmark fork"
+        required: true
+        default: "osaka"
+      bench_support_max:
+        description: "Maximum compiled evmz benchmark fork"
+        required: true
+        default: "osaka"
+      fixture:
+        description: "Optional single fixture path, for example fixtures/vm-loop/erc20-transfer"
+        required: false
+        default: ""
+      engines:
+        description: "Engine set: all, evmz, evmone, revm, or comma-separated engine names"
+        required: true
+        default: "all"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  vm-loop-compare:
+    name: VM-loop compare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      OUT_DIR: zig-out/compare/benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+      NUM_RUNS: ${{ inputs.num_runs }}
+      SPEC: ${{ inputs.spec }}
+      BENCH_SUPPORT_MIN: ${{ inputs.bench_support_min }}
+      BENCH_SUPPORT_MAX: ${{ inputs.bench_support_max }}
+      FIXTURE: ${{ inputs.fixture }}
+      ENGINES: ${{ inputs.engines }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Rust
+        if: ${{ inputs.engines == 'all' || contains(inputs.engines, 'revm') }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Record benchmark environment
+        run: |
+          mkdir -p "bench/${OUT_DIR}"
+          {
+            echo "ref=${GITHUB_REF}"
+            echo "sha=${GITHUB_SHA}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo
+            uname -a
+            echo
+            lscpu
+            echo
+            zig version
+            zig env
+            echo
+            rustc -Vv
+            cargo -V
+          } | tee "bench/${OUT_DIR}/environment.txt"
+
+      - name: Run fixed-Osaka comparison
+        run: |
+          set -euo pipefail
+
+          args=(
+            --spec "${SPEC}"
+            --num-runs "${NUM_RUNS}"
+            --out-dir "${OUT_DIR}"
+          )
+
+          if [[ -n "${FIXTURE}" ]]; then
+            args+=(--fixture "${FIXTURE}")
+          fi
+
+          if [[ "${ENGINES}" != "all" ]]; then
+            IFS=',' read -ra selected_engines <<< "${ENGINES}"
+            for engine in "${selected_engines[@]}"; do
+              engine="${engine//[[:space:]]/}"
+              if [[ -n "${engine}" ]]; then
+                args+=(--engine "${engine}")
+              fi
+            done
+          fi
+
+          zig build bench-compare \
+            -Dbench-optimize=ReleaseFast \
+            -Dbench-support-min="${BENCH_SUPPORT_MIN}" \
+            -Dbench-support-max="${BENCH_SUPPORT_MAX}" \
+            -- "${args[@]}" | tee "bench/${OUT_DIR}/compare.md"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## VM-loop benchmark"
+            echo
+            echo "- Ref: \`${GITHUB_REF}\`"
+            echo "- SHA: \`${GITHUB_SHA}\`"
+            echo "- Runs: \`${NUM_RUNS}\`"
+            echo "- Spec: \`${SPEC}\`"
+            echo "- evmz compiled fork range: \`${BENCH_SUPPORT_MIN}..${BENCH_SUPPORT_MAX}\`"
+            echo "- Engines: \`${ENGINES}\`"
+            if [[ -n "${FIXTURE}" ]]; then
+              echo "- Fixture: \`${FIXTURE}\`"
+            fi
+            echo
+            if [[ -f "bench/${OUT_DIR}/summary.csv" ]]; then
+              echo "### summary.csv"
+              echo
+              echo '```csv'
+              cat "bench/${OUT_DIR}/summary.csv"
+              echo '```'
+            else
+              echo "No benchmark summary was produced."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench/${{ env.OUT_DIR }}
+          if-no-files-found: warn
+          retention-days: 30

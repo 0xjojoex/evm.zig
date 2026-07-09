@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
         addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
         addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, profile);
-        addBenchDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name, profile);
+        addBenchCompareDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
         addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, profile);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, profile);
@@ -345,6 +345,36 @@ fn addBenchDelegate(
     run.setCwd(b.path("bench"));
 
     const step = b.step(step_name, description);
+    step.dependOn(&run.step);
+}
+
+fn addBenchCompareDelegate(
+    b: *std.Build,
+    optimize_name: []const u8,
+    support_min: ?[]const u8,
+    support_max: ?[]const u8,
+    profile: []const u8,
+) void {
+    const run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+    });
+    run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
+    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    if (support_min) |revision| {
+        run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
+    }
+    if (support_max) |revision| {
+        run.addArg(b.fmt("-Dbench-support-max={s}", .{revision}));
+    }
+    run.addArg("compare");
+    if (b.args) |args| {
+        run.addArg("--");
+        run.addArgs(args);
+    }
+    run.setCwd(b.path("bench"));
+
+    const step = b.step("bench-compare", "Run VM-core comparison");
     step.dependOn(&run.step);
 }
 

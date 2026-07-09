@@ -18,8 +18,9 @@ witness-in, roots-out state-transition function that runs as a zkVM guest.
   (`evmc_create_evmz`).
 - **Programmable** — swap forks, gas tables, opcodes, and precompiles by
   writing a definition type, not by forking the interpreter.
-- **Fast** — tail-call fast lane plus pooled executor; leads measured ERC20 and
-  warm-SSTORE fixtures while publishing the losing rows against evmone/revm.
+- **Fast** — tail-call fast lane plus pooled executor; leads ERC20
+  mint/transfer, warm-SSTORE, and snailtracer rows while publishing the losing
+  rows against evmone/revm.
 
 ## Install
 
@@ -104,24 +105,24 @@ State execution is validated against the locked Ethereum Execution Spec Tests
 corpus: `66,668` state vectors, `0` failed, `0` skipped. The EEST runner and
 fixture tooling live in `eest/`.
 
-Fixed-Osaka benchmark snapshot (Apple M1 Max, ReleaseFast, median ms per
+Fixed-Osaka benchmark snapshot (Apple M1 Max, ReleaseFast, 100-run median ms per
 deployed-runtime call; lower is better):
 
-`zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -- --spec osaka`
+`zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -- --spec osaka --num-runs 100`
 
 | VM-loop fixture          |     evmz | evmone-base | evmone-adv | revm-int |
 | ------------------------ | -------: | ----------: | ---------: | -------: |
-| Arithmetic loop          |  `0.156` |     `0.090` |    `0.325` |  `1.196` |
-| Memory MSTORE loop       |  `0.145` |     `0.089` |    `0.256` |  `0.986` |
-| Keccak loop              |  `3.549` |     `3.555` |    `3.629` |  `5.277` |
-| Ten-thousand hashes      |  `1.179` |     `0.739` |    `1.583` |  `4.313` |
-| Storage SLOAD loop       |  `0.140` |     `0.076` |    `0.101` |  `0.337` |
-| Storage SSTORE loop      |  `0.360` |     `1.136` |    `1.163` |  `1.754` |
-| LOG0 loop                |  `0.098` |     `0.030` |    `0.081` |  `0.134` |
-| ERC20 mint               |  `3.159` |     `4.273` |    `5.157` |  `5.302` |
-| ERC20 transfer           |  `5.673` |     `6.589` |    `7.905` |  `9.703` |
-| ERC20 approval+transfer  |  `4.896` |     `5.240` |    `6.164` |  `8.058` |
-| Snailtracer              | `60.457` |    `57.049` |   `76.005` | `60.559` |
+| Arithmetic loop          |  `0.154` |     `0.090` |    `0.325` |  `0.642` |
+| Memory MSTORE loop       |  `0.145` |     `0.089` |    `0.251` |  `0.580` |
+| Keccak loop              |  `3.525` |     `3.581` |    `3.635` |  `2.714` |
+| Ten-thousand hashes      |  `1.072` |     `0.737` |    `1.581` |  `2.068` |
+| Storage SLOAD loop       |  `0.134` |     `0.077` |    `0.101` |  `0.178` |
+| Storage SSTORE loop      |  `0.345` |     `1.131` |    `1.157` |  `1.166` |
+| LOG0 loop                |  `0.093` |     `0.030` |    `0.081` |  `0.257` |
+| ERC20 mint               |  `3.171` |     `4.257` |    `5.095` |  `3.967` |
+| ERC20 transfer           |  `5.590` |     `6.775` |    `7.891` |  `6.443` |
+| ERC20 approval+transfer  |  `4.816` |     `5.181` |    `6.163` |  `4.790` |
+| Snailtracer              | `29.889` |    `55.801` |   `75.837` | `38.480` |
 
 <details>
 <summary>The evmz approach</summary>
@@ -146,9 +147,9 @@ Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
 messages, and IO buffers live in preallocated slots (optionally hard-bounded for
 embedded/zkVM targets), and the state journal is cheap enough that the full
 executor benches within noise of the raw interpreter. This is why evmz is
-fastest of all measured engines on the realistic fixtures (ERC-20
-mint/transfer, warm-SSTORE) even where it trails on synthetic single-opcode
-loops.
+fastest of all measured engines on ERC-20 mint/transfer, warm-SSTORE, and
+snailtracer, while still trailing specialized competitors on some synthetic
+single-opcode loops and the revm keccak row.
 
 </details>
 

@@ -177,6 +177,10 @@ pub fn build(b: *std.Build) void {
             @tagName(compare_optimize),
             "--profile",
             profile,
+            "--support-min",
+            vm_loop_support_min,
+            "--support-max",
+            vm_loop_support_max,
         });
         if (b.args) |args| run_compare.addArgs(args);
         b.step("compare", "Run VM-core comparison").dependOn(&run_compare.step);
