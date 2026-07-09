@@ -184,9 +184,8 @@ Case tiers:
 ## Comparison report
 
 `zig build report` runs the VM-loop fixtures across evmz/evmone/revm,
-the host-boundary matrix, opcode kernels against evmz/evmone/revm, and a small
-representative EEST integration slice. It writes raw CSVs, a Markdown report,
-and a compact evmz checkpoint JSON:
+the host-boundary matrix, and opcode kernels against evmz/evmone/revm. It
+writes raw CSVs, a Markdown report, and a compact evmz checkpoint JSON:
 
 ```sh
 cd bench
@@ -208,3 +207,9 @@ Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
 the compact JSON somewhere stable. Use `--baseline <path>` to include
 evmz-vs-evmz deltas in the report after an optimization branch.
+
+Generated EEST benchmark fixtures are intentionally not part of this report
+lane. The previous report integration mixed host, fixture, and precompile
+semantics with VM timing, so future EEST benchmark reporting should first adapt
+meaningful cases into the VM-loop protocol or a separate fair block-verdict
+lane.

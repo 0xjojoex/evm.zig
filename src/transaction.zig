@@ -3,13 +3,13 @@
 const std = @import("std");
 
 const blob_mod = @import("./transaction/blob.zig");
-const eth_transaction = @import("./eth/transaction.zig");
 const gas_mod = @import("./transaction/gas.zig");
 const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 const prepare_mod = @import("./transaction/prepare.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
+pub const signing = @import("./transaction/signing.zig");
 const validation_mod = @import("./transaction/validation.zig");
 const transaction_mod = @import("./transaction/types.zig");
 
@@ -38,8 +38,12 @@ pub const FeeInput = settlement_mod.FeeInput;
 pub const Settlement = settlement_mod.Settlement;
 pub const SettlementFees = settlement_mod.SettlementFees;
 pub const ExecutionGasResult = settlement_mod.ExecutionGasResult;
+pub const BlockGas = settlement_mod.BlockGas;
+pub const ResultGas = settlement_mod.ResultGas;
 pub const SettlementCosts = settlement_mod.SettlementCosts;
 pub const SettlementPrecharge = settlement_mod.Precharge;
+pub const SenderRecovery = signing.SenderRecovery;
+pub const SenderRecoveryError = signing.SenderRecoveryError;
 
 pub const transactionView = transaction_mod.transactionView;
 pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
@@ -51,6 +55,9 @@ pub const checkedGasCost = settlement_mod.checkedGasCost;
 pub const Prepared = transaction_mod.Prepared;
 pub const PrepareInput = transaction_mod.PrepareInput;
 pub const PrepareResult = transaction_mod.PrepareResult;
+pub const recoverSender = signing.recoverSender;
+pub const signingHash = signing.signingHash;
+pub const recoverAuthorizationSigner = signing.recoverAuthorizationSigner;
 
 pub fn For(comptime ProtocolType: type) type {
     return struct {
@@ -111,6 +118,7 @@ test "transaction facade exposes root frame and transaction scope" {
 }
 
 test "transaction bound namespace carries comptime protocol" {
+    const blob_gas_per_blob: u64 = 131_072;
     const DoubleBlobProtocol = struct {
         pub const Revision = enum { test_revision };
 
@@ -121,10 +129,10 @@ test "transaction bound namespace carries comptime protocol" {
                     .target = 3,
                     .max = 6,
                     .max_per_transaction = 6,
-                    .gas_per_blob = eth_transaction.blob_gas_per_blob * 2,
-                    .min_base_fee = eth_transaction.min_blob_base_fee,
-                    .execution_base_cost = eth_transaction.blob_base_cost,
-                    .base_fee_update_fraction = eth_transaction.cancun_blob_base_fee_update_fraction,
+                    .gas_per_blob = blob_gas_per_blob * 2,
+                    .min_base_fee = 1,
+                    .execution_base_cost = 8_192,
+                    .base_fee_update_fraction = 3_338_477,
                     .reserve_price_active = false,
                 };
             }
@@ -133,7 +141,7 @@ test "transaction bound namespace carries comptime protocol" {
     const Bound = For(DoubleBlobProtocol);
 
     try std.testing.expectEqual(
-        @as(u256, 10 + eth_transaction.blob_gas_per_blob * 2),
+        @as(u256, 10 + blob_gas_per_blob * 2),
         Bound.validation.prepaymentCost(.test_revision, 10, 1, 1, 1).?,
     );
 }

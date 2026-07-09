@@ -57,6 +57,7 @@ fn ValidationInput(comptime Protocol: type) type {
         base_fee: u256 = 0,
         block_gas_limit: u64 = 0,
         blob_base_fee: u256 = 0,
+        blob_schedule: ?blob.BlobSchedule = null,
         max_fee_per_gas: ?u256 = null,
         max_priority_fee_per_gas: ?u256 = null,
         max_fee_per_blob_gas: ?u256 = null,
@@ -98,9 +99,9 @@ pub fn For(comptime ProtocolType: type) type {
             if (input.kind == .blob) {
                 if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_3_tx_contract_creation;
                 if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
-                const BlobProtocol = blob.For(Protocol);
-                if (input.blob_hashes.len > BlobProtocol.maxBlobCount(input.revision)) return .type_3_tx_max_blob_gas_allowance_exceeded;
-                if (input.blob_hashes.len > BlobProtocol.maxBlobCountPerTransaction(input.revision)) return .type_3_tx_blob_count_exceeded;
+                const schedule = effectiveBlobSchedule(Protocol, input.revision, input.blob_schedule) orelse return .type_3_tx_max_blob_gas_allowance_exceeded;
+                if (input.blob_hashes.len > maxBlobCount(schedule)) return .type_3_tx_max_blob_gas_allowance_exceeded;
+                if (input.blob_hashes.len > maxBlobCountPerTransaction(schedule)) return .type_3_tx_blob_count_exceeded;
                 for (input.blob_hashes) |hash| {
                     if (!Protocol.Transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
                 }
@@ -173,7 +174,7 @@ pub fn For(comptime ProtocolType: type) type {
             };
             const blob_fee = if (input.kind == .blob) input.max_fee_per_blob_gas orelse return null else 0;
             const gas_cost = uint256.checkedMul(@as(u256, input.gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(Protocol, input.revision, if (input.kind == .blob) input.blob_hashes.len else 0) orelse return null;
+            const blob_gas = blobGasForCount(Protocol, input.revision, input.blob_schedule, if (input.kind == .blob) input.blob_hashes.len else 0) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_fee) orelse return null;
             const transaction_cost = uint256.checkedAdd(gas_cost, blob_cost) orelse return null;
             return uint256.checkedAdd(transaction_cost, input.value);
@@ -182,7 +183,7 @@ pub fn For(comptime ProtocolType: type) type {
         pub fn prepaymentCost(revision: Protocol.Revision, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
             definition_support.assertRevisionSupported(Protocol, revision);
             const gas_cost = uint256.checkedMul(@as(u256, gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(Protocol, revision, blob_count) orelse return null;
+            const blob_gas = blobGasForCount(Protocol, revision, null, blob_count) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_base_fee) orelse return null;
             return uint256.checkedAdd(gas_cost, blob_cost);
         }
@@ -200,9 +201,21 @@ pub fn For(comptime ProtocolType: type) type {
     };
 }
 
-fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_count: usize) ?u256 {
+fn effectiveBlobSchedule(comptime Protocol: type, revision: Protocol.Revision, blob_schedule: ?blob.BlobSchedule) ?blob.BlobSchedule {
+    return blob_schedule orelse Protocol.Transaction.blobSchedule(revision);
+}
+
+fn maxBlobCount(schedule: blob.BlobSchedule) usize {
+    return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
+}
+
+fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
+    return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
+}
+
+fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = Protocol.Transaction.blobSchedule(revision) orelse return null;
+    const schedule = effectiveBlobSchedule(Protocol, revision, blob_schedule) orelse return null;
     return blob.blobGasForSchedule(schedule, blob_count);
 }
 
@@ -254,6 +267,39 @@ test "transaction prepayment uses comptime blob gas" {
         .blob_hashes = input.blob_hashes,
     }).?;
     try std.testing.expectEqual(default + @as(u256, eth_transaction.blob_gas_per_blob * hashes.len * 5), custom);
+}
+
+test "transaction validation uses runtime blob schedule" {
+    var schedule = eth_transaction.Transaction.blobSchedule(.cancun).?;
+    const hashes = [_]u256{
+        @as(u256, 0x01) << 248,
+        (@as(u256, 0x01) << 248) | 1,
+    };
+
+    schedule.max = 1;
+    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, For(ethereumDefinition()).validate(.{
+        .revision = .cancun,
+        .kind = .blob,
+        .gas_limit = 21_000,
+        .max_fee_per_gas = 1,
+        .max_fee_per_blob_gas = 1,
+        .blob_schedule = schedule,
+        .blob_hashes = &hashes,
+        .sender_balance = 1_000_000,
+    }).?);
+
+    schedule.max = 6;
+    schedule.gas_per_blob = eth_transaction.blob_gas_per_blob * 2;
+    const cost = For(ethereumDefinition()).maxPrepaymentCost(.{
+        .revision = .cancun,
+        .kind = .blob,
+        .gas_limit = 500_000,
+        .max_fee_per_gas = 7,
+        .max_fee_per_blob_gas = 5,
+        .blob_schedule = schedule,
+        .blob_hashes = &hashes,
+    }).?;
+    try std.testing.expectEqual(@as(u256, 500_000 * 7 + eth_transaction.blob_gas_per_blob * 2 * hashes.len * 5), cost);
 }
 
 test "transaction validation rejects intrinsic gas below limit" {

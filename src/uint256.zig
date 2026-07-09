@@ -9,7 +9,13 @@ pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
     return std.mem.readInt(u256, bytes, .big);
 }
 
-pub inline fn toBytes32(bytes: *[32]u8, value: u256) void {
+pub inline fn toBytes32(value: u256) [32]u8 {
+    var bytes: [32]u8 = undefined;
+    writeBytes32(&bytes, value);
+    return bytes;
+}
+
+pub inline fn writeBytes32(bytes: *[32]u8, value: u256) void {
     std.mem.writeInt(u256, bytes, value, .big);
 }
 
@@ -670,9 +676,12 @@ test "bytes32 conversion uses Ethereum byte order" {
     bytes[31] = 1;
     try std.testing.expectEqual(@as(u256, 1), fromBytes32(&bytes));
 
-    toBytes32(&bytes, 0x1234);
+    bytes = toBytes32(0x1234);
     try std.testing.expectEqual(@as(u8, 0x12), bytes[30]);
     try std.testing.expectEqual(@as(u8, 0x34), bytes[31]);
+
+    writeBytes32(&bytes, 1);
+    try std.testing.expectEqual(@as(u8, 1), bytes[31]);
 }
 
 test addMod {

@@ -106,6 +106,8 @@ fixture tooling live in `eest/`.
 
 Portable-release benchmark snapshot (median ms per call, lower is better):
 
+Apple M1 Max
+
 | VM-loop fixture     |    evmz | evmone-base | evmone-adv | revm-int |
 | ------------------- | ------: | ----------: | ---------: | -------: |
 | Arithmetic loop     | `0.230` |     `0.090` |    `0.325` |  `0.504` |

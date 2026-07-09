@@ -19,9 +19,9 @@ pub const delegation_designator = params.delegation_designator;
 pub const delegation_code_len = params.delegation_code_len;
 
 /// secp256k1 group order `n`; upper bound for a valid signature `r`/`s` scalar.
-const secp256k1n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
+pub const secp256k1n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
 /// `n / 2`; EIP-2 low-`s` bound rejecting malleable signatures.
-const secp256k1_half_n = secp256k1n / 2;
+pub const secp256k1_half_n = secp256k1n / 2;
 
 /// Decode a delegation target from account code.
 ///

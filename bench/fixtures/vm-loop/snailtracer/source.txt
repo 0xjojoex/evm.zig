@@ -1,0 +1,4 @@
+evm-bench benchmark: snailtracer
+source: https://github.com/ziyadedher/evm-bench/tree/main/benchmarks/snailtracer
+original source: https://github.com/karalabe/snailtracer
+build: cd benchmarks/snailtracer && npx --package solc@0.4.26 solcjs --optimize --bin SnailTracer.sol

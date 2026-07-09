@@ -449,7 +449,7 @@ fn mstoreAtWordBoundaryCode(target_words: u64) [37]u8 {
     result[0] = 0x60; // PUSH1
     result[1] = 0xaa;
     result[2] = 0x7f; // PUSH32
-    uint256.toBytes32(result[3..35], offset);
+    uint256.writeBytes32(result[3..35], offset);
     result[35] = 0x52; // MSTORE
     result[36] = 0x00; // STOP
     return result;

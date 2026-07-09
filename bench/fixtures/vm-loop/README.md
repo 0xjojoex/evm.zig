@@ -9,8 +9,9 @@ Each fixture directory contains:
 - `host-profile.txt`: `null` or `mock`.
 
 The checked-in evm-bench fixtures were built from
-`github.com/ziyadedher/evm-bench` Solidity benchmarks with local
-`solc 0.8.28 --optimize --bin`.
+`github.com/ziyadedher/evm-bench` Solidity benchmarks. The Solidity 0.8 rows
+use local `solc 0.8.28 --optimize --bin`; the legacy `snailtracer` row uses
+`solcjs 0.4.26 --optimize --bin`.
 
 The `*-loop` micro fixtures are handrolled bytecode. They use compact counted
 loops with repeated opcode bodies so VM-loop reports can separate null-host

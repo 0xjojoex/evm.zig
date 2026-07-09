@@ -1,4 +1,4 @@
-//! evmz test helper for testing EVM bytecode execution.
+//! evmz test helper for testing EVM execution.
 
 const std = @import("std");
 const evmz = @import("./evm.zig");
@@ -6,6 +6,21 @@ const evmz = @import("./evm.zig");
 const Host = evmz.Host;
 const addr = evmz.addr;
 const Address = evmz.Address;
+
+/// Decode a comptime hex string literal into a fixed-size byte array.
+pub fn hexBytes(comptime hex: []const u8) [hex.len / 2]u8 {
+    @setEvalBranchQuota(10_000);
+    if (hex.len % 2 != 0) @compileError("hex literal must contain an even number of characters");
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, hex) catch unreachable;
+    return bytes;
+}
+
+/// Assert that `actual` equals the bytes decoded from a comptime hex literal.
+pub fn expectHex(actual: []const u8, comptime expected_hex: []const u8) !void {
+    const expected = hexBytes(expected_hex);
+    try std.testing.expectEqualSlices(u8, &expected, actual);
+}
 
 pub fn bytecode(comptime items: anytype) [bytecodeLen(items)]u8 {
     if (@typeInfo(@TypeOf(items)) == .pointer) {

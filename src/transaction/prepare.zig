@@ -35,6 +35,7 @@ pub fn For(comptime Protocol: type) type {
                 .base_fee = input.env.base_fee,
                 .block_gas_limit = input.env.gas_limit,
                 .blob_base_fee = input.env.blob_base_fee,
+                .blob_schedule = input.env.blob_schedule,
                 .max_fee_per_gas = view.fee.max_fee_per_gas,
                 .max_priority_fee_per_gas = view.fee.max_priority_fee_per_gas,
                 .max_fee_per_blob_gas = view.fee.max_fee_per_blob_gas,
@@ -64,6 +65,7 @@ pub fn For(comptime Protocol: type) type {
                 .value = view.value,
                 .blob_base_fee = input.env.blob_base_fee,
                 .blob_count = view.blob_hashes.len,
+                .blob_schedule = input.env.blob_schedule,
             });
 
             return .{ .executable = .{

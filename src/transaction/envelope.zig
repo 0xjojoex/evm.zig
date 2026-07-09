@@ -21,7 +21,7 @@ const eip7702 = @import("../executor/eip7702.zig");
 const tx = @import("./types.zig");
 const tx_type_id = @import("./type_id.zig");
 
-const set_code_transaction_type = tx_type_id.set_code;
+pub const set_code_transaction_type = tx_type_id.set_code;
 
 pub const TransactionEnvelope = union(enum) {
     legacy: []const u8,

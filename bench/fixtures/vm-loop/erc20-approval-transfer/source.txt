@@ -1,0 +1,4 @@
+evm-bench benchmark: erc20.approval-transfer
+source: https://github.com/ziyadedher/evm-bench/tree/main/benchmarks/erc20/approval-transfer
+build context: https://github.com/ziyadedher/evm-bench/tree/main/benchmarks/erc20
+build: cd benchmarks/erc20 && solc 0.8.28 --optimize --bin approval-transfer/ERC20ApprovalTransfer.sol

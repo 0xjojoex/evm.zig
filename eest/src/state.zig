@@ -267,21 +267,24 @@ fn runVector(
     const result = try host.transact(public_tx);
 
     if (expected_exception) |expected| {
-        if (result.validation_error) |err| {
-            if (tx_validation.validationErrorMatchesEest(err, expected)) {
+        switch (result) {
+            .rejected => |err| if (tx_validation.validationErrorMatchesEest(err, expected)) {
                 try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
                 return;
-            }
+            },
+            .executed => {},
         }
         summary.countFail(.expected_transaction_exception);
         return;
     }
-    if (result.validation_error) |err| {
-        summary.countFail(validationFailReason(err));
-        return;
-    }
 
-    try finishPostAssertions(allocator, fixture, &post_obj, &host, 0, result.output, summary);
+    switch (result) {
+        .rejected => |err| {
+            summary.countFail(validationFailReason(err));
+            return;
+        },
+        .executed => |executed| try finishPostAssertions(allocator, fixture, &post_obj, &host, 0, executed.output, summary),
+    }
 }
 
 fn validationFailReason(err: transaction.ValidationError) FailReason {

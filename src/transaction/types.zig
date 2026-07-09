@@ -8,6 +8,7 @@
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
+const BlobSchedule = @import("./blob.zig").BlobSchedule;
 
 pub const AccessListCounts = struct {
     addresses: usize = 0,
@@ -102,6 +103,9 @@ pub const EnvFacts = struct {
     prev_randao: u256 = 0,
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
+    /// Optional dynamic chain/fixture override for blob gas rules.
+    /// When null, transaction validation and settlement use the protocol schedule for the active revision.
+    blob_schedule: ?BlobSchedule = null,
 };
 
 pub const StateFacts = struct {

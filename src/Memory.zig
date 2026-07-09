@@ -87,7 +87,7 @@ pub fn write(self: *Memory, offset: usize, value: u256) void {
     assert(offset + word_size <= self.bytes.items.len);
 
     const bytes = self.bytes.items[offset..][0..word_size];
-    uint256.toBytes32(bytes, value);
+    uint256.writeBytes32(bytes, value);
 }
 
 pub fn writeBytes(self: *Memory, offset: usize, value: []const u8) void {

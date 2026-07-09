@@ -12,6 +12,8 @@ const default_fixtures = [_][]const u8{
     "fixtures/vm-loop/log0-loop",
     "fixtures/vm-loop/erc20-mint",
     "fixtures/vm-loop/erc20-transfer",
+    "fixtures/vm-loop/erc20-approval-transfer",
+    "fixtures/vm-loop/snailtracer",
 };
 
 const engine_order = [_]Engine{

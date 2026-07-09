@@ -7,7 +7,6 @@ import argparse
 import csv
 import datetime as dt
 import json
-import os
 import platform
 import re
 import statistics
@@ -20,18 +19,6 @@ from typing import Any, Iterable
 SCRIPT_DIR = Path(__file__).resolve().parent
 BENCH_DIR = SCRIPT_DIR.parent
 REPO_ROOT = BENCH_DIR.parent
-EEST_DIR = REPO_ROOT / "eest"
-
-DEFAULT_EEST_ROOT = (
-    REPO_ROOT
-    / ".eest"
-    / "benchmarks"
-    / "tests-benchmark-v0.0.9"
-    / "fixtures"
-    / "blockchain_tests"
-    / "benchmark"
-    / "compute"
-)
 
 VM_LOOP_FIXTURES = (
     "fixtures/vm-loop/arithmetic-loop",
@@ -43,41 +30,12 @@ VM_LOOP_FIXTURES = (
     "fixtures/vm-loop/log0-loop",
     "fixtures/vm-loop/erc20-mint",
     "fixtures/vm-loop/erc20-transfer",
+    "fixtures/vm-loop/erc20-approval-transfer",
+    "fixtures/vm-loop/snailtracer",
 )
 
 VM_LOOP_BASELINE_ENGINE = "evmz"
 VM_LOOP_ENGINES = (VM_LOOP_BASELINE_ENGINE, "evmone-baseline", "evmone", "revm")
-
-EEST_CASES = (
-    {
-        "name": "arith_add_1m",
-        "path": "instruction/arithmetic/arithmetic.json",
-        "matches": ("opcode_ADD--", "value_1M"),
-    },
-    {
-        "name": "memory_mstore_1m",
-        "path": "instruction/memory/memory_access.json",
-        "matches": (
-            "mem_size_0",
-            "offset_initialized_False",
-            "offset_0",
-            "opcode_MSTORE-benchmark",
-            "value_1M",
-        ),
-    },
-    {
-        "name": "control_jump_1m",
-        "path": "instruction/control_flow/jump_benchmark.json",
-        "matches": ("value_1M",),
-    },
-    {
-        "name": "storage_tload_1m",
-        "path": "instruction/storage/tload.json",
-        "matches": ("fixed_value_False", "fixed_key_False", "value_1M"),
-    },
-)
-
-EEST_ENGINES = ("evmz", "evmone-baseline", "evmone")
 
 
 def main() -> int:
@@ -89,15 +47,13 @@ def main() -> int:
 
     checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else out_dir / "evmz-checkpoint.json"
     report_path = resolve_path(args.report) if args.report else out_dir / "report.md"
-    eest_root = resolve_path(args.eest_root)
 
     env = collect_environment(args)
     vm_loop_rows = run_vm_loop(args, raw_dir)
     host_rows = run_host_matrix(args, raw_dir, out_dir)
     kernel_rows = run_kernel(args, raw_dir, out_dir)
-    eest_rows = run_eest(args, raw_dir, out_dir, eest_root)
 
-    checkpoint = build_checkpoint(env, args, vm_loop_rows, host_rows, kernel_rows, eest_rows)
+    checkpoint = build_checkpoint(env, args, vm_loop_rows, host_rows, kernel_rows)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
 
@@ -108,7 +64,6 @@ def main() -> int:
         vm_loop_rows=vm_loop_rows,
         host_rows=host_rows,
         kernel_rows=kernel_rows,
-        eest_rows=eest_rows,
         checkpoint_path=checkpoint_path,
         baseline_path=resolve_path(args.baseline) if args.baseline else None,
         checkpoint=checkpoint,
@@ -131,14 +86,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report")
     parser.add_argument("--checkpoint")
     parser.add_argument("--baseline")
-    parser.add_argument("--eest-root", default=str(DEFAULT_EEST_ROOT))
-    parser.add_argument("--skip-eest", action="store_true")
     parser.add_argument("--kernel-iterations", type=int, default=100_000)
     parser.add_argument("--host-iterations", type=int, default=100_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
-    parser.add_argument("--eest-iterations", type=int, default=3)
-    parser.add_argument("--eest-warmups", type=int, default=1)
     return parser.parse_args()
 
 
@@ -402,45 +353,6 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
     return read_csv_rows(path)
 
 
-def run_eest(args: argparse.Namespace, raw_dir: Path, out_dir: Path, eest_root: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if args.skip_eest:
-        write_csv(out_dir / "eest_summary.csv", rows, eest_columns())
-        return rows
-    if not eest_root.exists():
-        print(f"[bench-report] skip EEST: missing {eest_root}", file=sys.stderr)
-        write_csv(out_dir / "eest_summary.csv", rows, eest_columns())
-        return rows
-
-    for case in EEST_CASES:
-        path = eest_root / case["path"]
-        for engine in EEST_ENGINES:
-            argv = [
-                args.zig_exe,
-                "build",
-                f"-Dbench-optimize={args.optimize}",
-                *build_profile_args(args),
-                "bench",
-                "--",
-                "--engine",
-                engine,
-                "--iterations",
-                str(args.eest_iterations),
-                "--warmups",
-                str(args.eest_warmups),
-                "--max-tests",
-                "1",
-            ]
-            for match in case["matches"]:
-                argv.extend(("--match", match))
-            argv.append(os.path.relpath(path, EEST_DIR))
-            stdout, stderr = run_command(f"eest-{case['name']}-{engine}", argv, EEST_DIR, raw_dir)
-            rows.extend(parse_eest_rows(case["name"], stdout + "\n" + stderr))
-
-    write_csv(out_dir / "eest_summary.csv", rows, eest_columns())
-    return rows
-
-
 def run_command(name: str, argv: list[str], cwd: Path, raw_dir: Path) -> tuple[str, str]:
     print(f"[bench-report] {name}", file=sys.stderr)
     result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
@@ -458,39 +370,6 @@ def shell_quote(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_./:=+-]+", value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
-
-
-def parse_eest_rows(case_name: str, text: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if ": engine=" not in line or ".json::" not in line:
-            continue
-        left, rest = line.split(": engine=", 1)
-        json_sep = ".json::"
-        idx = left.find(json_sep)
-        if idx < 0:
-            continue
-        fixture = left[: idx + len(".json")]
-        test = left[idx + len(json_sep) :]
-        fields = parse_key_values("engine=" + rest)
-        rows.append(
-            {
-                "case": case_name,
-                "engine": fields.get("engine", ""),
-                "fixture": fixture,
-                "test": test,
-                "txs": int_value(fields.get("txs")),
-                "gas_used": int_value(fields.get("gas_used")),
-                "iterations": int_value(fields.get("iterations")),
-                "elapsed_ns": int_value(fields.get("elapsed_ns")),
-                "mgas_per_s": float_value(fields.get("mgas_per_s")),
-                "vm_elapsed_ns": int_value(fields.get("vm_elapsed_ns")),
-                "vm_mgas_per_s": float_value(fields.get("vm_mgas_per_s")),
-                "opcode_count": int_value(fields.get("opcode_count")),
-            }
-        )
-    return rows
 
 
 def parse_key_values(line: str) -> dict[str, str]:
@@ -551,34 +430,15 @@ def combine_csv_text(parts: Iterable[str]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def eest_columns() -> tuple[str, ...]:
-    return (
-        "case",
-        "engine",
-        "fixture",
-        "test",
-        "txs",
-        "gas_used",
-        "iterations",
-        "elapsed_ns",
-        "mgas_per_s",
-        "vm_elapsed_ns",
-        "vm_mgas_per_s",
-        "opcode_count",
-    )
-
-
 def build_checkpoint(
     env: dict[str, Any],
     args: argparse.Namespace,
     vm_loop_rows: list[dict[str, Any]],
     host_rows: list[dict[str, Any]],
     kernel_rows: list[dict[str, Any]],
-    eest_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     kernel = grouped_medians(kernel_rows, ("engine", "case"), "ns_per_iter")
     host = grouped_medians(host_rows, ("op", "boundary"), "ns_per_op")
-    eest = grouped_medians(eest_rows, ("engine", "case"), "vm_mgas_per_s")
     return {
         "schema": 1,
         "environment": env,
@@ -588,8 +448,6 @@ def build_checkpoint(
             "host_iterations": args.host_iterations,
             "repeats": args.repeats,
             "warmups": args.warmups,
-            "eest_iterations": args.eest_iterations,
-            "eest_warmups": args.eest_warmups,
         },
         "evmz": {
             "vm_loop_engine": VM_LOOP_BASELINE_ENGINE,
@@ -604,7 +462,6 @@ def build_checkpoint(
                 for (op, boundary), value in host.items()
                 if boundary == "evmz-interpreter-zig-host" and op.startswith("bytecode_")
             },
-            "eest_vm_mgas_per_s": flatten_engine_map(eest, "evmz"),
         },
     }
 
@@ -637,7 +494,6 @@ def render_report(
     vm_loop_rows: list[dict[str, Any]],
     host_rows: list[dict[str, Any]],
     kernel_rows: list[dict[str, Any]],
-    eest_rows: list[dict[str, Any]],
     checkpoint_path: Path,
     baseline_path: Path | None,
     checkpoint: dict[str, Any],
@@ -666,7 +522,6 @@ def render_report(
     lines.extend(render_vm_loop(vm_loop_rows))
     lines.extend(render_host(host_rows))
     lines.extend(render_kernel(kernel_rows))
-    lines.extend(render_eest(eest_rows))
     lines.extend(render_checkpoint_delta(checkpoint, baseline))
 
     return "\n".join(lines) + "\n"
@@ -769,36 +624,6 @@ def render_kernel(rows: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def render_eest(rows: list[dict[str, Any]]) -> list[str]:
-    if not rows:
-        return ["## EEST integration slice", "", "Skipped: benchmark fixtures not found or `--skip-eest` was set.", ""]
-    medians = grouped_medians(rows, ("engine", "case"), "vm_mgas_per_s")
-    cases = sorted({case for _, case in medians.keys()})
-    table = [["case", "evmz VM MGas/s", "evmone base", "evmone adv", "base/evmz", "adv/evmz"]]
-    for case in cases:
-        evmz = medians.get(("evmz", case))
-        base = medians.get(("evmone-baseline", case))
-        adv = medians.get(("evmone-advanced", case))
-        table.append(
-            [
-                case,
-                fmt_float(evmz, 1),
-                fmt_float(base, 1),
-                fmt_float(adv, 1),
-                fmt_ratio(base / evmz if base and evmz else None),
-                fmt_ratio(adv / evmz if adv and evmz else None),
-            ]
-        )
-    return [
-        "## EEST integration slice",
-        "",
-        "VM MGas/s uses the EEST runner's VM-timed scope. This slice is representative, not a full corpus run.",
-        "",
-        *markdown_table(table),
-        "",
-    ]
-
-
 def render_checkpoint_delta(checkpoint: dict[str, Any], baseline: dict[str, Any] | None) -> list[str]:
     if not baseline:
         return ["## Evmz checkpoint delta", "", "No baseline supplied. Pass `--baseline <checkpoint.json>` after an optimization branch.", ""]
@@ -806,7 +631,6 @@ def render_checkpoint_delta(checkpoint: dict[str, Any], baseline: dict[str, Any]
     rows: list[list[str]] = [["metric", "case", "baseline", "current", "delta"]]
     for section, direction in (
         ("kernel_ns_per_iter", "lower"),
-        ("eest_vm_mgas_per_s", "higher"),
         ("vm_loop_median_ms", "lower"),
     ):
         current_map = checkpoint.get("evmz", {}).get(section, {})

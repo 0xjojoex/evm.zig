@@ -36,6 +36,9 @@ pub const Env = struct {
     prev_randao: u256 = 0,
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
+    /// Optional dynamic chain/fixture override for blob gas rules.
+    /// When null, transaction validation and settlement use the protocol schedule for the active revision.
+    blob_schedule: ?transaction.BlobSchedule = null,
 
     pub fn txContext(
         self: Env,
@@ -61,31 +64,35 @@ pub const Env = struct {
     }
 };
 
-/// Terminal status of an executed transaction.
-///
-/// `rejected` means the transaction failed pre-execution validation (never ran);
-/// the other variants are outcomes of a transaction that did execute.
+/// Terminal status of a transaction that reached execution.
 pub const TxStatus = enum {
     success,
     revert,
     invalid,
     out_of_gas,
-    rejected,
+};
+
+/// Execution payload for a transaction that passed validation and ran.
+///
+/// `output` is borrowed from the VM and remains valid until the next VM call
+/// that can replace call output.
+pub const TxExecutionResult = struct {
+    status: TxStatus,
+    /// Settled transaction gas: receipt gas, refund gas, and block contribution.
+    gas: transaction.ResultGas = .{},
+    output: []const u8 = &.{},
+    created_address: ?Address = null,
 };
 
 /// Result of `Vm.transact`.
 ///
-/// `output` is borrowed from the VM and remains valid until the next VM call
-/// that can replace call output.
+/// Validation rejection is tx/protocol state, not execution. `BlockSession`
+/// reports block inclusion failures, such as block gas exhaustion, through
+/// Zig errors so rejected transactions cannot accidentally build receipts.
 pub fn TxResultFor(comptime Protocol: type) type {
-    return struct {
-        status: TxStatus,
-        gas_used: u64 = 0,
-        block_gas_used: u64 = 0,
-        gas_refunded: u64 = 0,
-        output: []const u8 = &.{},
-        created_address: ?Address = null,
-        validation_error: ?Protocol.Transaction.ValidationError = null,
+    return union(enum) {
+        executed: TxExecutionResult,
+        rejected: Protocol.Transaction.ValidationError,
     };
 }
 
@@ -95,16 +102,20 @@ pub fn TxResultFor(comptime Protocol: type) type {
 /// discard, commit, or VM teardown. Copy it when constructing owned receipts.
 pub const TxReceiptView = struct {
     status: TxStatus,
+    /// Receipt gas for this transaction.
     gas_used: u64 = 0,
-    block_gas_used: u64 = 0,
+    /// Receipt cumulative gas across accepted transactions in this block session.
     cumulative_gas_used: u64 = 0,
     created_address: ?Address = null,
     logs: []const Log = &.{},
 };
 
+/// Summary of accepted transactions in a `BlockSession`.
 pub const BlockResult = struct {
+    /// Cumulative receipt gas.
     gas_used: u64 = 0,
-    block_gas_used: u64 = 0,
+    /// Cumulative block/header gas contribution.
+    block_gas: transaction.BlockGas = .{},
     tx_count: u64 = 0,
 };
 
@@ -166,66 +177,58 @@ pub fn Vm(comptime Protocol: type) type {
 
         pub const RuntimeResources = executor_module.RuntimeResources;
         pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
+        pub const BlockGas = transaction.BlockGas;
+        pub const ResultGas = transaction.ResultGas;
 
         /// A single block's transaction sequence over one `Vm`.
         ///
         /// It executes session for multiple txs under one env, Not a Ethereum block processor.
         /// Feed transactions through `transact` to accumulate block-level gas
-        /// and the transaction count; each call snapshots so a rejected or
-        /// overflowing transaction rolls back without tearing down the block.
+        /// and the transaction count; each executable call snapshots so a tx
+        /// that cannot fit this block rolls back without tearing down the block.
         pub const BlockSession = struct {
             vm: *Self,
+            /// Cumulative receipt gas for accepted transactions.
             gas_used: u64 = 0,
-            block_gas_used: u64 = 0,
+            /// Cumulative block/header gas for accepted transactions.
+            block_gas: transaction.BlockGas = .{},
             tx_count: u64 = 0,
 
             pub fn transact(self: *BlockSession, tx: Self.Transaction) !Self.TxResult {
                 const prepared = try self.vm.prepareTransaction(tx);
                 switch (prepared) {
-                    .rejected => |err| return .{
-                        .status = .rejected,
-                        .validation_error = err,
-                    },
+                    .rejected => |err| return .{ .rejected = err },
                     .executable => |executable| {
                         var pre_tx = try self.vm.executor.snapshot();
                         defer pre_tx.deinit(self.vm.executor.allocator);
 
                         const result = try self.vm.executePreparedTransaction(executable);
-                        const next_block_gas = std.math.add(u64, self.block_gas_used, result.block_gas_used) catch {
-                            try self.vm.executor.restore(&pre_tx);
-                            return .{
-                                .status = .rejected,
-                            };
+                        const next_gas_used = std.math.add(u64, self.gas_used, result.gas.used) catch {
+                            return self.drop(&pre_tx);
                         };
-                        if (self.vm.env.gas_limit != 0 and next_block_gas > self.vm.env.gas_limit) {
-                            try self.vm.executor.restore(&pre_tx);
-                            return .{
-                                .status = .rejected,
-                            };
+                        const next_block_gas = self.block_gas.add(result.gas.block) catch {
+                            return self.drop(&pre_tx);
+                        };
+                        if (!next_block_gas.withinLimit(self.vm.env.gas_limit)) {
+                            return self.drop(&pre_tx);
                         }
 
-                        self.gas_used += result.gas_used;
-                        self.block_gas_used = next_block_gas;
+                        self.gas_used = next_gas_used;
+                        self.block_gas = next_block_gas;
                         self.tx_count += 1;
-                        return result;
+                        return .{ .executed = result };
                     },
                 }
             }
 
-            pub fn receipt(self: *const BlockSession, result: Self.TxResult) TxReceiptView {
+            pub fn receipt(self: *const BlockSession, result: TxExecutionResult) TxReceiptView {
                 return .{
                     .status = result.status,
-                    .gas_used = result.gas_used,
-                    .block_gas_used = result.block_gas_used,
+                    .gas_used = result.gas.used,
                     .cumulative_gas_used = self.gas_used,
                     .created_address = result.created_address,
-                    .logs = if (result.status == .rejected) &.{} else self.vm.logs(),
+                    .logs = self.vm.logs(),
                 };
-            }
-
-            pub fn transactReceipt(self: *BlockSession, tx: Self.Transaction) !TxReceiptView {
-                const result = try self.transact(tx);
-                return self.receipt(result);
             }
 
             pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
@@ -235,9 +238,14 @@ pub fn Vm(comptime Protocol: type) type {
             pub fn finish(self: *const BlockSession) BlockResult {
                 return .{
                     .gas_used = self.gas_used,
-                    .block_gas_used = self.block_gas_used,
+                    .block_gas = self.block_gas,
                     .tx_count = self.tx_count,
                 };
+            }
+
+            fn drop(self: *BlockSession, pre_tx: *Executor.Snapshot) !Self.TxResult {
+                try self.vm.executor.restore(pre_tx);
+                return error.BlockGasExceeded;
             }
         };
 
@@ -326,11 +334,8 @@ pub fn Vm(comptime Protocol: type) type {
         pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
             const prepared = try self.prepareTransaction(tx);
             return switch (prepared) {
-                .rejected => |err| .{
-                    .status = .rejected,
-                    .validation_error = err,
-                },
-                .executable => |executable| try self.executePreparedTransaction(executable),
+                .rejected => |err| .{ .rejected = err },
+                .executable => |executable| .{ .executed = try self.executePreparedTransaction(executable) },
             };
         }
 
@@ -347,7 +352,7 @@ pub fn Vm(comptime Protocol: type) type {
             return Protocol.Transaction.prepare(Protocol, input);
         }
 
-        fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !Self.TxResult {
+        fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !TxExecutionResult {
             try self.executor.beginTransactionScope(prepared.scope, prepared.root);
             errdefer self.executor.closeTransaction();
             const result = try self.executor.runTopLevelTransaction(prepared.scope, prepared.root, .{
@@ -363,9 +368,7 @@ pub fn Vm(comptime Protocol: type) type {
             });
             return .{
                 .status = txStatus(result.status),
-                .gas_used = costs.gas_used,
-                .block_gas_used = costs.block_gas_used,
-                .gas_refunded = costs.refunded_gas,
+                .gas = costs.gas,
                 .output = result.output_data,
                 .created_address = if (result.status == .success) prepared.created_address else null,
             };
@@ -375,7 +378,10 @@ pub fn Vm(comptime Protocol: type) type {
         /// `transact` many times, then one `commit`.
         pub fn transactCommit(self: *Self, tx: Self.Transaction) !Self.TxResult {
             const result = try self.transact(tx);
-            if (result.status == .rejected) return result;
+            switch (result) {
+                .rejected => return result,
+                .executed => {},
+            }
             try self.commit();
             return result;
         }
@@ -420,6 +426,7 @@ pub fn Vm(comptime Protocol: type) type {
                 .prev_randao = env.prev_randao,
                 .base_fee = env.base_fee,
                 .blob_base_fee = env.blob_base_fee,
+                .blob_schedule = env.blob_schedule,
             };
         }
 
@@ -459,11 +466,24 @@ pub fn Vm(comptime Protocol: type) type {
 
 const Default = evmz.Evm;
 
+fn expectExecuted(result: Default.TxResult) !TxExecutionResult {
+    return switch (result) {
+        .executed => |executed| executed,
+        .rejected => error.UnexpectedRejection,
+    };
+}
+
+fn expectRejected(result: Default.TxResult) !transaction.ValidationError {
+    return switch (result) {
+        .executed => error.UnexpectedExecution,
+        .rejected => |err| err,
+    };
+}
+
 test "Vm exposes protocol verbs and low-level executor field" {
     try std.testing.expect(@hasDecl(Default, "transact"));
     try std.testing.expect(@hasDecl(Default, "beginBlock"));
     try std.testing.expect(@hasDecl(Default.BlockSession, "receipt"));
-    try std.testing.expect(@hasDecl(Default.BlockSession, "transactReceipt"));
     try std.testing.expect(@hasDecl(Default, "systemCall"));
     try std.testing.expect(@hasDecl(Default, "logs"));
     try std.testing.expect(@hasDecl(Default, "commit"));
@@ -576,14 +596,14 @@ test "Vm transact validates and executes call transaction" {
     });
     defer vm.deinit();
 
-    const result = try vm.transact(.{
+    const result = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    try std.testing.expect(result.gas_used > 21_000);
-    try std.testing.expectEqual(result.gas_used, result.block_gas_used);
+    try std.testing.expect(result.gas.used > 21_000);
+    try std.testing.expectEqual(result.gas.used, result.gas.block.total);
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -634,11 +654,11 @@ test "Vm transact forwards BLOCKHASH to configured block hash source" {
     });
     defer vm.deinit();
 
-    const result = try vm.transact(.{
+    const result = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expectEqual(@as(?u64, 999), block_hashes.last_number);
 
@@ -666,11 +686,11 @@ test "Vm transact reports successful create address" {
     defer vm.deinit();
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
-    const result = try vm.transact(.{
+    const result = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .gas_limit = 300_000,
         .input = init_code,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expectEqualSlices(u8, &create_address, &result.created_address.?);
 
@@ -706,8 +726,7 @@ test "Vm transact returns rejected validation result" {
         .to = addr(0xbbbb),
         .gas_limit = 300_000,
     });
-    try std.testing.expectEqual(TxStatus.rejected, result.status);
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, result.validation_error.?);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(result));
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -744,8 +763,7 @@ test "Vm rejected transaction preserves pending overlay" {
         .to = contract,
         .gas_limit = 100_000,
     });
-    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, rejected.validation_error.?);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -881,7 +899,7 @@ test "Vm transactCommit skips commit for rejected transaction" {
         .to = contract,
         .gas_limit = 100_000,
     });
-    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expectEqual(@as(u256, 0), memory.getAccount(contract).?.getStorage(0));
 
     var diff = try vm.changeset();
@@ -908,14 +926,14 @@ test "Vm Amsterdam transaction reports gross block gas separately from receipt g
     });
     defer vm.deinit();
 
-    const result = try vm.transact(.{
+    const result = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 100_000,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    try std.testing.expect(result.gas_refunded > 0);
-    try std.testing.expect(result.block_gas_used > result.gas_used);
+    try std.testing.expect(result.gas.refunded > 0);
+    try std.testing.expect(result.gas.block.total > result.gas.used);
 }
 
 test "Vm exposes borrowed logs for client receipt builders" {
@@ -934,12 +952,12 @@ test "Vm exposes borrowed logs for client receipt builders" {
     });
     defer vm.deinit();
 
-    const result = try vm.transact(.{
+    const result = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
         .value = 7,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expectEqual(@as(usize, 1), vm.logs().len);
     try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &vm.logs()[0].address);
@@ -962,12 +980,12 @@ test "Vm rejected transaction clears borrowed log surface" {
     });
     defer vm.deinit();
 
-    const accepted = try vm.transact(.{
+    const accepted = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
         .value = 7,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, accepted.status);
     try std.testing.expectEqual(@as(usize, 1), vm.logs().len);
 
@@ -978,8 +996,7 @@ test "Vm rejected transaction clears borrowed log surface" {
         .gas_limit = 300_000,
         .value = 7,
     });
-    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, rejected.validation_error.?);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expectEqual(@as(usize, 0), vm.logs().len);
 }
 
@@ -1232,9 +1249,7 @@ test "Vm preparation accepts custom transaction value" {
                 _ = plan;
                 _ = result;
                 return .{
-                    .gas_used = 0,
-                    .block_gas_used = 0,
-                    .refunded_gas = 0,
+                    .gas = .{},
                     .sender_refund = 0,
                     .coinbase_payment = 0,
                 };
@@ -1294,8 +1309,7 @@ test "BlockSession validation rejection skips rollback snapshot" {
         .to = recipient,
         .gas_limit = 300_000,
     });
-    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, rejected.validation_error.?);
+    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expect(!failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), block.finish().tx_count);
 }
@@ -1332,22 +1346,20 @@ test "BlockSession accumulates block gas and rolls back overflow transaction" {
     defer vm.deinit();
 
     var block = vm.beginBlock(.{ .gas_limit = 29_000 });
-    const accepted = try block.transact(.{
+    const accepted = try expectExecuted(try block.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 29_000,
-    });
+    }));
     try std.testing.expectEqual(TxStatus.success, accepted.status);
-    try std.testing.expectEqual(@as(u64, 15_000), accepted.block_gas_used);
+    try std.testing.expectEqual(@as(u64, 15_000), accepted.gas.block.total);
     try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
 
-    const rejected = try block.transact(.{
+    try std.testing.expectError(error.BlockGasExceeded, block.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 29_000,
-    });
-    try std.testing.expectEqual(TxStatus.rejected, rejected.status);
-    try std.testing.expectEqual(@as(?transaction.ValidationError, null), rejected.validation_error);
+    }));
     try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
 
     var diff = try vm.changeset();
@@ -1374,18 +1386,17 @@ test "BlockSession builds borrowed receipt view with cumulative gas and logs" {
     defer vm.deinit();
 
     var block = vm.beginBlock(.{ .gas_limit = 1_000_000 });
-    const result = try block.transact(.{
+    const result = try expectExecuted(try block.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
         .value = 7,
-    });
+    }));
     const receipt = block.receipt(result);
 
     try std.testing.expectEqual(TxStatus.success, receipt.status);
-    try std.testing.expectEqual(result.gas_used, receipt.gas_used);
-    try std.testing.expectEqual(result.block_gas_used, receipt.block_gas_used);
-    try std.testing.expectEqual(result.gas_used, receipt.cumulative_gas_used);
+    try std.testing.expectEqual(result.gas.used, receipt.gas_used);
+    try std.testing.expectEqual(result.gas.used, receipt.cumulative_gas_used);
     try std.testing.expectEqual(@as(usize, 1), receipt.logs.len);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, receipt.logs[0].topics[0]);
 }

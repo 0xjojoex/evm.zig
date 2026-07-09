@@ -425,7 +425,7 @@ const BenchmarkRunner = struct {
             .gas_reservoir = result.gas_reservoir,
             .state_gas_spent = result.state_gas_spent,
         });
-        return .{ .tx_count = 1, .gas_used = costs.gas_used, .vm_elapsed_ns = timed_engine.elapsed_ns };
+        return .{ .tx_count = 1, .gas_used = costs.gas.used, .vm_elapsed_ns = timed_engine.elapsed_ns };
     }
 
     const TimedTransactionEngine = struct {

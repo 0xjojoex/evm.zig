@@ -284,13 +284,12 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Initialize an executor with an empty mutable overlay.
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
-            var state = if (options.state_reader) |state_reader|
+            const state = if (options.state_reader) |state_reader|
                 StateOverlay.initWithStateReader(allocator, state_reader)
             else
                 StateOverlay.init(allocator);
-            state.trace_sink = options.trace_sink;
 
-            return .{
+            var executor: Self = .{
                 .allocator = allocator,
                 .state = state,
                 .frame_store = .{},
@@ -301,9 +300,11 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
                 .block_hash_source = options.block_hash_source,
                 .config = options.config,
-                .trace_sink = options.trace_sink,
+                .trace_sink = null,
                 .last_call_output = FrameIo.ByteSlot.initGrowable(allocator),
             };
+            executor.setTraceSink(options.trace_sink);
+            return executor;
         }
 
         /// Initialize an executor and reserve reusable runtime resources up front.
@@ -312,6 +313,11 @@ pub fn Executor(comptime ProtocolType: type) type {
             errdefer executor.deinit();
             try executor.configureRuntimeResources(runtime_resources);
             return executor;
+        }
+
+        pub fn setTraceSink(self: *Self, trace_sink: ?*TraceSink) void {
+            self.trace_sink = trace_sink;
+            self.state.trace_sink = trace_sink;
         }
 
         pub fn configureRuntimeResources(self: *Self, runtime_resources: RuntimeResourcesType) !void {
