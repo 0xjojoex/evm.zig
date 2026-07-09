@@ -1,9 +1,8 @@
 //! 256-bit unsigned integer helpers for EVM word arithmetic and byte conversion.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
-const use_limb_div_mod = builtin.target.cpu.arch == .riscv64;
+const use_limb_div_mod = true;
 
 pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
     return std.mem.readInt(u256, bytes, .big);
@@ -24,11 +23,8 @@ pub inline fn sdiv(a: u256, b: u256) u256 {
 
     const ia: i256 = @bitCast(a);
     const ib: i256 = @bitCast(b);
-    const quotient = if (ia == std.math.minInt(i256) and ib == -1)
-        ia
-    else
-        @divTrunc(ia, ib);
-    return @bitCast(quotient);
+    const quotient = div(signedMagnitude(ia), signedMagnitude(ib));
+    return if ((ia < 0) != (ib < 0)) 0 -% quotient else quotient;
 }
 
 pub inline fn smod(a: u256, b: u256) u256 {
@@ -36,15 +32,14 @@ pub inline fn smod(a: u256, b: u256) u256 {
 
     const ia: i256 = @bitCast(a);
     const ib: i256 = @bitCast(b);
-    const remainder = signedMagnitude(ia) % signedMagnitude(ib);
-    const signed_remainder: i256 = @intCast(remainder);
-    return @bitCast(if (ia < 0) -signed_remainder else signed_remainder);
+    const remainder = mod(signedMagnitude(ia), signedMagnitude(ib));
+    return if (ia < 0) 0 -% remainder else remainder;
 }
 
 pub inline fn div(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
-        return @as(u64, @intCast(a)) / @as(u64, @intCast(b));
+        return @as(u64, @truncate(a)) / @as(u64, @truncate(b));
     }
     if (!use_limb_div_mod) return a / b;
     return divKnuth(a, b);
@@ -53,7 +48,7 @@ pub inline fn div(a: u256, b: u256) u256 {
 pub inline fn mod(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
-        return @as(u64, @intCast(a)) % @as(u64, @intCast(b));
+        return @as(u64, @truncate(a)) % @as(u64, @truncate(b));
     }
     if (!use_limb_div_mod) return a % b;
     return modKnuth(a, b);
@@ -62,8 +57,8 @@ pub inline fn mod(a: u256, b: u256) u256 {
 pub inline fn addMod(a: u256, b: u256, modulo: u256) u256 {
     if (modulo == 0) return 0;
 
-    const lhs = if (a >= modulo) a % modulo else a;
-    const rhs = if (b >= modulo) b % modulo else b;
+    const lhs = if (a >= modulo) mod(a, modulo) else a;
+    const rhs = if (b >= modulo) mod(b, modulo) else b;
     return addModReduced(lhs, rhs, modulo);
 }
 
@@ -98,6 +93,28 @@ inline fn signedMagnitude(value: i256) u256 {
     const bits: u256 = @bitCast(value);
     if (value >= 0) return @intCast(value);
     return ~bits +% 1;
+}
+
+inline fn sdivGeneric(a: u256, b: u256) u256 {
+    if (b == 0) return 0;
+
+    const ia: i256 = @bitCast(a);
+    const ib: i256 = @bitCast(b);
+    const quotient = if (ia == std.math.minInt(i256) and ib == -1)
+        ia
+    else
+        @divTrunc(ia, ib);
+    return @bitCast(quotient);
+}
+
+inline fn smodGeneric(a: u256, b: u256) u256 {
+    if (b == 0) return 0;
+
+    const ia: i256 = @bitCast(a);
+    const ib: i256 = @bitCast(b);
+    const remainder = signedMagnitude(ia) % signedMagnitude(ib);
+    const signed_remainder: i256 = @intCast(remainder);
+    return @bitCast(if (ia < 0) -signed_remainder else signed_remainder);
 }
 
 inline fn addModGeneric(a: u256, b: u256, modulo: u256) u256 {
@@ -617,20 +634,72 @@ fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
     return fromLimbs(reduced);
 }
 
+fn expectDivModMatchesBuiltin(numerator: u256, denominator: u256) !void {
+    try std.testing.expect(denominator != 0);
+    try std.testing.expectEqual(numerator / denominator, div(numerator, denominator));
+    try std.testing.expectEqual(numerator % denominator, mod(numerator, denominator));
+    try std.testing.expectEqual(numerator / denominator, divKnuth(numerator, denominator));
+    try std.testing.expectEqual(numerator % denominator, modKnuth(numerator, denominator));
+}
+
+fn expectSignedDivModMatchesGeneric(numerator: u256, denominator: u256) !void {
+    try std.testing.expectEqual(sdivGeneric(numerator, denominator), sdiv(numerator, denominator));
+    try std.testing.expectEqual(smodGeneric(numerator, denominator), smod(numerator, denominator));
+}
+
 test sdiv {
     const min_word: u256 = @bitCast(@as(i256, std.math.minInt(i256)));
     const neg_one: u256 = @bitCast(@as(i256, -1));
+    const neg_three: u256 = @bitCast(@as(i256, -3));
 
     try std.testing.expectEqual(@as(u256, 0), sdiv(1, 0));
     try std.testing.expectEqual(@as(u256, 3), sdiv(10, 3));
     try std.testing.expectEqual(@as(u256, @bitCast(@as(i256, -3))), sdiv(@bitCast(@as(i256, -10)), 3));
+    try std.testing.expectEqual(@as(u256, @bitCast(@as(i256, -3))), sdiv(10, neg_three));
+    try std.testing.expectEqual(@as(u256, 3), sdiv(@bitCast(@as(i256, -10)), neg_three));
+    try std.testing.expectEqual(min_word, sdiv(min_word, 1));
     try std.testing.expectEqual(min_word, sdiv(min_word, neg_one));
+    try std.testing.expectEqual(@as(u256, 0), sdiv(neg_one, 2));
 }
 
 test smod {
+    const min_word: u256 = @bitCast(@as(i256, std.math.minInt(i256)));
+    const neg_three: u256 = @bitCast(@as(i256, -3));
+
     try std.testing.expectEqual(@as(u256, 0), smod(1, 0));
     try std.testing.expectEqual(@as(u256, 1), smod(10, 3));
     try std.testing.expectEqual(@as(u256, @bitCast(@as(i256, -1))), smod(@bitCast(@as(i256, -10)), 3));
+    try std.testing.expectEqual(@as(u256, 1), smod(10, neg_three));
+    try std.testing.expectEqual(@as(u256, @bitCast(@as(i256, -1))), smod(@bitCast(@as(i256, -10)), neg_three));
+    try std.testing.expectEqual(smodGeneric(min_word, 3), smod(min_word, 3));
+    try std.testing.expectEqual(@as(u256, 0), smod(min_word, @bitCast(@as(i256, -1))));
+}
+
+test "signed div and mod cover limb edge vectors" {
+    const min_word: u256 = @bitCast(@as(i256, std.math.minInt(i256)));
+    const max_positive: u256 = @bitCast(@as(i256, std.math.maxInt(i256)));
+    const neg_one: u256 = @bitCast(@as(i256, -1));
+    const neg_two: u256 = @bitCast(@as(i256, -2));
+    const neg_large_64: u256 = @bitCast(@as(i256, -0x1_0000_0000_0000_0000));
+    const neg_large_128: u256 = @bitCast(@as(i256, -0x1_0000_0000_0000_0000_0000_0000_0000_0000));
+
+    const cases = [_]struct {
+        numerator: u256,
+        denominator: u256,
+    }{
+        .{ .numerator = min_word, .denominator = neg_one },
+        .{ .numerator = min_word, .denominator = neg_two },
+        .{ .numerator = min_word, .denominator = neg_large_64 },
+        .{ .numerator = min_word +% 0x1234, .denominator = neg_large_64 -% 57 },
+        .{ .numerator = min_word +% 0x4567, .denominator = neg_large_128 +% 99 },
+        .{ .numerator = max_positive, .denominator = min_word },
+        .{ .numerator = neg_one, .denominator = min_word },
+        .{ .numerator = 0x7effffff8000000000000000000000000000000000000000d900000000000001, .denominator = @bitCast(@as(i256, -0x7fff_ffff_ffff_ffff)) },
+    };
+
+    for (cases) |case| {
+        try expectSignedDivModMatchesGeneric(case.numerator, case.denominator);
+    }
 }
 
 test "unsigned div and mod use EVM zero semantics and match builtin arithmetic" {
@@ -668,6 +737,33 @@ test "unsigned div and mod use EVM zero semantics and match builtin arithmetic" 
         try std.testing.expectEqual(case.numerator % case.denominator, mod(case.numerator, case.denominator));
         try std.testing.expectEqual(case.numerator / case.denominator, divKnuth(case.numerator, case.denominator));
         try std.testing.expectEqual(case.numerator % case.denominator, modKnuth(case.numerator, case.denominator));
+    }
+}
+
+test "limb div and mod cover branch edge vectors" {
+    const cases = [_]struct {
+        numerator: u256,
+        denominator: u256,
+    }{
+        .{ .numerator = 0x7000000000000000, .denominator = 0x8000000000000000 },
+        .{ .numerator = 0x80000000000000010000000000000000, .denominator = 0x80000000000000000000000000000000 },
+        .{ .numerator = 0x80000000000000000000000000000000, .denominator = 0x80000000000000000000000000000001 },
+        .{ .numerator = 0x478392145435897052, .denominator = 0x111 },
+        .{ .numerator = 0x12121212121212121212121212121212, .denominator = 0x232323232323232323 },
+        .{ .numerator = 0xf6376770abd3a36b20394c5664afef1194c801c3f05e42566f085ed24d002bb0, .denominator = 0xb368d219438b7f3f },
+        .{ .numerator = 0xfffff716b61616160b0b0b2b0b0b0becf4bef50a0df4f48b090b2b0bc60a0a00, .denominator = 0xfffff716b61616160b0b0b2b0b230b000008010d0a2b00 },
+        .{ .numerator = 0x50beb1c60141a0000dc2b0b0b0b0b0b410a0a0df4f40b090b2b0bc60a0a00, .denominator = 0x2000110000000d0a300e750a000000090a0a },
+        .{ .numerator = 0x4b00000b41000b0b0b2b0b0b0b0b0b410a0aeff4f40b090b2b0bc60a0a1000, .denominator = 0x4b00000b41000b0b0b2b0b0b0b0b0b410a0aeff4f40b0a0a },
+        .{ .numerator = 0x8200000000000000000000000000000000000000000000000000000000000000, .denominator = 0x8200000000000000fe000004000000ffff000000fffff700 },
+        .{ .numerator = 0x8000000000000001800000000000000080000000000000008000000000000000, .denominator = 0x800000000000000080000000000000008000000000000000 },
+        .{ .numerator = 0x001f000000000000000000000000000000200000000100000000000000000000, .denominator = 0x0000000000000000000100000000ffffffffffffffff0000000000002e000000 },
+        .{ .numerator = 0x7effffff80000000000000000000000000020000440000000000000000000001, .denominator = 0x7effffff800000007effffff800000008000ff0000010000 },
+        .{ .numerator = 0xff00ffffffffffffffcaffffffff0100, .denominator = 0x0100000000000000ff800000000000ff },
+        .{ .numerator = 170141183460488574554024512018559533058, .denominator = 170141183460488574554024512018559533057 },
+    };
+
+    for (cases) |case| {
+        try expectDivModMatchesBuiltin(case.numerator, case.denominator);
     }
 }
 
@@ -774,6 +870,8 @@ test "modular arithmetic fuzzes optimized reducers against full-width oracle" {
         const medium_mod_seed = [_]u8{0x02} ++ [_]u8{0x33} ** 127;
         const large_mod_seed = [_]u8{0x03} ++ [_]u8{0x44} ** 127;
         const near_mod_seed = [_]u8{0x04} ++ [_]u8{0xff} ** 127;
+        const signed_min_seed = [_]u8{0x05} ++ [_]u8{0x80} ++ [_]u8{0x00} ** 126;
+        const signed_neg_seed = [_]u8{0x06} ++ [_]u8{0xff} ** 127;
 
         const corpus = [_][]const u8{
             &zero_mod_seed,
@@ -781,14 +879,33 @@ test "modular arithmetic fuzzes optimized reducers against full-width oracle" {
             &medium_mod_seed,
             &large_mod_seed,
             &near_mod_seed,
+            &signed_min_seed,
+            &signed_neg_seed,
         };
 
+        fn shapedWord(raw: u256, shape: u8) u256 {
+            return switch (shape % 12) {
+                0 => 0,
+                1 => 1,
+                2 => std.math.maxInt(u256),
+                3 => @as(u256, 1) << 255,
+                4 => (@as(u256, 1) << 255) - 1,
+                5 => 0 -% @as(u256, 1 + (raw & 0xff)),
+                6 => raw & std.math.maxInt(u64),
+                7 => raw & std.math.maxInt(u128),
+                8 => raw | (@as(u256, 1) << 192),
+                9 => raw | (@as(u256, 1) << 255),
+                10 => 0 -% @as(u256, 1 + (raw & 0xffff)),
+                else => raw,
+            };
+        }
+
         fn oracle(_: void, smith: *std.testing.Smith) anyerror!void {
-            var shape_bytes: [1]u8 = undefined;
+            var shape_bytes: [4]u8 = undefined;
             smith.bytes(&shape_bytes);
 
-            const lhs = smith.value(u256);
-            const rhs = smith.value(u256);
+            const lhs = shapedWord(smith.value(u256), shape_bytes[1]);
+            const rhs = shapedWord(smith.value(u256), shape_bytes[2]);
             const modulo = switch (shape_bytes[0] % 5) {
                 0 => 0,
                 1 => @as(u256, 1) + smith.value(u8),
@@ -797,13 +914,19 @@ test "modular arithmetic fuzzes optimized reducers against full-width oracle" {
                 4 => 0 -% @as(u256, 1 + (smith.value(u64) % 1024)),
                 else => unreachable,
             };
+            const signed_denominator = shapedWord(smith.value(u256), shape_bytes[3]);
 
             try std.testing.expectEqual(if (modulo == 0) 0 else lhs / modulo, div(lhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else lhs % modulo, mod(lhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else lhs / modulo, divKnuth(lhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else lhs % modulo, modKnuth(lhs, modulo));
+            try std.testing.expectEqual(sdivGeneric(lhs, signed_denominator), sdiv(lhs, signed_denominator));
+            try std.testing.expectEqual(smodGeneric(lhs, signed_denominator), smod(lhs, signed_denominator));
             try std.testing.expectEqual(if (modulo == 0) 0 else addModGeneric(lhs, rhs, modulo), addMod(lhs, rhs, modulo));
             try std.testing.expectEqual(if (modulo == 0) 0 else mulModGeneric(lhs, rhs, modulo), mulMod(lhs, rhs, modulo));
+            if (modulo != 0 and (0 -% modulo) > std.math.maxInt(u64)) {
+                try std.testing.expectEqual(mulModGeneric(lhs, rhs, modulo), mulModKnuth(lhs, rhs, modulo));
+            }
         }
     };
 
