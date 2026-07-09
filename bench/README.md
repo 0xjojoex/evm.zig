@@ -18,6 +18,8 @@ zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
 
 From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
 `summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
+The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
+when intentionally testing another shared fork.
 
 The executor/transaction comparison is intentionally a later lane. For now
 `evmz-executor` remains available as a diagnostic target, but it is not mixed
@@ -137,11 +139,10 @@ use `--include-bytecode` to add `bytecode-sload` and `bytecode-sstore` rows.
 `zig build kernel` generates repeated opcode patterns and times only
 bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. It uses the null host and fails if a case touches host callbacks.
-The default comparison mode is portable release: Zig uses `ReleaseFast`, evmone
-is compiled into the Zig benchmark binary with the same optimization mode, and
-revm uses Cargo `--release`. The harness does not enable CPU-native flags such
-as `-march=native` or `target-cpu=native`; if we add those later, they should be
-reported as a separate native-release lane.
+The default comparison mode is native release for the Rust sidecar: Zig uses
+`ReleaseFast`, evmone is compiled into the Zig benchmark binary with the same
+optimization mode. Revm uses Cargo `--release` with
+`RUSTFLAGS=-C target-cpu=native`, fat LTO, and one codegen unit.
 
 Kernel case bytecode lives in `fixtures/kernel/*.hex`. Both the Zig runner and
 the revm sidecar read the same fixture files, then repeat or cycle non-empty
@@ -201,8 +202,9 @@ Root delegate:
 zig build bench-report -- --out-dir ../output/bench-report
 ```
 
-The default lane is portable release: Zig/C++ runners use `ReleaseFast`, and
-revm uses `cargo --release`.
+The default lane is native release for the Rust sidecar: Zig/C++ runners use
+`ReleaseFast`, and revm uses `cargo --release` with `target-cpu=native`, fat
+LTO, and one codegen unit.
 Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
 the compact JSON somewhere stable. Use `--baseline <path>` to include

@@ -11,6 +11,12 @@ len: usize = 0,
 
 const Stack = @This();
 
+inline fn swapSlot(a: *u256, b: *u256) void {
+    const tmp = a.*;
+    a.* = b.*;
+    b.* = tmp;
+}
+
 fn PopN(comptime n: usize) type {
     if (n == 0) {
         @compileError("PopN requires at least one value");
@@ -79,22 +85,22 @@ pub fn peek(self: *Stack) ?u256 {
 }
 
 /// Swap the nth element from the top of the stack with the top element
-pub fn swap(self: *Stack, comptime n: usize) Error!void {
+pub inline fn swap(self: *Stack, comptime n: usize) Error!void {
     if (self.len <= n) {
         return Error.StackUnderflow;
     }
 
     const target = self.len - 1 - n;
-    std.mem.swap(u256, &self.slots[target], &self.slots[self.len - 1]);
+    swapSlot(&self.slots[target], &self.slots[self.len - 1]);
 }
 
-pub fn swapDepth(self: *Stack, n: usize) Error!void {
+pub inline fn swapDepth(self: *Stack, n: usize) Error!void {
     if (self.len <= n) {
         return Error.StackUnderflow;
     }
 
     const target = self.len - 1 - n;
-    std.mem.swap(u256, &self.slots[target], &self.slots[self.len - 1]);
+    swapSlot(&self.slots[target], &self.slots[self.len - 1]);
 }
 
 /// Duplicate the nth element from the top of the stack
@@ -112,12 +118,12 @@ pub fn dupDepth(self: *Stack, n: usize) Error!void {
     try self.push(self.slots[self.len - n]);
 }
 
-pub fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
+pub inline fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
     if (self.len <= n or self.len <= m) {
         return Error.StackUnderflow;
     }
 
-    std.mem.swap(u256, &self.slots[self.len - 1 - n], &self.slots[self.len - 1 - m]);
+    swapSlot(&self.slots[self.len - 1 - n], &self.slots[self.len - 1 - m]);
 }
 
 pub fn peekN(self: *Stack, n: usize) ?u256 {
@@ -266,4 +272,25 @@ test "swap checks depth before computing target slot" {
     try stack.push(2);
     try stack.swap(1);
     try testing.expectEqual(@as(u256, 1), stack.peek().?);
+}
+
+test "runtime-depth swaps exchange stack slots" {
+    var storage: Storage = undefined;
+    var stack = Stack.init(&storage);
+
+    try stack.push(1);
+    try stack.push(2);
+    try stack.push(3);
+    try stack.push(4);
+
+    try stack.swapDepth(2);
+    try testing.expectEqual(@as(u256, 2), stack.peek().?);
+    try testing.expectEqual(@as(u256, 4), stack.peekN(3).?);
+
+    try stack.exchangeDepths(0, 3);
+    try testing.expectEqual(@as(u256, 1), stack.peek().?);
+    try testing.expectEqual(@as(u256, 2), stack.peekN(4).?);
+
+    try testing.expectError(Error.StackUnderflow, stack.swapDepth(4));
+    try testing.expectError(Error.StackUnderflow, stack.exchangeDepths(0, 4));
 }

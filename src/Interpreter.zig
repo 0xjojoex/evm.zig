@@ -171,6 +171,7 @@ fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
 pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
+        const Instructions = instruction.For(Protocol);
 
         pub const Protocol = ProtocolType;
 
@@ -214,9 +215,9 @@ pub fn For(comptime ProtocolType: type) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.bytecode) |bytecode| {
-                try executeUntracedPadded(frame, bytecode.read_bytes);
+                try executeUntracedLocal(frame, bytecode.read_bytes, true);
             } else {
-                try executeUntracedBounded(frame);
+                try executeUntracedLocal(frame, frame.code, false);
             }
 
             if (frame.status == .running) {
@@ -224,24 +225,33 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
-        fn executeUntracedPadded(frame: *CallFrame, read_bytes: []const u8) Error!void {
-            while (frame.status == .running) {
-                const opcode_byte = read_bytes[frame.pc];
-                frame.pc += 1;
-                try executeOpcode(opcode_byte, frame);
-            }
-        }
+        fn executeUntracedLocal(frame: *CallFrame, read_bytes: []const u8, comptime padded: bool) Error!void {
+            var state = LocalExecutionState{
+                .frame = frame,
+                .read_bytes = read_bytes,
+                .pc = frame.pc,
+                .gas_left = frame.gas_left,
+            };
 
-        fn executeUntracedBounded(frame: *CallFrame) Error!void {
-            while (frame.status == .running and frame.pc < frame.code.len) {
-                const opcode_byte = frame.code[frame.pc];
-                frame.pc += 1;
-                try executeOpcode(opcode_byte, frame);
+            while (padded or state.pc < read_bytes.len) {
+                const opcode_byte = read_bytes[state.pc];
+                state.pc += 1;
+                const keep_running = state.execute(opcode_byte, padded) catch |err| {
+                    if (invalidStatusError(err)) {
+                        if (frame.status == .running) {
+                            _ = state.fail(.invalid);
+                        }
+                        return;
+                    }
+                    return err;
+                };
+                if (!keep_running) return;
             }
+            state.spill();
         }
 
         inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) Error!void {
-            instruction.For(Protocol).execute(opcode_byte, frame) catch |err| {
+            Instructions.execute(opcode_byte, frame) catch |err| {
                 if (invalidStatusError(err)) {
                     if (frame.status == .running) {
                         frame.failWithStatus(.invalid);
@@ -251,6 +261,253 @@ pub fn For(comptime ProtocolType: type) type {
                 return err;
             };
         }
+
+        const BinaryOp = enum {
+            add,
+            sub,
+            lt,
+            gt,
+            eq,
+            bit_and,
+            bit_or,
+            bit_xor,
+        };
+
+        const UnaryOp = enum {
+            iszero,
+            bit_not,
+        };
+
+        const Pair = struct {
+            a: u256,
+            b: u256,
+        };
+
+        const LocalExecutionState = struct {
+            frame: *CallFrame,
+            read_bytes: []const u8,
+            pc: usize,
+            gas_left: i64,
+
+            inline fn execute(self: *LocalExecutionState, opcode_byte: u8, comptime padded: bool) Error!bool {
+                @setEvalBranchQuota(10_000);
+                // Keep this list deliberately narrow; expanding whole PUSH/DUP/SWAP ranges bloats the loop enough to lose the win.
+                return switch (opcode_byte) {
+                    @intFromEnum(Opcode.STOP) => if (comptime canFast(.STOP)) self.fastStop() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.ADD) => if (comptime canFast(.ADD)) self.fastBinary(.ADD, .add) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.SUB) => if (comptime canFast(.SUB)) self.fastBinary(.SUB, .sub) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.LT) => if (comptime canFast(.LT)) self.fastBinary(.LT, .lt) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.GT) => if (comptime canFast(.GT)) self.fastBinary(.GT, .gt) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.EQ) => if (comptime canFast(.EQ)) self.fastBinary(.EQ, .eq) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.ISZERO) => if (comptime canFast(.ISZERO)) self.fastUnary(.ISZERO, .iszero) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.AND) => if (comptime canFast(.AND)) self.fastBinary(.AND, .bit_and) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.OR) => if (comptime canFast(.OR)) self.fastBinary(.OR, .bit_or) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.XOR) => if (comptime canFast(.XOR)) self.fastBinary(.XOR, .bit_xor) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.NOT) => if (comptime canFast(.NOT)) self.fastUnary(.NOT, .bit_not) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.POP) => if (comptime canFast(.POP)) self.fastPop() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.JUMP) => if (comptime canFast(.JUMP)) self.fastJump() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.JUMPI) => if (comptime canFast(.JUMPI)) self.fastJumpi() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.PC) => if (comptime canFast(.PC)) self.fastPc() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.GAS) => if (comptime canFast(.GAS)) self.fastGas() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.JUMPDEST) => if (comptime canFast(.JUMPDEST)) self.fastJumpdest() else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.PUSH1) => if (comptime canFast(.PUSH1)) self.fastPush(.PUSH1, padded) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.PUSH2) => if (comptime canFast(.PUSH2)) self.fastPush(.PUSH2, padded) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.DUP1) => if (comptime canFast(.DUP1)) self.fastDup(.DUP1) else self.executeCold(opcode_byte),
+                    @intFromEnum(Opcode.SWAP1) => if (comptime canFast(.SWAP1)) self.fastSwap(.SWAP1) else self.executeCold(opcode_byte),
+                    else => self.executeCold(opcode_byte),
+                };
+            }
+
+            inline fn canFast(comptime opcode: Opcode) bool {
+                return Instructions.localFastPathBuiltin(opcode);
+            }
+
+            inline fn charge(self: *LocalExecutionState, comptime opcode: Opcode) bool {
+                const gas = Instructions.staticGasForFrame(self.frame, opcode);
+                if (gas > self.gas_left) {
+                    return self.fail(.out_of_gas);
+                }
+                self.gas_left -= gas;
+                return true;
+            }
+
+            inline fn fastStop(self: *LocalExecutionState) bool {
+                self.spill();
+                self.frame.status = .success;
+                return false;
+            }
+
+            inline fn fastBinary(self: *LocalExecutionState, comptime opcode: Opcode, comptime op: BinaryOp) bool {
+                if (!self.charge(opcode)) return false;
+                const values = self.popPair() orelse return false;
+                const result: u256 = switch (op) {
+                    .add => values.a +% values.b,
+                    .sub => values.a -% values.b,
+                    .lt => if (values.a < values.b) 1 else 0,
+                    .gt => if (values.a > values.b) 1 else 0,
+                    .eq => if (values.a == values.b) 1 else 0,
+                    .bit_and => values.a & values.b,
+                    .bit_or => values.a | values.b,
+                    .bit_xor => values.a ^ values.b,
+                };
+                return self.pushWord(result);
+            }
+
+            inline fn fastUnary(self: *LocalExecutionState, comptime opcode: Opcode, comptime op: UnaryOp) bool {
+                if (!self.charge(opcode)) return false;
+                if (self.frame.stack.len == 0) return self.fail(.invalid);
+                const top = self.frame.stack.len - 1;
+                const value = self.frame.stack.slots[top];
+                const result: u256 = switch (op) {
+                    .iszero => if (value == 0) 1 else 0,
+                    .bit_not => ~value,
+                };
+                self.frame.stack.slots[top] = result;
+                return true;
+            }
+
+            inline fn fastPop(self: *LocalExecutionState) bool {
+                if (!self.charge(.POP)) return false;
+                if (self.frame.stack.len == 0) return self.fail(.invalid);
+                self.frame.stack.len -= 1;
+                return true;
+            }
+
+            inline fn fastPush(self: *LocalExecutionState, comptime opcode: Opcode, comptime padded: bool) bool {
+                if (!self.charge(opcode)) return false;
+                const immediate_len = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
+                var value: u256 = 0;
+                inline for (0..immediate_len) |offset| {
+                    value = (value << 8) | self.immediateByte(offset, padded);
+                }
+                self.pc += immediate_len;
+                return self.pushWord(value);
+            }
+
+            inline fn fastDup(self: *LocalExecutionState, comptime opcode: Opcode) bool {
+                if (!self.charge(opcode)) return false;
+                const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.DUP1) + 1;
+                if (self.frame.stack.len < depth) return self.fail(.invalid);
+                if (self.frame.stack.len >= Stack.capacity) return self.fail(.invalid);
+                const value = self.frame.stack.slots[self.frame.stack.len - depth];
+                self.frame.stack.slots[self.frame.stack.len] = value;
+                self.frame.stack.len += 1;
+                return true;
+            }
+
+            inline fn fastSwap(self: *LocalExecutionState, comptime opcode: Opcode) bool {
+                if (!self.charge(opcode)) return false;
+                const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.SWAP1) + 1;
+                if (self.frame.stack.len <= depth) return self.fail(.invalid);
+                const top = self.frame.stack.len - 1;
+                const target = top - depth;
+                const tmp = self.frame.stack.slots[target];
+                self.frame.stack.slots[target] = self.frame.stack.slots[top];
+                self.frame.stack.slots[top] = tmp;
+                return true;
+            }
+
+            inline fn fastJump(self: *LocalExecutionState) Error!bool {
+                if (!self.charge(.JUMP)) return false;
+                const target_word = self.popWord() orelse return false;
+                return self.jumpTo(target_word);
+            }
+
+            inline fn fastJumpi(self: *LocalExecutionState) Error!bool {
+                if (!self.charge(.JUMPI)) return false;
+                const values = self.popPair() orelse return false;
+                if (values.b == 0) return true;
+                return self.jumpTo(values.a);
+            }
+
+            inline fn fastPc(self: *LocalExecutionState) bool {
+                if (!self.charge(.PC)) return false;
+                return self.pushWord(self.pc - 1);
+            }
+
+            inline fn fastGas(self: *LocalExecutionState) bool {
+                if (!self.charge(.GAS)) return false;
+                return self.pushWord(@intCast(self.gas_left));
+            }
+
+            inline fn fastJumpdest(self: *LocalExecutionState) bool {
+                _ = self.charge(.JUMPDEST);
+                return self.frame.status == .running;
+            }
+
+            inline fn popWord(self: *LocalExecutionState) ?u256 {
+                if (self.frame.stack.len == 0) {
+                    _ = self.fail(.invalid);
+                    return null;
+                }
+                self.frame.stack.len -= 1;
+                return self.frame.stack.slots[self.frame.stack.len];
+            }
+
+            inline fn popPair(self: *LocalExecutionState) ?Pair {
+                if (self.frame.stack.len < 2) {
+                    _ = self.fail(.invalid);
+                    return null;
+                }
+                self.frame.stack.len -= 2;
+                return .{
+                    .a = self.frame.stack.slots[self.frame.stack.len + 1],
+                    .b = self.frame.stack.slots[self.frame.stack.len],
+                };
+            }
+
+            inline fn pushWord(self: *LocalExecutionState, value: u256) bool {
+                if (self.frame.stack.len >= Stack.capacity) return self.fail(.invalid);
+                self.frame.stack.slots[self.frame.stack.len] = value;
+                self.frame.stack.len += 1;
+                return true;
+            }
+
+            inline fn jumpTo(self: *LocalExecutionState, target_word: u256) Error!bool {
+                const target = std.math.cast(usize, target_word) orelse {
+                    return self.fail(.invalid);
+                };
+                self.spill();
+                if (!try self.frame.isValidJumpDest(target)) {
+                    return self.fail(.invalid);
+                }
+                self.pc = target;
+                self.frame.pc = target;
+                return true;
+            }
+
+            inline fn immediateByte(self: *const LocalExecutionState, comptime offset: usize, comptime padded: bool) u8 {
+                const index = self.pc + offset;
+                if (comptime padded) {
+                    return self.read_bytes[index];
+                }
+                if (index >= self.read_bytes.len) return 0;
+                return self.read_bytes[index];
+            }
+
+            inline fn executeCold(self: *LocalExecutionState, opcode_byte: u8) Error!bool {
+                self.spill();
+                try executeOpcode(opcode_byte, self.frame);
+                self.reload();
+                return self.frame.status == .running;
+            }
+
+            inline fn fail(self: *LocalExecutionState, status: Status) bool {
+                self.spill();
+                self.frame.failWithStatus(status);
+                return false;
+            }
+
+            inline fn spill(self: *LocalExecutionState) void {
+                self.frame.pc = self.pc;
+                self.frame.gas_left = self.gas_left;
+            }
+
+            inline fn reload(self: *LocalExecutionState) void {
+                self.pc = self.frame.pc;
+                self.gas_left = self.frame.gas_left;
+            }
+        };
 
         fn resolveHostAction(self: *Self, action: Action) Error!void {
             switch (action) {

@@ -36,7 +36,7 @@ const Options = struct {
     profile: []const u8 = "native",
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
-    spec: ?[]const u8 = null,
+    spec: ?[]const u8 = "osaka",
     out_dir: ?[]const u8 = null,
     json: bool = false,
 };
@@ -57,6 +57,7 @@ const Row = struct {
     runtime_bytes: ?u64,
     deploy_host_calls: ?u64,
     timed_host_calls: ?u64,
+    timed_host_calls_per_run: ?f64,
     logs: ?u64,
     samples_ms: []const f64,
 };
@@ -176,7 +177,7 @@ fn printUsage() void {
         \\  --profile <profile>    evmz build profile forwarded to child Zig builds
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
-        \\  --spec <name>          fork spec forwarded to each engine, default runner-specific latest/stable
+        \\  --spec <name>          fork spec forwarded to each engine, default osaka
         \\  --out-dir <dir>        raw output directory, default zig-out/compare/<timestamp>
         \\  --json                 print JSON summary instead of markdown table
         \\
@@ -328,6 +329,7 @@ fn parseMeasurement(
     const mean = meanMs(times_ms);
     const min = minMs(times_ms);
     const max = maxMs(times_ms);
+    const timed_host_calls = try optionalU64(keyValue(summary, "timed_host_calls"));
 
     return .{
         .fixture = baseName(fixture),
@@ -344,7 +346,8 @@ fn parseMeasurement(
         .spec = keyValue(summary, "spec") orelse "",
         .runtime_bytes = try optionalU64(keyValue(summary, "runtime_bytes")),
         .deploy_host_calls = try optionalU64(keyValue(summary, "deploy_host_calls")),
-        .timed_host_calls = try optionalU64(keyValue(summary, "timed_host_calls")),
+        .timed_host_calls = timed_host_calls,
+        .timed_host_calls_per_run = hostCallsPerRun(timed_host_calls, times_ms.len),
         .logs = try optionalU64(keyValue(summary, "logs")),
         .samples_ms = times_ms,
     };
@@ -440,7 +443,7 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
     defer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,logs\n");
+    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,timed_host_calls_per_run,logs\n");
     for (rows) |row| {
         try writer.print(
             "{s},{s},{s},{s},{d},{d:.6},{d:.6},{d:.6},{d:.6},{s},{s},",
@@ -464,6 +467,8 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
         try writer.writeByte(',');
         try writeOptionalU64(writer, row.timed_host_calls);
         try writer.writeByte(',');
+        try writeOptionalF64(writer, row.timed_host_calls_per_run);
+        try writer.writeByte(',');
         try writeOptionalU64(writer, row.logs);
         try writer.writeByte('\n');
     }
@@ -473,6 +478,18 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
 
 fn writeOptionalU64(writer: *std.Io.Writer, value: ?u64) !void {
     if (value) |actual| try writer.print("{d}", .{actual});
+}
+
+fn writeOptionalF64(writer: *std.Io.Writer, value: ?f64) !void {
+    if (value) |actual| try writer.print("{d:.3}", .{actual});
+}
+
+fn hostCallsPerRun(calls: ?u64, runs: usize) ?f64 {
+    if (calls) |actual| {
+        if (runs == 0) return null;
+        return @as(f64, @floatFromInt(actual)) / @as(f64, @floatFromInt(runs));
+    }
+    return null;
 }
 
 fn renderMarkdown(allocator: std.mem.Allocator, rows: []const Row, out_dir: []const u8) ![]u8 {
@@ -487,20 +504,27 @@ fn renderMarkdown(allocator: std.mem.Allocator, rows: []const Row, out_dir: []co
         \\
     );
     try writer.print("\nArtifacts: `{s}`\n\n", .{out_dir});
-    try writer.writeAll("| fixture | engine | runner | scope | host | runs | median ms | vs fastest |\n");
-    try writer.writeAll("| --- | --- | --- | --- | --- | ---: | ---: | ---: |\n");
+    try writer.writeAll("| fixture | engine | runner | scope | host | spec | runs | host calls/run | median ms | vs fastest |\n");
+    try writer.writeAll("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |\n");
 
     for (rows) |row| {
         const fastest = fastestMedian(rows, row.fixture);
         try writer.print(
-            "| {s} | {s} | {s} | {s} | {s} | {d} | {d:.3} | {d:.2}x |\n",
+            "| {s} | {s} | {s} | {s} | {s} | {s} | {d} | ",
             .{
                 row.fixture,
                 row.engine,
                 row.runner,
                 row.scope,
                 row.host_profile,
+                row.spec,
                 row.runs,
+            },
+        );
+        try writeOptionalF64(writer, row.timed_host_calls_per_run);
+        try writer.print(
+            " | {d:.3} | {d:.2}x |\n",
+            .{
                 row.median_ms,
                 row.median_ms / fastest,
             },
@@ -531,7 +555,7 @@ fn runnerName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "zig",
         .evmone_baseline, .evmone_advanced => "c++",
-        .revm_interpreter => "rust",
+        .revm_interpreter => "rust-native",
     };
 }
 
@@ -582,4 +606,10 @@ test "summary key values are parsed from first summary line" {
 test "median handles odd and even sample counts" {
     try std.testing.expectEqual(@as(f64, 2.0), try medianMs(std.testing.allocator, &.{ 3.0, 1.0, 2.0 }));
     try std.testing.expectEqual(@as(f64, 2.5), try medianMs(std.testing.allocator, &.{ 4.0, 1.0, 3.0, 2.0 }));
+}
+
+test "host calls per run normalizes total counters" {
+    try std.testing.expectEqual(@as(?f64, 2.5), hostCallsPerRun(10, 4));
+    try std.testing.expect(hostCallsPerRun(null, 4) == null);
+    try std.testing.expect(hostCallsPerRun(10, 0) == null);
 }

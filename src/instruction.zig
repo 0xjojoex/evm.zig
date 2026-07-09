@@ -157,6 +157,35 @@ test "execute uses resolved dispatch target for hot opcodes" {
     try std.testing.expectEqual(Interpreter.FrameStatus.invalid, frame.frame.status);
 }
 
+test "untraced interpreter fast loop respects resolved dispatch target" {
+    const OverrideProtocol = DispatchOverrideProtocol(.invalid);
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{
+        @intFromEnum(Opcode.PUSH1),
+        2,
+        @intFromEnum(Opcode.PUSH1),
+        3,
+        @intFromEnum(Opcode.ADD),
+    };
+
+    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = try interpreter.execute();
+
+    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+}
+
 test "execute calls custom dispatch target directly" {
     const CustomHandler = struct {
         pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
@@ -192,6 +221,11 @@ fn DispatchOverrideProtocol(comptime add_target: definition.ExecutionTarget) typ
     return struct {
         pub const Revision = evmz.eth.Revision;
         pub const hot_cold_dispatch_enabled = true;
+        pub const Instruction = evmz.EthProtocol.Instruction;
+        pub const Storage = evmz.EthProtocol.Storage;
+        pub const Call = evmz.EthProtocol.Call;
+        pub const Create = evmz.EthProtocol.Create;
+        pub const SelfDestruct = evmz.EthProtocol.SelfDestruct;
 
         pub fn staticGas(comptime opcode: Opcode) definition.StaticGas {
             return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
@@ -199,6 +233,10 @@ fn DispatchOverrideProtocol(comptime add_target: definition.ExecutionTarget) typ
 
         pub fn staticGasForRevision(_: Revision, comptime opcode: Opcode) i64 {
             return @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas);
+        }
+
+        pub fn opcodeAvailability(comptime opcode: Opcode) evmz.EthProtocol.Availability {
+            return evmz.EthProtocol.opcodeAvailability(opcode);
         }
 
         pub fn dispatchEntry(comptime opcode: Opcode) definition.DispatchEntry {
@@ -1064,6 +1102,15 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub inline fn executeDispatchEntryForByte(comptime opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return Self.executeDispatchEntry(Self.dispatchEntryForByte(opcode_byte), frame);
+        }
+
+        pub inline fn localFastPathBuiltin(comptime opcode: Opcode) bool {
+            const entry = comptime Self.dispatchEntryForOpcode(opcode);
+            if (comptime entry.availability != .always) return false;
+            return switch (comptime entry.dispatchTarget()) {
+                .builtin => |builtin| builtin == opcode,
+                .invalid, .custom => false,
+            };
         }
 
         inline fn dispatchEntryForOpcode(comptime opcode: Opcode) definition.DispatchEntry {

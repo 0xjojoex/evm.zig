@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import platform
 import re
 import statistics
@@ -109,7 +110,9 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "rustc": tool_major_version(command_version(["rustc", "--version"])),
         "cargo": tool_major_version(command_version(["cargo", "--version"])),
         "solc": solc_version(),
-        "lane": "portable-release",
+        "lane": "rust-native-release",
+        "rustflags": "-C target-cpu=native",
+        "rust_lto": "fat",
     }
 
 
@@ -161,6 +164,10 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
                     "runtime_bytes": int_value(summary.get("runtime_bytes")),
                     "deploy_host_calls": int_value(summary.get("deploy_host_calls")),
                     "timed_host_calls": int_value(summary.get("timed_host_calls")),
+                    "timed_host_calls_per_run": per_run(
+                        int_value(summary.get("timed_host_calls")),
+                        len(times),
+                    ),
                     "logs": logs,
                     "median_ms": median(times),
                     "min_ms": min(times) if times else None,
@@ -180,6 +187,7 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
             "runtime_bytes",
             "deploy_host_calls",
             "timed_host_calls",
+            "timed_host_calls_per_run",
             "logs",
             "median_ms",
             "min_ms",
@@ -207,6 +215,8 @@ def run_vm_loop_engine(
                 "--",
                 "--fixture",
                 fixture,
+                "--spec",
+                "osaka",
                 "--summary",
             ],
             BENCH_DIR,
@@ -223,6 +233,8 @@ def run_vm_loop_engine(
             "--",
             "--fixture",
             fixture,
+            "--spec",
+            "osaka",
             "--summary",
         ]
         if engine == "evmone-baseline":
@@ -247,6 +259,8 @@ def run_vm_loop_engine(
             engine,
             "--fixture",
             fixture,
+            "--spec",
+            "osaka",
             "--summary",
         ],
         BENCH_DIR,
@@ -355,7 +369,14 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
 
 def run_command(name: str, argv: list[str], cwd: Path, raw_dir: Path) -> tuple[str, str]:
     print(f"[bench-report] {name}", file=sys.stderr)
-    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        argv,
+        cwd=cwd,
+        env=command_env(argv),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     (raw_dir / f"{name}.cmd").write_text(" ".join(shell_quote(arg) for arg in argv) + "\n")
     (raw_dir / f"{name}.stdout").write_text(result.stdout)
     (raw_dir / f"{name}.stderr").write_text(result.stderr)
@@ -364,6 +385,22 @@ def run_command(name: str, argv: list[str], cwd: Path, raw_dir: Path) -> tuple[s
         sys.stderr.write(result.stdout)
         raise SystemExit(f"{name} failed with exit code {result.returncode}")
     return result.stdout, result.stderr
+
+
+def command_env(argv: list[str]) -> dict[str, str] | None:
+    if "revm-vm-loop" not in argv and "revm-kernel" not in argv:
+        return None
+    env = os.environ.copy()
+    env["RUSTFLAGS"] = "-C target-cpu=native"
+    env["CARGO_PROFILE_RELEASE_LTO"] = "fat"
+    env["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
+    return env
+
+
+def per_run(total: int | None, runs: int) -> float | None:
+    if total is None or runs == 0:
+        return None
+    return total / runs
 
 
 def shell_quote(value: str) -> str:
@@ -532,7 +569,7 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
         (str(row.get("fixture", "")), str(row.get("engine", ""))): float_value(row.get("median_ms"))
         for row in rows
     }
-    table = [["fixture", "engine", "scope", "host", "runs", "runtime bytes", "host calls", "logs", "median ms", f"{VM_LOOP_BASELINE_ENGINE}/engine"]]
+    table = [["fixture", "engine", "scope", "host", "runs", "runtime bytes", "host calls/run", "logs", "median ms", f"{VM_LOOP_BASELINE_ENGINE}/engine"]]
     for row in rows:
         evmz_ms = by_fixture_engine.get((str(row["fixture"]), VM_LOOP_BASELINE_ENGINE))
         row_ms = float_value(row.get("median_ms"))
@@ -544,7 +581,7 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
                 row["host_profile"],
                 str(row["runs"]),
                 fmt_int(row["runtime_bytes"]),
-                fmt_int(row["timed_host_calls"]),
+                fmt_float(row.get("timed_host_calls_per_run"), 1),
                 fmt_int(row.get("logs")),
                 fmt_float(row["median_ms"], 3),
                 fmt_ratio(evmz_ms / row_ms if evmz_ms and row_ms else None),

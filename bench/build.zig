@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
             "--",
         });
         run_revm_kernel.setCwd(b.path("."));
+        addRevmNativeRustFlags(run_revm_kernel);
         if (b.args) |args| run_revm_kernel.addArgs(args);
         b.step("revm-kernel", "Run revm opcode kernel benchmark").dependOn(&run_revm_kernel.step);
     }
@@ -121,6 +122,7 @@ pub fn build(b: *std.Build) void {
             "vm-loop",
         });
         run_revm_vm_loop.setCwd(b.path("."));
+        addRevmNativeRustFlags(run_revm_vm_loop);
         if (b.args) |args| run_revm_vm_loop.addArgs(args);
         b.step("revm-vm-loop", "Run revm VM-loop fixture runner").dependOn(&run_revm_vm_loop.step);
     }
@@ -262,6 +264,12 @@ fn buildProfileOption(b: *std.Build) []const u8 {
         std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
     }
     return profile;
+}
+
+fn addRevmNativeRustFlags(run: *std.Build.Step.Run) void {
+    run.setEnvironmentVariable("RUSTFLAGS", "-C target-cpu=native");
+    run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_LTO", "fat");
+    run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1");
 }
 
 fn addEvmoneVm(module: *std.Build.Module, evmone_dep: *std.Build.Dependency, intx_dep: *std.Build.Dependency) void {
