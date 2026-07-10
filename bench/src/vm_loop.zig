@@ -18,10 +18,12 @@ const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;
 
 const max_contract_code_size = 256 * 1024 * 1024;
+const proxy_target_address = evmz.addr(0x3000000000000000000000000000000000000003);
 
 const Options = struct {
     fixture_dir: ?[]const u8 = null,
     contract_code_path: ?[]const u8 = null,
+    proxy_target_code_path: ?[]const u8 = null,
     call_data_hex: ?[]const u8 = null,
     num_runs: ?usize = null,
     gas_limit: ?u64 = null,
@@ -35,6 +37,7 @@ const Options = struct {
 const ResolvedOptions = struct {
     fixture_dir: ?[]const u8,
     contract_code_path: []const u8,
+    proxy_target_code_path: ?[]const u8 = null,
     call_data_hex: []const u8,
     num_runs: usize,
     gas_limit: u64,
@@ -75,6 +78,7 @@ const ExecutorRuntimeRunner = struct {
     fn init(
         allocator: std.mem.Allocator,
         runtime_code: []const u8,
+        proxy_target_runtime_code: ?[]const u8,
         revision: evmz.eth.Revision,
         executor_resources: ExecutorResources,
     ) !ExecutorRuntimeRunner {
@@ -91,6 +95,10 @@ const ExecutorRuntimeRunner = struct {
 
         const contract = try executor.getOrCreateAccount(common.contract_address);
         try contract.setCode(allocator, runtime_code);
+        if (proxy_target_runtime_code) |target_code| {
+            const target = try executor.getOrCreateAccount(proxy_target_address);
+            try target.setCode(allocator, target_code);
+        }
 
         var bytecode = try executor.prepareBytecode(runtime_code);
         errdefer bytecode.deinit(allocator);
@@ -170,6 +178,11 @@ pub fn main(init: std.process.Init) !void {
             options.contract_code_path = try arena.dupe(u8, value);
         } else if (common.stripPrefix(arg, "--contract-code-path=")) |value| {
             options.contract_code_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--proxy-target-code-path")) {
+            const value = args.next() orelse return error.MissingProxyTargetCodePath;
+            options.proxy_target_code_path = try arena.dupe(u8, value);
+        } else if (common.stripPrefix(arg, "--proxy-target-code-path=")) |value| {
+            options.proxy_target_code_path = try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--call-data")) {
             const value = args.next() orelse return error.MissingCallData;
             options.call_data_hex = try arena.dupe(u8, value);
@@ -233,29 +246,23 @@ pub fn main(init: std.process.Init) !void {
         return error.SpecOutsideSupportRange;
     }
 
-    const contract_code_hex = try std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        contract_code_path,
-        allocator,
-        .limited(max_contract_code_size * 2),
-    );
-    defer allocator.free(contract_code_hex);
-
-    const contract_code = try common.decodeHexAlloc(allocator, contract_code_hex);
-    defer allocator.free(contract_code);
-
     const call_data = try common.decodeHexAlloc(allocator, resolved.call_data_hex);
     defer allocator.free(call_data);
 
     var deploy_host = CountingHost.init(allocator, resolved.host_profile);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime_code = try deployRuntime(allocator, &deploy_host_iface, contract_code, resolved.revision);
+    const runtime_code = try loadRuntimeCode(init.io, allocator, &deploy_host_iface, contract_code_path, resolved.revision);
     defer allocator.free(runtime_code);
+    const proxy_target_runtime_code = if (resolved.proxy_target_code_path) |target_path|
+        try loadRuntimeCode(init.io, allocator, &deploy_host_iface, target_path, resolved.revision)
+    else
+        null;
+    defer if (proxy_target_runtime_code) |target_code| allocator.free(target_code);
     try common.rejectNullHostTouches(resolved.host_profile, deploy_host.counters);
 
     var executor_runner: ?ExecutorRuntimeRunner = if (isExecutorEngine(resolved.engine))
-        try ExecutorRuntimeRunner.init(allocator, runtime_code, resolved.revision, resolved.executor_resources)
+        try ExecutorRuntimeRunner.init(allocator, runtime_code, proxy_target_runtime_code, resolved.revision, resolved.executor_resources)
     else
         null;
     defer {
@@ -283,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (resolved.summary) {
         std.debug.print(
-            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} support={s}..{s} gas_limit={d} runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
+            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} support={s}..{s} gas_limit={d} runtime_bytes={d} proxy_target_runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
             .{
                 resolved.fixture_dir orelse "",
                 engineName(resolved.engine),
@@ -294,6 +301,7 @@ pub fn main(init: std.process.Init) !void {
                 @tagName(BenchProtocol.support.max),
                 resolved.gas_limit,
                 runtime_code.len,
+                if (proxy_target_runtime_code) |target_code| target_code.len else 0,
                 deploy_host.counters.total(),
                 timed_counters.total(),
                 timed_counters.log,
@@ -312,6 +320,7 @@ fn printUsage() void {
         \\Options:
         \\  --fixture <dir>              fixture dir containing init.hex plus optional metadata
         \\  --contract-code-path <path>   init-code hex file to deploy once
+        \\  --proxy-target-code-path <path>  optional executor-only proxy target init-code
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
         \\  --gas-limit <n>               finite gas for each timed runtime call, default maxInt(i64)
@@ -343,6 +352,9 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
     if (options.engine != .evmz_executor and options.executor_resources != .growable) {
         return error.ExecutorResourcesRequireExecutorEngine;
     }
+    if (options.engine != .evmz_executor and options.proxy_target_code_path != null) {
+        return error.ProxyTargetRequiresExecutorEngine;
+    }
 
     if (options.fixture_dir) |fixture_dir| {
         if (contract_code_path == null) {
@@ -371,6 +383,7 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
     return .{
         .fixture_dir = options.fixture_dir,
         .contract_code_path = contract_code_path orelse return error.MissingContractCodePath,
+        .proxy_target_code_path = options.proxy_target_code_path,
         .call_data_hex = call_data_hex orelse "",
         .num_runs = num_runs orelse 1,
         .gas_limit = gas_limit orelse defaultGasLimit(),
@@ -638,6 +651,26 @@ fn deployRuntime(
     return deployRuntimeForProtocol(BenchProtocol, allocator, host, contract_code, revision);
 }
 
+fn loadRuntimeCode(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: *Host,
+    init_code_path: []const u8,
+    revision: evmz.eth.Revision,
+) ![]u8 {
+    const init_code_hex = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        init_code_path,
+        allocator,
+        .limited(max_contract_code_size * 2),
+    );
+    defer allocator.free(init_code_hex);
+
+    const init_code = try common.decodeHexAlloc(allocator, init_code_hex);
+    defer allocator.free(init_code);
+    return deployRuntime(allocator, host, init_code, revision);
+}
+
 fn deployRuntimeForProtocol(
     comptime Protocol: type,
     allocator: std.mem.Allocator,
@@ -804,7 +837,7 @@ test "deploys runtime and runs empty bytecode under null host" {
     _ = try timeRuntimeCall(std.testing.allocator, &run_host_iface, runtime, &.{}, .latest, defaultGasLimit());
     try std.testing.expectEqual(@as(u64, 0), run_host.counters.total());
 
-    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, .latest, .growable);
+    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, null, .latest, .growable);
     defer executor_runner.deinit();
     _ = try executor_runner.timeRuntimeCall(&.{}, defaultGasLimit());
 }
@@ -823,4 +856,14 @@ test "resolves fixture defaults with CLI overrides" {
     try std.testing.expectEqual(@as(usize, 2), resolved.num_runs);
     try std.testing.expectEqual(defaultGasLimit(), resolved.gas_limit);
     try std.testing.expectEqual(HostProfile.null, resolved.host_profile);
+}
+
+test "proxy target is executor-only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.ProxyTargetRequiresExecutorEngine, resolveOptions(std.testing.io, arena.allocator(), .{
+        .fixture_dir = "fixtures/vm-loop/ten-thousand-hashes",
+        .proxy_target_code_path = "fixtures/vm-loop/erc20-transfer/init.hex",
+    }));
 }

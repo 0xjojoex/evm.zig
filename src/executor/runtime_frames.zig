@@ -23,5 +23,6 @@ pub const Frame = struct {
     frame: FrameStore.Lease,
     scratch_depth: ?u16 = null,
     needs_action_loop: bool,
+    zero_padded_raw: bool = false,
     pending_action: ?Interpreter.Action = null,
 };

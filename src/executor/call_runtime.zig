@@ -11,6 +11,7 @@ const Opcode = evmz.Opcode;
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
+const tail_dispatch = @import("../interpreter/tail_dispatch.zig");
 const runtime_frames = @import("./runtime_frames.zig");
 const transaction = @import("../transaction.zig");
 const call_scratch_storage = @import("./call_scratch.zig");
@@ -24,6 +25,12 @@ pub fn For(comptime Executor: type) type {
             executor: *Executor,
             depth: u16,
             allocator: std.mem.Allocator,
+
+            fn allowsReadPadding(self: *const ScratchScope) bool {
+                // Optimization-only bytes must not enlarge a bounded resource envelope.
+                const index: usize = self.depth;
+                return !self.executor.call_scratch_slots.items[index].isBounded();
+            }
 
             pub fn deinit(self: *ScratchScope) void {
                 endCallScratch(self.executor, self.depth);
@@ -55,6 +62,11 @@ pub fn For(comptime Executor: type) type {
             executor: *Executor,
             host_iface: Host,
             frames: *std.ArrayList(RuntimeFrame),
+
+            const PreparedChildCallFrame = struct {
+                frame: FrameLease,
+                zero_padded_raw: bool,
+            };
 
             fn init(executor: *Executor) CallRuntime {
                 return .{
@@ -98,22 +110,47 @@ pub fn For(comptime Executor: type) type {
                 var scratch = try callScratch(self.executor, msg.depth);
                 errdefer scratch.deinit();
 
-                const code = try dupeCodeAlloc(self.executor, scratch.allocator, code_address);
-                var frame = try acquireRawFrame(
-                    self.executor,
-                    scratch.allocator,
-                    &self.host_iface,
-                    &msg,
-                    code,
-                    null,
-                );
+                const source = try self.executor.getCode(code_address);
+                const needs_action_loop = codeNeedsActionLoop(source);
+                const use_zero_padded_raw = !needs_action_loop and
+                    self.executor.trace_sink == null and
+                    scratch.allowsReadPadding();
+                const prepared: PreparedChildCallFrame = if (!use_zero_padded_raw) blk: {
+                    const code = try scratch.allocator.dupe(u8, source);
+                    break :blk .{
+                        .frame = try acquireRawFrame(
+                            self.executor,
+                            scratch.allocator,
+                            &self.host_iface,
+                            &msg,
+                            code,
+                            null,
+                        ),
+                        .zero_padded_raw = false,
+                    };
+                } else blk: {
+                    const code = try Bytecode.ZeroPaddedCode.init(scratch.allocator, source);
+                    break :blk .{
+                        .frame = try acquireRawFrame(
+                            self.executor,
+                            scratch.allocator,
+                            &self.host_iface,
+                            &msg,
+                            code.bytes,
+                            null,
+                        ),
+                        .zero_padded_raw = true,
+                    };
+                };
+                var frame = prepared.frame;
                 errdefer frame.deinit();
 
                 try self.appendFrame(.{
                     .kind = .{ .call = checkpoint_state },
                     .frame = frame,
                     .scratch_depth = scratch.depth,
-                    .needs_action_loop = codeNeedsActionLoop(code),
+                    .needs_action_loop = needs_action_loop,
+                    .zero_padded_raw = prepared.zero_padded_raw,
                 });
             }
 
@@ -163,6 +200,8 @@ pub fn For(comptime Executor: type) type {
                     const depth = runtime_frame.frame.callFrame().msg.depth;
                     const run_result: Interpreter.RunResult = if (runtime_frame.needs_action_loop)
                         try executeInterpreterUntilAction(self.executor, &interpreter, depth)
+                    else if (runtime_frame.zero_padded_raw)
+                        .{ .finished = try executeZeroPaddedRawFrame(self.executor, &interpreter, depth) }
                     else
                         .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
                     switch (run_result) {
@@ -599,6 +638,18 @@ pub fn For(comptime Executor: type) type {
             self.state.trace_depth = depth;
             defer self.state.trace_depth = previous_depth;
             return interpreter.executeUntilAction();
+        }
+
+        fn executeZeroPaddedRawFrame(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.Result {
+            const previous_depth = self.state.trace_depth;
+            self.state.trace_depth = depth;
+            defer self.state.trace_depth = previous_depth;
+
+            var frame = interpreter.call_frame;
+            if (self.trace_sink != null) return interpreter.execute();
+            try tail_dispatch.For(Protocol).executeZeroPaddedRaw(frame);
+            if (frame.status == .running) frame.status = .success;
+            return frame.getResult();
         }
 
         pub fn currentTxContext(self: *const Executor) !Host.TxContext {

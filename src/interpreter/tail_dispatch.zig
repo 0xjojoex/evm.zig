@@ -177,15 +177,23 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         pub fn execute(frame: *CallFrame, read_bytes: []const u8) anyerror!void {
+            return executeAt(frame, read_bytes.ptr);
+        }
+
+        pub fn executeZeroPaddedRaw(frame: *CallFrame) anyerror!void {
+            return executeAt(frame, frame.code.ptr);
+        }
+
+        fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
             const stack_base: [*]u256 = frame.stack.slots;
             var ctx = Context{
                 .frame = frame,
-                .code_base = read_bytes.ptr,
+                .code_base = code_base,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
             };
 
-            const ip = read_bytes.ptr + frame.pc;
+            const ip = code_base + frame.pc;
             const status = table[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx);
             switch (status) {
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),

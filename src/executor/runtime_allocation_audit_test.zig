@@ -47,7 +47,7 @@ test "runtime allocation audit sees no traffic for bounded prepared stop after s
     executor.closeTransaction();
 }
 
-test "runtime allocation audit sees no traffic for warmed bounded child call" {
+test "bounded child call preserves semantic scratch requirement" {
     var audit = CountingAllocator.init(std.testing.allocator);
     const allocator = audit.allocator();
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
@@ -56,12 +56,16 @@ test "runtime allocation audit sees no traffic for warmed bounded child call" {
     const tx_context = testTxContext(sender, 100_000);
     var executor = try Executor.initWithRuntimeResources(allocator, .{
         .revision = .cancun,
-    }, .{ .bounded = .{
-        .max_live_frames = 2,
-        .memory_bytes_per_frame = 0,
-        .io_bytes_per_frame = 0,
-        .result_bytes = 0,
-    } });
+    }, .{
+        .bounded = .{
+            .max_live_frames = 2,
+            .memory_bytes_per_frame = 0,
+            .io_bytes_per_frame = 0,
+            // The raw one-byte code and jump map fit; a readable tail does not.
+            .scratch_bytes_per_frame = evmz.Bytecode.zero_padding_len - 1,
+            .result_bytes = 0,
+        },
+    });
     defer executor.deinit();
 
     var sender_account = AccountState.init(allocator);

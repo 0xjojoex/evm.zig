@@ -1,0 +1,3 @@
+handrolled 46-byte DELEGATECALL proxy for the erc20-transfer fixture
+target: 0x3000000000000000000000000000000000000003
+target init code: ../erc20-transfer/init.hex via --proxy-target-code-path

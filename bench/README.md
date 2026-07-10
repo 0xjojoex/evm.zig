@@ -75,6 +75,10 @@ zig build revm-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
 zig build vm-loop -- --fixture fixtures/vm-loop/erc20-mint --summary
 zig build vm-loop -- --engine evmz --fixture fixtures/vm-loop/erc20-mint --summary
 zig build vm-loop -- \
+  --engine evmz-executor \
+  --fixture fixtures/vm-loop/erc20-transfer-proxy \
+  --proxy-target-code-path fixtures/vm-loop/erc20-transfer/init.hex
+zig build vm-loop -- \
   --contract-code-path path/to/init-code.hex \
   --call-data 30627b7c \
   --num-runs 5
@@ -89,8 +93,11 @@ The default evmz runner is direct bound-interpreter `execute()` with
 metadata prepared before timing. Use `--engine evmz-executor` only for the
 transaction/executor diagnostic stub; it prepares bytecode once and times
 `Executor.executePreparedCallTransaction` after transaction setup/reset. The
-standalone evmone runner prepares baseline or advanced analysis once and times
-the analyzed execution path.
+executor-only `--proxy-target-code-path` deploys a second runtime at
+`0x3000000000000000000000000000000000000003`; the proxy fixture above uses it
+to measure a real nested ERC call without adding executor work to the VM-core
+scoreboard. The standalone evmone runner prepares baseline or advanced analysis
+once and times the analyzed execution path.
 
 Host profiles:
 
