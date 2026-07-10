@@ -38,7 +38,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         };
 
         pub const Entry = struct {
-            key_ptr: *K,
+            key_ptr: *const K,
             value_ptr: *V,
         };
 
@@ -48,7 +48,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         };
 
         pub const GetOrPutResult = struct {
-            key_ptr: *K,
+            key_ptr: *const K,
             value_ptr: *V,
             found_existing: bool,
         };
@@ -57,7 +57,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             entries: []Row,
             index: usize = 0,
 
-            pub fn next(self: *KeyIterator) ?*K {
+            pub fn next(self: *KeyIterator) ?*const K {
                 if (self.index >= self.entries.len) return null;
                 defer self.index += 1;
                 return &self.entries[self.index].key;
@@ -103,11 +103,18 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn init(allocator: std.mem.Allocator) Self {
             if (@sizeOf(Context) != 0) {
-                @compileError("Context must be zero-sized; add initContext if a stateful context is needed");
+                @compileError("Context must be specified; call initContext(allocator, context)");
             }
+            return initContext(allocator, undefined);
+        }
+
+        pub fn initContext(
+            allocator: std.mem.Allocator,
+            context: Context,
+        ) Self {
             return .{
                 .allocator = allocator,
-                .context = undefined,
+                .context = context,
                 .index = &.{},
                 .entries = &.{},
                 .len = 0,
@@ -117,7 +124,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.index);
             self.allocator.free(self.entries);
-            self.* = init(self.allocator);
+            self.* = undefined;
         }
 
         pub fn count(self: Self) Index {
@@ -200,6 +207,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn getOrPutAssumeCapacity(self: *Self, key: K) GetOrPutResult {
             std.debug.assert(self.index.len != 0);
+            std.debug.assert(self.len < self.entries.len);
 
             if (self.findSlotForInsert(key)) |slot| {
                 const stored = self.index[slot];
@@ -252,8 +260,8 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             // Clear only the probe slots named by live rows. This is the core
             // reason this type exists: reset cost is O(live entries), not
             // O(reserved slots).
-            for (self.entries[0..self.len]) |entry| {
-                self.index[entry.slot] = empty_slot;
+            for (0..self.len) |index| {
+                self.index[self.entries[index].slot] = empty_slot;
             }
             self.len = 0;
         }
@@ -347,7 +355,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         fn homeSlot(slot_count: usize, hash: u64) usize {
             std.debug.assert(slot_count != 0);
             std.debug.assert(std.math.isPowerOfTwo(slot_count));
-            return @as(usize, @intCast(hash)) & (slot_count - 1);
+            return @as(usize, @truncate(hash)) & (slot_count - 1);
         }
 
         fn nextSlot(slot: usize, slot_count: usize) usize {
@@ -362,11 +370,19 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         fn slotCountForCapacity(entry_capacity: Index) !usize {
             if (entry_capacity == 0) return 0;
-            const needed = try std.math.add(
+
+            const numerator = try std.math.mul(
                 usize,
-                try std.math.divCeil(usize, @as(usize, entry_capacity) * 100, default_max_load_percentage),
-                1,
+                @as(usize, entry_capacity),
+                100,
             );
+
+            const needed = try std.math.divCeil(
+                usize,
+                numerator,
+                default_max_load_percentage,
+            );
+
             return std.math.ceilPowerOfTwo(usize, needed) catch error.CapacityTooLarge;
         }
 
@@ -381,7 +397,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
     };
 }
 
-test "touched hash map clears only live slots" {
+test "sparse hash map clears only live slots" {
     var map = Auto(u64, void).init(std.testing.allocator);
     defer map.deinit();
 
@@ -400,7 +416,7 @@ test "touched hash map clears only live slots" {
     try std.testing.expectEqual(@as(usize, 1), map.debugOccupiedSlots());
 }
 
-test "touched hash map implicit growth is amortized" {
+test "sparse hash map implicit growth is amortized" {
     var implicit = Auto(u64, void).init(std.testing.allocator);
     defer implicit.deinit();
 
@@ -414,7 +430,7 @@ test "touched hash map implicit growth is amortized" {
     try std.testing.expectEqual(@as(u32, 1), explicit.capacity());
 }
 
-test "touched hash map removal preserves probe clusters" {
+test "sparse hash map removal preserves probe clusters" {
     const BadContext = struct {
         pub fn hash(_: @This(), _: u64) u64 {
             return 0;
