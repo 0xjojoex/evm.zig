@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
     const zbench_dep = b.dependency("zbench", .{ .target = target, .optimize = micro_optimize });
+    const evmone_libgcc = nativeEvmoneLibgcc(b, target);
     const evmz_mod = evmz_dep.module("evmz");
     const vm_loop_support_min = b.option(
         []const u8,
@@ -95,7 +96,7 @@ pub fn build(b: *std.Build) void {
 
     {
         const kernel_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
-        addEvmoneVm(kernel_mod, evmone_dep, intx_dep);
+        addEvmoneVm(kernel_mod, evmone_dep, intx_dep, evmone_libgcc);
         const kernel = b.addExecutable(.{
             .name = "evmz-kernel",
             .root_module = kernel_mod,
@@ -147,7 +148,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .link_libcpp = true,
         });
-        addEvmoneVm(evmone_vm_loop_mod, evmone_dep, intx_dep);
+        addEvmoneVm(evmone_vm_loop_mod, evmone_dep, intx_dep, evmone_libgcc);
         evmone_vm_loop_mod.addCSourceFile(.{
             .file = b.path("evmone/vm_loop.cpp"),
             .flags = &[_][]const u8{
@@ -257,7 +258,7 @@ pub fn build(b: *std.Build) void {
         const kernel_tests = b.addTest(.{
             .root_module = blk: {
                 const kernel_test_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
-                addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep);
+                addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep, evmone_libgcc);
                 break :blk kernel_test_mod;
             },
         });
@@ -293,9 +294,15 @@ fn addRevmNativeRustFlags(run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1");
 }
 
-fn addEvmoneVm(module: *std.Build.Module, evmone_dep: *std.Build.Dependency, intx_dep: *std.Build.Dependency) void {
+fn addEvmoneVm(
+    module: *std.Build.Module,
+    evmone_dep: *std.Build.Dependency,
+    intx_dep: *std.Build.Dependency,
+    libgcc: ?std.Build.LazyPath,
+) void {
     module.link_libc = true;
     module.link_libcpp = true;
+    if (libgcc) |archive| module.addObjectFile(archive);
     module.addIncludePath(evmone_dep.path("evmc/include"));
     module.addIncludePath(evmone_dep.path("include"));
     module.addIncludePath(evmone_dep.path("lib"));
@@ -332,6 +339,21 @@ fn addEvmoneVm(module: *std.Build.Module, evmone_dep: *std.Build.Dependency, int
         module.addCSourceFile(.{ .file = evmone_dep.path(source), .flags = cxx_flags });
     }
     module.addCSourceFile(.{ .file = evmone_dep.path("lib/evmone_precompiles/keccak.c"), .flags = c_flags });
+}
+
+/// Evmone's x86 Keccak selector uses GCC CPU-detection symbols absent from Zig's compiler runtime.
+fn nativeEvmoneLibgcc(b: *std.Build, target: std.Build.ResolvedTarget) ?std.Build.LazyPath {
+    if (!target.query.isNative() or target.result.os.tag != .linux or target.result.cpu.arch != .x86_64) return null;
+
+    const copy = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\cp "$(gcc -print-libgcc-file-name)" "$1"
+        ,
+        "evmone-libgcc",
+    });
+    return copy.addOutputFileArg("libgcc.a");
 }
 
 fn benchModule(
