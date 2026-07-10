@@ -104,6 +104,9 @@ pub fn build(b: *std.Build) void {
             .root_module = lib_unit_tests_mod,
             .filters = b.args orelse &.{},
         });
+        // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
+        // Keep the test build in Debug while using LLVM for tail dispatch.
+        lib_unit_tests.use_llvm = true;
 
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
@@ -125,6 +128,7 @@ pub fn build(b: *std.Build) void {
                 .root_module = c_api_tests_mod,
                 .filters = b.args orelse &.{},
             });
+            c_api_tests.use_llvm = true;
             test_step.dependOn(&b.addRunArtifact(c_api_tests).step);
         }
     }
