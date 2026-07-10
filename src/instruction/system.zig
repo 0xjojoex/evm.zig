@@ -111,18 +111,22 @@ pub fn For(comptime ProtocolType: type) type {
                 .gas_reservoir = frame.gas_reservoir,
             };
 
-            var cost: i64 = if (value > 0) Protocol.Call.callValueTransferGas(revision) else 0;
+            const value_transfer_gas: i64 = if (value > 0) Protocol.Call.callValueTransferGas(revision) else 0;
+            frame.trackGas(value_transfer_gas);
+            if (frame.status != .running) return;
+
+            frame.traceAccountAccess(address);
+
             var account_state_gas: i64 = 0;
 
             if (op == Opcode.CALL) {
                 const account_exists = try frame.host.accountExists(address);
                 const new_account_gas = Protocol.Call.callNewAccountGas(revision, value, account_exists);
-                cost += new_account_gas.regular;
+                frame.trackGas(new_account_gas.regular);
+                if (frame.status != .running) return;
                 account_state_gas = new_account_gas.state;
             }
 
-            frame.trackGas(cost);
-            if (frame.status != .running) return;
             frame.trackStateGas(account_state_gas);
             if (frame.status != .running) return;
 
@@ -256,6 +260,15 @@ pub fn For(comptime ProtocolType: type) type {
             const same_address = std.mem.eql(u8, &frame.msg.recipient, &address);
             const transfers_balance = balance > 0 and !same_address;
             const revision = Self.frameRevision(frame);
+
+            if (Protocol.SelfDestruct.selfDestructColdAccountAccessGas(revision)) |cold_account_access_cost| {
+                if (try frame.host.accessAccount(address) == .cold) {
+                    frame.trackGas(cold_account_access_cost);
+                    if (frame.status != .running) return;
+                }
+            }
+            frame.traceAccountAccess(address);
+
             const new_account_gas = Protocol.SelfDestruct.selfDestructNewAccountGas(
                 revision,
                 same_address,
@@ -266,14 +279,6 @@ pub fn For(comptime ProtocolType: type) type {
             if (frame.status != .running) return;
             frame.trackStateGas(new_account_gas.state);
             if (frame.status != .running) return;
-
-            if (Protocol.SelfDestruct.selfDestructColdAccountAccessGas(revision)) |cold_account_access_cost| {
-                if (try frame.host.accessAccount(address) == .cold) {
-                    frame.trackGas(cold_account_access_cost);
-                    if (frame.status != .running) return;
-                }
-            }
-
             const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
 
             if (should_refund) {

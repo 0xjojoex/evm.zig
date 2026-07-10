@@ -12,6 +12,8 @@
 
 pub const revision = @import("eth/revision.zig");
 pub const config = @import("eth/config.zig");
+pub const bal = @import("eth/bal.zig");
+pub const bal_recorder = @import("eth/bal_recorder.zig");
 pub const instruction = @import("eth/instruction.zig");
 pub const transaction = @import("eth/transaction.zig");
 pub const settlement = @import("eth/settlement.zig");

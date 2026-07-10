@@ -1,0 +1,44 @@
+{
+  "duplicate-account": {
+    "transaction_count": "0x1",
+    "block_access_list": [
+      {
+        "address": "0x0000000000000000000000000000000000000001"
+      },
+      {
+        "address": "0x0000000000000000000000000000000000000001"
+      }
+    ],
+    "expect_error": "DuplicateAccount"
+  },
+  "read-write-overlap": {
+    "transaction_count": "0x1",
+    "block_access_list": [
+      {
+        "address": "0x0000000000000000000000000000000000000001",
+        "storage_changes": [
+          {
+            "slot": "0x01",
+            "changes": [
+              { "block_access_index": "0x01", "new_value": "0x02" }
+            ]
+          }
+        ],
+        "storage_reads": ["0x01"]
+      }
+    ],
+    "expect_error": "StorageReadAlsoWritten"
+  },
+  "out-of-range-index": {
+    "transaction_count": "0x1",
+    "block_access_list": [
+      {
+        "address": "0x0000000000000000000000000000000000000001",
+        "balance_changes": [
+          { "block_access_index": "0x03", "post_balance": "0x01" }
+        ]
+      }
+    ],
+    "expect_error": "BlockAccessIndexOutOfRange"
+  }
+}

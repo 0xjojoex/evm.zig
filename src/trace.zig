@@ -60,6 +60,12 @@ pub const StepEnd = struct {
     return_data_size: usize,
 };
 
+/// Account access that survived the instruction's pre-state gas checks.
+pub const AccountAccess = struct {
+    depth: u16 = 0,
+    address: Address,
+};
+
 pub const AccountExistsRead = struct {
     depth: u16 = 0,
     address: Address,
@@ -238,6 +244,13 @@ pub const StepEndField = enum(u4) {
 
 pub const StepEndFields = std.enums.EnumSet(StepEndField);
 
+pub const AccountAccessField = enum(u1) {
+    depth,
+    address,
+};
+
+pub const AccountAccessFields = std.enums.EnumSet(AccountAccessField);
+
 /// Kind-level schema for `StateRead`.
 ///
 /// State read schemas currently select whole union variants. For example,
@@ -270,6 +283,7 @@ pub const CheckpointFields = std.enums.EnumSet(CheckpointField);
 pub const Events = struct {
     step_start: StepStartFields = .{},
     step_end: StepEndFields = .{},
+    account_access: AccountAccessFields = .{},
     state_read: StateReadKinds = .{},
     state_write: StateWriteKinds = .{},
     checkpoint: CheckpointFields = .{},
@@ -278,6 +292,7 @@ pub const Events = struct {
         return .{
             .step_start = StepStartFields.full,
             .step_end = StepEndFields.full,
+            .account_access = AccountAccessFields.full,
             .state_read = StateReadKinds.full,
             .state_write = StateWriteKinds.full,
             .checkpoint = CheckpointFields.full,
@@ -298,6 +313,10 @@ pub const Events = struct {
 
     pub fn wantsDecodedOpcode(self: Events) bool {
         return self.step_start.contains(.decoded_opcode) or self.step_end.contains(.decoded_opcode);
+    }
+
+    pub fn wantsAccountAccess(self: Events) bool {
+        return !self.account_access.eql(.empty);
     }
 
     pub fn wantsStateRead(self: Events, event: StateReadKind) bool {
@@ -340,6 +359,7 @@ pub const Sink = struct {
     pub const VTable = struct {
         stepStart: ?*const fn (ptr: *anyopaque, event: StepStart) void = null,
         stepEnd: ?*const fn (ptr: *anyopaque, event: StepEnd) void = null,
+        accountAccess: ?*const fn (ptr: *anyopaque, event: AccountAccess) void = null,
         stateRead: ?*const fn (ptr: *anyopaque, event: StateRead) void = null,
         stateWrite: ?*const fn (ptr: *anyopaque, event: StateWrite) void = null,
         checkpoint: ?*const fn (ptr: *anyopaque, event: Checkpoint) void = null,
@@ -350,6 +370,7 @@ pub const Sink = struct {
         wants_step_start: bool = false,
         wants_step_end: bool = false,
         wants_decoded_opcode: bool = false,
+        wants_account_access: bool = false,
         wants_state_read: bool = false,
         wants_state_write: bool = false,
         wants_checkpoint: bool = false,
@@ -363,6 +384,7 @@ pub const Sink = struct {
                 .wants_step_end = wants_step_end,
                 .wants_decoded_opcode = (wants_step_start and events.step_start.contains(.decoded_opcode)) or
                     (wants_step_end and events.step_end.contains(.decoded_opcode)),
+                .wants_account_access = events.wantsAccountAccess() and vtable.accountAccess != null,
                 .wants_state_read = !events.state_read.eql(.empty) and vtable.stateRead != null,
                 .wants_state_write = !events.state_write.eql(.empty) and vtable.stateWrite != null,
                 .wants_checkpoint = events.wantsCheckpoint() and vtable.checkpoint != null,
@@ -398,6 +420,11 @@ pub const Sink = struct {
         self.vtable.stepEnd.?(self.ptr, event);
     }
 
+    pub fn accountAccess(self: *Sink, event: AccountAccess) void {
+        if (!self.flags().wants_account_access) return;
+        self.vtable.accountAccess.?(self.ptr, event);
+    }
+
     pub fn stateRead(self: *Sink, event: StateRead) void {
         if (!self.wantsStateReadKind(event.kind())) return;
         self.vtable.stateRead.?(self.ptr, event);
@@ -428,6 +455,10 @@ pub const Sink = struct {
 
     pub fn wantsDecodedOpcode(self: *const Sink) bool {
         return self.flags().wants_decoded_opcode;
+    }
+
+    pub fn wantsAccountAccess(self: *const Sink) bool {
+        return self.flags().wants_account_access;
     }
 
     pub fn wantsStateReadKind(self: *const Sink, event: StateReadKind) bool {

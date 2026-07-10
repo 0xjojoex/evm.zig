@@ -24,7 +24,7 @@
 const std = @import("std");
 
 const evmz = @import("./evm.zig");
-const resource_bound = @import("./executor/resource_bound.zig");
+pub const resource_bound = @import("./executor/resource_bound.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
 const BlockHashSource = evmz.BlockHashSource;
@@ -402,6 +402,16 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.state.trace_sink = trace_sink;
         }
 
+        pub fn traceAccountAccess(self: *Self, account_address: Address, depth: u16) void {
+            const sink = self.trace_sink orelse return;
+            if (!sink.wantsAccountAccess()) return;
+            const fields = sink.events.account_access;
+            sink.accountAccess(.{
+                .depth = if (fields.contains(.depth)) depth else 0,
+                .address = if (fields.contains(.address)) account_address else std.mem.zeroes(Address),
+            });
+        }
+
         /// Rebind fixture/benchmark inputs while retaining configured resources.
         pub fn reset(self: *Self, options: Init) !void {
             if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
@@ -658,6 +668,10 @@ pub fn Executor(comptime ProtocolType: type) type {
             return self.state.snapshot();
         }
 
+        pub fn traceSnapshotLifecycle(self: *Self, kind: trace.CheckpointKind, snapshot_state: *const Self.Snapshot) void {
+            self.state.traceSnapshotLifecycle(kind, snapshot_state);
+        }
+
         fn snapshotLease(self: *Self) !SnapshotLease {
             const snapshot_state = try self.snapshot_pool.create(self.allocator);
             errdefer self.snapshot_pool.destroy(snapshot_state);
@@ -794,10 +808,16 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             var pre_execution = try self.snapshot();
             defer pre_execution.deinit(self.allocator);
-            errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+            self.traceSnapshotLifecycle(.checkpoint, &pre_execution);
+            var trace_checkpoint_open = true;
+            errdefer {
+                if (trace_checkpoint_open) self.traceSnapshotLifecycle(.revert, &pre_execution);
+                self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+            }
 
             const result = try runtime.executeCall(self, options);
             try self.finishStandaloneTransaction(result.status(), &pre_execution);
+            trace_checkpoint_open = false;
             return result;
         }
 
@@ -807,18 +827,26 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             var pre_execution = try self.snapshot();
             defer pre_execution.deinit(self.allocator);
-            errdefer self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+            self.traceSnapshotLifecycle(.checkpoint, &pre_execution);
+            var trace_checkpoint_open = true;
+            errdefer {
+                if (trace_checkpoint_open) self.traceSnapshotLifecycle(.revert, &pre_execution);
+                self.rollbackTransaction(&pre_execution) catch self.closeTransaction();
+            }
 
             const result = try runtime.executeCreate(self, options);
             try self.finishStandaloneTransaction(result.status(), &pre_execution);
+            trace_checkpoint_open = false;
             return result;
         }
 
         fn finishStandaloneTransaction(self: *Self, status: Interpreter.Status, snapshot_state: *Self.Snapshot) !void {
             if (executionRolledBack(status)) {
                 try self.rollbackTransaction(snapshot_state);
+                self.traceSnapshotLifecycle(.revert, snapshot_state);
             } else {
                 try self.commitTransaction();
+                self.traceSnapshotLifecycle(.commit, snapshot_state);
             }
         }
 
@@ -828,14 +856,17 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// and final commit/rollback. `runTopLevelTransaction` wraps those pieces.
         pub fn executeTransactionMessage(self: *Self, root: Self.RootFrame, gas: transaction.ExecutionGas) !Interpreter.Result {
             return switch (root) {
-                .call => |call_tx| runtime.executeCallTransaction(
-                    self,
-                    call_tx.sender,
-                    call_tx.recipient,
-                    call_tx.input,
-                    gas,
-                    call_tx.value,
-                ),
+                .call => |call_tx| blk: {
+                    self.traceAccountAccess(call_tx.recipient, 0);
+                    break :blk runtime.executeCallTransaction(
+                        self,
+                        call_tx.sender,
+                        call_tx.recipient,
+                        call_tx.input,
+                        gas,
+                        call_tx.value,
+                    );
+                },
                 .create => |create_tx| blk: {
                     const result = (try runtime.executeCreateTransaction(
                         self,
@@ -903,7 +934,10 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             var shell_start_state = try self.snapshot();
             defer shell_start_state.deinit(self.allocator);
+            self.traceSnapshotLifecycle(.checkpoint, &shell_start_state);
+            var shell_trace_checkpoint_open = true;
             errdefer {
+                if (shell_trace_checkpoint_open) self.traceSnapshotLifecycle(.revert, &shell_start_state);
                 self.restore(&shell_start_state) catch {};
                 self.closeTransaction();
             }
@@ -936,6 +970,11 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             var pre_execution_state = try self.snapshot();
             defer pre_execution_state.deinit(self.allocator);
+            self.traceSnapshotLifecycle(.checkpoint, &pre_execution_state);
+            var execution_trace_checkpoint_open = true;
+            errdefer if (execution_trace_checkpoint_open) {
+                self.traceSnapshotLifecycle(.revert, &pre_execution_state);
+            };
 
             var result = Interpreter.Result{
                 .status = .out_of_gas,
@@ -961,18 +1000,24 @@ pub fn Executor(comptime ProtocolType: type) type {
                 if (root.isCreate() and transaction_charged) {
                     result.refillIntrinsicStateGas(Protocol.Create.createTransactionRollbackStateGasRefund(self.revision()));
                 }
+                self.traceSnapshotLifecycle(.revert, &pre_execution_state);
+                execution_trace_checkpoint_open = false;
                 try self.restore(&pre_execution_state);
                 if (root.isCreate() and transaction_charged) {
                     try self.incrementNonce(sender);
                 }
                 self.closeTransaction();
             } else {
+                self.traceSnapshotLifecycle(.commit, &pre_execution_state);
+                execution_trace_checkpoint_open = false;
                 try self.commitTransaction();
             }
             if (transaction_charged) {
                 try self.settleTransactionCosts(sender, run.settlement, result);
             }
 
+            self.traceSnapshotLifecycle(.commit, &shell_start_state);
+            shell_trace_checkpoint_open = false;
             return result;
         }
 
@@ -1003,6 +1048,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             defer scratch.deinit();
             const code = try runtime.dupeExecutionCodeAlloc(self, scratch.allocator, recipient);
             var bytecode = try runtime.prepareBytecodeAlloc(self, scratch.allocator, code);
+            self.traceAccountAccess(recipient, 0);
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
@@ -2467,6 +2513,59 @@ test "executor runTopLevelTransaction commits successful call" {
     try std.testing.expectEqual(@as(?Host.TxContext, null), executor.tx_context);
 }
 
+test "BAL recorder keeps reverted root storage as an access" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(sender, 100_000);
+    var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.setBlockAccessIndex(1);
+    var sink = recorder.sink();
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+        .trace_sink = &sink,
+    });
+    defer executor.deinit();
+
+    var sender_account = AccountState.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.accounts.put(sender, sender_account);
+
+    var contract_account = AccountState.init(std.testing.allocator);
+    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xfd });
+    try executor.state.accounts.put(contract, contract_account);
+
+    const root = RootFrame{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas_limit = 100_000,
+    } };
+    const scope = Default.transactionScope(tx_context, .{});
+    try executor.beginTransactionScope(scope, root);
+    const result = try executor.runTopLevelTransaction(scope, root, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .coinbase = tx_context.coinbase,
+        },
+    });
+
+    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
+    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
+    defer observed.deinit(std.testing.allocator);
+    try evmz.eth.bal.validate(observed.accounts, .{ .transaction_count = 1 });
+    try std.testing.expectEqual(@as(usize, 2), observed.accounts.len);
+    try std.testing.expectEqual(contract, observed.accounts[1].address);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_changes.len);
+    try std.testing.expectEqualSlices(u256, &.{0}, observed.accounts[1].storage_reads);
+}
+
 test "executor rejects settlement revision mismatch before execution" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
@@ -2510,8 +2609,13 @@ test "zero-price top-level transaction materializes missing sender" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
+    var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.setBlockAccessIndex(1);
+    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .frontier,
+        .trace_sink = &sink,
     });
     defer executor.deinit();
 
@@ -2539,6 +2643,16 @@ test "zero-price top-level transaction materializes missing sender" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
     try std.testing.expectEqual(@as(u256, 0), executor.getAccount(sender).?.balance);
+
+    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
+    defer observed.deinit(std.testing.allocator);
+    try evmz.eth.bal.validate(observed.accounts, .{ .transaction_count = 1 });
+    try std.testing.expectEqual(@as(usize, 2), observed.accounts.len);
+    try std.testing.expectEqual(recipient, observed.accounts[1].address);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_changes.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_reads.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].balance_changes.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].nonce_changes.len);
 }
 
 test "executor runTopLevelTransaction increments create nonce after rollback" {

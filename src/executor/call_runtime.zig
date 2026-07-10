@@ -961,6 +961,7 @@ pub fn For(comptime Executor: type) type {
             if (Protocol.Create.createWarmsCreatedAddress(self.revision())) {
                 try self.warmAccessListAddress(create_address);
             }
+            self.traceAccountAccess(create_address, msg.depth);
             const account_pre_existing = try self.state.accountExists(create_address);
 
             try self.state.setNonce(msg.sender, next_nonce);

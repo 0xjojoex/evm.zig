@@ -1,0 +1,89 @@
+{
+  "empty-bal": {
+    "transaction_count": "0x0",
+    "block_access_list": [],
+    "expected": {
+      "hash": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+      "counts": {
+        "accounts": 0,
+        "storage_read_keys": 0,
+        "storage_write_keys": 0,
+        "storage_write_changes": 0,
+        "balance_changes": 0,
+        "nonce_changes": 0,
+        "code_changes": 0,
+        "code_bytes": 0
+      },
+      "block_resources": {
+        "accounts": 0,
+        "storage_overlay_entries": 0,
+        "deleted_accounts": 0,
+        "dirty_accounts": 0
+      },
+      "per_index": {
+        "max_storage_write_keys": 0,
+        "max_changed_accounts": 0
+      },
+      "transaction_resources": {
+        "original_storage_entries": 0
+      }
+    }
+  },
+  "mixed-bal-aliases": {
+    "transactionCount": "0x2",
+    "blockAccessList": [
+      {
+        "address": "0x0000000000000000000000000000000000000001",
+        "storageChanges": [
+          {
+            "slot": "0x01",
+            "slotChanges": [
+              { "blockAccessIndex": "0x01", "postValue": "0x02" },
+              { "txIndex": "0x03", "post_value": "0x04" }
+            ]
+          }
+        ],
+        "storageReads": ["0x02"],
+        "balanceChanges": [
+          { "block_access_index": "0x01", "post_balance": "0x10" }
+        ],
+        "nonce_changes": [
+          { "tx_index": "0x02", "post_nonce": "0x05" }
+        ],
+        "codeChanges": [
+          { "blockAccessIndex": "0x03", "newCode": "0x6000" }
+        ]
+      },
+      {
+        "address": "0x0000000000000000000000000000000000000002",
+        "storage_reads": ["0x04"]
+      }
+    ],
+    "expected": {
+      "counts": {
+        "accounts": 2,
+        "storage_read_keys": 2,
+        "storage_write_keys": 1,
+        "storage_write_changes": 2,
+        "balance_changes": 1,
+        "nonce_changes": 1,
+        "code_changes": 1,
+        "code_bytes": 2,
+        "max_block_access_index": 3
+      },
+      "block_resources": {
+        "accounts": 2,
+        "storage_overlay_entries": 3,
+        "deleted_accounts": 2,
+        "dirty_accounts": 2
+      },
+      "per_index": {
+        "max_storage_write_keys": 1,
+        "max_changed_accounts": 1
+      },
+      "transaction_resources": {
+        "original_storage_entries": 3
+      }
+    }
+  }
+}

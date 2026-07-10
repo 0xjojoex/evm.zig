@@ -1082,6 +1082,15 @@ pub fn restore(self: *Overlay, snapshot_state: *Snapshot) !void {
     try self.restoreFromSnapshot(snapshot_state);
 }
 
+/// Emit lifecycle for snapshot-backed rollback paths that do not use journal
+/// checkpoint methods directly.
+pub fn traceSnapshotLifecycle(self: *const Overlay, kind: trace.CheckpointKind, snapshot_state: *const Snapshot) void {
+    self.traceCheckpoint(kind, .{
+        .journal_len = snapshot_state.journal_len,
+        .logs_len = snapshot_state.logs_len,
+    });
+}
+
 fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.clearAccounts();
     self.warm_accounts.clearRetainingCapacity();

@@ -1,0 +1,551 @@
+{
+  "schema": "evmz/block-stf-semantic-fixture/v1",
+  "defaults": {
+    "fork": "amsterdam",
+    "phase_order": [
+      "pre_system",
+      "transactions",
+      "withdrawals",
+      "post_system",
+      "derive_commitments",
+      "compare_or_commit"
+    ],
+    "indexing": {
+      "pre_system": 0,
+      "transaction": "one_based_position",
+      "post_system": "transaction_count_plus_one"
+    },
+    "comparison_rule": "mutate_exactly_one_side_and_freeze_the_other"
+  },
+  "cases": [
+    {
+      "id": "access-only-account-and-precompile",
+      "tags": ["eip-7928", "access-only"],
+      "setup": [
+        "access_target exists with unchanged balance, nonce, code, and storage",
+        "precompile_01 is available"
+      ],
+      "actions": [
+        "tx 1 executes BALANCE(access_target), EXTCODEHASH(access_target), and zero-value STATICCALL(precompile_01)"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_account", "address": "access_target", "present": true, "changes": "empty" },
+          { "kind": "bal_account", "address": "precompile_01", "present": true, "changes": "empty" },
+          { "kind": "bal_index", "index": 1, "applies_to": "sender fee and nonce changes" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "remove_account", "selector": "access_target", "expect_status": "block_access_list_mismatch" },
+        { "target": "claimed.block_access_list", "op": "add_balance_change", "selector": "precompile_01", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "access-list-warmth-is-not-access",
+      "tags": ["eip-2930", "eip-7928", "access-only"],
+      "setup": [
+        "tx 1 declares untouched_account and untouched_slot in its EIP-2930 access list"
+      ],
+      "actions": [
+        "tx 1 succeeds without loading untouched_account or untouched_slot"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_account", "address": "untouched_account", "present": false },
+          { "kind": "bal_storage", "address": "untouched_account", "slot": "untouched_slot", "present": false }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "add_empty_account", "selector": "untouched_account", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "net-zero-sstore-is-read-and-bounds-peak",
+      "tags": ["eip-7928", "storage", "resource-bound"],
+      "setup": [
+        "contract.slot_0 is zero before tx 1"
+      ],
+      "actions": [
+        "tx 1 executes SSTORE(slot_0, 1), then SSTORE(slot_0, 0), and succeeds"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "state_storage", "address": "contract", "slot": "slot_0", "value": "0x00" },
+          { "kind": "bal_storage", "address": "contract", "slot": "slot_0", "classification": "read" },
+          { "kind": "resource_peak", "resource": "storage_overlay_entries", "minimum": 1 },
+          { "kind": "resource_peak", "resource": "original_storage_entries", "minimum": 1 }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "move_storage_read_to_change", "selector": "contract.slot_0@1", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "reverted-child-discards-write-keeps-access",
+      "tags": ["eip-7928", "rollback", "storage"],
+      "setup": [
+        "child.slot_0 is zero before tx 1"
+      ],
+      "actions": [
+        "tx 1 parent calls child",
+        "child executes SSTORE(slot_0, 1) then REVERT",
+        "parent handles the failure and tx 1 succeeds"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "state_storage", "address": "child", "slot": "slot_0", "value": "0x00" },
+          { "kind": "bal_account", "address": "child", "present": true },
+          { "kind": "bal_storage", "address": "child", "slot": "slot_0", "classification": "read" },
+          { "kind": "bal_storage_change", "address": "child", "slot": "slot_0", "present": false }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "record_reverted_storage_change", "selector": "child.slot_0@1", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "exceptional-root-halt-keeps-settlement-and-accesses",
+      "tags": ["eip-7928", "rollback", "exceptional-halt"],
+      "setup": [
+        "recipient.slot_0 is zero before tx 1"
+      ],
+      "actions": [
+        "tx 1 increments sender nonce and reserves gas",
+        "recipient executes SSTORE(slot_0, 1) then exceptional halt"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "tx_status", "index": 1, "value": "exceptional_halt" },
+          { "kind": "state_storage", "address": "recipient", "slot": "slot_0", "value": "0x00" },
+          { "kind": "bal_account", "address": "recipient", "present": true },
+          { "kind": "bal_storage", "address": "recipient", "slot": "slot_0", "classification": "read" },
+          { "kind": "bal_change_indices", "address": "sender", "fields": ["balance", "nonce"], "indices": [1] },
+          { "kind": "bal_change_indices", "address": "coinbase", "fields": ["balance"], "indices": [1] }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "remove_account", "selector": "recipient", "expect_status": "block_access_list_mismatch" },
+        { "target": "claimed.state_root", "op": "replace", "value": "different_hash", "expect_status": "state_root_mismatch" }
+      ]
+    },
+    {
+      "id": "storage-net-diff-is-per-index",
+      "tags": ["eip-7928", "storage", "indexing"],
+      "setup": [
+        "contract.slot_0 is zero before the block"
+      ],
+      "actions": [
+        "tx 1 stores 1 in contract.slot_0",
+        "tx 2 stores 1 in contract.slot_0 as a no-op",
+        "tx 3 stores 2 in contract.slot_0"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_storage_changes", "address": "contract", "slot": "slot_0", "values": [[1, "0x01"], [3, "0x02"]] },
+          { "kind": "bal_storage_read", "address": "contract", "slot": "slot_0", "present": false },
+          { "kind": "bal_order", "field": "storage_change_indices", "value": "strictly_ascending" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "add_storage_change", "selector": "contract.slot_0@2", "value": "0x01", "expect_status": "block_access_list_mismatch" },
+        { "target": "claimed.block_access_list", "op": "remove_storage_change", "selector": "contract.slot_0@1", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "gas-before-account-access-boundary",
+      "tags": ["eip-7928", "gas-boundary", "call"],
+      "setup": [
+        "cold_target_before and cold_target_after are cold empty accounts"
+      ],
+      "actions": [
+        "tx 1 CALL to cold_target_before runs out of gas during pre-state access and never loads it",
+        "tx 2 CALL to cold_target_after covers access and memory costs, loads it, then fails a post-state cost"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_account", "address": "cold_target_before", "present": false },
+          { "kind": "bal_account", "address": "cold_target_after", "present": true, "changes": "empty" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "add_empty_account", "selector": "cold_target_before", "expect_status": "block_access_list_mismatch" },
+        { "target": "claimed.block_access_list", "op": "remove_account", "selector": "cold_target_after", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "sstore-gas-sentry-before-slot-access",
+      "tags": ["eip-7928", "gas-boundary", "sstore"],
+      "setup": [
+        "contract.slot_cold and contract.slot_warm both contain zero",
+        "slot_warm is warmed by a prior actual SLOAD in tx 2"
+      ],
+      "actions": [
+        "tx 1 attempts cold SSTORE without enough gas for access cost and stipend sentry",
+        "tx 2 attempts warm SSTORE with gas_left equal to GAS_CALL_STIPEND"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_storage", "address": "contract", "slot": "slot_cold", "present": false },
+          { "kind": "bal_storage", "address": "contract", "slot": "slot_warm", "classification": "read", "reason": "prior SLOAD only" }
+        ]
+      }
+    },
+    {
+      "id": "create-address-access-boundaries",
+      "tags": ["eip-7928", "create", "gas-boundary"],
+      "setup": [
+        "collision_address already has a nonzero nonce or code",
+        "insufficient_balance_address and post_access_oog_address do not exist"
+      ],
+      "actions": [
+        "tx 1 CREATE fails sender-balance validation before computed-address access",
+        "tx 2 CREATE reaches collision detection",
+        "tx 3 CREATE loads its computed address then runs out of gas during setup"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_account", "address": "insufficient_balance_address", "present": false },
+          { "kind": "bal_account", "address": "collision_address", "present": true, "changes": "empty" },
+          { "kind": "bal_account", "address": "post_access_oog_address", "present": true, "changes": "empty" }
+        ]
+      }
+    },
+    {
+      "id": "selfdestruct-created-account-collapses-to-accesses",
+      "tags": ["eip-7928", "selfdestruct", "rollback"],
+      "setup": [
+        "ephemeral does not exist before tx 1",
+        "beneficiary exists"
+      ],
+      "actions": [
+        "tx 1 creates ephemeral with zero value",
+        "ephemeral writes and reads slot_0",
+        "ephemeral SELFDESTRUCTs to beneficiary in the same transaction"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "state_account", "address": "ephemeral", "exists": false },
+          { "kind": "bal_account", "address": "ephemeral", "present": true },
+          { "kind": "bal_changes_absent", "address": "ephemeral", "fields": ["nonce", "code"] },
+          { "kind": "bal_storage", "address": "ephemeral", "slot": "slot_0", "classification": "read" },
+          { "kind": "bal_account", "address": "beneficiary", "present": true, "changes": "empty" }
+        ]
+      }
+    },
+    {
+      "id": "eip-7702-authorization-and-target-boundaries",
+      "tags": ["eip-7702", "eip-7928", "delegation"],
+      "setup": [
+        "authority_success is eligible for delegation to delegated_target",
+        "authority_late_fail fails after authority load",
+        "authority_early_fail fails before authority load"
+      ],
+      "actions": [
+        "tx 1 processes all three authorizations but does not call delegated_target",
+        "tx 2 executes authority_success and resolves delegated_target"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_change_indices", "address": "authority_success", "fields": ["nonce", "code"], "indices": [1] },
+          { "kind": "bal_account", "address": "authority_late_fail", "present": true, "changes": "empty" },
+          { "kind": "bal_account", "address": "authority_early_fail", "present": false },
+          { "kind": "bal_account_at_index", "address": "delegated_target", "index": 1, "present": false },
+          { "kind": "bal_account_at_index", "address": "delegated_target", "index": 2, "present": true }
+        ]
+      }
+    },
+    {
+      "id": "pre-execution-ring-buffer-indices",
+      "tags": ["eip-2935", "eip-4788", "eip-7928", "system-call"],
+      "setup": [
+        "parent block hash and parent beacon block root select fresh ring-buffer entries"
+      ],
+      "actions": [
+        "BlockSTF performs EIP-2935 and EIP-4788 pre-execution calls before tx 1"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "phase_before", "left": "pre_system", "right": "transaction_1" },
+          { "kind": "bal_storage_change_count", "address": "history_storage_contract", "index": 0, "value": 1 },
+          { "kind": "bal_storage_change_count", "address": "beacon_roots_contract", "index": 0, "value": 2 },
+          { "kind": "bal_account", "address": "system_address", "present": false }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.block_access_list", "op": "replace_change_index", "selector": "history_storage_contract", "value": 1, "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "withdrawals-share-post-index-and-coalesce",
+      "tags": ["eip-4895", "eip-7928", "withdrawals"],
+      "setup": [
+        "recipient_a and recipient_b have known pre-block balances",
+        "the block contains two transactions"
+      ],
+      "actions": [
+        "apply zero-amount withdrawal to recipient_a",
+        "apply positive withdrawal to recipient_a",
+        "apply zero-amount withdrawal to recipient_b"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_change_indices", "address": "recipient_a", "fields": ["balance"], "indices": [3], "count": 1, "value": "final_balance_after_both_withdrawals" },
+          { "kind": "bal_account", "address": "recipient_b", "present": true, "changes": "empty" },
+          { "kind": "phase_before", "left": "transaction_2", "right": "withdrawals" }
+        ]
+      },
+      "mutations": [
+        { "target": "input.withdrawals[1].amount", "op": "increment", "claims": "frozen", "expect_status_any": ["withdrawals_root_mismatch", "state_root_mismatch"] },
+        { "target": "claimed.block_access_list", "op": "split_same_index_balance_change", "selector": "recipient_a@3", "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "eip-6110-filters-and-orders-deposit-logs",
+      "tags": ["eip-6110", "eip-7685", "receipts", "requests"],
+      "setup": [
+        "deposit_a and deposit_b use valid 576-byte ABI event layouts",
+        "noise_same_address has a non-deposit topic",
+        "noise_same_topic comes from a non-deposit address"
+      ],
+      "actions": [
+        "tx 1 receipt emits noise_same_address then deposit_a",
+        "tx 2 receipt emits noise_same_topic then deposit_b"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "request_object", "type": "0x00", "records": ["deposit_a", "deposit_b"], "order": "receipt_then_log" },
+          { "kind": "request_absent", "record": "noise_same_address" },
+          { "kind": "request_absent", "record": "noise_same_topic" },
+          { "kind": "request_field_encoding", "fields": ["amount", "index"], "byte_order": "little_endian" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.requests[0]", "op": "swap_records", "selector": ["deposit_a", "deposit_b"], "expect_status": "requests_hash_mismatch" },
+        { "target": "claimed.requests_hash", "op": "replace", "value": "different_hash", "expect_status": "requests_hash_mismatch" }
+      ]
+    },
+    {
+      "id": "eip-6110-matching-malformed-log-invalidates-block",
+      "tags": ["eip-6110", "invalid-block", "atomicity"],
+      "setup": [
+        "tx 1 would otherwise commit a state change",
+        "tx 1 receipt contains the deposit address and signature topic with a malformed data length or offset"
+      ],
+      "actions": [
+        "execute tx 1 and derive deposit requests from its receipt"
+      ],
+      "expect": {
+        "status": "invalid_deposit_event",
+        "assertions": [
+          { "kind": "block_atomicity", "published_state": "pre_block" },
+          { "kind": "commitments_published", "value": false }
+        ]
+      }
+    },
+    {
+      "id": "eip-7002-post-call-dequeues-and-records",
+      "tags": ["eip-7002", "eip-7685", "eip-7928", "system-call"],
+      "setup": [
+        "withdrawal request queue contains request_a then request_b",
+        "queue head, tail, count, and excess values require updates",
+        "the block contains two transactions"
+      ],
+      "actions": [
+        "BlockSTF calls withdrawal_request_predeploy from system_address after withdrawals"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "system_call", "address": "withdrawal_request_predeploy", "caller": "system_address", "calldata": "0x", "gas_limit": 30000000, "counts_toward_block_gas": false },
+          { "kind": "request_object", "type": "0x01", "records": ["request_a", "request_b"], "order": "queue" },
+          { "kind": "bal_storage_change_slots", "address": "withdrawal_request_predeploy", "slots": [0, 1, 2, 3], "index": 3 },
+          { "kind": "bal_storage_read_slots", "address": "withdrawal_request_predeploy", "slots": "queue_slots_from_4_three_per_dequeued_request" },
+          { "kind": "bal_account", "address": "system_address", "present": false }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.requests[1]", "op": "reverse_records", "expect_status": "requests_hash_mismatch" },
+        { "target": "claimed.block_access_list", "op": "replace_change_index", "selector": "withdrawal_request_predeploy", "value": 2, "expect_status": "block_access_list_mismatch" }
+      ]
+    },
+    {
+      "id": "eip-7002-system-call-failure-is-atomic",
+      "tags": ["eip-7002", "invalid-block", "atomicity"],
+      "setup": [
+        "tx 1 would otherwise commit",
+        "withdrawal request predeploy has no code; repeat variant with reverting code"
+      ],
+      "actions": [
+        "run the post-block withdrawal request system call"
+      ],
+      "expect": {
+        "status": "withdrawal_system_call_failure",
+        "assertions": [
+          { "kind": "block_atomicity", "published_state": "pre_block" },
+          { "kind": "requests_published", "value": false },
+          { "kind": "commitments_published", "value": false }
+        ]
+      }
+    },
+    {
+      "id": "eip-7251-post-call-dequeues-and-records",
+      "tags": ["eip-7251", "eip-7685", "eip-7928", "system-call"],
+      "setup": [
+        "consolidation request queue contains request_a then request_b",
+        "queue head, tail, count, and excess values require updates",
+        "the block contains one transaction"
+      ],
+      "actions": [
+        "BlockSTF calls consolidation_request_predeploy from system_address after withdrawals"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "system_call", "address": "consolidation_request_predeploy", "caller": "system_address", "calldata": "0x", "gas_limit": 30000000, "counts_toward_block_gas": false },
+          { "kind": "request_object", "type": "0x02", "records": ["request_a", "request_b"], "order": "queue" },
+          { "kind": "bal_storage_change_slots", "address": "consolidation_request_predeploy", "slots": [0, 1, 2, 3], "index": 2 },
+          { "kind": "bal_storage_read_slots", "address": "consolidation_request_predeploy", "slots": "queue_slots_from_4_four_per_dequeued_request" },
+          { "kind": "request_count_max", "type": "0x02", "value": 2 }
+        ]
+      }
+    },
+    {
+      "id": "eip-7251-system-call-failure-is-atomic",
+      "tags": ["eip-7251", "invalid-block", "atomicity"],
+      "setup": [
+        "tx 1 would otherwise commit",
+        "consolidation request predeploy has no code; repeat variant with reverting code"
+      ],
+      "actions": [
+        "run the post-block consolidation request system call"
+      ],
+      "expect": {
+        "status": "consolidation_system_call_failure",
+        "assertions": [
+          { "kind": "block_atomicity", "published_state": "pre_block" },
+          { "kind": "requests_published", "value": false },
+          { "kind": "commitments_published", "value": false }
+        ]
+      }
+    },
+    {
+      "id": "eip-7685-orders-types-and-skips-empty-data",
+      "tags": ["eip-7685", "requests", "commitment"],
+      "setup": [
+        "deposit request data is non-empty",
+        "withdrawal request data is empty",
+        "consolidation request data is non-empty"
+      ],
+      "actions": [
+        "derive all request objects and requests_hash"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "request_type_order", "value": ["0x00", "0x01", "0x02"] },
+          { "kind": "requests_hash_members", "value": ["sha256(0x00 || deposit_data)", "sha256(0x02 || consolidation_data)"] },
+          { "kind": "requests_hash_absent_member", "value": "0x01" },
+          { "kind": "requests_hash_algorithm", "value": "sha256(concat(non_empty_request_hashes))" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.requests", "op": "order_types", "value": ["0x02", "0x00", "0x01"], "expect_status": "requests_hash_mismatch" },
+        { "target": "claimed.requests_hash", "op": "include_empty_request_hash", "selector": "0x01", "expect_status": "requests_hash_mismatch" }
+      ]
+    },
+    {
+      "id": "empty-amsterdam-block-has-empty-requests-commitment",
+      "tags": ["block-stf", "eip-7685", "eip-7928", "empty-block"],
+      "setup": [
+        "the block has no transactions and no consensus withdrawals",
+        "EIP-2935, EIP-4788, EIP-7002, and EIP-7251 are active with valid predeploy code",
+        "withdrawal and consolidation request queues are empty"
+      ],
+      "actions": [
+        "run the complete BlockSTF lifecycle"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "bal_index", "index": 0, "applies_to": "pre-execution system changes" },
+          { "kind": "bal_index", "index": 1, "applies_to": "post-execution system changes" },
+          { "kind": "bal_account", "address": "coinbase", "present": false },
+          { "kind": "bal_account", "address": "system_address", "present": false },
+          { "kind": "requests_hash", "value": "sha256(empty_bytes)" },
+          { "kind": "requests_hash_members", "value": [] }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.requests_hash", "op": "hash_empty_type_objects", "value": ["0x00", "0x01", "0x02"], "expect_status": "requests_hash_mismatch" }
+      ]
+    },
+    {
+      "id": "bal-size-boundary-counts-unique-addresses-and-slots",
+      "tags": ["eip-7928", "resource-bound", "invalid-block"],
+      "setup": [
+        "variant exact executes with bal_items equal to floor(block_gas_limit / 2000)",
+        "variant excess executes with one additional unique address or storage key"
+      ],
+      "actions": [
+        "run both variants through BlockSTF BAL validation"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "variant_status", "variant": "exact", "value": "valid" },
+          { "kind": "variant_status", "variant": "excess", "value": "block_access_list_too_large" },
+          { "kind": "bal_item_formula", "value": "unique_addresses_plus_unique_storage_keys" }
+        ]
+      }
+    },
+    {
+      "id": "malformed-provided-bal-rejected-before-execution",
+      "tags": ["eip-7928", "validation-order", "invalid-block"],
+      "setup": [
+        "tx 1 would increment a probe counter if execution begins",
+        "provided BAL variant has duplicate accounts, unsorted accounts, duplicate indices, or read/write slot overlap"
+      ],
+      "actions": [
+        "run compare mode with each malformed BAL variant"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "execution_started", "value": false },
+          { "kind": "probe_counter", "value": 0 },
+          { "kind": "status_category", "value": "invalid_block_access_list" }
+        ]
+      }
+    },
+    {
+      "id": "combined-block-lifecycle-and-commitments",
+      "tags": ["block-stf", "eip-6110", "eip-7002", "eip-7251", "eip-7685", "eip-7928", "soundness"],
+      "setup": [
+        "pre-system ring buffers require updates",
+        "tx 1 emits a valid deposit log",
+        "tx 2 mutates application storage",
+        "one consensus withdrawal is present",
+        "withdrawal and consolidation queues each contain one request"
+      ],
+      "actions": [
+        "run the complete BlockSTF lifecycle"
+      ],
+      "expect": {
+        "assertions": [
+          { "kind": "phase_order", "value": ["pre_system", "transaction_1", "transaction_2", "withdrawals", "post_system", "derive_commitments", "compare_or_commit"] },
+          { "kind": "bal_indices_used", "value": [0, 1, 2, 3] },
+          { "kind": "request_type_order", "value": ["0x00", "0x01", "0x02"] },
+          { "kind": "commitment_source", "field": "state_root", "value": "execution_derived" },
+          { "kind": "commitment_source", "field": "requests_hash", "value": "execution_derived_requests" },
+          { "kind": "commitment_source", "field": "block_access_list_hash", "value": "execution_derived_bal" }
+        ]
+      },
+      "mutations": [
+        { "target": "claimed.state_root", "op": "flip_bit", "expect_status": "state_root_mismatch" },
+        { "target": "claimed.transactions_root", "op": "flip_bit", "expect_status": "transactions_root_mismatch" },
+        { "target": "claimed.receipts_root", "op": "flip_bit", "expect_status": "receipts_root_mismatch" },
+        { "target": "claimed.withdrawals_root", "op": "flip_bit", "expect_status": "withdrawals_root_mismatch" },
+        { "target": "claimed.requests_hash", "op": "flip_bit", "expect_status": "requests_hash_mismatch" },
+        { "target": "claimed.block_access_list", "op": "remove_account", "selector": "application_contract", "expect_status": "block_access_list_mismatch" },
+        { "target": "claimed.block_access_list_hash", "op": "flip_bit", "expect_status": "block_access_list_hash_mismatch" },
+        { "target": "input.withdrawals[0].recipient", "op": "replace_and_recompute_claimed_withdrawals_root", "value": "other_recipient", "claims": "freeze_except_withdrawals_root", "expect_status": "state_root_mismatch" },
+        { "target": "claimed.requests", "op": "replace_data_and_recompute_claimed_requests_hash", "execution": "frozen", "expect_status": "requests_hash_mismatch" },
+        { "target": "claimed.block_access_list", "op": "add_phantom_account_and_recompute_claimed_block_access_list_hash", "execution": "frozen", "expect_status": "block_access_list_mismatch" }
+      ]
+    }
+  ]
+}

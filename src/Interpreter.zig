@@ -618,6 +618,16 @@ pub const CallFrame = struct {
         return sink.wantsSteps();
     }
 
+    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) void {
+        const sink = self.trace_sink orelse return;
+        if (!sink.wantsAccountAccess()) return;
+        const fields = sink.events.account_access;
+        sink.accountAccess(.{
+            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
+            .address = if (fields.contains(.address)) account_address else std.mem.zeroes(evmz.Address),
+        });
+    }
+
     fn traceStepStart(self: *CallFrame, pc: usize, opcode_byte: u8, decoded_opcode: ?instruction.Instruction) void {
         const fields = self.trace_sink.?.events.step_start;
         self.trace_sink.?.stepStart(.{

@@ -249,21 +249,31 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
                     .executable => |executable| {
                         var pre_tx = try self.vm.executor.snapshot();
                         defer pre_tx.deinit(self.vm.executor.allocator);
+                        self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_tx);
+                        var trace_checkpoint_open = true;
+                        errdefer if (trace_checkpoint_open) {
+                            self.vm.executor.traceSnapshotLifecycle(.revert, &pre_tx);
+                        };
 
                         const result = try self.vm.executePreparedTransaction(executable);
                         const next_gas_used = std.math.add(u64, self.gas_used, result.gas.used) catch {
+                            trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         };
                         const next_block_gas = self.block_gas.add(result.gas.block) catch {
+                            trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         };
                         if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
+                            trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         }
 
                         self.gas_used = next_gas_used;
                         self.block_gas = next_block_gas;
                         self.tx_count += 1;
+                        self.vm.executor.traceSnapshotLifecycle(.commit, &pre_tx);
+                        trace_checkpoint_open = false;
                         return .{ .executed = result };
                     },
                 }
@@ -282,25 +292,38 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
                 var pre_call = try self.vm.executor.snapshot();
                 defer pre_call.deinit(self.vm.executor.allocator);
+                self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_call);
+                var trace_checkpoint_open = true;
+                errdefer if (trace_checkpoint_open) {
+                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
+                };
 
                 const result = try self.vm.executeSystemCall(call);
                 const spent = systemCallGasUsed(call.gas, result.gasLeft());
                 const next_block_gas = self.block_gas.add(transaction.BlockGas.legacy(spent)) catch {
+                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
+                    trace_checkpoint_open = false;
                     try self.vm.executor.restore(&pre_call);
                     return error.GasAllowanceExceeded;
                 };
                 const next_gas_used = std.math.add(u64, self.gas_used, spent) catch {
+                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
+                    trace_checkpoint_open = false;
                     try self.vm.executor.restore(&pre_call);
                     return error.GasAllowanceExceeded;
                 };
                 const env = self.vm.runtimeEnv();
                 if (!next_block_gas.withinLimit(env.gas_limit)) {
+                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
+                    trace_checkpoint_open = false;
                     try self.vm.executor.restore(&pre_call);
                     return error.GasAllowanceExceeded;
                 }
 
                 self.gas_used = next_gas_used;
                 self.block_gas = next_block_gas;
+                self.vm.executor.traceSnapshotLifecycle(.commit, &pre_call);
+                trace_checkpoint_open = false;
                 return result;
             }
 
@@ -313,6 +336,7 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             }
 
             fn drop(self: *BlockSession, pre_tx: *Executor.Snapshot) !Self.TxResult {
+                self.vm.executor.traceSnapshotLifecycle(.revert, pre_tx);
                 try self.vm.executor.restore(pre_tx);
                 return error.BlockGasExceeded;
             }
