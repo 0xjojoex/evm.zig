@@ -57,10 +57,14 @@ pub fn TransactionConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
+        Preparation: ?type = null,
+        /// Protocol-owned rejection reason returned by `Preparation`.
+        ValidationError: ?type = null,
         kindActive: ?*const fn (R, tx.TxKind) bool = null,
         allowsContractCreation: ?*const fn (R, tx.TxKind) bool = null,
         requiresAuthorizationList: ?*const fn (R, tx.TxKind) bool = null,
         rejectsNonDelegatingSenderCode: ?*const fn (R, tx.TxKind) bool = null,
+        isDelegationCode: ?*const fn (R, []const u8) bool = null,
         blobSchedule: ?*const fn (R) ?tx_blob.BlobSchedule = null,
         blobVersionedHashActive: ?*const fn (R, u8) bool = null,
         maxInitcodeSize: ?*const fn (R) usize = null,
@@ -114,6 +118,7 @@ pub fn BlockConfig(comptime R: type) type {
 
         valueTransferLog: *const fn (R, Address, Address, u256) ?interface.ValueTransferLog = noValueTransferLog,
         blockStartSystemCalls: *const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = noBlockStartSystemCalls,
+        blockEndSystemCalls: *const fn (R, interface.BlockEndContext) interface.BlockEndSystemCalls = noBlockEndSystemCalls,
         transactionWarmsCoinbase: *const fn (R) bool = doesNotWarmCoinbase,
 
         fn noValueTransferLog(_: R, _: Address, _: Address, _: u256) ?interface.ValueTransferLog {
@@ -121,6 +126,10 @@ pub fn BlockConfig(comptime R: type) type {
         }
 
         fn noBlockStartSystemCalls(_: R, _: interface.BlockStartContext) interface.BlockStartSystemCalls {
+            return .{};
+        }
+
+        fn noBlockEndSystemCalls(_: R, _: interface.BlockEndContext) interface.BlockEndSystemCalls {
             return .{};
         }
 
@@ -255,6 +264,7 @@ pub fn Bound(comptime definition: anytype) type {
     assertRequiredConfig("Definition.transaction", TransactionConfig(R), definition.transaction, &.{
         "blobSchedule",
         "blobVersionedHashActive",
+        "isDelegationCode",
     });
     assertRequiredConfig("Definition.settlement", SettlementConfig(R), definition.settlement, &.{
         "baseFeeActive",
@@ -388,6 +398,13 @@ fn containsName(comptime names: []const []const u8, comptime needle: []const u8)
 
 fn BoundTransaction(comptime R: type, comptime cfg: TransactionConfig(R)) type {
     return struct {
+        pub const ValidationError = cfg.ValidationError.?;
+
+        pub fn prepare(comptime Protocol: type, input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
+            const Preparation = cfg.Preparation.?;
+            return Preparation.For(Protocol).prepare(input);
+        }
+
         pub fn kindActive(revision_value: R, kind: tx.TxKind) bool {
             return cfg.kindActive.?(revision_value, kind);
         }
@@ -402,6 +419,10 @@ fn BoundTransaction(comptime R: type, comptime cfg: TransactionConfig(R)) type {
 
         pub fn rejectsNonDelegatingSenderCode(revision_value: R, kind: tx.TxKind) bool {
             return cfg.rejectsNonDelegatingSenderCode.?(revision_value, kind);
+        }
+
+        pub fn isDelegationCode(revision_value: R, code: []const u8) bool {
+            return if (cfg.isDelegationCode) |classify| classify(revision_value, code) else false;
         }
 
         pub fn blobSchedule(revision_value: R) ?tx_blob.BlobSchedule {

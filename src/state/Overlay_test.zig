@@ -4,11 +4,13 @@ const Host = @import("../Host.zig");
 const trace = @import("../trace.zig");
 const Address = evmz.Address;
 const AccountState = @import("./Account.zig");
+const MemoryAccount = @import("./MemoryAccount.zig");
 const storage = @import("./storage.zig");
 const StorageKey = storage.Key;
 const StateReader = @import("./Reader.zig");
 const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
+const mpt = @import("../mpt.zig");
 
 const EthereumFinalizer = struct {
     revision: evmz.Evm.Protocol.Revision,
@@ -74,8 +76,9 @@ test "journal checkpoint reverts storage and preserves original storage" {
 
     const address = evmz.addr(0xbeef);
     const key = 7;
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     try account.storage.put(key, 1);
+    try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
     const checkpoint_state = overlay.checkpoint();
@@ -85,7 +88,7 @@ test "journal checkpoint reverts storage and preserves original storage" {
 
     try overlay.revertToCheckpoint(checkpoint_state);
     try std.testing.expectEqual(@as(u256, 1), try overlay.getStorage(address, key));
-    try std.testing.expectEqual(@as(u256, 1), overlay.getAccount(address).?.getStorage(key));
+    try std.testing.expectEqual(@as(u256, 1), try overlay.getStorage(address, key));
     try std.testing.expect(!overlay.storage_overlay.contains(.{ .address = address, .key = key }));
     try std.testing.expectEqual(@as(u256, 1), overlay.original_storage.get(.{ .address = address, .key = key }).?);
 }
@@ -96,14 +99,15 @@ test "storage writes use overlay as dirty truth" {
 
     const address = evmz.addr(0xbeef);
     const key = 7;
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     try account.storage.put(key, 1);
+    try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
     try std.testing.expectEqual(Host.StorageStatus.modified, try overlay.setStorage(address, key, 2));
 
     try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
-    try std.testing.expectEqual(@as(u256, 1), overlay.getAccount(address).?.getStorage(key));
+    try std.testing.expectEqual(@as(u256, 1), overlay.seeded_storage.get(.{ .address = address, .key = key }).?);
     try std.testing.expectEqual(@as(u256, 2), overlay.storage_overlay.get(.{ .address = address, .key = key }).?);
 }
 
@@ -129,8 +133,9 @@ test "unchanged storage write does not journal or dirty overlay" {
 
     const address = evmz.addr(0xbeef);
     const key = 7;
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     try account.storage.put(key, 1);
+    try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
     try std.testing.expectEqual(Host.StorageStatus.assigned, try overlay.setStorage(address, key, 1));
@@ -213,6 +218,24 @@ test "journal checkpoint reverts transient storage warm state and logs" {
     try std.testing.expect(!overlay.warm_storage.contains(storage_key));
     try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(warm_after, storage_key.key));
     try std.testing.expectEqual(@as(usize, 0), overlay.logs.items.len);
+}
+
+test "transient storage allocation failure leaves journal and state unchanged" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var overlay = Overlay.init(failing_allocator.allocator());
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(1);
+
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        overlay.setTransientStorage(evmz.addr(1), 1, 99),
+    );
+
+    try std.testing.expect(failing_allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
+    try std.testing.expectEqual(@as(usize, 0), overlay.transient_storage.count());
+    try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(evmz.addr(1), 1));
 }
 
 test "bounded logs copy into fixed storage and rollback" {
@@ -391,10 +414,15 @@ test "bounded transient storage reports unique-entry capacity exhaustion" {
     try overlay.setTransientStorage(evmz.addr(1), 1, 12);
     try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
     try std.testing.expectEqual(@as(u256, 12), overlay.getTransientStorage(evmz.addr(1), 1));
+    const journal_len = overlay.journal.len();
     try std.testing.expectError(
         error.TransientStorageCapacityExceeded,
         overlay.setTransientStorage(evmz.addr(1), 2, 22),
     );
+    try std.testing.expectEqual(journal_len, overlay.journal.len());
+    try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
+    try std.testing.expectEqual(@as(u256, 12), overlay.getTransientStorage(evmz.addr(1), 1));
+    try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(evmz.addr(1), 2));
 
     overlay.closeTransaction();
     try overlay.setTransientStorage(evmz.addr(2), 1, 33);
@@ -410,6 +438,106 @@ test "bounded state resources report account capacity exhaustion" {
     _ = try overlay.getOrCreateAccount(evmz.addr(1));
     try std.testing.expectError(error.AccountCapacityExceeded, overlay.getOrCreateAccount(evmz.addr(2)));
     try std.testing.expectEqual(@as(usize, 1), overlay.accounts.count());
+}
+
+test "bounded code cache deduplicates hashes and reports capacity exhaustion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureStateResources(.{
+        .accounts = 3,
+        .code_entries = 1,
+        .code_bytes = 1,
+    });
+
+    var first = MemoryAccount.init(std.testing.allocator);
+    try first.setCode(&.{0xaa});
+    try overlay.seedAccount(evmz.addr(1), first);
+
+    var shared = MemoryAccount.init(std.testing.allocator);
+    try shared.setCode(&.{0xaa});
+    try overlay.seedAccount(evmz.addr(2), shared);
+
+    try std.testing.expectEqual(@as(usize, 1), overlay.code_cache.count());
+    try std.testing.expectEqual(@as(usize, 1), overlay.code_bytes_used);
+
+    var overflow = MemoryAccount.init(std.testing.allocator);
+    try overflow.setCode(&.{0xbb});
+    try std.testing.expectError(
+        error.CodeCacheEntryCapacityExceeded,
+        overlay.seedAccount(evmz.addr(3), overflow),
+    );
+    try std.testing.expectEqual(@as(usize, 1), overlay.code_cache.count());
+    try std.testing.expectEqual(@as(usize, 1), overlay.code_bytes_used);
+}
+
+test "bounded code cache reports byte capacity exhaustion atomically" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .code_entries = 1,
+        .code_bytes = 1,
+    });
+
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&.{ 0xaa, 0xbb });
+    try std.testing.expectError(
+        error.CodeCacheByteCapacityExceeded,
+        overlay.seedAccount(evmz.addr(1), account),
+    );
+    try std.testing.expectEqual(@as(usize, 0), overlay.code_cache.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.code_bytes_used);
+    try std.testing.expectEqual(@as(usize, 0), overlay.accounts.count());
+}
+
+test "overlay seed rejects empty code with non-empty explicit hash" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    var account = MemoryAccount.init(std.testing.allocator);
+    account.code_hash = [_]u8{0xaa} ** 32;
+
+    try std.testing.expectError(
+        error.CodeHashMismatch,
+        overlay.seedAccount(evmz.addr(1), account),
+    );
+    try std.testing.expectEqual(@as(usize, 0), overlay.accounts.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.code_cache.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.seeded_storage.count());
+}
+
+test "bounded code cache requires entry and byte limits together" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try std.testing.expectError(
+        error.InvalidCodeResources,
+        overlay.configureStateResources(.{ .code_entries = 1 }),
+    );
+    try std.testing.expectError(
+        error.InvalidCodeResources,
+        overlay.configureStateResources(.{ .code_bytes = 1 }),
+    );
+}
+
+test "account reseeding replaces separately stored code and storage" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    const address = evmz.addr(0x5eed);
+
+    var first = MemoryAccount.init(std.testing.allocator);
+    try first.setCode(&.{0xaa});
+    try first.storage.put(1, 11);
+    try first.storage.put(2, 22);
+    try overlay.seedAccount(address, first);
+
+    var replacement = MemoryAccount.init(std.testing.allocator);
+    try replacement.setCode(&.{0xbb});
+    try replacement.storage.put(2, 222);
+    try overlay.seedAccount(address, replacement);
+
+    try std.testing.expectEqualSlices(u8, &.{0xbb}, try overlay.getCode(address));
+    try std.testing.expectEqual(@as(u256, 0), try overlay.getStorage(address, 1));
+    try std.testing.expectEqual(@as(u256, 222), try overlay.getStorage(address, 2));
 }
 
 test "bounded state resources report storage map capacity exhaustion" {
@@ -495,12 +623,13 @@ test "bounded state resource failure rolls back code ownership" {
     });
 
     const address = evmz.addr(0xc0de);
-    const account = try overlay.getOrCreateAccount(address);
-    try account.setCode(std.testing.allocator, &.{0xaa});
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
     overlay.closeTransaction();
 
     try std.testing.expectError(error.DirtyAccountCapacityExceeded, overlay.setCode(address, &.{0xbb}));
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, overlay.getAccount(address).?.code);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
     try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
 }
 
@@ -556,10 +685,11 @@ test "journal checkpoint restores existing account fields" {
     defer overlay.deinit();
 
     const address = evmz.addr(0xcafe);
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     account.balance = 5;
     account.nonce = 1;
-    try account.setCode(std.testing.allocator, &.{0xaa});
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
     const checkpoint_state = overlay.checkpoint();
@@ -572,7 +702,7 @@ test "journal checkpoint restores existing account fields" {
     const restored = overlay.getAccount(address).?;
     try std.testing.expectEqual(@as(u256, 5), restored.balance);
     try std.testing.expectEqual(@as(u64, 1), restored.nonce);
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, restored.code);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
 }
 
 test "journal checkpoint restores code without allocating" {
@@ -580,8 +710,9 @@ test "journal checkpoint restores code without allocating" {
     defer overlay.deinit();
 
     const address = evmz.addr(0xc0de);
-    var account = try overlay.getOrCreateAccount(address);
-    try account.setCode(std.testing.allocator, &.{0xaa});
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
     const checkpoint_state = overlay.checkpoint();
@@ -594,7 +725,30 @@ test "journal checkpoint restores code without allocating" {
     try overlay.revertToCheckpoint(checkpoint_state);
 
     try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, overlay.getAccount(address).?.code);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
+}
+
+test "reverted code change restores hash and keeps immutable cache entry" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xc0de);
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
+
+    overlay.beginTransaction();
+    const checkpoint_state = overlay.checkpoint();
+    try overlay.setCode(address, &.{0xbb});
+    try overlay.revertToCheckpoint(checkpoint_state);
+
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
+    try std.testing.expectEqual(@as(usize, 2), overlay.code_cache.count());
+
+    var delta = try overlay.changeset();
+    defer delta.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), delta.account_updates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), delta.code_inserts.items.len);
 }
 
 test "journal checkpoint removes newly created account and markers" {
@@ -647,11 +801,12 @@ test "journal checkpoint reverts finalized selfdestruct cleanup" {
     const address = evmz.addr(0xdead);
     const other_created = evmz.addr(0xbeef);
     const key = StorageKey{ .address = address, .key = 7 };
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     account.balance = 5;
     account.nonce = 1;
-    try account.setCode(std.testing.allocator, &.{0xaa});
+    try account.setCode(&.{0xaa});
     try account.storage.put(key.key, 9);
+    try overlay.seedAccount(address, account);
     try overlay.storage_overlay.put(key, 10);
     try overlay.markSelfdestructed(address);
     try overlay.markCreatedContract(other_created);
@@ -669,8 +824,8 @@ test "journal checkpoint reverts finalized selfdestruct cleanup" {
     const restored = overlay.getAccount(address).?;
     try std.testing.expectEqual(@as(u256, 5), restored.balance);
     try std.testing.expectEqual(@as(u64, 1), restored.nonce);
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, restored.code);
-    try std.testing.expectEqual(@as(u256, 9), restored.getStorage(key.key));
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
+    try std.testing.expectEqual(@as(u256, 9), overlay.seeded_storage.get(key).?);
     try std.testing.expectEqual(@as(u256, 10), overlay.storage_overlay.get(key).?);
     try std.testing.expect(!overlay.deleted_accounts.contains(address));
     try std.testing.expect(overlay.selfdestructed_accounts.contains(address));
@@ -718,9 +873,10 @@ test "selfdestruct finalization policy comes from comptime protocol" {
 
     const address = evmz.addr(0xf17a);
     const key = StorageKey{ .address = address, .key = 7 };
-    var account = try overlay.getOrCreateAccount(address);
+    var account = MemoryAccount.init(std.testing.allocator);
     account.nonce = 3;
-    try account.setCode(std.testing.allocator, &.{0xaa});
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
     try overlay.storage_overlay.put(key, 10);
     try overlay.markSelfdestructed(address);
 
@@ -728,7 +884,7 @@ test "selfdestruct finalization policy comes from comptime protocol" {
 
     const finalized = overlay.getAccount(address).?;
     try std.testing.expectEqual(@as(u64, 0), finalized.nonce);
-    try std.testing.expectEqualSlices(u8, &.{}, finalized.code);
+    try std.testing.expectEqualSlices(u8, &.{}, try overlay.getCode(address));
     try std.testing.expect(!overlay.storage_overlay.contains(key));
     try std.testing.expect(!overlay.deleted_accounts.contains(address));
     try std.testing.expect(!overlay.selfdestructed_accounts.contains(address));
@@ -756,7 +912,8 @@ test "changeset emits sorted account updates and storage writes" {
     try std.testing.expectEqualSlices(u8, &high_address, &delta.account_updates.items[1].address);
     try std.testing.expectEqual(@as(u64, 1), delta.account_updates.items[0].nonce);
     try std.testing.expectEqual(@as(u256, 10), delta.account_updates.items[0].balance);
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, delta.account_updates.items[0].code);
+    try std.testing.expectEqual(@as(usize, 1), delta.code_inserts.items.len);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, delta.code_inserts.items[0].code);
 
     try std.testing.expectEqual(@as(usize, 2), delta.storage_writes.items.len);
     try std.testing.expectEqualSlices(u8, &low_address, &delta.storage_writes.items[0].address);
@@ -773,7 +930,7 @@ test "changeset skips read-only loaded accounts" {
     var account = try memory.getOrCreateAccount(address);
     account.balance = 5;
     account.nonce = 1;
-    try account.setCode(std.testing.allocator, &.{0x5f});
+    try account.setCode(&.{0x5f});
 
     var overlay = Overlay.initWithStateReader(std.testing.allocator, memory.reader());
     defer overlay.deinit();
@@ -787,6 +944,53 @@ test "changeset skips read-only loaded accounts" {
     try std.testing.expectEqual(@as(usize, 0), delta.account_updates.items.len);
     try std.testing.expectEqual(@as(usize, 0), delta.account_deletes.items.len);
     try std.testing.expectEqual(@as(usize, 0), delta.storage_writes.items.len);
+}
+
+test "balance-only changeset preserves non-materialized code hash" {
+    const address = evmz.addr(0xabc);
+    const code = [_]u8{0x5f};
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var account = try memory.getOrCreateAccount(address);
+    account.balance = 5;
+    try account.setCode(&code);
+
+    var overlay = Overlay.initWithStateReader(std.testing.allocator, memory.reader());
+    defer overlay.deinit();
+
+    try overlay.setBalance(address, 7);
+
+    var delta = try overlay.changeset();
+    defer delta.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), delta.account_updates.items.len);
+    const update = delta.account_updates.items[0];
+    try std.testing.expectEqualSlices(u8, &address, &update.address);
+    try std.testing.expectEqual(@as(u64, 0), update.nonce);
+    try std.testing.expectEqual(@as(u256, 7), update.balance);
+    try std.testing.expectEqual(@as(usize, 0), delta.code_inserts.items.len);
+    try std.testing.expectEqualSlices(u8, &mpt.codeHash(&code), &update.code_hash);
+}
+
+test "code hash accessors preserve non-materialized account code" {
+    const address = evmz.addr(0xabc);
+    const code = [_]u8{0x5f};
+    const code_hash = mpt.codeHash(&code);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var account = try memory.getOrCreateAccount(address);
+    try account.setCode(&code);
+
+    var overlay = Overlay.initWithStateReader(std.testing.allocator, memory.reader());
+    defer overlay.deinit();
+
+    try std.testing.expectEqual(std.mem.readInt(u256, &code_hash, .big), try overlay.getCodeHash(address));
+    try std.testing.expect(try overlay.accountHasCode(address));
+
+    const loaded_summary = overlay.getAccount(address).?;
+    try std.testing.expectEqualSlices(u8, &code_hash, &loaded_summary.code_hash);
 }
 
 test "checkpoint reverts dirty account marker introduced after checkpoint" {
@@ -874,6 +1078,7 @@ const TestStateReader = struct {
         return .{ .ptr = self, .vtable = &.{
             .accountExists = readerAccountExists,
             .loadAccount = readerLoadAccount,
+            .loadCode = readerLoadCode,
             .getStorage = readerGetStorage,
             .accountHasStorage = readerAccountHasStorage,
         } };
@@ -884,16 +1089,20 @@ const TestStateReader = struct {
         return std.mem.eql(u8, &self.address, &address);
     }
 
-    fn readerLoadAccount(ptr: *anyopaque, allocator: std.mem.Allocator, address: Address) !?AccountState {
+    fn readerLoadAccount(ptr: *anyopaque, address: Address) !?AccountState {
         const self: *TestStateReader = @ptrCast(@alignCast(ptr));
         if (!std.mem.eql(u8, &self.address, &address)) return null;
         self.load_count += 1;
+        return .{
+            .balance = self.balance,
+            .code_hash = mpt.codeHash(&.{0x5f}),
+        };
+    }
 
-        var account = AccountState.init(allocator);
-        errdefer account.deinit(allocator);
-        account.balance = self.balance;
-        try account.setCode(allocator, &.{0x5f});
-        return account;
+    fn readerLoadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
+        _ = ptr;
+        if (!std.mem.eql(u8, &hash, &mpt.codeHash(&.{0x5f}))) return error.MissingCode;
+        return &.{0x5f};
     }
 
     fn readerGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {

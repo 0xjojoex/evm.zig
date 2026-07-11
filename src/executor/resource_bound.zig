@@ -58,6 +58,8 @@ pub fn blockResourcesFromBal(block_access_list: bal.BlockAccessList) BlockResour
     return .{
         .state = .{
             .accounts = counts.accounts,
+            // BAL code changes do not bound pre-state code loaded by calls.
+            // Callers with a witness/code manifest may add both code caps.
             .storage_overlay_entries = storageKeyCount(counts),
             .deleted_accounts = counts.accounts,
             .dirty_accounts = counts.accounts,
@@ -68,12 +70,15 @@ pub fn blockResourcesFromBal(block_access_list: bal.BlockAccessList) BlockResour
 /// Build conservative block-lived capacities when only aggregate BAL counts are
 /// available.
 pub fn blockResourcesFromBalCounts(counts: bal.Counts) BlockResources {
-    return .{ .state = .{
-        .accounts = counts.accounts,
-        .storage_overlay_entries = storageKeyCount(counts),
-        .deleted_accounts = counts.accounts,
-        .dirty_accounts = counts.accounts,
-    } };
+    return .{
+        .state = .{
+            .accounts = counts.accounts,
+            // Aggregate BAL counts still omit pre-state code byte lengths.
+            .storage_overlay_entries = storageKeyCount(counts),
+            .deleted_accounts = counts.accounts,
+            .dirty_accounts = counts.accounts,
+        },
+    };
 }
 
 pub fn declaredEnvelopeFromBal(block_access_list: bal.BlockAccessList, transaction: TransactionResources) Envelope {
@@ -149,6 +154,8 @@ test "BAL declaration maps to block-lived state resources" {
 
     const resources = blockResourcesFromBal(&block_access_list);
     try std.testing.expectEqual(@as(usize, 2), resources.state.accounts);
+    try std.testing.expectEqual(@as(?usize, null), resources.state.code_entries);
+    try std.testing.expectEqual(@as(?usize, null), resources.state.code_bytes);
     try std.testing.expectEqual(@as(usize, 4), resources.state.storage_overlay_entries);
     try std.testing.expectEqual(@as(usize, 2), resources.state.deleted_accounts);
     try std.testing.expectEqual(@as(usize, 2), resources.state.dirty_accounts);

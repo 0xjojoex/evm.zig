@@ -77,6 +77,15 @@ pub const Transaction = struct {
         return kind == .set_code or revision.isImpl(.london);
     }
 
+    /// EIP-7702's delegation-shaped sender exception is revision-gated here so
+    /// pre-Prague EIP-3607 validation continues to reject every coded sender.
+    pub fn isDelegationCode(revision: Revision, code: []const u8) bool {
+        if (!revision.isImpl(.prague)) return false;
+        const params = @import("eip/7702.zig");
+        return code.len == params.delegation_code_len and
+            std.mem.eql(u8, code[0..params.delegation_designator.len], &params.delegation_designator);
+    }
+
     pub fn blobSchedule(revision: Revision) ?tx_blob.BlobSchedule {
         if (!revision.isImpl(.cancun)) return null;
         if (revision.isImpl(.amsterdam)) {

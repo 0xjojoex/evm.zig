@@ -16,3 +16,12 @@ benchmark_version=tests-benchmark@v0.0.9
 benchmark_artifact=fixtures_benchmark.tar.gz
 benchmark_url=https://github.com/ethereum/execution-specs/releases/download/tests-benchmark%40v0.0.9/fixtures_benchmark.tar.gz
 benchmark_dest=.eest/benchmarks/tests-benchmark-v0.0.9
+
+# zkEVM stateless fixture download defaults. These fixtures are published on
+# the tests-zkevm release track and carry statelessInputBytes/statelessOutputBytes
+# for the native stateless/ERE runners.
+zkevm_repo=ethereum/execution-specs
+zkevm_version=tests-zkevm@v0.5.0
+zkevm_artifact=fixtures_zkevm.tar.gz
+zkevm_url=https://github.com/ethereum/execution-specs/releases/download/tests-zkevm%40v0.5.0/fixtures_zkevm.tar.gz
+zkevm_dest=.eest/fixtures/tests-zkevm-v0.5.0

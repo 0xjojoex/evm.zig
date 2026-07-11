@@ -344,7 +344,7 @@ fn finishVectorResult(
     }
 }
 
-fn validationFailReason(err: transaction.ValidationError) FailReason {
+fn validationFailReason(err: EthProtocol.Transaction.ValidationError) FailReason {
     return switch (err) {
         .nonce_mismatch => .transaction_nonce_mismatch,
         else => .unexpected_status,
@@ -567,57 +567,15 @@ fn comparePostState(
     return null;
 }
 
-const FixtureConfig = struct {
-    chain_id: u256 = 1,
-    blob_schedule: ?transaction.BlobSchedule = null,
-};
-
-fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth.Revision) !FixtureConfig {
-    const config_value = fixture.get("config") orelse return .{};
-    const config = asObject(config_value) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&config, &.{ "chainid", "blobSchedule" });
-
-    var result = FixtureConfig{
-        .chain_id = if (config.get("chainid")) |value| try parseU256FromValue(value) else 1,
-    };
-
-    if (config.get("blobSchedule")) |schedule_value| {
-        const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
-        try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
-        const schedule_key: ?[]const u8 = if (revision.isImpl(.amsterdam))
-            "Amsterdam"
-        else if (revision.isImpl(.osaka))
-            "Osaka"
-        else if (revision.isImpl(.prague))
-            "Prague"
-        else if (revision.isImpl(.cancun))
-            "Cancun"
-        else
-            null;
-        if (schedule_key) |key| {
-            if (schedules.get(key)) |value| {
-                result.blob_schedule = try parseBlobSchedule(revision, value);
-            }
-        }
-    }
-
-    return result;
-}
-
-fn parseBlobSchedule(revision: evmz.eth.Revision, value: JsonValue) !transaction.BlobSchedule {
-    const schedule = asObject(value) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = EthProtocol.Transaction.blobSchedule(revision) orelse return error.MalformedFixture;
-    result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
-    result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
-    result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);
-    return result;
-}
+const FixtureConfig = fixture_common.FixtureConfig;
+const parseFixtureConfig = fixture_common.parseFixtureConfig;
 
 test "EEST fixture config selects Amsterdam blob schedule" {
     const fixture =
         \\{
         \\  "config": {
+        \\    "network": "Amsterdam",
+        \\    "chainId": "0x2a",
         \\    "blobSchedule": {
         \\      "Cancun": {"target": "0x03", "max": "0x06", "baseFeeUpdateFraction": "0x01"},
         \\      "Prague": {"target": "0x06", "max": "0x09", "baseFeeUpdateFraction": "0x02"},
@@ -640,6 +598,7 @@ test "EEST fixture config selects Amsterdam blob schedule" {
     try std.testing.expectEqual(evmz.eth.transaction.blob_base_cost, osaka.blob_schedule.?.execution_base_cost);
 
     const amsterdam = try parseFixtureConfig(&obj, .amsterdam);
+    try std.testing.expectEqual(@as(u256, 42), amsterdam.chain_id);
     try std.testing.expectEqual(@as(u64, 12), amsterdam.blob_schedule.?.target);
     try std.testing.expectEqual(@as(u64, 15), amsterdam.blob_schedule.?.max);
 }

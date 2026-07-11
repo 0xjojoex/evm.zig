@@ -19,6 +19,19 @@ const StaticGas = protocol.StaticGas;
 const assertValidDefinition = protocol.assertValidDefinition;
 const assertValidProtocolDefinition = protocol.assertValidProtocolDefinition;
 
+const TestTransactionPreparation = struct {
+    pub fn For(comptime ProtocolType: type) type {
+        return struct {
+            pub fn prepare(input: tx.PrepareInput(ProtocolType)) !tx.PrepareResult(ProtocolType) {
+                _ = input;
+                return error.UnsupportedTransactionPreparation;
+            }
+        };
+    }
+};
+
+const TestTransactionValidationError = enum { rejected };
+
 fn instructionFor(comptime ProtocolType: type, comptime opcode: opcode_info.Opcode) ProtocolType.Instruction.Value {
     return ProtocolType.Instruction.fromByte(@intFromEnum(opcode));
 }
@@ -118,6 +131,8 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
         }
     };
     return .{
+        .Preparation = TestTransactionPreparation,
+        .ValidationError = TestTransactionValidationError,
         .kindActive = F.kindActive,
         .allowsContractCreation = F.allowsContractCreation,
         .requiresAuthorizationList = F.requiresAuthorizationList,
@@ -301,7 +316,7 @@ test "transaction resolver defaults engine protocol shape" {
     try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.max);
     try std.testing.expectEqual(tx.Transaction, Cancun.Transaction.Value);
     try std.testing.expectEqual(tx.TransactionView, Cancun.Transaction.View);
-    try std.testing.expectEqual(tx.ValidationError, Cancun.Transaction.ValidationError);
+    try std.testing.expectEqual(eth.transaction_validation.ValidationError, Cancun.Transaction.ValidationError);
 
     const sender = address.addr(0xaaaa);
     const view = Cancun.Transaction.view(.{

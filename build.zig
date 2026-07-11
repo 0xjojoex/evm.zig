@@ -163,7 +163,12 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, profile);
         addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, profile);
         addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, profile);
-        addEestDelegate(b, "bench", "Run EEST benchmark blockchain-test fixtures", "bench", null, bench_optimize_name, profile);
+        addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, profile);
+        addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", "zkevm-input", optimize_name, null, profile);
+        addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, profile);
+        addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, profile);
+        addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, profile);
+        addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, profile);
     }
     if (pathExists(b, "bench/build.zig")) {
         addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, profile);
@@ -180,6 +185,23 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, profile);
         addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, profile);
     }
+
+    if (is_native_profile) {
+        addGuestPayloadTest(b, target, optimize, evmz_mod);
+    } else {
+        const fail = b.addFail("guest-payload-test is native-only; use guest-zisk-run with -Dziskos-staticlib for zkvm proof");
+        const guest_payload_test_step = b.step("guest-payload-test", "Run native tests for guest payload fixtures");
+        guest_payload_test_step.dependOn(&fail.step);
+    }
+    const ziskos_staticlib_path = b.option(
+        []const u8,
+        "ziskos-staticlib",
+        "Path to a ZisK libziskos_staticlib.a provider for guest-zisk",
+    );
+    const guest_input_path = b.option([]const u8, "guest-input", "Path to ZisK stdin input file for guest-zisk-run");
+    const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
+    const guest_payload = guestPayloadOption(b);
+    addGuestZisk(b, optimize, evmone_dep, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
     // example
     {
@@ -265,6 +287,318 @@ fn buildOptions(b: *std.Build, profile: []const u8) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption([]const u8, "profile", profile);
     return options;
+}
+
+fn guestOptions(b: *std.Build, use_ziskos_staticlib: bool) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(bool, "use_ziskos_staticlib", use_ziskos_staticlib);
+    return options;
+}
+
+fn guestZiskTarget(b: *std.Build) std.Build.ResolvedTarget {
+    const query = std.Target.Query.parse(.{
+        .arch_os_abi = "riscv64-freestanding",
+        .cpu_features = "generic_rv64+m+a",
+    }) catch @panic("invalid ZisK guest target");
+    return b.resolveTargetQuery(query);
+}
+
+fn guestPayloadOption(b: *std.Build) []const u8 {
+    const payload = b.option([]const u8, "guest-payload", "Guest payload: basic, stateless-smoke, stateless-ssz-smoke, stateless-ere-smoke, or stateless-ere") orelse "basic";
+    _ = guestPayloadSource(payload) catch |err| switch (err) {
+        error.UnknownGuestPayload => std.debug.panic("unsupported guest payload '{s}' (expected basic, stateless-smoke, stateless-ssz-smoke, stateless-ere-smoke, or stateless-ere)", .{payload}),
+    };
+    return payload;
+}
+
+fn guestPayloadSource(payload: []const u8) error{UnknownGuestPayload}![]const u8 {
+    if (std.mem.eql(u8, payload, "basic")) return "guest/payload/basic.zig";
+    if (std.mem.eql(u8, payload, "stateless-smoke")) return "guest/payload/stateless_smoke.zig";
+    if (std.mem.eql(u8, payload, "stateless-ssz-smoke")) return "guest/payload/stateless_ssz_smoke.zig";
+    if (std.mem.eql(u8, payload, "stateless-ere-smoke")) return "guest/payload/stateless_ere_smoke.zig";
+    if (std.mem.eql(u8, payload, "stateless-ere")) return "guest/payload/stateless_ere.zig";
+    return error.UnknownGuestPayload;
+}
+
+fn addGuestPayloadTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    evmz_mod: *std.Build.Module,
+) void {
+    const guest_options = guestOptions(b, false);
+    const guest_options_mod = guest_options.createModule();
+    const guest_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("guest/allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+        },
+    });
+    const basic_payload_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/basic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+    });
+    const guest_payload_tests_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/basic_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "guest_payload_basic", .module = basic_payload_mod },
+        },
+    });
+    const guest_payload_tests = b.addTest(.{
+        .name = "guest-payload-basic",
+        .root_module = guest_payload_tests_mod,
+    });
+
+    const stateless_smoke_payload_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+    });
+    const stateless_smoke_tests_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "guest_payload_stateless_smoke", .module = stateless_smoke_payload_mod },
+        },
+    });
+    const stateless_smoke_tests = b.addTest(.{
+        .name = "guest-payload-stateless-smoke",
+        .root_module = stateless_smoke_tests_mod,
+    });
+    const stateless_ssz_smoke_payload_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ssz_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+    });
+    const stateless_ssz_smoke_tests_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ssz_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "guest_payload_stateless_ssz_smoke", .module = stateless_ssz_smoke_payload_mod },
+        },
+    });
+    const stateless_ssz_smoke_tests = b.addTest(.{
+        .name = "guest-payload-stateless-ssz-smoke",
+        .root_module = stateless_ssz_smoke_tests_mod,
+    });
+    const stateless_ere_smoke_payload_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ere_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+    });
+    const stateless_ere_smoke_tests_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ere_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "guest_payload_stateless_ere_smoke", .module = stateless_ere_smoke_payload_mod },
+        },
+    });
+    const stateless_ere_smoke_tests = b.addTest(.{
+        .name = "guest-payload-stateless-ere-smoke",
+        .root_module = stateless_ere_smoke_tests_mod,
+    });
+    const guest_io_mod = b.createModule(.{
+        .root_source_file = b.path("guest/io.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+        },
+    });
+    const stateless_ere_payload_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ere.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_io", .module = guest_io_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+    });
+    const stateless_ere_tests_mod = b.createModule(.{
+        .root_source_file = b.path("guest/payload/stateless_ere_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_payload_stateless_ere", .module = stateless_ere_payload_mod },
+        },
+    });
+    const stateless_ere_tests = b.addTest(.{
+        .name = "guest-payload-stateless-ere",
+        .root_module = stateless_ere_tests_mod,
+    });
+
+    const guest_payload_test_step = b.step("guest-payload-test", "Run native tests for guest payload fixtures");
+    guest_payload_test_step.dependOn(&b.addRunArtifact(guest_payload_tests).step);
+    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_smoke_tests).step);
+    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ssz_smoke_tests).step);
+    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ere_smoke_tests).step);
+    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ere_tests).step);
+}
+
+fn addGuestZisk(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    evmone_dep: *std.Build.Dependency,
+    ziskos_staticlib_path: ?[]const u8,
+    guest_payload: []const u8,
+    guest_input_path: ?[]const u8,
+    guest_output_path: ?[]const u8,
+) void {
+    const provider_path = ziskos_staticlib_path orelse {
+        const fail = b.addFail("guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a");
+        const guest_step = b.step("guest-zisk", "Build the ZisK rv64 guest ELF");
+        guest_step.dependOn(&fail.step);
+        const run_step = b.step("guest-zisk-run", "Run the ZisK guest ELF with ziskemu");
+        run_step.dependOn(&fail.step);
+        return;
+    };
+
+    const target = guestZiskTarget(b);
+    const build_options = buildOptions(b, "zkvm");
+    const guest_options = guestOptions(b, true);
+    const guest_options_mod = guest_options.createModule();
+    const guest_payload_source = guestPayloadSource(guest_payload) catch unreachable;
+
+    const evmz_mod = b.createModule(.{
+        .root_source_file = b.path("src/evm.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .medium,
+        .error_tracing = false,
+        .pic = false,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    evmz_mod.addOptions("build_options", build_options);
+    evmz_mod.addIncludePath(b.path("include"));
+    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
+
+    const guest_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("guest/allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .medium,
+        .error_tracing = false,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+        },
+        .pic = false,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    const payload_mod = b.createModule(.{
+        .root_source_file = b.path(guest_payload_source),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .medium,
+        .error_tracing = false,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+        },
+        .pic = false,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    const guest_io_mod = b.createModule(.{
+        .root_source_file = b.path("guest/io.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .medium,
+        .error_tracing = false,
+        .imports = &.{
+            .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
+        },
+        .pic = false,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    payload_mod.addImport("guest_io", guest_io_mod);
+    const root_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "guest_payload", .module = payload_mod },
+    };
+
+    const root_mod = b.createModule(.{
+        .root_source_file = b.path("guest/runtime/zisk/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .code_model = .medium,
+        .error_tracing = false,
+        .imports = root_imports,
+        .pic = false,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    root_mod.addObjectFile(.{ .cwd_relative = provider_path });
+
+    const guest = b.addExecutable(.{
+        .name = "evmz-guest-zisk",
+        .root_module = root_mod,
+    });
+    guest.entry = .{ .symbol_name = "_start" };
+    guest.link_gc_sections = true;
+    guest.setLinkerScript(b.path("guest/runtime/zisk/zisk-rv64.ld"));
+
+    const install_guest = b.addInstallArtifact(guest, .{
+        .dest_dir = .{ .override = .{ .custom = "guest/zisk" } },
+        .dest_sub_path = "evmz-guest-zisk.elf",
+    });
+
+    const guest_step = b.step("guest-zisk", "Build the ZisK rv64 guest ELF");
+    guest_step.dependOn(&install_guest.step);
+
+    const ziskemu = b.option([]const u8, "ziskemu", "Path to ziskemu for guest-zisk-run") orelse "ziskemu";
+    const ziskemu_steps = b.option([]const u8, "ziskemu-steps", "Maximum ziskemu steps for guest-zisk-run") orelse "5000000";
+    const run = b.addSystemCommand(&.{ ziskemu, "-e" });
+    run.addFileArg(guest.getEmittedBin());
+    if (guest_input_path) |path| run.addArgs(&.{ "-i", path });
+    if (guest_output_path) |path| run.addArgs(&.{ "-o", path });
+    run.addArgs(&.{ "-n", ziskemu_steps, "-m", "--steps", "-c" });
+    run.has_side_effects = true;
+
+    const run_step = b.step("guest-zisk-run", "Run the ZisK guest ELF with ziskemu");
+    run_step.dependOn(&run.step);
 }
 
 fn pathExists(b: *std.Build, sub_path: []const u8) bool {

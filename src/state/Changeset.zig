@@ -2,6 +2,8 @@
 //!
 //! This is the write boundary for integrations: clients keep their trie/db as
 //! the state reader, then commit this compact delta after successful execution.
+//! Account-leaf updates carry code hashes; code blobs are separate, idempotent,
+//! content-addressed inserts.
 
 const std = @import("std");
 
@@ -13,6 +15,14 @@ pub const AccountUpdate = struct {
     address: Address,
     nonce: u64,
     balance: u256,
+    /// Canonical code commitment after this update, whether or not code bytes
+    /// had to be materialized in the execution overlay.
+    code_hash: [32]u8,
+};
+
+/// Owned content-addressed code introduced by the transition.
+pub const CodeInsert = struct {
+    code_hash: [32]u8,
     code: []u8,
 };
 
@@ -23,30 +33,36 @@ pub const StorageWrite = struct {
 };
 
 account_updates: std.ArrayList(AccountUpdate),
+code_inserts: std.ArrayList(CodeInsert),
 account_deletes: std.ArrayList(Address),
 storage_writes: std.ArrayList(StorageWrite),
 
 pub fn init() Changeset {
     return .{
         .account_updates = .empty,
+        .code_inserts = .empty,
         .account_deletes = .empty,
         .storage_writes = .empty,
     };
 }
 
 pub fn deinit(self: *Changeset, allocator: std.mem.Allocator) void {
-    for (self.account_updates.items) |update| {
-        allocator.free(update.code);
-    }
+    for (self.code_inserts.items) |insert| allocator.free(insert.code);
     self.account_updates.deinit(allocator);
+    self.code_inserts.deinit(allocator);
     self.account_deletes.deinit(allocator);
     self.storage_writes.deinit(allocator);
 }
 
 pub fn sort(self: *Changeset) void {
     std.mem.sort(AccountUpdate, self.account_updates.items, {}, accountUpdateLessThan);
+    std.mem.sort(CodeInsert, self.code_inserts.items, {}, codeInsertLessThan);
     std.mem.sort(Address, self.account_deletes.items, {}, addressLessThan);
     std.mem.sort(StorageWrite, self.storage_writes.items, {}, storageWriteLessThan);
+}
+
+fn codeInsertLessThan(_: void, lhs: CodeInsert, rhs: CodeInsert) bool {
+    return std.mem.order(u8, &lhs.code_hash, &rhs.code_hash) == .lt;
 }
 
 fn accountUpdateLessThan(_: void, lhs: AccountUpdate, rhs: AccountUpdate) bool {

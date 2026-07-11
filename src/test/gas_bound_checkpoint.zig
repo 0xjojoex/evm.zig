@@ -241,7 +241,7 @@ fn seedSenderAndCode(memory: *MemoryStore, maybe_contract: ?Address, code: []con
     if (maybe_contract) |contract| {
         if (code.len != 0) {
             var contract_account = try memory.getOrCreateAccount(contract);
-            try contract_account.setCode(std.testing.allocator, code);
+            try contract_account.setCode(code);
         }
     }
 }
@@ -283,7 +283,7 @@ fn seedStorageOverlayBlock(memory: *MemoryStore) !void {
     const write_code = evmz.t.bytecode(.{ .PUSH1, 0x01, .PUSH0, .SSTORE, .STOP });
     for (0..16) |index| {
         var account = try memory.getOrCreateAccount(contractAddress(index));
-        try account.setCode(std.testing.allocator, &write_code);
+        try account.setCode(&write_code);
     }
 }
 
@@ -308,7 +308,7 @@ fn runStorageOverlayBlock(block: anytype) !BlockRun {
                 else => try std.testing.expect(false),
             },
             .rejected => |err| {
-                try std.testing.expectEqual(transaction.ValidationError.gas_allowance_exceeded, err);
+                try std.testing.expectEqual(DefaultVm.Protocol.Transaction.ValidationError.gas_allowance_exceeded, err);
                 rejected = true;
                 break;
             },

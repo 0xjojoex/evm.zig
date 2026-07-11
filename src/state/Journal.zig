@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const AccountState = @import("./Account.zig");
+const Account = @import("./Account.zig");
 const storage = @import("./storage.zig");
 
 const Journal = @This();
@@ -32,11 +32,11 @@ pub const Entry = union(enum) {
     },
     code: struct {
         address: Address,
-        prev: []u8,
+        prev: [32]u8,
     },
     account_removed: struct {
         address: Address,
-        prev: ?AccountState,
+        prev: ?Account,
     },
     storage: struct {
         address: Address,
@@ -63,15 +63,7 @@ pub const Entry = union(enum) {
     },
 
     pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .code => |code| allocator.free(code.prev),
-            .account_removed => |*removed| {
-                if (removed.prev) |*account| {
-                    account.deinit(allocator);
-                }
-            },
-            else => {},
-        }
+        _ = allocator;
         self.* = undefined;
     }
 };

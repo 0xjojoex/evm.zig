@@ -9,6 +9,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const BlobSchedule = @import("./blob.zig").BlobSchedule;
+const BlockGas = @import("./settlement.zig").BlockGas;
 
 pub const AccessListCounts = struct {
     addresses: usize = 0,
@@ -108,11 +109,44 @@ pub const EnvFacts = struct {
     blob_schedule: ?BlobSchedule = null,
 };
 
-pub const StateFacts = struct {
-    sender_balance: u256 = 0,
-    sender_nonce: u64 = 0,
-    sender_code_kind: SenderCodeKind = .empty,
-    value_transfer_creates_account: bool = false,
+/// Minimal account proof consumed during protocol transaction preparation.
+pub const PreparationAccount = struct {
+    nonce: u64,
+    balance: u256,
+    code_hash: [32]u8,
+};
+
+/// Read-only state capability available to protocol transaction preparation.
+///
+/// Preparation controls when these reads happen. The VM supplies the current
+/// overlay-backed view, but exposes neither storage nor mutation through this
+/// boundary.
+pub const PreparationStateAccess = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        accountSummary: *const fn (ptr: *anyopaque, address: Address) anyerror!?PreparationAccount,
+        code: *const fn (ptr: *anyopaque, address: Address, expected_hash: [32]u8) anyerror![]const u8,
+    };
+
+    pub fn accountSummary(self: PreparationStateAccess, address: Address) !?PreparationAccount {
+        return self.vtable.accountSummary(self.ptr, address);
+    }
+
+    /// Load code proven by `expected_hash`. Returned bytes are borrowed for the
+    /// duration of preparation.
+    pub fn code(self: PreparationStateAccess, address: Address, expected_hash: [32]u8) ![]const u8 {
+        return self.vtable.code(self.ptr, address, expected_hash);
+    }
+};
+
+/// Cumulative progress before the transaction currently being prepared.
+pub const PreparationBlockProgress = struct {
+    /// Receipt cumulative gas, used by the legacy one-dimensional allowance.
+    receipt_gas_used: u64 = 0,
+    /// Block/header dimensions, used by multidimensional gas accounting.
+    block_gas: BlockGas = .{},
 };
 
 pub const ExecutionContext = struct {
@@ -322,8 +356,8 @@ pub fn PrepareInput(comptime Protocol: type) type {
 
         revision: Protocol.Revision,
         tx: Protocol.Transaction.Value,
-        view: Protocol.Transaction.View,
         env: EnvFacts,
-        state: StateFacts,
+        block: PreparationBlockProgress = .{},
+        state: PreparationStateAccess,
     };
 }

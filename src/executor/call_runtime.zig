@@ -1175,7 +1175,7 @@ pub fn For(comptime Executor: type) type {
         fn createCollision(self: *Executor, address: Address) !bool {
             if (Protocol.Precompile.active(self.revision(), address)) return true;
             const account = try self.state.getAccountOrLoad(address) orelse return false;
-            return account.nonce != 0 or account.code.len != 0 or try self.state.accountHasStorage(address);
+            return account.nonce != 0 or try self.state.accountHasCode(address) or try self.state.accountHasStorage(address);
         }
     };
 }

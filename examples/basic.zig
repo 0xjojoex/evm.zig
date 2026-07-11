@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     sender_account.balance = 1_000_000;
 
     const contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(allocator, &.{
+    try contract_account.setCode(&.{
         0x60, 0x2a, // PUSH1 42
         0x60, 0x00, // PUSH1 0
         0x55, // SSTORE
@@ -39,20 +39,20 @@ pub fn main(init: std.process.Init) !void {
         .to = contract,
         .gas_limit = gas_limit,
     });
-    const executed = switch (result) {
+    const execution = switch (result) {
         .executed => |value| value,
         .rejected => return error.ExampleTransactionRejected,
     };
     var diff = try vm.changeset();
     defer diff.deinit(allocator);
     const stored = storageValue(&diff, contract, 0);
-    if (executed.status != .success) return error.ExampleTransactionFailed;
+    if (execution.status != .success) return error.ExampleTransactionFailed;
     if (stored != 42) return error.ExampleStorageMismatch;
 
-    std.debug.print("status: {s}\n", .{@tagName(executed.status)});
-    std.debug.print("gas used: {d}\n", .{executed.gas.used});
+    std.debug.print("status: {s}\n", .{@tagName(execution.status)});
+    std.debug.print("gas used: {d}\n", .{execution.gas.used});
     std.debug.print("return: 0x", .{});
-    printHex(executed.output);
+    printHex(execution.output);
     std.debug.print("\n", .{});
     std.debug.print("storage[0]: {d}\n", .{stored});
 }

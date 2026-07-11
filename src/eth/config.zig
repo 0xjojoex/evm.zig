@@ -18,6 +18,8 @@ const revision = @import("revision.zig");
 const settlement = @import("settlement.zig");
 const system = @import("system.zig");
 const transaction = @import("transaction.zig");
+const transaction_prepare = @import("transaction_prepare.zig");
+const transaction_validation = @import("transaction_validation.zig");
 
 pub const Revision = revision.Revision;
 const Opcode = opcode_info.Opcode;
@@ -115,10 +117,13 @@ fn domainOrDefault(comptime R: type, comptime override: ?type, comptime default:
 fn defaultTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
     if (R == Revision) {
         return .{
+            .Preparation = transaction_prepare,
+            .ValidationError = transaction_validation.ValidationError,
             .kindActive = transaction.Transaction.kindActive,
             .allowsContractCreation = transaction.Transaction.allowsContractCreation,
             .requiresAuthorizationList = transaction.Transaction.requiresAuthorizationList,
             .rejectsNonDelegatingSenderCode = transaction.Transaction.rejectsNonDelegatingSenderCode,
+            .isDelegationCode = transaction.Transaction.isDelegationCode,
             .blobSchedule = transaction.Transaction.blobSchedule,
             .blobVersionedHashActive = transaction.Transaction.blobVersionedHashActive,
             .maxInitcodeSize = transaction.Transaction.maxInitcodeSize,

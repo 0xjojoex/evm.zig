@@ -273,7 +273,7 @@ pub const MockHost = struct {
         const code = try self.getCodeBuf(address, &buf);
 
         if (code.len == 0) {
-            return evmz.empty_code_hash;
+            return evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
         }
         const result = evmz.crypto.keccak256(code);
         const final_result = evmz.uint256.fromBytes32(&result);

@@ -3,8 +3,6 @@ const std = @import("std");
 const tx_blob = @import("../transaction/blob.zig");
 const tx_gas = @import("../transaction/gas.zig");
 const tx = @import("../transaction/types.zig");
-const tx_prepare = @import("../transaction/prepare.zig");
-const tx_validation = @import("../transaction/validation.zig");
 
 fn declOr(comptime Namespace: type, comptime name: []const u8, comptime default_value: anytype) @TypeOf(if (@hasDecl(Namespace, name)) @field(Namespace, name) else default_value) {
     return if (@hasDecl(Namespace, name)) @field(Namespace, name) else default_value;
@@ -22,7 +20,7 @@ pub fn For(comptime Definition: type) type {
         /// Read-only projection of a `Value` used by the execution/gas paths.
         pub const View = declOr(DefinitionTransaction, "View", tx.TransactionView);
         /// Reason a transaction is rejected during pre-execution validation.
-        pub const ValidationError = declOr(DefinitionTransaction, "ValidationError", tx_validation.ValidationError);
+        pub const ValidationError = DefinitionTransaction.ValidationError;
 
         pub fn view(value: Value) View {
             if (comptime std.meta.hasFn(DefinitionTransaction, "view")) {
@@ -38,10 +36,7 @@ pub fn For(comptime Definition: type) type {
             if (comptime std.meta.hasFn(DefinitionTransaction, "prepare")) {
                 return DefinitionTransaction.prepare(Protocol, input);
             }
-            if (comptime View != tx.TransactionView or ValidationError != tx_validation.ValidationError) {
-                @compileError("Definition.Transaction.prepare is required when overriding Transaction.View or Transaction.ValidationError");
-            }
-            return tx_prepare.For(Protocol).prepare(input);
+            @compileError("Definition.Transaction.prepare is required");
         }
 
         pub fn kindActive(revision: Definition.Revision, kind: tx.TxKind) bool {
@@ -58,6 +53,13 @@ pub fn For(comptime Definition: type) type {
 
         pub fn rejectsNonDelegatingSenderCode(revision: Definition.Revision, kind: tx.TxKind) bool {
             return DefinitionTransaction.rejectsNonDelegatingSenderCode(revision, kind);
+        }
+
+        pub fn isDelegationCode(revision: Definition.Revision, code: []const u8) bool {
+            if (comptime std.meta.hasFn(DefinitionTransaction, "isDelegationCode")) {
+                return DefinitionTransaction.isDelegationCode(revision, code);
+            }
+            return false;
         }
 
         pub fn blobGasPerBlob(revision: Definition.Revision) u64 {

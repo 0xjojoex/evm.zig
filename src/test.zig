@@ -1,10 +1,12 @@
 test {
     _ = @import("./test/gas_bound_checkpoint.zig");
+    _ = @import("./test/block_stf_cases.zig");
     _ = @import("./test/eip2200.zig");
     _ = @import("./test/amsterdam/eip2780.zig");
     _ = @import("./test/amsterdam/bal_fixtures.zig");
     _ = @import("./test/amsterdam/eip8037.zig");
     _ = @import("./test/amsterdam/eip8038.zig");
+    _ = @import("./test/amsterdam/transaction_preparation.zig");
 }
 
 const std = @import("std");

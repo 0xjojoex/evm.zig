@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 
-const AccountState = evmz.state.Account;
+const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
 const EthProtocol = evmz.Evm.Protocol;
 const Executor = evmz.Executor;
@@ -34,14 +34,14 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.nonce = std.math.maxInt(u64);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
@@ -60,18 +60,18 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 1;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var beneficiary_account = AccountState.init(std.testing.allocator);
+    var beneficiary_account = MemoryAccount.init(std.testing.allocator);
     beneficiary_account.balance = 1;
-    try executor.state.accounts.put(beneficiary, beneficiary_account);
+    try executor.state.seedAccount(beneficiary, beneficiary_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(20_000), 0);
@@ -91,13 +91,13 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
+    var target_account = MemoryAccount.init(std.testing.allocator);
     target_account.balance = 1;
-    try executor.state.accounts.put(create_address, target_account);
+    try executor.state.seedAccount(create_address, target_account);
 
     const root = RootFrame{ .create = .{
         .sender = sender,
@@ -125,9 +125,9 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 10_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const root = RootFrame{ .create = .{
         .sender = sender,
@@ -153,7 +153,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     const account = executor.getAccount(create_address).?;
     try std.testing.expectEqual(@as(u64, 0), account.nonce);
     try std.testing.expectEqual(@as(u256, 0), account.balance);
-    try std.testing.expectEqual(@as(usize, 0), account.code.len);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(create_address)).len);
 }
 
 test "Amsterdam keeps delegated top-level transaction target cold" {
@@ -167,9 +167,9 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -226,7 +226,7 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
     }, .{ .execute = CheckingEngine.execute });
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "Amsterdam top-level delegated call charges cold target access" {
@@ -239,19 +239,19 @@ test "Amsterdam top-level delegated call charges cold target access" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&delegation_code, target);
-    var authority_account = AccountState.init(std.testing.allocator);
-    try authority_account.setCode(std.testing.allocator, &delegation_code);
-    try executor.state.accounts.put(authority, authority_account);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&delegation_code);
+    try executor.state.seedAccount(authority, authority_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(target, target_account);
 
     try executor.beginTransaction(tx_context, sender, authority);
     const result = try executor.executeCallTransaction(sender, authority, &.{}, .legacy(10_000), 0);

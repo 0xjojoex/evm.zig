@@ -114,10 +114,7 @@ pub fn For(comptime Executor: type) type {
 
         fn getCodeHash(ptr: *anyopaque, address: Address) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            const account = try self.state.getAccountOrLoad(address) orelse return 0;
-            if (account.code.len == 0) return evmz.empty_code_hash;
-            const result = evmz.crypto.keccak256(account.code);
-            return std.mem.readInt(u256, &result, .big);
+            return self.state.getCodeHash(address);
         }
 
         fn copyCode(ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) !usize {

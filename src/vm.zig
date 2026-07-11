@@ -19,7 +19,6 @@ const transaction = @import("./transaction.zig");
 const Address = address.Address;
 const addr = address.addr;
 const Changeset = evmz.state.Changeset;
-const AccountState = evmz.state.Account;
 const MemoryStore = evmz.state.MemoryStore;
 
 pub const StateReader = executor_module.state_io.StateReader;
@@ -184,7 +183,7 @@ pub fn Vm(
         // Keep these concrete for ZLS; Typed verifies Protocol coherence below.
         transaction.Transaction,
         transaction.TransactionView,
-        transaction.ValidationError,
+        ProtocolType.Transaction.ValidationError,
         transaction.Prepared(ProtocolType),
         transaction.PrepareResult(ProtocolType),
         TxResultFor(ProtocolType),
@@ -309,8 +308,9 @@ fn Typed(
         ///
         /// It executes session for multiple txs under one env, Not a Ethereum block processor.
         /// Feed transactions through `transact` to accumulate block-level gas
-        /// and the transaction count; each executable call snapshots so a tx
-        /// that cannot fit this block rolls back without tearing down the block.
+        /// and the transaction count. Preparation receives current gas progress;
+        /// each executable call then snapshots before execution so the final fold
+        /// can still roll back without tearing down the block.
         pub const BlockSession = struct {
             vm: *Self,
             /// Cumulative receipt gas for accepted transactions.
@@ -320,7 +320,10 @@ fn Typed(
             tx_count: u64 = 0,
 
             pub fn transact(self: *BlockSession, tx: Self.Transaction) !Self.TxResult {
-                const prepared = try self.vm.prepareTransaction(tx);
+                const prepared = try self.vm.prepareTransaction(tx, .{
+                    .receipt_gas_used = self.gas_used,
+                    .block_gas = self.block_gas,
+                });
                 switch (prepared) {
                     .rejected => |err| return .{ .rejected = err },
                     .executable => |executable| {
@@ -506,15 +509,27 @@ fn Typed(
 
         pub fn getAccount(self: *Self, address_value: Address) !?AccountView {
             const account = try self.executor.getAccountOrLoad(address_value) orelse return null;
+            const code = try self.executor.getCode(address_value);
             return .{
                 .nonce = account.nonce,
                 .balance = account.balance,
-                .code = account.code,
+                .code = code,
             };
         }
 
         pub fn getStorage(self: *Self, address_value: Address, key: u256) !u256 {
             return self.executor.getStorage(address_value, key);
+        }
+
+        /// Credit an account balance through the VM overlay.
+        ///
+        /// Block-level callers use this for execution-derived writes such as
+        /// withdrawal credits while keeping `BlockSession` limited to tx folding.
+        pub fn creditBalance(self: *Self, address_value: Address, amount: u256) !void {
+            if (amount == 0) return;
+            const current_balance = try self.executor.state.getBalance(address_value);
+            const next_balance = std.math.add(u256, current_balance, amount) catch return error.BalanceOverflow;
+            try self.executor.state.setBalance(address_value, next_balance);
         }
 
         /// Borrow logs emitted by the most recent transaction/system-call scope.
@@ -553,23 +568,22 @@ fn Typed(
         /// Execute one protocol transaction into the VM overlay.
         pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
             try self.requireDirectExecution();
-            const prepared = try self.prepareTransaction(tx);
+            const prepared = try self.prepareTransaction(tx, .{});
             return switch (prepared) {
                 .rejected => |err| .{ .rejected = err },
                 .executable => |executable| .{ .executed = try self.executePreparedTransaction(executable) },
             };
         }
 
-        fn prepareTransaction(self: *Self, tx: Self.Transaction) !Self.PreparedTransactionResult {
+        fn prepareTransaction(self: *Self, tx: Self.Transaction, block: transaction.PreparationBlockProgress) !Self.PreparedTransactionResult {
             self.executor.clearLogs();
             const env = self.runtimeEnv();
-            const view = Protocol.Transaction.view(tx);
             const input: transaction.PrepareInput(Protocol) = .{
                 .revision = self.executor.revision(),
                 .tx = tx,
-                .view = view,
                 .env = envFacts(env),
-                .state = try self.stateFacts(view),
+                .block = block,
+                .state = self.preparationStateAccess(),
             };
             return Protocol.Transaction.prepare(Protocol, input);
         }
@@ -612,33 +626,38 @@ fn Typed(
             if (self.block_bound != null) return error.BlockSessionRequired;
         }
 
-        fn stateFacts(self: *Self, view: Protocol.Transaction.View) !transaction.StateFacts {
-            const sender_account = try self.executor.getAccountOrLoad(view.sender);
-            const sender_balance: u256 = if (sender_account) |account| account.balance else 0;
-            const sender_nonce: u64 = if (sender_account) |account| account.nonce else 0;
-            const sender_code_kind = if (sender_account) |account| senderCodeKind(account) else transaction.SenderCodeKind.empty;
+        fn preparationStateAccess(self: *Self) transaction.PreparationStateAccess {
             return .{
-                .sender_balance = sender_balance,
-                .sender_nonce = sender_nonce,
-                .sender_code_kind = sender_code_kind,
-                .value_transfer_creates_account = try self.valueTransferCreatesAccount(view),
+                .ptr = self,
+                .vtable = &preparation_state_vtable,
             };
         }
 
-        fn senderCodeKind(account: *const AccountState) transaction.SenderCodeKind {
-            if (account.code.len == 0) return .empty;
-            if (executor_module.eip7702.delegationTarget(account.code) != null) return .delegation;
-            return .non_delegating;
+        const preparation_state_vtable = transaction.PreparationStateAccess.VTable{
+            .accountSummary = preparationAccountSummary,
+            .code = preparationCode,
+        };
+
+        fn preparationAccountSummary(ptr: *anyopaque, account_address: Address) !?transaction.PreparationAccount {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const account = try self.executor.getAccountOrLoad(account_address) orelse return null;
+            return .{
+                .nonce = account.nonce,
+                .balance = account.balance,
+                .code_hash = account.code_hash,
+            };
         }
 
-        fn valueTransferCreatesAccount(self: *Self, view: Protocol.Transaction.View) !bool {
-            if (view.value == 0 or view.to == null or isSelfTransfer(view)) return false;
-            return (try self.executor.getAccountOrLoad(view.to.?)) == null;
-        }
-
-        fn isSelfTransfer(view: Protocol.Transaction.View) bool {
-            const recipient = view.to orelse return false;
-            return std.mem.eql(u8, &view.sender, &recipient);
+        fn preparationCode(ptr: *anyopaque, account_address: Address, expected_hash: [32]u8) ![]const u8 {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const code = try self.executor.getCode(account_address);
+            // Reader implementations own missing/malformed-state errors. The
+            // expected hash came from the same metadata read, so a mismatch here
+            // is a generic preparation contract error, not a witness diagnosis.
+            if (!std.mem.eql(u8, &evmz.mpt.codeHash(code), &expected_hash)) {
+                return error.CodeHashMismatch;
+            }
+            return code;
         }
 
         fn envFacts(env: Env) transaction.EnvFacts {
@@ -701,6 +720,7 @@ fn Typed(
 }
 
 const Default = evmz.Evm;
+const EthValidationError = evmz.Evm.Protocol.Transaction.ValidationError;
 
 fn expectExecuted(result: Default.TxResult) !TxExecutionResult {
     return switch (result) {
@@ -709,7 +729,7 @@ fn expectExecuted(result: Default.TxResult) !TxExecutionResult {
     };
 }
 
-fn expectRejected(result: Default.TxResult) !transaction.ValidationError {
+fn expectRejected(result: Default.TxResult) !EthValidationError {
     return switch (result) {
         .executed => error.UnexpectedExecution,
         .rejected => |err| err,
@@ -747,7 +767,7 @@ test "Vm executor runs low-level standalone call" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -811,7 +831,13 @@ test "Vm executor runs low-level standalone create" {
     try std.testing.expectEqual(sender, diff.account_updates.items[0].address);
     try std.testing.expectEqual(@as(u64, 1), diff.account_updates.items[0].nonce);
     try std.testing.expectEqual(create_address, diff.account_updates.items[1].address);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.account_updates.items[1].code);
+    try std.testing.expectEqual(@as(usize, 1), diff.code_inserts.items.len);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(
+        u8,
+        &diff.account_updates.items[1].code_hash,
+        &diff.code_inserts.items[0].code_hash,
+    );
 }
 
 test "Vm transact validates and executes call transaction" {
@@ -823,7 +849,7 @@ test "Vm transact validates and executes call transaction" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 1_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -879,7 +905,7 @@ test "Vm transact forwards BLOCKHASH to configured block hash source" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x61, 0x03, 0xe7, 0x40, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x61, 0x03, 0xe7, 0x40, 0x5f, 0x55, 0x00 });
 
     var block_hashes = TestBlockHashSource{};
     var vm = Default.init(std.testing.allocator, .{
@@ -937,7 +963,13 @@ test "Vm transact reports successful create address" {
     try std.testing.expectEqual(sender, diff.account_updates.items[0].address);
     try std.testing.expectEqual(@as(u64, 1), diff.account_updates.items[0].nonce);
     try std.testing.expectEqual(create_address, diff.account_updates.items[1].address);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.account_updates.items[1].code);
+    try std.testing.expectEqual(@as(usize, 1), diff.code_inserts.items.len);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(
+        u8,
+        &diff.account_updates.items[1].code_hash,
+        &diff.code_inserts.items[0].code_hash,
+    );
 }
 
 test "Vm transact returns rejected validation result" {
@@ -962,7 +994,7 @@ test "Vm transact returns rejected validation result" {
         .to = addr(0xbbbb),
         .gas_limit = 300_000,
     });
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(result));
+    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(result));
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -979,7 +1011,7 @@ test "Vm rejected transaction preserves pending overlay" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 1_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -999,7 +1031,7 @@ test "Vm rejected transaction preserves pending overlay" {
         .to = contract,
         .gas_limit = 100_000,
     });
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -1018,7 +1050,7 @@ test "Vm commit applies changeset and rebases overlay" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -1051,7 +1083,7 @@ test "Vm discard drops pending overlay without touching state reader" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 1_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -1083,7 +1115,7 @@ test "Vm read-only commit leaves pending overlay intact" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 10_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -1114,7 +1146,7 @@ test "Vm transactCommit skips commit for rejected transaction" {
     var sender_account = try memory.getOrCreateAccount(sender);
     sender_account.balance = 1_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
@@ -1135,7 +1167,7 @@ test "Vm transactCommit skips commit for rejected transaction" {
         .to = contract,
         .gas_limit = 100_000,
     });
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expectEqual(@as(u256, 0), memory.getAccount(contract).?.getStorage(0));
 
     var diff = try vm.changeset();
@@ -1153,7 +1185,7 @@ test "Vm Amsterdam transaction reports gross block gas separately from receipt g
     sender_account.balance = 1_000_000;
     var contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.storage.put(0, 1);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x5f, 0x5f, 0x55, 0x00 });
+    try contract_account.setCode(&.{ 0x5f, 0x5f, 0x55, 0x00 });
 
     var vm = Default.init(std.testing.allocator, .{
         .revision = .amsterdam,
@@ -1232,7 +1264,7 @@ test "Vm rejected transaction clears borrowed log surface" {
         .gas_limit = 300_000,
         .value = 7,
     });
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expectEqual(@as(usize, 0), vm.logs().len);
 }
 
@@ -1258,7 +1290,7 @@ test "Vm preparation uses comptime transaction gas policy" {
         .gas_limit = 21_000,
     };
 
-    const default_prepared = try vm.prepareTransaction(tx);
+    const default_prepared = try vm.prepareTransaction(tx, .{});
     switch (default_prepared) {
         .executable => {},
         .rejected => return error.UnexpectedRejection,
@@ -1270,14 +1302,14 @@ test "Vm preparation uses comptime transaction gas policy" {
         pub const Transaction = struct {
             pub const Value = transaction.Transaction;
             pub const View = transaction.TransactionView;
-            pub const ValidationError = transaction.ValidationError;
+            pub const ValidationError = EthValidationError;
 
             pub fn view(value: Value) View {
                 return transaction.transactionView(value);
             }
 
             pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
-                return transaction.For(ProtocolType).prepare.prepare(input);
+                return evmz.eth.transaction_prepare.For(ProtocolType).prepare(input);
             }
 
             pub fn kindActive(revision: Revision, kind: transaction.TxKind) bool {
@@ -1420,10 +1452,10 @@ test "Vm preparation uses comptime transaction gas policy" {
     });
     defer custom_vm.deinit();
 
-    const custom_prepared = try custom_vm.prepareTransaction(tx);
+    const custom_prepared = try custom_vm.prepareTransaction(tx, .{});
     switch (custom_prepared) {
         .executable => try std.testing.expect(false),
-        .rejected => |err| try std.testing.expectEqual(transaction.ValidationError.intrinsic_gas_too_low, err),
+        .rejected => |err| try std.testing.expectEqual(EthValidationError.intrinsic_gas_too_low, err),
     }
 }
 
@@ -1454,16 +1486,17 @@ test "Vm preparation accepts custom transaction value" {
             }
 
             pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
+                const tx_view = ProtocolType.Transaction.view(input.tx);
                 return .{ .executable = .{
                     .created_address = null,
                     .scope = .{
-                        .context = .init(input.env, input.view.sender, 7, input.env.gas_limit, &.{}),
+                        .context = .init(input.env, tx_view.sender, 7, input.env.gas_limit, &.{}),
                     },
                     .root = .init(.{
-                        .sender = input.view.sender,
-                        .to = input.view.to,
-                        .gas_limit = input.view.gas_limit,
-                        .value = input.view.value,
+                        .sender = tx_view.sender,
+                        .to = tx_view.to,
+                        .gas_limit = tx_view.gas_limit,
+                        .value = tx_view.value,
                     }),
                     .execution_gas = transaction.ExecutionGas.legacy(12_345),
                     .settlement = .{
@@ -1505,7 +1538,7 @@ test "Vm preparation accepts custom transaction value" {
         .target = recipient,
         .amount = 5,
         .gas = 50_000,
-    });
+    }, .{});
 
     const executable = switch (prepared) {
         .rejected => return error.UnexpectedRejection,
@@ -1545,7 +1578,7 @@ test "BlockSession validation rejection skips rollback snapshot" {
         .to = recipient,
         .gas_limit = 300_000,
     });
-    try std.testing.expectEqual(transaction.ValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expect(!failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), block.finish().tx_count);
 }
@@ -1566,7 +1599,7 @@ test "Vm systemCall uses bound executor protocol" {
     try std.testing.expectEqualSlices(u8, &.{}, result.outputData());
 }
 
-test "BlockSession accumulates block gas and rolls back overflow transaction" {
+test "BlockSession rejects transaction whose gas limit exceeds remaining block dimensions" {
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -1591,11 +1624,12 @@ test "BlockSession accumulates block gas and rolls back overflow transaction" {
     try std.testing.expectEqual(@as(u64, 15_000), accepted.gas.block.total);
     try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
 
-    try std.testing.expectError(error.BlockGasExceeded, block.transact(.{
+    const rejected = try block.transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 29_000,
-    }));
+    });
+    try std.testing.expectEqual(EthValidationError.gas_allowance_exceeded, try expectRejected(rejected));
     try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
 
     var diff = try vm.changeset();

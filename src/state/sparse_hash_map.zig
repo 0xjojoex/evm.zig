@@ -207,7 +207,6 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn getOrPutAssumeCapacity(self: *Self, key: K) GetOrPutResult {
             std.debug.assert(self.index.len != 0);
-            std.debug.assert(self.len < self.entries.len);
 
             if (self.findSlotForInsert(key)) |slot| {
                 const stored = self.index[slot];
@@ -428,6 +427,18 @@ test "sparse hash map implicit growth is amortized" {
 
     try explicit.ensureTotalCapacity(1);
     try std.testing.expectEqual(@as(u32, 1), explicit.capacity());
+}
+
+test "sparse hash map updates existing entry at full capacity" {
+    var map = Auto(u64, u64).init(std.testing.allocator);
+    defer map.deinit();
+
+    try map.ensureTotalCapacity(1);
+    map.putAssumeCapacityNoClobber(1, 11);
+    map.putAssumeCapacity(1, 12);
+
+    try std.testing.expectEqual(@as(u32, 1), map.count());
+    try std.testing.expectEqual(@as(?u64, 12), map.get(1));
 }
 
 test "sparse hash map removal preserves probe clusters" {

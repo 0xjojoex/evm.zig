@@ -1,10 +1,12 @@
+//! Shared JSON parsing and in-memory state seeding for EEST adapters.
+
 const std = @import("std");
 const evmz = @import("evmz");
 
 pub const JsonValue = std.json.Value;
-pub const Address = evmz.Address;
-pub const AccountState = evmz.state.Account;
-pub const MemoryStore = evmz.state.MemoryStore;
+const Address = evmz.Address;
+const MemoryAccount = evmz.state.MemoryAccount;
+const MemoryStore = evmz.state.MemoryStore;
 
 pub const AccessListEntry = struct {
     address: Address,
@@ -48,6 +50,11 @@ pub fn lockedFixturePath(
         try std.fs.path.join(allocator, &.{ dest, "fixtures" })
     else
         try std.fs.path.join(allocator, &.{ dest, "fixtures", track });
+}
+
+pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const dest = try lockedPathValue(io, allocator, "zkevm_dest");
+    return try std.fs.path.join(allocator, &.{ dest, "fixtures" });
 }
 
 fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
@@ -134,6 +141,53 @@ pub fn rejectUnknownKeys(object: *const std.json.ObjectMap, allowed_keys: []cons
     }
 }
 
+pub const FixtureConfig = struct {
+    chain_id: u256 = 1,
+    blob_schedule: ?evmz.transaction.BlobSchedule = null,
+};
+
+pub fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth.Revision) !FixtureConfig {
+    const config_value = fixture.get("config") orelse return .{};
+    const config = asObject(config_value) orelse return error.MalformedFixture;
+    try rejectUnknownKeys(&config, &.{ "network", "chainid", "chainId", "blobSchedule" });
+
+    var result = FixtureConfig{
+        .chain_id = if (config.get("chainid")) |value|
+            try parseU256FromValue(value)
+        else if (config.get("chainId")) |value|
+            try parseU256FromValue(value)
+        else
+            1,
+    };
+    const schedule_value = config.get("blobSchedule") orelse return result;
+    const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
+    try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
+    const schedule_key: ?[]const u8 = if (revision.isImpl(.amsterdam))
+        "Amsterdam"
+    else if (revision.isImpl(.osaka))
+        "Osaka"
+    else if (revision.isImpl(.prague))
+        "Prague"
+    else if (revision.isImpl(.cancun))
+        "Cancun"
+    else
+        null;
+    if (schedule_key) |key| {
+        if (schedules.get(key)) |value| result.blob_schedule = try parseBlobSchedule(revision, value);
+    }
+    return result;
+}
+
+fn parseBlobSchedule(revision: evmz.eth.Revision, value: JsonValue) !evmz.transaction.BlobSchedule {
+    const schedule = asObject(value) orelse return error.MalformedFixture;
+    try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
+    var result = evmz.eth.Protocol.Transaction.blobSchedule(revision) orelse return error.MalformedFixture;
+    result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
+    result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
+    result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);
+    return result;
+}
+
 pub fn parseAddressFromValue(value: JsonValue) !Address {
     const string = jsonString(value) orelse return error.MalformedFixture;
     return parseAddress(string);
@@ -202,16 +256,16 @@ pub fn strip0x(string: []const u8) []const u8 {
     return string;
 }
 
-pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.ObjectMap) !AccountState {
+pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.ObjectMap) !MemoryAccount {
     try rejectUnknownKeys(account, &.{ "balance", "nonce", "code", "storage" });
 
-    var self = AccountState.init(allocator);
-    errdefer self.deinit(allocator);
+    var result = MemoryAccount.init(allocator);
+    errdefer result.deinit();
 
-    self.balance = if (account.get("balance")) |value| try parseU256FromValue(value) else 0;
-    self.nonce = if (account.get("nonce")) |value| try parseU64FromValue(value) else 0;
+    result.balance = if (account.get("balance")) |value| try parseU256FromValue(value) else 0;
+    result.nonce = if (account.get("nonce")) |value| try parseU64FromValue(value) else 0;
     if (account.get("code")) |value| {
-        self.code = try parseBytesFromValue(allocator, value);
+        result.code = try parseBytesFromValue(allocator, value);
     }
 
     if (account.get("storage")) |storage_value| {
@@ -221,12 +275,12 @@ pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.Ob
             const key = try parseHexInt(u256, entry.key_ptr.*);
             const value = try parseU256FromValue(entry.value_ptr.*);
             if (value != 0) {
-                try self.storage.put(key, value);
+                try result.storage.put(key, value);
             }
         }
     }
 
-    return self;
+    return result;
 }
 
 pub fn seedMemoryStore(allocator: std.mem.Allocator, store: *MemoryStore, pre: *const std.json.ObjectMap) !void {
@@ -235,11 +289,8 @@ pub fn seedMemoryStore(allocator: std.mem.Allocator, store: *MemoryStore, pre: *
         const address = try parseAddress(entry.key_ptr.*);
         const account_obj = asObject(entry.value_ptr.*) orelse return error.MalformedFixture;
         var account = try accountFromJson(allocator, &account_obj);
-        var account_owned = true;
-        errdefer if (account_owned) account.deinit(allocator);
-
-        try store.putAccount(address, account);
-        account_owned = false;
+        defer account.deinit();
+        try store.putAccount(address, &account);
     }
 }
 

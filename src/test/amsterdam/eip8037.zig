@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 
-const AccountState = evmz.state.Account;
+const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
 const EthProtocol = evmz.Evm.Protocol;
 const Executor = evmz.Executor;
@@ -26,9 +26,9 @@ test "Amsterdam existing delegated EIP-7702 authority refills auth base state ga
 
     var code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&code, old_target);
-    var authority_account = AccountState.init(std.testing.allocator);
-    try authority_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(authority, authority_account);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&code);
+    try executor.state.seedAccount(authority, authority_account);
 
     try executor.beginTransaction(tx_context, sender, new_target);
     defer executor.closeTransaction();
@@ -50,7 +50,7 @@ test "Amsterdam existing delegated EIP-7702 authority refills auth base state ga
         refund.state_refund,
     );
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqualSlices(u8, &new_target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &new_target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "Amsterdam clearing EIP-7702 authority refills auth base state gas" {
@@ -80,7 +80,7 @@ test "Amsterdam clearing EIP-7702 authority refills auth base state gas" {
     try std.testing.expectEqual(@as(u64, 0), refund.regular_refund);
     try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_auth_base_state_gas), refund.state_refund);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), executor.getAccount(authority).?.code.len);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
 }
 
 test "Amsterdam create then clear EIP-7702 authority refills auth base twice" {
@@ -128,7 +128,7 @@ test "Amsterdam create then clear EIP-7702 authority refills auth base twice" {
         refund.state_refund,
     );
     try std.testing.expectEqual(@as(u64, 2), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), executor.getAccount(authority).?.code.len);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
 }
 
 test "Amsterdam invalid EIP-7702 authorization refills intrinsic auth gas" {
@@ -142,9 +142,9 @@ test "Amsterdam invalid EIP-7702 authorization refills intrinsic auth gas" {
     });
     defer executor.deinit();
 
-    var authority_account = AccountState.init(std.testing.allocator);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
     authority_account.nonce = std.math.maxInt(u64);
-    try executor.state.accounts.put(authority, authority_account);
+    try executor.state.seedAccount(authority, authority_account);
 
     try executor.beginTransaction(tx_context, sender, recipient);
     defer executor.closeTransaction();
@@ -164,7 +164,7 @@ test "Amsterdam invalid EIP-7702 authorization refills intrinsic auth gas" {
     try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_authorization_state_gas), refund.state_refund);
     try std.testing.expect(!executor.state.warm_accounts.contains(authority));
     try std.testing.expectEqual(std.math.maxInt(u64), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), executor.getAccount(authority).?.code.len);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
 }
 
 test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
@@ -179,12 +179,12 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    const authority_account = AccountState.init(std.testing.allocator);
-    try executor.state.accounts.put(authority, authority_account);
+    const authority_account = MemoryAccount.init(std.testing.allocator);
+    try executor.state.seedAccount(authority, authority_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -260,18 +260,18 @@ test "Amsterdam CREATE to pre-existing account refills parent state gas" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.nonce = 1;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var create_account = AccountState.init(std.testing.allocator);
+    var create_account = MemoryAccount.init(std.testing.allocator);
     create_account.balance = 1;
-    try executor.state.accounts.put(create_address, create_account);
+    try executor.state.seedAccount(create_address, create_account);
 
     try executor.beginTransaction(testTxContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
@@ -298,14 +298,14 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 1;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
@@ -337,13 +337,13 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 10_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 5_000_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, input, .{

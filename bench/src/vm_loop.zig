@@ -106,11 +106,11 @@ const ExecutorRuntimeRunner = struct {
         const sender = try executor.getOrCreateAccount(common.caller_address);
         sender.balance = std.math.maxInt(u256);
 
-        const contract = try executor.getOrCreateAccount(common.contract_address);
-        try contract.setCode(allocator, runtime_code);
+        _ = try executor.getOrCreateAccount(common.contract_address);
+        try executor.state.setCode(common.contract_address, runtime_code);
         if (proxy_target_runtime_code) |target_code| {
-            const target = try executor.getOrCreateAccount(proxy_target_address);
-            try target.setCode(allocator, target_code);
+            _ = try executor.getOrCreateAccount(proxy_target_address);
+            try executor.state.setCode(proxy_target_address, target_code);
         }
 
         var bytecode = try executor.prepareBytecode(runtime_code);

@@ -204,7 +204,7 @@ fn runPolicy(allocator: std.mem.Allocator, options: Options) !RunResult {
 fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResult {
     var memory = MemoryStore.init(allocator);
     defer memory.deinit();
-    try seedState(allocator, &memory, options.case);
+    try seedState(&memory, options.case);
     var access_list = try prepareAccessList(allocator, options);
     defer access_list.deinit(allocator);
 
@@ -238,7 +238,7 @@ fn runExactLifecycle(
 ) !RunResult {
     var memory = MemoryStore.init(allocator);
     defer memory.deinit();
-    try seedState(allocator, &memory, options.case);
+    try seedState(&memory, options.case);
     var access_list = try prepareAccessList(allocator, options);
     defer access_list.deinit(allocator);
 
@@ -265,12 +265,12 @@ fn runExactLifecycle(
     };
 }
 
-fn seedState(allocator: std.mem.Allocator, memory: *MemoryStore, case: Case) !void {
+fn seedState(memory: *MemoryStore, case: Case) !void {
     var sender = try memory.getOrCreateAccount(sender_address);
     sender.balance = std.math.maxInt(u256);
 
     var contract = try memory.getOrCreateAccount(contract_address);
-    try contract.setCode(allocator, contractCode(case));
+    try contract.setCode(contractCode(case));
 }
 
 fn prepareAccessList(allocator: std.mem.Allocator, options: Options) !PreparedAccessList {

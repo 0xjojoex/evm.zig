@@ -138,6 +138,7 @@ pub const CodeWrite = struct {
     depth: u16 = 0,
     address: Address,
     size: usize,
+    code: []const u8 = &.{},
 };
 
 pub const SlotValueWrite = struct {

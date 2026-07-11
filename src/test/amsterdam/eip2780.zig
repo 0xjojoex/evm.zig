@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 
-const AccountState = evmz.state.Account;
+const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
 const EthProtocol = evmz.Evm.Protocol;
 const Executor = evmz.Executor;
@@ -77,9 +77,9 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
     var executor = try executorWithSender(sender, 1_000_000);
     defer executor.deinit();
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(target, target_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -132,13 +132,13 @@ test "Amsterdam top-frame delegated target charges cold even when warm" {
 
     var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&delegation_code, target);
-    var authority_account = AccountState.init(std.testing.allocator);
-    try authority_account.setCode(std.testing.allocator, &delegation_code);
-    try executor.state.accounts.put(authority, authority_account);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&delegation_code);
+    try executor.state.seedAccount(authority, authority_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(target, target_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, authority);
     try executor.state.warmAccount(target);
@@ -166,9 +166,9 @@ fn executorWithSender(sender: Address, balance: u256) !Executor {
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .amsterdam,
     });
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = balance;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
     return executor;
 }
 

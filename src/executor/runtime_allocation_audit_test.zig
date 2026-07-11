@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
-const AccountState = evmz.state.Account;
+const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
 const Executor = evmz.executor;
 const Host = evmz.Host;
@@ -23,12 +23,12 @@ test "runtime allocation audit sees no traffic for bounded prepared stop after s
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{.STOP});
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -68,22 +68,22 @@ test "bounded child call preserves semantic scratch requirement" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(allocator);
+    var sender_account = MemoryAccount.init(allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
         .PUSH2, 0xbe,   0xef,   .GAS,   .CALL,
         .STOP,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var target_account = AccountState.init(allocator);
-    try target_account.setCode(allocator, &.{@intFromEnum(evmz.Opcode.STOP)});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(allocator);
+    try target_account.setCode(&.{@intFromEnum(evmz.Opcode.STOP)});
+    try executor.state.seedAccount(target, target_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -129,12 +129,12 @@ test "runtime allocation audit exposes omitted top-level scratch cap as growth" 
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{.STOP});
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     audit.reset();
@@ -162,12 +162,12 @@ test "runtime allocation audit sees no traffic for bounded top-level scratch" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{.STOP});
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     audit.reset();
@@ -195,12 +195,12 @@ test "bounded executor reports scratch capacity exhaustion" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{.STOP});
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     defer executor.closeTransaction();
@@ -225,15 +225,15 @@ test "runtime allocation audit exposes omitted evm memory cap as growth" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x2a, .PUSH0, .MSTORE,
         .PUSH1, 0x20, .PUSH0, .RETURN,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -268,15 +268,15 @@ test "runtime allocation audit sees no traffic for bounded evm memory return" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x2a, .PUSH0, .MSTORE,
         .PUSH1, 0x20, .PUSH0, .RETURN,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -311,16 +311,16 @@ test "runtime allocation audit exposes omitted log cap as growth" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x2a, .PUSH0, .MSTORE,
         .PUSH1, 0x20, .PUSH0, .LOG0,
         .STOP,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -356,16 +356,16 @@ test "runtime allocation audit sees no traffic for bounded log storage" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x2a, .PUSH0, .MSTORE,
         .PUSH1, 0x20, .PUSH0, .LOG0,
         .STOP,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(allocator);
@@ -405,14 +405,14 @@ test "runtime allocation audit exposes omitted state overlay cap as growth" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x0b, .PUSH1, 0x01, .SSTORE, .STOP,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     audit.reset();
@@ -447,14 +447,14 @@ test "runtime allocation audit sees no traffic for bounded state overlay storage
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x0b, .PUSH1, 0x01, .SSTORE, .STOP,
     });
-    var contract_account = AccountState.init(allocator);
-    try contract_account.setCode(allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     audit.reset();
@@ -479,7 +479,7 @@ test "runtime allocation audit exposes omitted precompile result cap as growth" 
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     audit.reset();
@@ -506,7 +506,7 @@ test "runtime allocation audit sees no traffic for bounded identity precompile o
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     audit.reset();
@@ -533,7 +533,7 @@ test "runtime allocation audit sees no traffic for bounded sha256 precompile out
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     audit.reset();
@@ -562,7 +562,7 @@ test "runtime allocation audit exposes omitted precompile scratch cap as growth"
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     audit.reset();
@@ -590,7 +590,7 @@ test "runtime allocation audit sees no traffic for bounded modexp precompile scr
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     audit.reset();
@@ -618,7 +618,7 @@ test "bounded executor reports precompile scratch capacity exhaustion" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     try std.testing.expectError(
@@ -643,7 +643,7 @@ test "bounded executor reports precompile result output capacity exhaustion" {
     } });
     defer executor.deinit();
 
-    try executor.state.accounts.put(sender, AccountState.init(allocator));
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
 
     try executor.beginTransaction(tx_context, sender, precompile);
     try std.testing.expectError(

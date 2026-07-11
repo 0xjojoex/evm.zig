@@ -27,6 +27,7 @@ const evmz = @import("./evm.zig");
 pub const resource_bound = @import("./executor/resource_bound.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
+const MemoryAccount = evmz.state.MemoryAccount;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
 const Changeset = evmz.state.Changeset;
@@ -123,6 +124,8 @@ pub const BoundedRuntimeResources = struct {
             },
             .state = .{
                 .accounts = block.state.accounts,
+                .code_entries = block.state.code_entries,
+                .code_bytes = block.state.code_bytes,
                 .original_storage_entries = tx.state.original_storage_entries,
                 .storage_overlay_entries = block.state.storage_overlay_entries,
                 .selfdestructed_accounts = tx.state.selfdestructed_accounts,
@@ -152,6 +155,8 @@ test "resource bound envelope maps executor resources by lifetime" {
         .source = .gas_derived,
         .block = .{ .state = .{
             .accounts = 101,
+            .code_entries = 108,
+            .code_bytes = 109,
             .original_storage_entries = 102,
             .storage_overlay_entries = 103,
             .selfdestructed_accounts = 104,
@@ -184,6 +189,8 @@ test "resource bound envelope maps executor resources by lifetime" {
     try std.testing.expectEqual(@as(usize, 15), resources.access.?.accounts);
     try std.testing.expectEqual(@as(usize, 16), resources.access.?.storage_keys);
     try std.testing.expectEqual(@as(usize, 101), resources.state.?.accounts);
+    try std.testing.expectEqual(@as(usize, 108), resources.state.?.code_entries.?);
+    try std.testing.expectEqual(@as(usize, 109), resources.state.?.code_bytes.?);
     try std.testing.expectEqual(@as(usize, 202), resources.state.?.original_storage_entries);
     try std.testing.expectEqual(@as(usize, 103), resources.state.?.storage_overlay_entries);
     try std.testing.expectEqual(@as(usize, 204), resources.state.?.selfdestructed_accounts);
@@ -635,17 +642,17 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
         }
 
-        /// Return an account already present in the overlay, without consulting the state reader.
+        /// Return account metadata already present in the overlay.
         pub fn getAccount(self: *Self, address: Address) ?*AccountState {
             return self.state.getAccount(address);
         }
 
-        /// Return an account, loading it from the state reader into the overlay if needed.
+        /// Return account metadata, loading it from the state reader if needed.
         pub fn getAccountOrLoad(self: *Self, address: Address) !?*AccountState {
             return self.state.getAccountOrLoad(address);
         }
 
-        /// Return an account, creating an empty overlay account when none exists.
+        /// Return account metadata, creating an empty record when none exists.
         pub fn getOrCreateAccount(self: *Self, address: Address) !*AccountState {
             return self.state.getOrCreateAccount(address);
         }
@@ -1172,17 +1179,15 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             const existing_account = try self.state.getAccountOrLoad(auth.signer);
             const account_exists = existing_account != null;
-            const cur_delegated = if (existing_account) |existing|
-                eip7702.delegationTarget(existing.code) != null
-            else
-                false;
+            const existing_code = if (existing_account != null) try self.getCode(auth.signer) else &.{};
+            const cur_delegated = eip7702.delegationTarget(existing_code) != null;
             const pre_delegated = if (pre_delegated_by_authority) |map| blk: {
                 if (map.get(auth.signer)) |delegated| break :blk delegated;
                 try map.put(auth.signer, cur_delegated);
                 break :blk cur_delegated;
             } else cur_delegated;
             if (existing_account) |existing| {
-                if (existing.code.len != 0 and !cur_delegated) return invalidAuthorizationGasAdjustment(self);
+                if (existing_code.len != 0 and !cur_delegated) return invalidAuthorizationGasAdjustment(self);
                 if (existing.nonce != auth.nonce) return invalidAuthorizationGasAdjustment(self);
             } else if (auth.nonce != 0) {
                 return invalidAuthorizationGasAdjustment(self);
@@ -1307,9 +1312,9 @@ test "executor executes prepared bytecode call transaction" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
     var bytecode = try executor.prepareBytecode(&code);
@@ -1358,9 +1363,9 @@ test "executor BLOCKHASH reads configured block hash source" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const code = evmz.t.bytecode(.{ .PUSH2, 0x03, 0xe7, .BLOCKHASH, .PUSH0, .SSTORE, .STOP });
     var bytecode = try executor.prepareBytecode(&code);
@@ -1388,13 +1393,13 @@ test "executor executeMessage dispatches top-level call" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = (try executor.executeMessage(.{ .call = .{
@@ -1554,9 +1559,9 @@ fn executeCreateOpcodeStatus(comptime Protocol: type) !Interpreter.Status {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     return (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
@@ -1577,18 +1582,18 @@ fn executeCallResultStore(comptime Protocol: type) !u256 {
 
     try putFundedSender(&executor, sender);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
+    try executor.state.seedAccount(target, target_account);
 
     const parent_code = evmz.t.bytecode(.{
         .PUSH1, 0x00,   .PUSH1, 0x00,    .PUSH1, 0x00,   .PUSH1, 0x00,
         .PUSH1, 0x00,   .PUSH2, 0xbb,    0xbb,   .PUSH2, 0xff,   0xff,
         .CALL,  .PUSH1, 0x00,   .SSTORE, .STOP,
     });
-    var parent_account = AccountState.init(std.testing.allocator);
-    try parent_account.setCode(std.testing.allocator, &parent_code);
-    try executor.state.accounts.put(parent, parent_account);
+    var parent_account = MemoryAccount.init(std.testing.allocator);
+    try parent_account.setCode(&parent_code);
+    try executor.state.seedAccount(parent, parent_account);
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
@@ -1615,13 +1620,13 @@ fn executeTopLevelDelegatedCall(comptime Protocol: type) !i64 {
 
     var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&delegation_code, target);
-    var authority_account = AccountState.init(std.testing.allocator);
-    try authority_account.setCode(std.testing.allocator, &delegation_code);
-    try executor.state.accounts.put(authority, authority_account);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&delegation_code);
+    try executor.state.seedAccount(authority, authority_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(target, target_account);
 
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
@@ -1651,9 +1656,9 @@ fn executeTopFrameValueTransfer(comptime Protocol: type) !TopFrameValueTransferR
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var recipient_account = AccountState.init(std.testing.allocator);
-    try recipient_account.setCode(std.testing.allocator, &.{evmz.Opcode.STOP.toByte()});
-    try executor.state.accounts.put(recipient, recipient_account);
+    var recipient_account = MemoryAccount.init(std.testing.allocator);
+    try recipient_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(recipient, recipient_account);
 
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
@@ -1695,9 +1700,9 @@ fn emptyCallRecipientMaterialized(comptime Protocol: type) !bool {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
@@ -1718,13 +1723,13 @@ fn executeNestedBalanceCall(comptime Protocol: type, revision_value: Protocol.Re
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
+    try executor.state.seedAccount(target, target_account);
 
     const parent_code = evmz.t.bytecode(.{
         .PUSH1, 0x00,  .PUSH1, 0x00, .PUSH1, 0x00,   .PUSH1, 0x00,
@@ -1831,13 +1836,13 @@ test "executor executeTransactionMessage dispatches root call" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try executor.state.seedAccount(contract, contract_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -1906,9 +1911,9 @@ test "executor upfront charge uses comptime blob gas schedule" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 10 + evmz.eth.transaction.blob_gas_per_blob;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginTransaction(tx_context, sender, recipient);
     defer executor.closeTransaction();
@@ -1939,8 +1944,8 @@ test "executor returns EIP-7702 refund for existing authority account" {
     });
     defer executor.deinit();
 
-    const authority_account = AccountState.init(std.testing.allocator);
-    try executor.state.accounts.put(authority, authority_account);
+    const authority_account = MemoryAccount.init(std.testing.allocator);
+    try executor.state.seedAccount(authority, authority_account);
 
     try executor.beginTransaction(tx_context, sender, target);
     defer executor.closeTransaction();
@@ -1959,7 +1964,7 @@ test "executor returns EIP-7702 refund for existing authority account" {
     try std.testing.expectEqual(@as(u64, evmz.eth.transaction.authorization_existing_account_refund_gas), refund.regular_refund);
     try std.testing.expectEqual(@as(u64, 0), refund.state_refund);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "executor rejects EIP-7702 max authorization nonce before warming signer" {
@@ -1973,9 +1978,9 @@ test "executor rejects EIP-7702 max authorization nonce before warming signer" {
     });
     defer executor.deinit();
 
-    var authority_account = AccountState.init(std.testing.allocator);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
     authority_account.nonce = std.math.maxInt(u64);
-    try executor.state.accounts.put(authority, authority_account);
+    try executor.state.seedAccount(authority, authority_account);
 
     try executor.beginTransaction(tx_context, sender, recipient);
     defer executor.closeTransaction();
@@ -1995,7 +2000,7 @@ test "executor rejects EIP-7702 max authorization nonce before warming signer" {
     try std.testing.expectEqual(@as(u64, 0), refund.state_refund);
     try std.testing.expect(!executor.state.warm_accounts.contains(authority));
     try std.testing.expectEqual(std.math.maxInt(u64), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), executor.getAccount(authority).?.code.len);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
 }
 
 test "protocol definition drives authorization activation and success gas adjustment" {
@@ -2053,7 +2058,7 @@ test "protocol definition drives authorization activation and success gas adjust
 
     try std.testing.expectEqual(@as(u64, 17), refund.regular_refund);
     try std.testing.expectEqual(@as(u64, 19), refund.state_refund);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "executor top-level transaction settles EIP-7702 authorization refund" {
@@ -2068,12 +2073,12 @@ test "executor top-level transaction settles EIP-7702 authorization refund" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    const authority_account = AccountState.init(std.testing.allocator);
-    try executor.state.accounts.put(authority, authority_account);
+    const authority_account = MemoryAccount.init(std.testing.allocator);
+    try executor.state.seedAccount(authority, authority_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -2147,10 +2152,10 @@ test "top-level engine errors roll back without gas settlement" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
     sender_account.nonce = 7;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2211,9 +2216,9 @@ test "Amsterdam malformed authorization count refills intrinsic auth gas" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2274,9 +2279,9 @@ test "executor warms delegated target for top-level transaction destination" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -2335,7 +2340,7 @@ test "executor warms delegated target for top-level transaction destination" {
     }, .{ .execute = CheckingEngine.execute });
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "protocol definition drives delegated transaction target warming" {
@@ -2360,9 +2365,9 @@ test "protocol definition drives delegated transaction target warming" {
 
     var code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&code, target);
-    var authority_account = AccountState.init(std.testing.allocator);
-    try authority_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(authority, authority_account);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&code);
+    try executor.state.seedAccount(authority, authority_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2420,13 +2425,13 @@ test "Prague top-level delegated precompile call can use exactly intrinsic gas" 
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var authority_account = AccountState.init(std.testing.allocator);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
     authority_account.balance = 1;
-    try executor.state.accounts.put(authority, authority_account);
+    try executor.state.seedAccount(authority, authority_account);
 
     const authorization_list = [_]transaction.AuthorizationTuple{.{
         .chain_id = 0,
@@ -2467,7 +2472,7 @@ test "Prague top-level delegated precompile call can use exactly intrinsic gas" 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(u256, 2), executor.getAccount(authority).?.balance);
-    try std.testing.expectEqualSlices(u8, &precompile_address, &eip7702.delegationTarget(executor.getAccount(authority).?.code).?);
+    try std.testing.expectEqualSlices(u8, &precompile_address, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "executor runTopLevelTransaction commits successful call" {
@@ -2479,13 +2484,13 @@ test "executor runTopLevelTransaction commits successful call" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try executor.state.seedAccount(contract, contract_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2528,13 +2533,13 @@ test "BAL recorder keeps reverted root storage as an access" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &.{ 0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xfd });
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{ 0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xfd });
+    try executor.state.seedAccount(contract, contract_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2576,9 +2581,9 @@ test "executor rejects settlement revision mismatch before execution" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -2664,9 +2669,9 @@ test "executor runTopLevelTransaction increments create nonce after rollback" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const root = RootFrame{ .create = .{
         .sender = sender,
@@ -2770,9 +2775,9 @@ test "recursive call bomb unwinds with iterative call runtime" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const code = evmz.t.bytecode(.{
         .PUSH1,  0x01,
@@ -2791,10 +2796,10 @@ test "recursive call bomb unwinds with iterative call runtime" {
         0x01,    .SSTORE,
         .STOP,
     });
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 20_000_000;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -2822,9 +2827,9 @@ test "iterative call runtime preserves precompile output" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const code = evmz.t.bytecode(.{
         .PUSH1,  0x2a,
@@ -2842,9 +2847,9 @@ test "iterative call runtime preserves precompile output" {
         .PUSH1,  0x00,
         .RETURN,
     });
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -2874,9 +2879,9 @@ test "top-level call transaction executes precompile recipient" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginTransaction(tx_context, sender, precompile);
     const result = try executor.executeCallTransaction(sender, precompile, &input, .legacy(1000), 7);
@@ -2919,13 +2924,13 @@ test "legacy precompile calls materialize touched empty account until Spurious D
         });
         defer executor.deinit();
 
-        var sender_account = AccountState.init(std.testing.allocator);
+        var sender_account = MemoryAccount.init(std.testing.allocator);
         sender_account.balance = 1_000_000_000_000_000_000;
-        try executor.state.accounts.put(sender, sender_account);
+        try executor.state.seedAccount(sender, sender_account);
 
-        var contract_account = AccountState.init(std.testing.allocator);
-        try contract_account.setCode(std.testing.allocator, &code);
-        try executor.state.accounts.put(contract, contract_account);
+        var contract_account = MemoryAccount.init(std.testing.allocator);
+        try contract_account.setCode(&code);
+        try executor.state.seedAccount(contract, contract_account);
 
         var bytecode = try executor.prepareBytecode(&code);
         defer bytecode.deinit(std.testing.allocator);
@@ -2967,13 +2972,13 @@ test "prepared call transaction calls to empty account succeed" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3012,17 +3017,17 @@ test "iterative CALLCODE writes target code in caller storage" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &target_code);
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&target_code);
+    try executor.state.seedAccount(target, target_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3063,17 +3068,17 @@ test "iterative DELEGATECALL preserves parent call value" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &target_code);
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&target_code);
+    try executor.state.seedAccount(target, target_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3114,17 +3119,17 @@ test "iterative STATICCALL failure resumes parent with zero result" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &target_code);
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&target_code);
+    try executor.state.seedAccount(target, target_account);
 
     _ = try executor.state.setStorage(contract, 1, 0x99);
 
@@ -3164,13 +3169,13 @@ test "prepared call transaction create opcodes deploy code" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3187,8 +3192,8 @@ test "prepared call transaction create opcodes deploy code" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(evmz.address.toU256(create_address), try executor.getStorage(contract, 0));
     try std.testing.expectEqual(evmz.address.toU256(create2_address), try executor.getStorage(contract, 1));
-    try std.testing.expectEqualSlices(u8, &.{0x00}, executor.getAccount(create_address).?.code);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, executor.getAccount(create2_address).?.code);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create_address));
+    try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create2_address));
 }
 
 test "CREATE2 insufficient balance does not bump creator nonce" {
@@ -3205,14 +3210,14 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.nonce = 1;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3251,17 +3256,17 @@ test "iterative trace ends call and create steps after child resume" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
-    var child_account = AccountState.init(std.testing.allocator);
-    try child_account.setCode(std.testing.allocator, &.{@intFromEnum(evmz.Opcode.STOP)});
-    try executor.state.accounts.put(child, child_account);
+    var child_account = MemoryAccount.init(std.testing.allocator);
+    try child_account.setCode(&.{@intFromEnum(evmz.Opcode.STOP)});
+    try executor.state.seedAccount(child, child_account);
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -3364,9 +3369,9 @@ test "executor executes top-level create transaction" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
@@ -3381,7 +3386,7 @@ test "executor executes top-level create transaction" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, executor.getAccount(create_address).?.code);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create_address));
 }
 
 fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u256) !void {
@@ -3404,9 +3409,9 @@ test "Amsterdam value transaction emits transfer log" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
@@ -3427,9 +3432,9 @@ test "Osaka value transaction does not emit transfer log" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .legacy(50_000), 7);
@@ -3452,14 +3457,14 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 100;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
@@ -3486,14 +3491,14 @@ test "Amsterdam CREATE endowment emits transfer log" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 100;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
@@ -3517,14 +3522,14 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 7;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
@@ -3549,9 +3554,9 @@ fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
 }
 
 fn putFundedSender(executor: anytype, sender: Address) !void {
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 100_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 }
 
 test "Amsterdam raises create runtime code size limit" {
@@ -3588,7 +3593,7 @@ test "Amsterdam raises create runtime code size limit" {
     } })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status);
     try std.testing.expectEqualSlices(u8, &evmz.address.create(sender, 0), &amsterdam_result.address);
-    try std.testing.expectEqual(@as(usize, default_max_code_size + 1), amsterdam.getAccount(amsterdam_result.address).?.code.len);
+    try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try amsterdam.getCode(amsterdam_result.address)).len);
 
     var amsterdam_over = Default.init(std.testing.allocator, .{
         .revision = .amsterdam,
@@ -3677,7 +3682,7 @@ test "protocol definition drives create runtime prefix rejection" {
         .gas = 100_000,
     } })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, custom_result.status);
-    try std.testing.expectEqualSlices(u8, &.{0xef}, custom_executor.getAccount(custom_result.address).?.code);
+    try std.testing.expectEqualSlices(u8, &.{0xef}, try custom_executor.getCode(custom_result.address));
 }
 
 test "protocol definition drives create deposit gas" {
@@ -3707,7 +3712,7 @@ test "protocol definition drives create deposit gas" {
         .gas = 100_000,
     } })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, default_result.status);
-    try std.testing.expectEqual(@as(usize, 1), default_executor.getAccount(default_result.address).?.code.len);
+    try std.testing.expectEqual(@as(usize, 1), (try default_executor.getCode(default_result.address)).len);
 
     const ExpensiveDepositExecutor = Executor(ExpensiveDepositProtocol);
     var custom_executor = ExpensiveDepositExecutor.init(std.testing.allocator, .{
@@ -3896,10 +3901,10 @@ test "protocol definition drives selfdestruct host policy" {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 7;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     _ = try executor.getOrCreateAccount(beneficiary);
 
@@ -3924,9 +3929,9 @@ test "create warms created address from Berlin" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginCreateTransaction(tx_context, sender);
 
@@ -3950,13 +3955,13 @@ test "callcode with insufficient balance fails without executing target code" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 0;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
+    try executor.state.seedAccount(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
     const result = (try executeHostCall(&executor, .{
@@ -3989,14 +3994,14 @@ test "create address collision closes checkpoint without rolling back nonce or w
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     const create_address = evmz.address.create(sender, 0);
-    var existing_account = AccountState.init(std.testing.allocator);
+    var existing_account = MemoryAccount.init(std.testing.allocator);
     existing_account.nonce = 1;
-    try executor.state.accounts.put(create_address, existing_account);
+    try executor.state.seedAccount(create_address, existing_account);
 
     try executor.beginCreateTransaction(tx_context, sender);
 
@@ -4019,14 +4024,14 @@ test "call-like message at max depth still executes in recipient storage" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
-    try executor.state.accounts.put(target, AccountState.init(std.testing.allocator));
+    try executor.state.seedAccount(target, MemoryAccount.init(std.testing.allocator));
 
     inline for (.{ Host.CallKind.callcode, Host.CallKind.delegatecall }, 0..) |kind, slot| {
-        try executor.getAccount(target).?.setCode(std.testing.allocator, &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
+        try executor.state.setCode(target, &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
         try executor.beginTransaction(tx_context, caller, caller);
         const result = (try executeHostCall(&executor, .{
             .depth = Host.max_call_depth,
@@ -4053,9 +4058,9 @@ test "value call at max depth returns stipend without child execution" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
@@ -4068,9 +4073,9 @@ test "value call at max depth returns stipend without child execution" {
         0x00,   .CALL,
         .STOP,
     });
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
@@ -4099,9 +4104,9 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
@@ -4114,10 +4119,10 @@ test "Amsterdam value call at max depth refills new-account state gas" {
         0x27,   0x10,
         .CALL,  .STOP,
     });
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 1;
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
@@ -4147,14 +4152,14 @@ test "Amsterdam create at max depth refills new-account state gas" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &code);
-    try executor.state.accounts.put(contract, contract_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
@@ -4184,13 +4189,13 @@ test "exceptional child call burns forwarded gas" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{0xfe});
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{0xfe});
+    try executor.state.seedAccount(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
     const result = (try executeHostCall(&executor, .{
@@ -4217,13 +4222,13 @@ test "exceptional child call rolls back storage via checkpoint" {
     });
     defer executor.deinit();
 
-    var caller_account = AccountState.init(std.testing.allocator);
+    var caller_account = MemoryAccount.init(std.testing.allocator);
     caller_account.balance = 1_000_000;
-    try executor.state.accounts.put(caller, caller_account);
+    try executor.state.seedAccount(caller, caller_account);
 
-    var target_account = AccountState.init(std.testing.allocator);
-    try target_account.setCode(std.testing.allocator, &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0xfe });
-    try executor.state.accounts.put(target, target_account);
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0xfe });
+    try executor.state.seedAccount(target, target_account);
 
     try executor.beginTransaction(tx_context, caller, caller);
     const result = (try executeHostCall(&executor, .{
@@ -4249,9 +4254,9 @@ test "contract creation rejects EF-prefixed runtime code from London" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
     try executor.beginCreateTransaction(tx_context, sender);
 
@@ -4275,14 +4280,14 @@ test "selfdestruct charges new-account cost for nonzero balance" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
     contract_account.balance = 1;
-    try contract_account.setCode(std.testing.allocator, &.{ 0x5f, 0xff });
-    try executor.state.accounts.put(contract, contract_account);
+    try contract_account.setCode(&.{ 0x5f, 0xff });
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
@@ -4310,13 +4315,13 @@ test "TangerineWhistle selfdestruct charges new-account cost without balance tra
         });
         defer executor.deinit();
 
-        var sender_account = AccountState.init(std.testing.allocator);
+        var sender_account = MemoryAccount.init(std.testing.allocator);
         sender_account.balance = 1_000_000;
-        try executor.state.accounts.put(sender, sender_account);
+        try executor.state.seedAccount(sender, sender_account);
 
-        var contract_account = AccountState.init(std.testing.allocator);
-        try contract_account.setCode(std.testing.allocator, &code);
-        try executor.state.accounts.put(contract, contract_account);
+        var contract_account = MemoryAccount.init(std.testing.allocator);
+        try contract_account.setCode(&code);
+        try executor.state.seedAccount(contract, contract_account);
 
         try executor.beginTransaction(tx_context, sender, contract);
         const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
@@ -4345,13 +4350,13 @@ test "SELFDESTRUCT refund is removed at London" {
         });
         defer executor.deinit();
 
-        var sender_account = AccountState.init(std.testing.allocator);
+        var sender_account = MemoryAccount.init(std.testing.allocator);
         sender_account.balance = 1_000_000;
-        try executor.state.accounts.put(sender, sender_account);
+        try executor.state.seedAccount(sender, sender_account);
 
-        var contract_account = AccountState.init(std.testing.allocator);
-        try contract_account.setCode(std.testing.allocator, &code);
-        try executor.state.accounts.put(contract, contract_account);
+        var contract_account = MemoryAccount.init(std.testing.allocator);
+        try contract_account.setCode(&code);
+        try executor.state.seedAccount(contract, contract_account);
 
         try executor.beginTransaction(tx_context, sender, contract);
         const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
@@ -4374,7 +4379,7 @@ test "active precompiles are warm but not existing state accounts" {
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(precompile_address));
 
     _ = try executor.getOrCreateAccount(precompile_address);
-    try std.testing.expectEqual(evmz.empty_code_hash, try host_iface.getCodeHash(precompile_address));
+    try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(precompile_address));
 }
 
 test "delegated precompile targets are warm" {
@@ -4388,9 +4393,9 @@ test "delegated precompile targets are warm" {
 
         var code: [eip7702.delegation_code_len]u8 = undefined;
         eip7702.writeDelegationCode(&code, precompile_address);
-        var authority_account = AccountState.init(std.testing.allocator);
-        try authority_account.setCode(std.testing.allocator, &code);
-        try executor.state.accounts.put(authority, authority_account);
+        var authority_account = MemoryAccount.init(std.testing.allocator);
+        try authority_account.setCode(&code);
+        try executor.state.seedAccount(authority, authority_account);
 
         var host_iface = executor.host();
         try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(authority)).?);
@@ -4410,18 +4415,18 @@ test "state-only trace sink records state without step tracing" {
     });
     defer executor.deinit();
 
-    var sender_account = AccountState.init(std.testing.allocator);
+    var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
-    try executor.state.accounts.put(sender, sender_account);
+    try executor.state.seedAccount(sender, sender_account);
 
-    var contract_account = AccountState.init(std.testing.allocator);
-    try contract_account.setCode(std.testing.allocator, &.{
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{
         0x60, 0x2a, // PUSH1 42
         0x60, 0x00, // PUSH1 0
         0x55, // SSTORE
         0x00, // STOP
     });
-    try executor.state.accounts.put(contract, contract_account);
+    try executor.state.seedAccount(contract, contract_account);
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);

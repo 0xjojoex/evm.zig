@@ -16,7 +16,6 @@ Environment overrides:
 
 Example:
   scripts/fetch-eest-benchmarks.sh
-  zig build bench -- ../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures/blockchain_tests/benchmark/compute
 USAGE
 }
 
@@ -63,5 +62,5 @@ fi
 printf 'Extracting to %s\n' "${dest}"
 tar -xzf "${archive}" -C "${dest}"
 
-printf 'Done. Try:\n'
-printf '  zig build bench -- %s/fixtures/blockchain_tests/benchmark/compute\n' "${dest}"
+printf 'Done. Benchmark fixtures are cached at %s for future adapter work.\n' "${dest}"
+printf 'No active EEST benchmark runner consumes them today; use bench/ VM-loop reports for routine comparisons.\n'

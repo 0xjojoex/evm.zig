@@ -5,12 +5,10 @@ const std = @import("std");
 const blob_mod = @import("./transaction/blob.zig");
 const gas_mod = @import("./transaction/gas.zig");
 const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
-const prepare_mod = @import("./transaction/prepare.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
 pub const signing = @import("./transaction/signing.zig");
-const validation_mod = @import("./transaction/validation.zig");
 const transaction_mod = @import("./transaction/types.zig");
 
 pub const AccessListCounts = transaction_mod.AccessListCounts;
@@ -18,7 +16,6 @@ pub const BlobSchedule = blob_mod.BlobSchedule;
 pub const ExcessBlobGasInput = blob_mod.ExcessBlobGasInput;
 pub const TxKind = transaction_mod.TxKind;
 pub const SenderCodeKind = transaction_mod.SenderCodeKind;
-pub const ValidationError = validation_mod.ValidationError;
 pub const IntrinsicGasOptions = gas_mod.IntrinsicGasOptions;
 pub const GasCharge = gas_mod.GasCharge;
 pub const InitialGas = gas_mod.InitialGas;
@@ -30,7 +27,9 @@ pub const FeeFields = transaction_mod.FeeFields;
 pub const Transaction = transaction_mod.Transaction;
 pub const TransactionView = transaction_mod.TransactionView;
 pub const EnvFacts = transaction_mod.EnvFacts;
-pub const StateFacts = transaction_mod.StateFacts;
+pub const PreparationAccount = transaction_mod.PreparationAccount;
+pub const PreparationStateAccess = transaction_mod.PreparationStateAccess;
+pub const PreparationBlockProgress = transaction_mod.PreparationBlockProgress;
 pub const ExecutionContext = transaction_mod.ExecutionContext;
 pub const TransactionScope = transaction_mod.TransactionScope;
 pub const RootFrame = transaction_mod.RootFrame;
@@ -66,9 +65,7 @@ pub fn For(comptime ProtocolType: type) type {
         pub const gas = gas_mod.For(ProtocolType);
         /// Gas-derived producer for source-neutral resource-bound envelopes.
         pub const gas_bound = gas_bound_plan.For(ProtocolType);
-        pub const prepare = prepare_mod.For(ProtocolType);
         pub const settlement = settlement_mod.For(ProtocolType);
-        pub const validation = validation_mod.For(ProtocolType);
     };
 }
 
@@ -142,10 +139,7 @@ test "transaction bound namespace carries comptime protocol" {
     };
     const Bound = For(DoubleBlobProtocol);
 
-    try std.testing.expectEqual(
-        @as(u256, 10 + blob_gas_per_blob * 2),
-        Bound.validation.prepaymentCost(.test_revision, 10, 1, 1, 1).?,
-    );
+    try std.testing.expectEqual(blob_gas_per_blob * 2, Bound.blob.blobSchedule(.test_revision).?.gas_per_blob);
 }
 
 test {

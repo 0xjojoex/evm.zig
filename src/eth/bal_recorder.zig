@@ -20,6 +20,7 @@ pub const Recorder = struct {
     }
 
     pub fn deinit(self: *Recorder) void {
+        for (self.events.items) |*event| event.deinit(self.allocator);
         self.events.deinit(self.allocator);
         self.checkpoints.deinit(self.allocator);
         self.* = init(self.allocator);
@@ -33,7 +34,7 @@ pub const Recorder = struct {
         return trace.Sink.init(self, .{
             .account_access = trace.AccountAccessFields.full,
             .state_read = trace.StateReadKinds.initMany(&.{.storage}),
-            .state_write = trace.StateWriteKinds.initMany(&.{ .balance, .nonce, .storage }),
+            .state_write = trace.StateWriteKinds.initMany(&.{ .balance, .nonce, .code, .storage }),
             .checkpoint = trace.CheckpointFields.full,
         }, &.{
             .accountAccess = accountAccess,
@@ -94,6 +95,21 @@ pub const Recorder = struct {
         } });
     }
 
+    pub fn recordCodeWrite(self: *Recorder, event: trace.CodeWrite) !void {
+        try self.recordAccountAccess(event.address);
+        const new_code = try self.allocator.dupe(u8, event.code);
+        var new_code_owned = true;
+        errdefer if (new_code_owned) self.allocator.free(new_code);
+
+        try self.append(.{ .code_write = .{
+            .block_access_index = self.block_access_index,
+            .address = event.address,
+            .new_code = new_code,
+            .sequence = self.nextSequence(),
+        } });
+        new_code_owned = false;
+    }
+
     pub fn toOwnedBlockAccessList(self: *Recorder, allocator: Allocator) !bal.Decoded {
         if (self.failure) |failure| return failure;
         if (self.checkpoints.items.len != 0) return error.UnclosedCheckpoint;
@@ -129,6 +145,11 @@ pub const Recorder = struct {
                     if (!nonce_write.active) continue;
                     const builder = try accountBuilderFor(allocator, &builders, &builder_indices, nonce_write.address);
                     try builder.nonce_writes.append(allocator, nonce_write);
+                },
+                .code_write => |code_write| {
+                    if (!code_write.active) continue;
+                    const builder = try accountBuilderFor(allocator, &builders, &builder_indices, code_write.address);
+                    try builder.code_writes.append(allocator, code_write);
                 },
             }
         }
@@ -217,6 +238,9 @@ pub const Recorder = struct {
             .nonce => |nonce_write| self.recordNonceWrite(nonce_write) catch |err| {
                 self.failure = err;
             },
+            .code => |code_write| self.recordCodeWrite(code_write) catch |err| {
+                self.failure = err;
+            },
             else => {},
         }
     }
@@ -262,18 +286,35 @@ const NonceWrite = struct {
     active: bool = true,
 };
 
+const CodeWrite = struct {
+    block_access_index: bal.BlockAccessIndex,
+    address: bal.Address,
+    new_code: []const u8,
+    sequence: usize,
+    active: bool = true,
+};
+
 const Event = union(enum) {
     account_access: bal.Address,
     storage_read: StorageRead,
     storage_write: StorageWrite,
     balance_write: BalanceWrite,
     nonce_write: NonceWrite,
+    code_write: CodeWrite,
 
     fn deactivateWrite(self: *Event) void {
         switch (self.*) {
             .storage_write => |*write| write.active = false,
             .balance_write => |*write| write.active = false,
             .nonce_write => |*write| write.active = false,
+            .code_write => |*write| write.active = false,
+            else => {},
+        }
+    }
+
+    fn deinit(self: *Event, allocator: Allocator) void {
+        switch (self.*) {
+            .code_write => |write| allocator.free(@constCast(write.new_code)),
             else => {},
         }
     }
@@ -292,12 +333,14 @@ const AccountBuilder = struct {
     storage_writes: std.ArrayList(StorageWrite) = .empty,
     balance_writes: std.ArrayList(BalanceWrite) = .empty,
     nonce_writes: std.ArrayList(NonceWrite) = .empty,
+    code_writes: std.ArrayList(CodeWrite) = .empty,
 
     fn deinit(self: *AccountBuilder, allocator: Allocator) void {
         self.storage_reads.deinit(allocator);
         self.storage_writes.deinit(allocator);
         self.balance_writes.deinit(allocator);
         self.nonce_writes.deinit(allocator);
+        self.code_writes.deinit(allocator);
         self.* = .{ .address = std.mem.zeroes(bal.Address) };
     }
 
@@ -311,6 +354,7 @@ const AccountBuilder = struct {
         account.storage_reads = try self.toOwnedStorageReads(allocator, account.storage_changes);
         account.balance_changes = try self.toOwnedBalanceChanges(allocator);
         account.nonce_changes = try self.toOwnedNonceChanges(allocator);
+        account.code_changes = try self.toOwnedCodeChanges(allocator);
         return account;
     }
 
@@ -436,6 +480,34 @@ const AccountBuilder = struct {
         }
         return changes.toOwnedSlice(allocator);
     }
+
+    fn toOwnedCodeChanges(self: *AccountBuilder, allocator: Allocator) ![]bal.CodeChange {
+        std.mem.sort(CodeWrite, self.code_writes.items, {}, codeWriteLessThan);
+
+        var changes: std.ArrayList(bal.CodeChange) = .empty;
+        errdefer {
+            for (changes.items) |change| allocator.free(@constCast(change.new_code));
+            changes.deinit(allocator);
+        }
+
+        var index: usize = 0;
+        while (index < self.code_writes.items.len) {
+            const block_access_index = self.code_writes.items[index].block_access_index;
+            var last = self.code_writes.items[index];
+            index += 1;
+            while (index < self.code_writes.items.len and self.code_writes.items[index].block_access_index == block_access_index) {
+                last = self.code_writes.items[index];
+                index += 1;
+            }
+            const new_code = try allocator.dupe(u8, last.new_code);
+            errdefer allocator.free(new_code);
+            try changes.append(allocator, .{
+                .block_access_index = block_access_index,
+                .new_code = new_code,
+            });
+        }
+        return changes.toOwnedSlice(allocator);
+    }
 };
 
 fn accountBuilderFor(
@@ -461,6 +533,8 @@ fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void 
     if (account.storage_reads.len > 0) allocator.free(account.storage_reads);
     if (account.balance_changes.len > 0) allocator.free(account.balance_changes);
     if (account.nonce_changes.len > 0) allocator.free(account.nonce_changes);
+    for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
+    if (account.code_changes.len > 0) allocator.free(account.code_changes);
 }
 
 fn accountLessThan(_: void, lhs: bal.AccountChanges, rhs: bal.AccountChanges) bool {
@@ -483,6 +557,11 @@ fn nonceWriteLessThan(_: void, lhs: NonceWrite, rhs: NonceWrite) bool {
     return lhs.sequence < rhs.sequence;
 }
 
+fn codeWriteLessThan(_: void, lhs: CodeWrite, rhs: CodeWrite) bool {
+    if (lhs.block_access_index != rhs.block_access_index) return lhs.block_access_index < rhs.block_access_index;
+    return lhs.sequence < rhs.sequence;
+}
+
 fn u256LessThan(_: void, lhs: u256, rhs: u256) bool {
     return lhs < rhs;
 }
@@ -497,8 +576,38 @@ test "BAL recorder sink declares only materializable state events" {
     try std.testing.expect(sink.wantsStateWriteKind(.storage));
     try std.testing.expect(sink.wantsStateWriteKind(.balance));
     try std.testing.expect(sink.wantsStateWriteKind(.nonce));
-    try std.testing.expect(!sink.wantsStateWriteKind(.code));
+    try std.testing.expect(sink.wantsStateWriteKind(.code));
     try std.testing.expect(sink.wantsCheckpoint());
+}
+
+test "BAL recorder owns and coalesces code changes per block access index" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    var sink = recorder.sink();
+
+    const changed = address.addr(6);
+    var first_code = [_]u8{ 0x60, 0x00 };
+    var final_code = [_]u8{ 0x60, 0x01 };
+
+    recorder.setBlockAccessIndex(1);
+    sink.stateWrite(.{ .code = .{ .address = changed, .size = first_code.len, .code = &first_code } });
+    sink.stateWrite(.{ .code = .{ .address = changed, .size = final_code.len, .code = &final_code } });
+    @memset(&first_code, 0xff);
+    @memset(&final_code, 0xff);
+
+    recorder.setBlockAccessIndex(2);
+    sink.stateWrite(.{ .code = .{ .address = changed, .size = 1, .code = &.{0x00} } });
+
+    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
+    defer observed.deinit(std.testing.allocator);
+
+    try bal.validate(observed.accounts, .{ .transaction_count = 2 });
+    try std.testing.expectEqual(@as(usize, 1), observed.accounts.len);
+    try std.testing.expectEqual(@as(usize, 2), observed.accounts[0].code_changes.len);
+    try std.testing.expectEqual(@as(bal.BlockAccessIndex, 1), observed.accounts[0].code_changes[0].block_access_index);
+    try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x01 }, observed.accounts[0].code_changes[0].new_code);
+    try std.testing.expectEqual(@as(bal.BlockAccessIndex, 2), observed.accounts[0].code_changes[1].block_access_index);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, observed.accounts[0].code_changes[1].new_code);
 }
 
 test "BAL recorder builds canonical observed storage balance and nonce changes" {
@@ -618,6 +727,7 @@ test "BAL recorder discards reverted writes but preserves accesses" {
     sink.checkpoint(.{ .kind = .checkpoint, .depth = 1, .journal_len = 2, .logs_len = 0 });
     sink.stateWrite(.{ .storage = .{ .address = accessed, .key = 8, .previous = 0, .value = 1 } });
     sink.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 6 } });
+    sink.stateWrite(.{ .code = .{ .address = accessed, .size = 2, .code = &.{ 0x60, 0x00 } } });
     sink.checkpoint(.{ .kind = .revert, .depth = 1, .journal_len = 2, .logs_len = 0 });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
@@ -628,4 +738,5 @@ test "BAL recorder discards reverted writes but preserves accesses" {
     try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].storage_changes.len);
     try std.testing.expectEqualSlices(u256, &.{8}, observed.accounts[0].storage_reads);
     try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].balance_changes.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].code_changes.len);
 }

@@ -3,8 +3,9 @@ const evmz = @import("evmz");
 
 const transaction = evmz.transaction;
 const transaction_envelope = evmz.transaction.envelope;
+const ValidationError = evmz.Evm.Protocol.Transaction.ValidationError;
 
-pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
+pub fn eestExceptionName(error_value: ValidationError) []const u8 {
     return switch (error_value) {
         .intrinsic_gas_too_low => "TransactionException.INTRINSIC_GAS_TOO_LOW",
         .intrinsic_gas_below_floor_gas_cost => "TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST",
@@ -31,7 +32,7 @@ pub fn eestExceptionName(error_value: transaction.ValidationError) []const u8 {
     };
 }
 
-pub fn validationErrorMatchesEest(error_value: transaction.ValidationError, expected: []const u8) bool {
+pub fn validationErrorMatchesEest(error_value: ValidationError, expected: []const u8) bool {
     const name = eestExceptionName(error_value);
     if (error_value == .intrinsic_gas_below_floor_gas_cost and exceptionNameMatches("TransactionException.INTRINSIC_GAS_TOO_LOW", expected)) return true;
     if (error_value == .gas_allowance_exceeded and exceptionNameMatches("TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM", expected)) return true;

@@ -126,7 +126,7 @@ test "DIV and SDIV by zero push zero" {
 }
 
 test "KECCAK256 of empty input returns the empty hash" {
-    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH0, .KECCAK256 }, evmz.empty_code_hash);
+    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH0, .KECCAK256 }, evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty));
 }
 
 inline fn wrapExp(a: u256, expo: u256) u256 {

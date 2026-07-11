@@ -279,7 +279,7 @@ the compact JSON somewhere stable. Use `--baseline <path>` to include
 evmz-vs-evmz deltas in the report after an optimization branch.
 
 Generated EEST benchmark fixtures are intentionally not part of this report
-lane. The previous report integration mixed host, fixture, and precompile
-semantics with VM timing, so future EEST benchmark reporting should first adapt
+lane. The old transaction-shaped runner mixed host, fixture, and precompile
+semantics with VM timing, so future EEST benchmark work should first adapt
 meaningful cases into the VM-loop protocol or a separate fair block-verdict
 lane.

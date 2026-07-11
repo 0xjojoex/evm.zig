@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     const bench_optimize = b.option(
         std.builtin.OptimizeMode,
         "bench-optimize",
-        "Optimization mode for the EEST benchmark runner",
+        "Optimization mode for EEST benchmark-style runners",
     ) orelse .ReleaseFast;
     const profile = buildProfileOption(b);
 
@@ -24,9 +24,6 @@ pub fn build(b: *std.Build) void {
     });
     const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
-    const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = bench_optimize });
-    const intx_dep = b.dependency("intx", .{ .target = target, .optimize = bench_optimize });
-
     {
         const state_tests = b.addTest(.{
             .root_module = eestModule(b, "src/state.zig", target, optimize, evmz_mod),
@@ -35,14 +32,34 @@ pub fn build(b: *std.Build) void {
             .root_module = eestModule(b, "src/tx.zig", target, optimize, evmz_mod),
         });
 
-        const bench_tests_mod = eestModule(b, "src/bench.zig", target, optimize, evmz_mod);
-        addEvmoneVm(bench_tests_mod, evmz_dep, evmone_dep, intx_dep);
-        const bench_tests = b.addTest(.{ .root_module = bench_tests_mod });
+        const stateless_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/stateless.zig", target, optimize, evmz_mod),
+        });
+        const stateless_input_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/stateless_input_cli.zig", target, optimize, evmz_mod),
+        });
+        const stateless_ere_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/stateless_ere_cli.zig", target, optimize, evmz_mod),
+        });
+        const stateless_ere_bench_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/stateless_ere_bench.zig", target, optimize, evmz_mod),
+        });
+        const block_stf_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/block_stf.zig", target, optimize, evmz_mod),
+        });
+        const stateless_block_stf_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/stateless_block_stf.zig", target, optimize, evmz_mod),
+        });
 
         const test_step = b.step("test", "Run EEST runner tests");
         test_step.dependOn(&b.addRunArtifact(state_tests).step);
         test_step.dependOn(&b.addRunArtifact(tx_tests).step);
-        test_step.dependOn(&b.addRunArtifact(bench_tests).step);
+        test_step.dependOn(&b.addRunArtifact(stateless_tests).step);
+        test_step.dependOn(&b.addRunArtifact(stateless_input_tests).step);
+        test_step.dependOn(&b.addRunArtifact(stateless_ere_tests).step);
+        test_step.dependOn(&b.addRunArtifact(stateless_ere_bench_tests).step);
+        test_step.dependOn(&b.addRunArtifact(block_stf_tests).step);
+        test_step.dependOn(&b.addRunArtifact(stateless_block_stf_tests).step);
     }
 
     {
@@ -80,17 +97,75 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const bench_mod = eestModule(b, "src/bench_cli.zig", target, bench_optimize, bench_evmz_mod);
-        addEvmoneVm(bench_mod, bench_evmz_dep, evmone_dep, intx_dep);
-        const bench_exe = b.addExecutable(.{
-            .name = "evmz-eest-bench",
-            .root_module = bench_mod,
+        const stateless_exe = b.addExecutable(.{
+            .name = "evmz-zkevm",
+            .root_module = eestModule(b, "src/stateless_cli.zig", target, optimize, evmz_mod),
         });
-        b.installArtifact(bench_exe);
+        b.installArtifact(stateless_exe);
 
-        const run_bench = b.addRunArtifact(bench_exe);
-        if (b.args) |args| run_bench.addArgs(args);
-        b.step("bench", "Run EEST benchmark blockchain-test fixtures").dependOn(&run_bench.step);
+        const run_stateless = b.addRunArtifact(stateless_exe);
+        if (b.args) |args| run_stateless.addArgs(args);
+        b.step("zkevm", "Run EEST zkEVM stateless SSZ fixtures").dependOn(&run_stateless.step);
+    }
+
+    {
+        const stateless_input_exe = b.addExecutable(.{
+            .name = "evmz-zkevm-input",
+            .root_module = eestModule(b, "src/stateless_input_cli.zig", target, optimize, evmz_mod),
+        });
+        b.installArtifact(stateless_input_exe);
+
+        const run_stateless_input = b.addRunArtifact(stateless_input_exe);
+        if (b.args) |args| run_stateless_input.addArgs(args);
+        b.step("zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin").dependOn(&run_stateless_input.step);
+    }
+
+    {
+        const stateless_ere_exe = b.addExecutable(.{
+            .name = "evmz-zkevm-ere",
+            .root_module = eestModule(b, "src/stateless_ere_cli.zig", target, optimize, evmz_mod),
+        });
+        b.installArtifact(stateless_ere_exe);
+
+        const run_stateless_ere = b.addRunArtifact(stateless_ere_exe);
+        if (b.args) |args| run_stateless_ere.addArgs(args);
+        b.step("zkevm-ere", "Run raw ERE stateless input through native adapter").dependOn(&run_stateless_ere.step);
+    }
+
+    {
+        const stateless_ere_bench_exe = b.addExecutable(.{
+            .name = "evmz-zkevm-ere-bench",
+            .root_module = eestModule(b, "src/stateless_ere_bench_cli.zig", target, bench_optimize, bench_evmz_mod),
+        });
+        b.installArtifact(stateless_ere_bench_exe);
+
+        const run_stateless_ere_bench = b.addRunArtifact(stateless_ere_bench_exe);
+        if (b.args) |args| run_stateless_ere_bench.addArgs(args);
+        b.step("zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures").dependOn(&run_stateless_ere_bench.step);
+    }
+
+    {
+        const block_stf_exe = b.addExecutable(.{
+            .name = "evmz-eest-block-stf",
+            .root_module = eestModule(b, "src/block_stf_cli.zig", target, optimize, evmz_mod),
+        });
+        b.installArtifact(block_stf_exe);
+
+        const run_block_stf = b.addRunArtifact(block_stf_exe);
+        if (b.args) |args| run_block_stf.addArgs(args);
+        b.step("eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF").dependOn(&run_block_stf.step);
+    }
+
+    {
+        const stateless_block_stf_exe = b.addExecutable(.{
+            .name = "evmz-eest-stateless-block-stf",
+            .root_module = eestModule(b, "src/stateless_block_stf_cli.zig", target, optimize, evmz_mod),
+        });
+        b.installArtifact(stateless_block_stf_exe);
+
+        const run_stateless_block_stf = b.addRunArtifact(stateless_block_stf_exe);
+        if (b.args) |args| run_stateless_block_stf.addArgs(args);
+        b.step("eest-stateless-block-stf", "Run witness-backed zkEVM blockchain fixtures through stateless BlockSTF").dependOn(&run_stateless_block_stf.step);
     }
 }
 
@@ -118,49 +193,4 @@ fn eestModule(
             .{ .name = "evmz", .module = evmz_mod },
         },
     });
-}
-
-fn addEvmoneVm(
-    module: *std.Build.Module,
-    evmz_dep: *std.Build.Dependency,
-    evmone_dep: *std.Build.Dependency,
-    intx_dep: *std.Build.Dependency,
-) void {
-    const cxx_flags = &[_][]const u8{
-        "-std=c++20",
-        "-Wall",
-        "-Wextra",
-        "-Wno-missing-field-initializers",
-        "-fno-exceptions",
-        "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.22.0\"",
-    };
-    const c_flags = &[_][]const u8{
-        "-Wall",
-        "-Wextra",
-    };
-
-    module.addIncludePath(evmz_dep.path("include"));
-    module.addIncludePath(evmone_dep.path("evmc/include"));
-    module.addIncludePath(evmone_dep.path("include"));
-    module.addIncludePath(evmone_dep.path("lib"));
-    module.addIncludePath(intx_dep.path("include"));
-
-    const sources = &[_][]const u8{
-        "lib/evmone/advanced_analysis.cpp",
-        "lib/evmone/advanced_execution.cpp",
-        "lib/evmone/advanced_instructions.cpp",
-        "lib/evmone/baseline_analysis.cpp",
-        "lib/evmone/baseline_execution.cpp",
-        "lib/evmone/baseline_instruction_table.cpp",
-        "lib/evmone/delegation.cpp",
-        "lib/evmone/instructions_calls.cpp",
-        "lib/evmone/instructions_storage.cpp",
-        "lib/evmone/tracing.cpp",
-        "lib/evmone/vm.cpp",
-    };
-    for (sources) |source| {
-        module.addCSourceFile(.{ .file = evmone_dep.path(source), .flags = cxx_flags });
-    }
-    module.addCSourceFile(.{ .file = evmone_dep.path("lib/evmone_precompiles/keccak.c"), .flags = c_flags });
 }

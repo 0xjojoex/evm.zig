@@ -8,7 +8,6 @@ const precompile = @import("../precompile.zig");
 const support = @import("support.zig");
 const transaction_protocol = @import("transaction.zig");
 const tx = @import("../transaction/types.zig");
-const tx_validation = @import("../transaction/validation.zig");
 
 const Address = address.Address;
 const RevisionId = support.RevisionId;
@@ -89,6 +88,37 @@ pub const BlockStartSystemCalls = struct {
     }
 
     pub fn slice(self: *const BlockStartSystemCalls) []const BlockStartSystemCall {
+        return self.items[0..self.len];
+    }
+};
+
+pub const BlockEndContext = struct {
+    number: u64,
+    timestamp: u64,
+};
+
+pub const BlockEndSystemCall = struct {
+    sender: Address,
+    recipient: Address,
+    input: []const u8 = &.{},
+    gas: u64,
+    request_type: u8,
+    require_code: bool = false,
+};
+
+pub const BlockEndSystemCalls = struct {
+    pub const capacity = 4;
+
+    items: [capacity]BlockEndSystemCall = undefined,
+    len: usize = 0,
+
+    pub fn append(self: *BlockEndSystemCalls, call: BlockEndSystemCall) void {
+        std.debug.assert(self.len < capacity);
+        self.items[self.len] = call;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const BlockEndSystemCalls) []const BlockEndSystemCall {
         return self.items[0..self.len];
     }
 };
@@ -362,12 +392,6 @@ pub fn assertResolvedTransactionDomainTypes(comptime Definition: type, comptime 
     {
         @compileError("Definition.Transaction.view is required when overriding Transaction.Value or Transaction.View");
     }
-    if (!std.meta.hasFn(DefinitionTransaction, "prepare") and
-        (ResolvedTransaction.View != tx.TransactionView or ResolvedTransaction.ValidationError != tx_validation.ValidationError))
-    {
-        @compileError("Definition.Transaction.prepare is required when overriding Transaction.View or Transaction.ValidationError");
-    }
-
     const ProtocolLike = struct {
         pub const Revision = Definition.Revision;
         pub const Transaction = ResolvedTransaction;

@@ -2,6 +2,10 @@ const std = @import("std");
 const address = @import("../address.zig");
 const definition = @import("../definition.zig");
 const interface = @import("../protocol/interface.zig");
+const eip6110 = @import("eip/6110.zig");
+const eip7002 = @import("eip/7002.zig");
+const eip7251 = @import("eip/7251.zig");
+const eip8282 = @import("eip/8282.zig");
 const tx = @import("transaction.zig");
 const Revision = @import("revision.zig").Revision;
 const Address = address.Address;
@@ -9,6 +13,17 @@ const Address = address.Address;
 pub const system_address = address.addr(0xfffffffffffffffffffffffffffffffffffffffe);
 pub const beacon_roots_address = address.addr(0x000f3df6d732807ef1319fb7b8bb8522d0beac02);
 pub const history_storage_address = address.addr(0x0000f90827f1c53a10cb7a02335b175320002935);
+pub const deposit_contract_address = eip6110.deposit_contract_address;
+pub const withdrawal_request_predeploy_address = eip7002.predeploy_address;
+pub const consolidation_request_predeploy_address = eip7251.predeploy_address;
+pub const builder_deposit_request_predeploy_address = eip8282.builder_deposit_predeploy_address;
+pub const builder_exit_request_predeploy_address = eip8282.builder_exit_predeploy_address;
+pub const deposit_event_signature_hash = eip6110.deposit_event_signature_hash;
+pub const deposit_request_type = eip6110.request_type;
+pub const withdrawal_request_type = eip7002.request_type;
+pub const consolidation_request_type = eip7251.request_type;
+pub const builder_deposit_request_type = eip8282.builder_deposit_request_type;
+pub const builder_exit_request_type = eip8282.builder_exit_request_type;
 pub const value_transfer_log_topic = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 pub const system_call_gas: u64 = 30_000_000;
 const call_static_gas_floor: i64 = 40;
@@ -102,6 +117,7 @@ pub const Block = struct {
         const PatchType = struct {
             valueTransferLog: ?*const fn (R, Address, Address, u256) ?interface.ValueTransferLog = null,
             blockStartSystemCalls: ?*const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = null,
+            blockEndSystemCalls: ?*const fn (R, interface.BlockEndContext) interface.BlockEndSystemCalls = null,
             transactionWarmsCoinbase: ?*const fn (R) bool = null,
         };
         definition.assertPatchMirrors(definition.BlockConfig(R), PatchType);
@@ -115,6 +131,7 @@ pub const Block = struct {
         return .{
             .valueTransferLog = Self.valueTransferLog,
             .blockStartSystemCalls = Self.blockStartSystemCalls,
+            .blockEndSystemCalls = Self.blockEndSystemCalls,
             .transactionWarmsCoinbase = Self.transactionWarmsCoinbase,
         };
     }
@@ -155,6 +172,20 @@ pub const Block = struct {
             }
         }
 
+        return calls;
+    }
+
+    pub fn blockEndSystemCalls(revision: Revision, context: interface.BlockEndContext) interface.BlockEndSystemCalls {
+        var calls = interface.BlockEndSystemCalls{};
+        if (context.number == 0) return calls;
+        if (!revision.isImpl(.prague)) return calls;
+
+        calls.append(eip7002.blockEndSystemCall(system_address, system_call_gas));
+        calls.append(eip7251.blockEndSystemCall(system_address, system_call_gas));
+        if (revision.isImpl(.amsterdam)) {
+            calls.append(eip8282.builderDepositBlockEndSystemCall(system_address, system_call_gas));
+            calls.append(eip8282.builderExitBlockEndSystemCall(system_address, system_call_gas));
+        }
         return calls;
     }
 

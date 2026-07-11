@@ -1,11 +1,11 @@
 const std = @import("std");
 
-const blob = @import("./blob.zig");
+const blob = @import("../transaction/blob.zig");
 const definition_support = @import("../protocol/support.zig");
-const gas = @import("./gas.zig");
-const Transaction = @import("./types.zig");
-const EthRevision = @import("../eth/revision.zig").Revision;
-const eth_transaction = @import("../eth/transaction.zig");
+const gas = @import("../transaction/gas.zig");
+const Transaction = @import("../transaction/types.zig");
+const EthRevision = @import("revision.zig").Revision;
+const eth_transaction = @import("transaction.zig");
 const uint256 = @import("../uint256.zig");
 
 pub const TxKind = Transaction.TxKind;
@@ -40,22 +40,20 @@ pub const ValidationError = enum {
     type_4_tx_contract_creation,
 };
 
-/// Facts required for pre-execution transaction validation.
-/// Callers own decoding and fork/fixture-specific mapping; this struct is the
-/// reusable semantic boundary used by the executor and EEST adapter.
+/// Ethereum transaction facts consumed by the ordered preparation program.
 fn ValidationInput(comptime Protocol: type) type {
     return struct {
         revision: Protocol.Revision,
         kind: TxKind = .legacy,
         is_create: bool = false,
         is_self_transfer: bool = false,
-        creates_account: bool = false,
         gas_limit: u64,
         input: []const u8 = &.{},
         value: u256 = 0,
         gas_price: u256 = 0,
         base_fee: u256 = 0,
         block_gas_limit: u64 = 0,
+        block_progress: Transaction.PreparationBlockProgress = .{},
         blob_base_fee: u256 = 0,
         blob_schedule: ?blob.BlobSchedule = null,
         max_fee_per_gas: ?u256 = null,
@@ -80,32 +78,71 @@ pub fn For(comptime ProtocolType: type) type {
         pub const Input = ValidationInput(Protocol);
 
         pub fn validate(input: Input) ?ValidationError {
+            const gas_plan = Self.gasPlan(input);
+            if (Self.validateBeforeAccount(input, gas_plan)) |err| return err;
+            if (Self.validateAfterAccount(input)) |err| return err;
+            return Self.validateSenderCode(input);
+        }
+
+        /// Checks whose result is independent of sender state. Keep this order in
+        /// sync with protocol transaction preparation: a decisive rejection here
+        /// must happen before the first account proof is requested.
+        pub fn validateBeforeAccount(input: Input, gas_plan: gas.GasPlan) ?ValidationError {
             definition_support.assertRevisionSupported(Protocol, input.revision);
             if (Self.inactiveTransactionKindError(input.revision, input.kind)) |err| return err;
 
-            if (input.kind == .set_code) {
-                if (Protocol.Transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
-                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
-                if (Protocol.Transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) return .sender_not_eoa;
-            } else if (Protocol.Transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) {
-                return .sender_not_eoa;
+            if (gas_plan.intrinsic_regular_gas == std.math.maxInt(u64) or
+                gas_plan.intrinsic_state_gas == std.math.maxInt(u64) or
+                gas_plan.intrinsic_gas == std.math.maxInt(u64))
+            {
+                return .intrinsic_gas_too_low;
             }
 
-            if (input.sender_nonce == std.math.maxInt(u64)) return .nonce_is_max;
-            if (input.tx_nonce) |tx_nonce| {
-                if (tx_nonce != input.sender_nonce) return .nonce_mismatch;
+            if (Protocol.Transaction.intrinsicRegularGasLimit(input.revision)) |regular_intrinsic_limit| {
+                const capped_intrinsic = @max(gas_plan.intrinsic_regular_gas, gas_plan.floor_gas);
+                if (capped_intrinsic > regular_intrinsic_limit) return .intrinsic_gas_too_low;
             }
+
+            if (input.gas_limit < gas_plan.intrinsic_gas) return .intrinsic_gas_too_low;
+
+            if (input.gas_limit < gas_plan.floor_gas) return .intrinsic_gas_below_floor_gas_cost;
+
+            if (input.tx_nonce) |tx_nonce| {
+                if (tx_nonce == std.math.maxInt(u64)) return .nonce_is_max;
+            }
+
+            if (input.is_create and input.input.len > gas_protocol.maxInitcodeSize(input.revision)) {
+                return .initcode_size_exceeded;
+            }
+
+            if (Protocol.Transaction.totalGasLimit(input.revision)) |limit| {
+                if (input.gas_limit > limit) return .gas_allowance_exceeded;
+            }
+
+            if (Self.exceedsBlockGasAllowance(input)) return .gas_allowance_exceeded;
 
             if (input.kind == .blob) {
-                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_3_tx_contract_creation;
-                if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
                 const schedule = effectiveBlobSchedule(Protocol, input.revision, input.blob_schedule) orelse return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCount(schedule)) return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCountPerTransaction(schedule)) return .type_3_tx_blob_count_exceeded;
-                for (input.blob_hashes) |hash| {
-                    if (!Protocol.Transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
-                }
             }
+
+            return null;
+        }
+
+        pub fn gasPlan(input: Input) gas.GasPlan {
+            return gas_protocol.gasPlan(input.revision, input.input, input.gas_limit, .{
+                .authorization_count = input.authorization_count,
+                .access_list_counts = input.access_list_counts,
+                .is_create = input.is_create,
+                .value = input.value,
+                .is_self_transfer = input.is_self_transfer,
+            });
+        }
+
+        /// Checks ordered after the sender account proof and before sender code.
+        pub fn validateAfterAccount(input: Input) ?ValidationError {
+            definition_support.assertRevisionSupported(Protocol, input.revision);
 
             if (input.kind == .dynamic_fee or input.kind == .blob or input.kind == .set_code) {
                 const max_fee = input.max_fee_per_gas orelse 0;
@@ -114,55 +151,40 @@ pub fn For(comptime ProtocolType: type) type {
                 if (max_fee < input.base_fee) return .insufficient_max_fee_per_gas;
             }
 
-            if (input.kind == .blob) {
-                const max_blob_fee = input.max_fee_per_blob_gas orelse 0;
-                if (max_blob_fee < input.blob_base_fee) return .insufficient_max_fee_per_blob_gas;
-            }
-
             if ((input.kind == .legacy or input.kind == .access_list) and Protocol.Settlement.baseFeeActive(input.revision) and input.gas_price < input.base_fee) {
                 return .insufficient_max_fee_per_gas;
             }
 
-            if (input.is_create and input.input.len > gas_protocol.maxInitcodeSize(input.revision)) {
-                return .initcode_size_exceeded;
+            if (input.kind == .blob) {
+                const max_blob_fee = input.max_fee_per_blob_gas orelse 0;
+                if (max_blob_fee < input.blob_base_fee) return .insufficient_max_fee_per_blob_gas;
+                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_3_tx_contract_creation;
+                if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
+                for (input.blob_hashes) |hash| {
+                    if (!Protocol.Transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
+                }
             }
 
-            const intrinsic_options = gas.IntrinsicGasOptions{
-                .authorization_count = input.authorization_count,
-                .access_list_counts = input.access_list_counts,
-                .is_create = input.is_create,
-                .value = input.value,
-                .is_self_transfer = input.is_self_transfer,
-                .creates_account = input.creates_account,
-            };
-            const intrinsic_regular = gas_protocol.intrinsicRegularGasForTransaction(input.revision, input.input, intrinsic_options) orelse return .intrinsic_gas_too_low;
-            const intrinsic_state = gas_protocol.intrinsicStateGasForTransaction(input.revision, intrinsic_options) orelse return .intrinsic_gas_too_low;
-            const intrinsic = std.math.add(u64, intrinsic_regular, intrinsic_state) catch return .intrinsic_gas_too_low;
-            const floor = gas_protocol.floorGasForTransaction(input.revision, input.input, intrinsic_options);
-
-            if (Protocol.Transaction.intrinsicRegularGasLimit(input.revision)) |regular_intrinsic_limit| {
-                var capped_intrinsic = intrinsic_regular;
-                if (floor) |floor_gas| capped_intrinsic = @max(capped_intrinsic, floor_gas);
-                if (capped_intrinsic > regular_intrinsic_limit) return .intrinsic_gas_too_low;
+            if (input.kind == .set_code) {
+                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
+                if (Protocol.Transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
             }
 
-            if (input.gas_limit < intrinsic) return .intrinsic_gas_too_low;
-
-            if (floor) |floor_gas| {
-                if (input.gas_limit < floor_gas) return .intrinsic_gas_below_floor_gas_cost;
-            }
-
-            if (Protocol.Transaction.totalGasLimit(input.revision)) |limit| {
-                if (input.gas_limit > limit) return .gas_allowance_exceeded;
-            }
-
-            if (input.block_gas_limit != 0 and input.gas_limit > input.block_gas_limit) {
-                return .gas_allowance_exceeded;
+            if (input.tx_nonce) |tx_nonce| {
+                if (tx_nonce != input.sender_nonce) return .nonce_mismatch;
             }
 
             const required_balance = Self.maxPrepaymentCost(input) orelse return .insufficient_account_funds;
             if (input.sender_balance < required_balance) return .insufficient_account_funds;
 
+            return null;
+        }
+
+        pub fn validateSenderCode(input: Input) ?ValidationError {
+            definition_support.assertRevisionSupported(Protocol, input.revision);
+            if (Protocol.Transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) {
+                return .sender_not_eoa;
+            }
             return null;
         }
 
@@ -197,6 +219,22 @@ pub fn For(comptime ProtocolType: type) type {
                 .blob => .type_3_tx_pre_fork,
                 .set_code => .type_4_tx_pre_fork,
             };
+        }
+
+        fn exceedsBlockGasAllowance(input: Input) bool {
+            if (input.block_gas_limit == 0) return false;
+            const uses_state_gas_accounting = if (comptime @hasDecl(Protocol.Settlement, "usesStateGasAccounting"))
+                Protocol.Settlement.usesStateGasAccounting(input.revision)
+            else
+                false;
+            if (uses_state_gas_accounting) {
+                const regular_available = input.block_gas_limit -| input.block_progress.block_gas.regular;
+                const state_available = input.block_gas_limit -| input.block_progress.block_gas.state;
+                return gas_protocol.regularGasLimit(input.revision, input.gas_limit) > regular_available or
+                    input.gas_limit > state_available;
+            }
+            const available = input.block_gas_limit -| input.block_progress.receipt_gas_used;
+            return input.gas_limit > available;
         }
     };
 }
@@ -410,7 +448,7 @@ test "transaction validation rejects nonce overflow" {
         .is_create = true,
         .gas_limit = 100_000,
         .gas_price = 1,
-        .sender_nonce = std.math.maxInt(u64),
+        .tx_nonce = std.math.maxInt(u64),
         .sender_balance = 100_000,
     }).?);
 }
@@ -450,6 +488,44 @@ test "transaction validation rejects block gas allowance" {
         .gas_price = 1,
         .sender_balance = 90_000,
     }).?);
+}
+
+test "transaction validation interprets revision-specific block progress" {
+    const Validation = For(ethereumProtocol());
+
+    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, Validation.validate(.{
+        .revision = .cancun,
+        .gas_limit = 50_000,
+        .block_gas_limit = 100_000,
+        .block_progress = .{ .receipt_gas_used = 60_000 },
+    }).?);
+
+    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, Validation.validate(.{
+        .revision = .amsterdam,
+        .gas_limit = 50_000,
+        .block_gas_limit = 100_000,
+        .block_progress = .{ .block_gas = .{
+            .total = 60_000,
+            .regular = 60_000,
+        } },
+    }).?);
+
+    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, Validation.validate(.{
+        .revision = .amsterdam,
+        .gas_limit = 50_000,
+        .block_gas_limit = 100_000,
+        .block_progress = .{ .block_gas = .{
+            .total = 60_000,
+            .state = 60_000,
+        } },
+    }).?);
+
+    try std.testing.expectEqual(@as(?ValidationError, null), Validation.validate(.{
+        .revision = .amsterdam,
+        .gas_limit = 50_000,
+        .block_gas_limit = 100_000,
+        .block_progress = .{ .receipt_gas_used = 99_999 },
+    }));
 }
 
 test "transaction validation applies Osaka transaction gas cap" {
@@ -769,8 +845,8 @@ test "transaction validation rejects oversized initcode" {
     try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .is_create = true,
-        .gas_limit = 1_000_000,
+        .gas_limit = 10_000_000,
         .input = oversized_amsterdam,
-        .sender_balance = 1_000_000,
+        .sender_balance = 10_000_000,
     }).?);
 }
