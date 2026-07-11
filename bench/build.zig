@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     const zbench_dep = b.dependency("zbench", .{ .target = target, .optimize = micro_optimize });
     const evmone_libgcc = nativeEvmoneLibgcc(b, target);
     const evmz_mod = evmz_dep.module("evmz");
+    evmz_mod.omit_frame_pointer = true;
     const vm_loop_support_min = b.option(
         []const u8,
         "bench-support-min",
@@ -145,6 +146,7 @@ pub fn build(b: *std.Build) void {
         const evmone_vm_loop_mod = b.createModule(.{
             .target = target,
             .optimize = optimize,
+            .omit_frame_pointer = true,
             .link_libc = true,
             .link_libcpp = true,
         });
@@ -156,6 +158,7 @@ pub fn build(b: *std.Build) void {
                 "-Wall",
                 "-Wextra",
                 "-Wno-missing-field-initializers",
+                "-fomit-frame-pointer",
                 "-fno-rtti",
             },
         });
@@ -215,12 +218,20 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const micro_evmz_dep = b.dependency("evmz", .{
+            .target = target,
+            .optimize = micro_optimize,
+            .profile = profile,
+        });
+        const micro_evmz_mod = micro_evmz_dep.module("evmz");
+        micro_evmz_mod.omit_frame_pointer = true;
         const zbench_mod = b.createModule(.{
             .root_source_file = zbench_dep.path("src/zbench.zig"),
             .target = target,
             .optimize = micro_optimize,
+            .omit_frame_pointer = true,
         });
-        const micro_mod = benchModule(b, "src/micro.zig", target, micro_optimize, evmz_mod);
+        const micro_mod = benchModule(b, "src/micro.zig", target, micro_optimize, micro_evmz_mod);
         micro_mod.addImport("zbench", zbench_mod);
         const micro_filters: []const []const u8 = if (micro_filter) |filter| &.{filter} else &.{};
         const micro_tests = b.addTest(.{
@@ -289,7 +300,7 @@ fn buildProfileOption(b: *std.Build) []const u8 {
 }
 
 fn addRevmNativeRustFlags(run: *std.Build.Step.Run) void {
-    run.setEnvironmentVariable("RUSTFLAGS", "-C target-cpu=native");
+    run.setEnvironmentVariable("RUSTFLAGS", "-C target-cpu=native -C force-frame-pointers=no");
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_LTO", "fat");
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1");
 }
@@ -300,6 +311,7 @@ fn addEvmoneVm(
     intx_dep: *std.Build.Dependency,
     libgcc: ?std.Build.LazyPath,
 ) void {
+    module.omit_frame_pointer = true;
     module.link_libc = true;
     module.link_libcpp = true;
     if (libgcc) |archive| module.addObjectFile(archive);
@@ -314,6 +326,7 @@ fn addEvmoneVm(
         "-Wextra",
         "-Wno-missing-field-initializers",
         "-Wno-unknown-attributes",
+        "-fomit-frame-pointer",
         "-fno-exceptions",
         "-fno-rtti",
         "-DPROJECT_VERSION=\"0.22.0\"",
@@ -321,6 +334,7 @@ fn addEvmoneVm(
     const c_flags = &[_][]const u8{
         "-Wall",
         "-Wextra",
+        "-fomit-frame-pointer",
     };
     const evmone_sources = &[_][]const u8{
         "lib/evmone/advanced_analysis.cpp",
@@ -367,6 +381,7 @@ fn benchModule(
         .root_source_file = b.path(root),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = true,
         .link_libcpp = true,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },

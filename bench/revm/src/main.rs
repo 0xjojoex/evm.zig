@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use revm::context::{BlockEnv, CfgEnv, TxEnv};
 use revm::context_interface::cfg::GasParams;
@@ -22,6 +22,7 @@ use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 const DEFAULT_ITERATIONS: usize = 100_000;
 const DEFAULT_REPEATS: usize = 5;
 const DEFAULT_WARMUPS: usize = 1;
+const DEFAULT_VM_LOOP_WARMUP_MS: usize = 100;
 const DEFAULT_FIXTURES_DIR: &str = "fixtures/kernel";
 const TX_BASE_GAS: u64 = 21_000;
 const MAX_GAS: u64 = 1_000_000_000_000;
@@ -205,6 +206,7 @@ struct VmLoopOptions {
     contract_code_path: Option<String>,
     call_data_hex: Option<String>,
     num_runs: Option<usize>,
+    warmup_ms: usize,
     spec: SpecId,
     host_profile: Option<HostProfile>,
     summary: bool,
@@ -215,6 +217,7 @@ struct ResolvedVmLoopOptions {
     contract_code_path: String,
     call_data_hex: String,
     num_runs: usize,
+    warmup_ms: usize,
     spec: SpecId,
     host_profile: HostProfile,
     summary: bool,
@@ -244,6 +247,7 @@ where
         contract_code_path: None,
         call_data_hex: None,
         num_runs: None,
+        warmup_ms: DEFAULT_VM_LOOP_WARMUP_MS,
         spec: SpecId::OSAKA,
         host_profile: None,
         summary: false,
@@ -272,6 +276,10 @@ where
             )?);
         } else if let Some(value) = arg.strip_prefix("--num-runs=") {
             options.num_runs = Some(parse_nonzero_usize(value)?);
+        } else if arg == "--warmup-ms" {
+            options.warmup_ms = parse_usize(&args.next().ok_or("missing --warmup-ms value")?)?;
+        } else if let Some(value) = arg.strip_prefix("--warmup-ms=") {
+            options.warmup_ms = parse_usize(value)?;
         } else if arg == "--spec" {
             options.spec = parse_spec(&args.next().ok_or("missing --spec value")?)
                 .ok_or("invalid --spec value")?;
@@ -299,15 +307,35 @@ where
     let runtime_code = deploy.runtime_code;
     let runtime_bytecode = Bytecode::new_raw(Bytes::from(runtime_code.clone()));
 
-    let mut timed_host_calls = 0usize;
-    let mut total_logs = 0usize;
-    for _ in 0..resolved.num_runs {
-        let measurement = time_runtime_call_revm(
+    let run_runtime_call = || {
+        time_runtime_call_revm(
             runtime_bytecode.clone(),
             &call_data,
             resolved.spec,
             resolved.host_profile,
-        )?;
+        )
+    };
+
+    let warmup_ms = u64::try_from(resolved.warmup_ms)
+        .map_err(|_| "warmup duration is too large".to_string())?;
+    let warmup_target = Duration::from_millis(warmup_ms);
+    let mut warmup_calls = 0usize;
+    let mut warmup_elapsed = Duration::ZERO;
+    if !warmup_target.is_zero() {
+        let warmup_start = Instant::now();
+        while warmup_elapsed < warmup_target {
+            let _ = run_runtime_call()?;
+            warmup_calls = warmup_calls
+                .checked_add(1)
+                .ok_or("warmup call count overflow")?;
+            warmup_elapsed = warmup_start.elapsed();
+        }
+    }
+
+    let mut timed_host_calls = 0usize;
+    let mut total_logs = 0usize;
+    for _ in 0..resolved.num_runs {
+        let measurement = run_runtime_call()?;
         timed_host_calls += measurement.host_calls;
         total_logs += measurement.logs;
         println!("{:.6}", measurement.elapsed_ns as f64 / 1_000_000.0);
@@ -315,7 +343,7 @@ where
 
     if resolved.summary {
         eprintln!(
-            "fixture={} engine=revm-interpreter host_profile={} spec={} runtime_bytes={} deploy_host_calls={} timed_host_calls={} logs={}",
+            "fixture={} engine=revm-interpreter host_profile={} spec={} runtime_bytes={} deploy_host_calls={} timed_host_calls={} logs={} warmup_ms={} warmup_calls={} warmup_elapsed_ms={:.3}",
             resolved.fixture_dir.as_deref().unwrap_or(""),
             resolved.host_profile.name(),
             spec_name(resolved.spec),
@@ -323,6 +351,9 @@ where
             deploy.host_calls,
             timed_host_calls,
             total_logs,
+            resolved.warmup_ms,
+            warmup_calls,
+            warmup_elapsed.as_secs_f64() * 1_000.0,
         );
     }
 
@@ -341,6 +372,7 @@ Options:
   --contract-code-path <path>  init-code hex file to deploy once
   --call-data <hex>            calldata hex for each runtime call
   --num-runs, -n <n>           number of timed calls
+  --warmup-ms <n>              discarded warmup duration in milliseconds, default 100; 0 disables
   --spec <name>                osaka, prague, cancun, shanghai, latest; default osaka
   --host-profile <null|mock>   fixture host profile label, default null
   --summary                    print fixture metadata to stderr
@@ -379,6 +411,7 @@ fn resolve_vm_loop_options(options: VmLoopOptions) -> Result<ResolvedVmLoopOptio
         contract_code_path: contract_code_path.ok_or("missing contract code path")?,
         call_data_hex: call_data_hex.unwrap_or_default(),
         num_runs: num_runs.unwrap_or(1),
+        warmup_ms: options.warmup_ms,
         spec: options.spec,
         host_profile: host_profile.unwrap_or(HostProfile::Null),
         summary: options.summary,
@@ -426,7 +459,7 @@ fn deploy_runtime_revm(
     host_profile: HostProfile,
 ) -> Result<VmLoopDeploy, String> {
     let bytecode = Bytecode::new_raw(Bytes::from(contract_code.to_vec()));
-    let output = execute_raw_interpreter(bytecode, &[], spec, false)?;
+    let output = execute_raw_interpreter(bytecode, &[], spec, false, true)?;
     reject_null_host_touches(host_profile, output.counters)?;
     Ok(VmLoopDeploy {
         runtime_code: output.output,
@@ -440,7 +473,7 @@ fn time_runtime_call_revm(
     spec: SpecId,
     host_profile: HostProfile,
 ) -> Result<VmLoopMeasurement, String> {
-    let output = execute_raw_interpreter(runtime_bytecode, call_data, spec, true)?;
+    let output = execute_raw_interpreter(runtime_bytecode, call_data, spec, true, false)?;
     reject_null_host_touches(host_profile, output.counters)?;
     Ok(VmLoopMeasurement {
         elapsed_ns: output.elapsed_ns,
@@ -460,6 +493,7 @@ fn execute_raw_interpreter(
     call_data: &[u8],
     spec: SpecId,
     timed: bool,
+    capture_output: bool,
 ) -> Result<RawInterpreterOutput, String> {
     let instruction_table = instruction_table::<EthInterpreter, BenchHost>();
     let gas_table = gas_table_spec(spec);
@@ -486,7 +520,11 @@ fn execute_raw_interpreter(
 
     match action {
         InterpreterAction::Return(result) if result.is_ok() => Ok(RawInterpreterOutput {
-            output: result.output.to_vec(),
+            output: if capture_output {
+                result.output.to_vec()
+            } else {
+                Vec::new()
+            },
             elapsed_ns,
             counters: host.counters(),
         }),
@@ -517,11 +555,17 @@ fn reject_null_host_touches(profile: HostProfile, counters: HostCounters) -> Res
 
 struct BenchHost {
     gas_params: GasParams,
-    storage: HashMap<(Address, StorageKey), StorageValue>,
+    storage: HashMap<(Address, StorageKey), StorageSlot>,
     original_storage: HashMap<(Address, StorageKey), StorageValue>,
     transient_storage: HashMap<(Address, StorageKey), StorageValue>,
     empty_account: AccountInfo,
     counters: Cell<HostCounters>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StorageSlot {
+    value: StorageValue,
+    warm: bool,
 }
 
 impl BenchHost {
@@ -643,26 +687,29 @@ impl Host for BenchHost {
         address: Address,
         key: StorageKey,
         value: StorageValue,
-        _skip_cold_load: bool,
+        skip_cold_load: bool,
     ) -> Result<StateLoad<SStoreResult>, LoadError> {
         self.record_host_call();
         let storage_key = (address, key);
-        let present_value = *self
-            .storage
-            .get(&storage_key)
-            .unwrap_or(&StorageValue::ZERO);
+        if skip_cold_load && !self.storage.get(&storage_key).is_some_and(|slot| slot.warm) {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let slot = self.storage.entry(storage_key).or_default();
+        let is_cold = !slot.warm;
+        slot.warm = true;
+        let present_value = slot.value;
+        slot.value = value;
         let original_value = *self
             .original_storage
             .entry(storage_key)
             .or_insert(present_value);
-        self.storage.insert(storage_key, value);
         Ok(StateLoad::new(
             SStoreResult {
                 original_value,
                 present_value,
                 new_value: value,
             },
-            false,
+            is_cold,
         ))
     }
 
@@ -670,16 +717,17 @@ impl Host for BenchHost {
         &mut self,
         address: Address,
         key: StorageKey,
-        _skip_cold_load: bool,
+        skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, LoadError> {
         self.record_host_call();
-        Ok(StateLoad::new(
-            *self
-                .storage
-                .get(&(address, key))
-                .unwrap_or(&StorageValue::ZERO),
-            false,
-        ))
+        let storage_key = (address, key);
+        if skip_cold_load && !self.storage.get(&storage_key).is_some_and(|slot| slot.warm) {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let slot = self.storage.entry(storage_key).or_default();
+        let is_cold = !slot.warm;
+        slot.warm = true;
+        Ok(StateLoad::new(slot.value, is_cold))
     }
 
     fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue) {
@@ -1028,6 +1076,51 @@ mod tests {
         assert_eq!(StorageValue::ZERO, first.data.original_value);
         assert_eq!(StorageValue::ZERO, second.data.original_value);
         assert_eq!(StorageValue::from(1), second.data.present_value);
+        assert!(first.is_cold);
+        assert!(!second.is_cold);
         assert_eq!(2, host.counters().total);
+    }
+
+    #[test]
+    fn storage_warmth_is_shared_by_loads_and_stores() {
+        let mut host = BenchHost::new(SpecId::OSAKA);
+        let address = contract_address();
+        let key = StorageKey::ZERO;
+
+        let first_load = host
+            .sload_skip_cold_load(address, key, false)
+            .expect("first sload succeeds");
+        let second_load = host
+            .sload_skip_cold_load(address, key, false)
+            .expect("second sload succeeds");
+        let following_store = host
+            .sstore_skip_cold_load(address, key, StorageValue::from(1), false)
+            .expect("sstore succeeds");
+
+        assert!(first_load.is_cold);
+        assert!(!second_load.is_cold);
+        assert!(!following_store.is_cold);
+    }
+
+    #[test]
+    fn skipped_cold_storage_load_does_not_warm_or_mutate_the_slot() {
+        let mut host = BenchHost::new(SpecId::OSAKA);
+        let address = contract_address();
+        let key = StorageKey::ZERO;
+
+        assert_eq!(
+            Err(LoadError::ColdLoadSkipped),
+            host.sload_skip_cold_load(address, key, true)
+        );
+        assert_eq!(
+            Err(LoadError::ColdLoadSkipped),
+            host.sstore_skip_cold_load(address, key, StorageValue::from(1), true)
+        );
+
+        let load = host
+            .sload_skip_cold_load(address, key, false)
+            .expect("non-skipped sload succeeds");
+        assert!(load.is_cold);
+        assert_eq!(StorageValue::ZERO, load.data);
     }
 }

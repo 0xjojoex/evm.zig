@@ -16,3 +16,13 @@ use local `solc 0.8.28 --optimize --bin`; the legacy `snailtracer` row uses
 The `*-loop` micro fixtures are handrolled bytecode. They use compact counted
 loops with repeated opcode bodies so VM-loop reports can separate null-host
 interpreter work from mock-host storage and log callbacks.
+
+The log matrix keeps 1000 loop iterations and 8 log operations per loop while
+varying topics and data independently:
+
+| Fixture | Topics per log | Data per log |
+| --- | ---: | ---: |
+| `log0-loop` | 0 | 0 bytes |
+| `log0-data32-loop` | 0 | 32 bytes |
+| `log4-loop` | 4 | 0 bytes |
+| `log4-data32-loop` | 4 | 32 bytes |

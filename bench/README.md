@@ -20,6 +20,9 @@ From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
 `summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
 The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
 when intentionally testing another shared fork.
+For the fair scoreboard, all compared engines explicitly omit frame pointers:
+Zig/C++ modules use the corresponding compiler setting (and evmone C++ uses
+`-fomit-frame-pointer`), while revm uses `-C force-frame-pointers=no`.
 Use repeated `--engine` filters for narrower runs. `--engine evmz` runs only
 evmz, while `--engine evmone` expands to both evmone baseline and advanced, and
 `--engine revm` expands to `revm-interpreter`.
@@ -52,13 +55,26 @@ cd bench
 zig build micro -Dmicro-filter=micro/arithmetic
 zig build micro -Dmicro-filter=sdiv
 zig build micro -Dmicro-filter=mulmod
+zig build micro -Dmicro-filter=sparse-hash-map
+zig build micro -Dmicro-filter=sparse-hash-map/warm-storage-contains
 ```
 
 Micro benchmarks default to `ReleaseFast` even when the sidecar build default is
 debug. Use `-Dmicro-optimize=ReleaseSafe` when a checked timing run is useful.
-Each reported zBench run currently batches 256 helper calls so tiny arithmetic
-helpers stay above timer noise. Keep tests split by function or feature so
-`-Dmicro-filter` stays precise.
+Arithmetic rows batch 256 helper calls. State-map lookup/hash rows batch 1,024
+operations, while clear rows batch eight independently prefilled maps. Keep tests
+split by function or feature so `-Dmicro-filter` stays precise.
+
+The sparse-map microscope compares the executor's internal `SparseHashMap`
+against `std.AutoHashMap` with the same generated keys and preallocation. Lookup
+rows batch 1,024 operations per reported zBench run; divide `time/run` by 1,024
+for per-operation cost. Clear rows end in `/8x`; divide those by eight. Setup
+hooks refill maps outside the timed window. `warm-storage-contains` models the
+warm-storage `StorageKey -> void` set, `storage-overlay-get` models overlay
+`StorageKey -> u256` lookups, `account-get-ptr` uses the real
+`Address -> Account` map type, and `clear-retaining-capacity` times only
+clearing. Reserve/live counts are part of each row name. These rows diagnose
+executor state layout; they are not VM-core scoreboard rows.
 
 ## VM-loop Runners
 
@@ -87,8 +103,14 @@ zig build vm-loop -- \
 The runner deploys the contract once, then times repeated calls to the returned
 runtime bytecode. Stdout contains one millisecond value per run so external
 harnesses can consume it. Use `--summary` for host callback counts on stderr.
+Before recording runs, every VM-loop engine warms the same prepared execution
+path for at least `--warmup-ms 100` by default; pass `--warmup-ms 0` to disable
+it. Warmup calls are excluded from timed values and host counts. Summaries and
+compare output report `warmup_ms`, `warmup_calls`, and `warmup_elapsed_ms`.
 `--fixture` reads `init.hex`, `calldata.hex`, `num-runs.txt`, and
 `host-profile.txt` from a fixture directory. CLI flags override fixture defaults.
+The [VM-loop fixture guide](fixtures/vm-loop/README.md) documents the LOG0/LOG4
+by zero/32-byte data matrix used to separate topic and data-copy costs.
 The default evmz runner is direct bound-interpreter `execute()` with
 metadata prepared before timing. Use `--engine evmz-executor` only for the
 transaction/executor diagnostic stub; it prepares bytecode once and times
@@ -105,6 +127,12 @@ Host profiles:
   Use this for pure opcode, memory, jump, arithmetic, and keccak benchmarks.
 - `--host-profile mock`: provide deterministic in-memory storage/account/log
   callbacks. Use this for VM + mock-host measurements, not pure VM claims.
+
+Every runtime call receives fresh transaction-scoped mock-host state. Storage
+slots track value and warmth independently, so the first access to a slot is
+cold and later accesses in that call are warm even when the stored value is
+zero. Evmz and evmone expose separate access plus get/set callbacks; revm's
+low-level host combines those operations, so callback counts remain visible.
 
 Precompiles and real state execution should stay in dedicated kernel or
 integration lanes. This layer is intentionally about deployed runtime bytecode
@@ -181,7 +209,8 @@ initialization. It uses the null host and fails if a case touches host callbacks
 The default comparison mode is native release for the Rust sidecar: Zig uses
 `ReleaseFast`, evmone is compiled into the Zig benchmark binary with the same
 optimization mode. Revm uses Cargo `--release` with
-`RUSTFLAGS=-C target-cpu=native`, fat LTO, and one codegen unit.
+`RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=no"`, fat LTO, and one
+codegen unit.
 
 Kernel case bytecode lives in `fixtures/kernel/*.hex`. Both the Zig runner and
 the revm sidecar read the same fixture files, then repeat or cycle non-empty
@@ -242,8 +271,8 @@ zig build bench-report -- --out-dir ../output/bench-report
 ```
 
 The default lane is native release for the Rust sidecar: Zig/C++ runners use
-`ReleaseFast`, and revm uses `cargo --release` with `target-cpu=native`, fat
-LTO, and one codegen unit.
+`ReleaseFast`, and revm uses `cargo --release` with `target-cpu=native`,
+`force-frame-pointers=no`, fat LTO, and one codegen unit.
 Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
 the compact JSON somewhere stable. Use `--baseline <path>` to include

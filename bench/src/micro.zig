@@ -2,6 +2,10 @@ const std = @import("std");
 const evmz = @import("evmz");
 const zbench = @import("zbench");
 
+test {
+    _ = @import("micro_state.zig");
+}
+
 const uint256 = evmz.uint256;
 const scanner = evmz.code.scanner;
 

@@ -59,6 +59,10 @@ pub fn For(comptime ProtocolType: type) type {
             }
             const key, const value = try frame.stack.popN(2);
 
+            try Self.sstoreAfterPop(frame, key, value);
+        }
+
+        pub fn sstoreAfterPop(frame: *CallFrame, key: u256, value: u256) !void {
             const recipient = frame.msg.recipient;
             const host = frame.host;
             const revision = Self.frameRevision(frame);
@@ -92,6 +96,11 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn sload(frame: *CallFrame) !void {
             const key = try frame.stack.pop();
+            const value = (try Self.sloadAfterPop(frame, key)) orelse return;
+            frame.stack.pushUnchecked(value);
+        }
+
+        pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
             const host = frame.host;
             const recipient = frame.msg.recipient;
             const revision = Self.frameRevision(frame);
@@ -99,12 +108,11 @@ pub fn For(comptime ProtocolType: type) type {
             if (Protocol.Storage.sloadColdStorageAccessGas(revision)) |cold_storage_access_gas| {
                 if (try host.accessStorage(recipient, key) == .cold) {
                     frame.trackGas(cold_storage_access_gas);
-                    if (frame.status != .running) return;
+                    if (frame.status != .running) return null;
                 }
             }
 
-            const value = try host.getStorage(recipient, key);
-            frame.stack.pushUnchecked(value);
+            return try host.getStorage(recipient, key);
         }
     };
 }
@@ -240,12 +248,14 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
         .value = 0,
         .input_data = &.{},
     };
-    const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
 
     var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = bytecode,
+        .bytecode = &bytecode,
         .revision = .berlin,
     });
     defer frame.deinit();
@@ -270,12 +280,14 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
         .value = 0,
         .input_data = &.{},
     };
-    const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
 
     var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = bytecode,
+        .bytecode = &bytecode,
         .revision = .amsterdam,
     });
     defer frame.deinit();
@@ -289,7 +301,32 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
-test "cold SLOAD out of gas stops before storage read" {
+test "prepared SSTORE rejects static context before host access" {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    msg.is_static = true;
+    const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+        .revision = .osaka,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = try interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
+}
+
+test "prepared cold SLOAD out of gas stops before storage read" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
@@ -302,12 +339,14 @@ test "cold SLOAD out of gas stops before storage read" {
         .value = 0,
         .input_data = &.{},
     };
-    const bytecode = &.{ 0x60, 0x00, 0x54 };
+    const code = &.{ 0x60, 0x00, 0x54 };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
 
     var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = bytecode,
+        .bytecode = &bytecode,
         .revision = .berlin,
     });
     defer frame.deinit();

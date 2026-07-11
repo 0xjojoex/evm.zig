@@ -6,6 +6,7 @@ const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
+const storage_instruction = @import("../instruction/storage.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -21,10 +22,15 @@ const BinaryOp = enum {
     mul,
     sub,
     div,
+    sdiv,
     mod,
+    smod,
     lt,
     gt,
+    slt,
+    sgt,
     eq,
+    byte,
     bit_and,
     bit_or,
     bit_xor,
@@ -38,6 +44,27 @@ const UnaryOp = enum {
 const ShiftOp = enum {
     left,
     right,
+    arithmetic,
+};
+
+const FrameValue = enum {
+    address,
+    caller,
+    call_value,
+    calldata_size,
+    code_size,
+    return_data_size,
+};
+
+const CopySource = enum {
+    calldata,
+    code,
+    return_data,
+};
+
+const TerminalStatus = enum {
+    success,
+    revert,
 };
 
 pub fn For(comptime ProtocolType: type) type {
@@ -45,6 +72,7 @@ pub fn For(comptime ProtocolType: type) type {
         const Self = @This();
         const Protocol = ProtocolType;
         const Instructions = instruction.For(Protocol);
+        const StorageInstructions = storage_instruction.For(Protocol);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
@@ -95,6 +123,14 @@ pub fn For(comptime ProtocolType: type) type {
         };
 
         const direct_entries = [_]Entry{
+            // LLVM currently emits these table-referenced handlers in reverse
+            // declaration order. Keep this accepted block stable; later
+            // selective additions grow through promoted_entries below.
+            .{ .opcode = .SMOD, .handler = &BinaryHandler(.SMOD, .smod).run },
+            .{ .opcode = .BYTE, .handler = &BinaryHandler(.BYTE, .byte).run },
+            .{ .opcode = .SDIV, .handler = &BinaryHandler(.SDIV, .sdiv).run },
+            .{ .opcode = .SLT, .handler = &BinaryHandler(.SLT, .slt).run },
+            .{ .opcode = .SGT, .handler = &BinaryHandler(.SGT, .sgt).run },
             .{ .opcode = .STOP, .handler = &tailStop },
             .{ .opcode = .ADD, .handler = &BinaryHandler(.ADD, .add).run },
             .{ .opcode = .MUL, .handler = &BinaryHandler(.MUL, .mul).run },
@@ -115,12 +151,36 @@ pub fn For(comptime ProtocolType: type) type {
             .{ .opcode = .MLOAD, .handler = &tailMload },
             .{ .opcode = .MSTORE, .handler = &tailMstore },
             .{ .opcode = .MSTORE8, .handler = &tailMstore8 },
+            .{ .opcode = .SLOAD, .handler = &tailSload },
+            .{ .opcode = .SSTORE, .handler = &tailSstore },
             .{ .opcode = .JUMP, .handler = &tailJump },
             .{ .opcode = .JUMPI, .handler = &tailJumpi },
             .{ .opcode = .PC, .handler = &tailPc },
             .{ .opcode = .MSIZE, .handler = &tailMsize },
             .{ .opcode = .GAS, .handler = &tailGas },
             .{ .opcode = .JUMPDEST, .handler = &tailJumpdest },
+        };
+
+        // Reverse emission makes the final entry the stable edge nearest the
+        // accepted direct block. Prepend later promotions to preserve addresses.
+        const promoted_entries = [_]Entry{
+            .{ .opcode = .LOG4, .handler = &LogHandler(.LOG4, 4).run },
+            .{ .opcode = .LOG3, .handler = &LogHandler(.LOG3, 3).run },
+            .{ .opcode = .LOG2, .handler = &LogHandler(.LOG2, 2).run },
+            .{ .opcode = .LOG1, .handler = &LogHandler(.LOG1, 1).run },
+            .{ .opcode = .LOG0, .handler = &LogHandler(.LOG0, 0).run },
+            .{ .opcode = .REVERT, .handler = &TerminalHandler(.REVERT, .revert).run },
+            .{ .opcode = .RETURN, .handler = &TerminalHandler(.RETURN, .success).run },
+            .{ .opcode = .RETURNDATACOPY, .handler = &CopyHandler(.RETURNDATACOPY, .return_data).run },
+            .{ .opcode = .CODECOPY, .handler = &CopyHandler(.CODECOPY, .code).run },
+            .{ .opcode = .CALLDATACOPY, .handler = &CopyHandler(.CALLDATACOPY, .calldata).run },
+            .{ .opcode = .RETURNDATASIZE, .handler = &FrameValueHandler(.RETURNDATASIZE, .return_data_size).run },
+            .{ .opcode = .ADDRESS, .handler = &FrameValueHandler(.ADDRESS, .address).run },
+            .{ .opcode = .CALLER, .handler = &FrameValueHandler(.CALLER, .caller).run },
+            .{ .opcode = .CALLVALUE, .handler = &FrameValueHandler(.CALLVALUE, .call_value).run },
+            .{ .opcode = .CALLDATASIZE, .handler = &FrameValueHandler(.CALLDATASIZE, .calldata_size).run },
+            .{ .opcode = .CODESIZE, .handler = &FrameValueHandler(.CODESIZE, .code_size).run },
+            .{ .opcode = .SAR, .handler = &ShiftHandler(.SAR, .arithmetic).run },
         };
 
         const runtime_entries = [_]Entry{
@@ -135,6 +195,11 @@ pub fn For(comptime ProtocolType: type) type {
         const table: [256]*const Handler = blk: {
             @setEvalBranchQuota(20_000);
             var handlers: [256]*const Handler = @splat(&tailCold);
+            for (promoted_entries) |entry| {
+                if (tailFastPathSupported(entry.opcode)) {
+                    handlers[@intFromEnum(entry.opcode)] = entry.handler;
+                }
+            }
             for (direct_entries) |entry| {
                 if (tailFastPathAlways(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
@@ -276,7 +341,57 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         noinline fn executeColdOpcode(opcode_byte: u8, frame: *CallFrame) anyerror!void {
-            return Instructions.execute(opcode_byte, frame);
+            // Common host-bound opcodes already paid the tail spill. Resolve their
+            // protocol entry directly instead of crossing the generic cold switch again.
+            return switch (opcode_byte) {
+                @intFromEnum(Opcode.LOG0) => executeResolvedCold(.LOG0, frame),
+                @intFromEnum(Opcode.LOG1) => executeResolvedCold(.LOG1, frame),
+                @intFromEnum(Opcode.LOG2) => executeResolvedCold(.LOG2, frame),
+                @intFromEnum(Opcode.LOG3) => executeResolvedCold(.LOG3, frame),
+                @intFromEnum(Opcode.LOG4) => executeResolvedCold(.LOG4, frame),
+                else => Instructions.execute(opcode_byte, frame),
+            };
+        }
+
+        inline fn executeResolvedCold(comptime opcode: Opcode, frame: *CallFrame) anyerror!void {
+            return Instructions.executeDispatchEntryForByte(@intFromEnum(opcode), frame);
+        }
+
+        fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            const next_gas = charge(.SLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+            const key_slot = sp - 1;
+            ctx.frame.gas_left = next_gas;
+            const value = StorageInstructions.sloadAfterPop(ctx.frame, key_slot[0]) catch |err| {
+                ctx.spill(ip, key_slot, ctx.frame.gas_left);
+                ctx.err = err;
+                return .thrown;
+            };
+            const loaded = value orelse return ctx.finish(ip, key_slot, ctx.frame.gas_left, .done);
+            key_slot[0] = loaded;
+            return tailNext(ip, sp, ctx.frame.gas_left, ctx);
+        }
+
+        fn tailSstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            // Canonical SSTORE has no static-gas charge; all accounting is
+            // performed by sstoreAfterPop after the static/stack checks.
+            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .invalid);
+
+            const next_sp = sp - 2;
+            const key = (sp - 1)[0];
+            const value = next_sp[0];
+            ctx.frame.gas_left = gas;
+            StorageInstructions.sstoreAfterPop(ctx.frame, key, value) catch |err| {
+                ctx.spill(ip, next_sp, ctx.frame.gas_left);
+                ctx.err = err;
+                return .thrown;
+            };
+            if (ctx.frame.status != .running) {
+                return ctx.finish(ip, next_sp, ctx.frame.gas_left, .done);
+            }
+            return tailNext(ip, next_sp, ctx.frame.gas_left, ctx);
         }
 
         fn BinaryHandler(comptime opcode: Opcode, comptime op: BinaryOp) type {
@@ -292,15 +407,151 @@ pub fn For(comptime ProtocolType: type) type {
                         .mul => a *% b,
                         .sub => a -% b,
                         .div => uint256.div(a, b),
+                        .sdiv => uint256.sdiv(a, b),
                         .mod => uint256.mod(a, b),
+                        .smod => uint256.smod(a, b),
                         .lt => @intFromBool(a < b),
                         .gt => @intFromBool(a > b),
+                        .slt => @intFromBool(@as(i256, @bitCast(a)) < @as(i256, @bitCast(b))),
+                        .sgt => @intFromBool(@as(i256, @bitCast(a)) > @as(i256, @bitCast(b))),
                         .eq => @intFromBool(a == b),
+                        .byte => if (a >= 32) 0 else (b >> ((31 - @as(u8, @intCast(a))) * 8)) & 0xff,
                         .bit_and => a & b,
                         .bit_or => a | b,
                         .bit_xor => a ^ b,
                     };
                     return tailNext(ip, nsp, next_gas, ctx);
+                }
+            };
+        }
+
+        fn FrameValueHandler(comptime opcode: Opcode, comptime value: FrameValue) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+                    sp[0] = switch (value) {
+                        .address => evmz.address.toU256(ctx.frame.msg.recipient),
+                        .caller => evmz.address.toU256(ctx.frame.msg.sender),
+                        .call_value => ctx.frame.msg.value,
+                        .calldata_size => @intCast(ctx.frame.msg.input_data.len),
+                        .code_size => @intCast(ctx.frame.code.len),
+                        .return_data_size => @intCast(ctx.frame.return_data.len),
+                    };
+                    return tailNext(ip, sp + 1, next_gas, ctx);
+                }
+            };
+        }
+
+        fn CopyHandler(comptime opcode: Opcode, comptime source_kind: CopySource) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+                    const nsp = sp - 3;
+                    const dest_offset_word = (sp - 1)[0];
+                    const source_offset_word = (sp - 2)[0];
+                    const size_word = nsp[0];
+                    const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+                    const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+                    const memory_gas = expandMemory(dest_offset, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+                    const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .out_of_gas;
+                    const final_gas = chargeGas(ip, nsp, memory_gas, ctx, copy_gas) orelse return .out_of_gas;
+
+                    switch (source_kind) {
+                        .calldata => ctx.frame.memory.writePaddedBytes(
+                            dest_offset,
+                            size,
+                            sourceFromOffset(ctx.frame.msg.input_data, source_offset_word),
+                        ),
+                        .code => ctx.frame.memory.writePaddedBytes(
+                            dest_offset,
+                            size,
+                            sourceFromOffset(ctx.frame.code, source_offset_word),
+                        ),
+                        .return_data => {
+                            const source_offset = std.math.cast(usize, source_offset_word) orelse
+                                return fail(ctx, ip, nsp, final_gas, .invalid);
+                            if (source_offset > ctx.frame.return_data.len or size > ctx.frame.return_data.len - source_offset) {
+                                return fail(ctx, ip, nsp, final_gas, .invalid);
+                            }
+                            ctx.frame.memory.writeBytes(
+                                dest_offset,
+                                ctx.frame.return_data[source_offset .. source_offset + size],
+                            );
+                        },
+                    }
+                    return tailNext(ip, nsp, final_gas, ctx);
+                }
+            };
+        }
+
+        fn TerminalHandler(comptime opcode: Opcode, comptime terminal_status: TerminalStatus) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .invalid);
+
+                    const nsp = sp - 2;
+                    const offset_word = (sp - 1)[0];
+                    const size_word = nsp[0];
+                    const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .out_of_gas;
+                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, nsp, gas, ctx) orelse return .out_of_gas;
+                    const final_gas = expandMemory(offset, size, ip, nsp, gas, ctx) orelse return .out_of_gas;
+                    const output = ctx.frame.memory.readBytes(offset, size);
+                    ctx.frame.replaceOutputData(output) catch |err| {
+                        ctx.spill(ip, nsp, final_gas);
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    ctx.frame.status = switch (terminal_status) {
+                        .success => .success,
+                        .revert => .revert,
+                    };
+                    return ctx.finish(ip, nsp, final_gas, .done);
+                }
+            };
+        }
+
+        fn LogHandler(comptime opcode: Opcode, comptime topic_count: usize) type {
+            if (topic_count > 4) @compileError("LOG supports at most four topics");
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, 2 + topic_count)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+                    // Canonical logging pops offset/size before dynamic gas, then
+                    // topics only after memory and data gas have succeeded.
+                    const args_sp = sp - 2;
+                    const offset_word = (sp - 1)[0];
+                    const size_word = args_sp[0];
+                    const size = wordToUsizeOrOog(size_word, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
+                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
+                    const memory_gas = expandMemory(offset, size, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
+                    const data_gas = logDataGas(size, ip, args_sp, memory_gas, ctx) orelse return .out_of_gas;
+                    const final_gas = chargeGas(ip, args_sp, memory_gas, ctx, data_gas) orelse return .out_of_gas;
+
+                    var topics: [topic_count]u256 = undefined;
+                    inline for (0..topic_count) |index| {
+                        topics[index] = (args_sp - 1 - index)[0];
+                    }
+                    const nsp = args_sp - topic_count;
+                    ctx.frame.gas_left = final_gas;
+                    ctx.frame.host.emitLog(.{
+                        .address = ctx.frame.msg.recipient,
+                        .topics = topics[0..],
+                        .data = ctx.frame.memory.readBytes(offset, size),
+                    }) catch |err| {
+                        ctx.spill(ip, nsp, ctx.frame.gas_left);
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    return tailNext(ip, nsp, ctx.frame.gas_left, ctx);
                 }
             };
         }
@@ -388,18 +639,22 @@ pub fn For(comptime ProtocolType: type) type {
                     const shift = (sp - 1)[0];
                     const value = (sp - 2)[0];
                     const nsp = sp - 1;
-                    if (shift > std.math.maxInt(u8)) {
-                        (nsp - 1)[0] = 0;
-                    } else {
-                        const amount: u8 = @intCast(shift);
-                        (nsp - 1)[0] = switch (op) {
-                            .left => value << amount,
-                            .right => value >> amount,
-                        };
-                    }
+                    (nsp - 1)[0] = switch (op) {
+                        .left => if (shift > std.math.maxInt(u8)) 0 else value << @as(u8, @intCast(shift)),
+                        .right => if (shift > std.math.maxInt(u8)) 0 else value >> @as(u8, @intCast(shift)),
+                        .arithmetic => arithmeticShiftRight(value, shift),
+                    };
                     return tailNext(ip, nsp, next_gas, ctx);
                 }
             };
+        }
+
+        inline fn arithmeticShiftRight(value: u256, shift: u256) u256 {
+            const signed: i256 = @bitCast(value);
+            if (shift >= std.math.maxInt(u8)) {
+                return if (signed < 0) std.math.maxInt(u256) else 0;
+            }
+            return @bitCast(signed >> @as(u8, @intCast(shift)));
         }
 
         fn tailJump(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -567,6 +822,39 @@ pub fn For(comptime ProtocolType: type) type {
                 _ = fail(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
+        }
+
+        inline fn copyWordGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
+            const padded = std.math.add(usize, size, 31) catch {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            };
+            const words = padded / 32;
+            const gas_usize = std.math.mul(usize, 3, words) catch {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            };
+            return std.math.cast(i64, gas_usize) orelse {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            };
+        }
+
+        inline fn logDataGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
+            const gas_usize = std.math.mul(usize, 8, size) catch {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            };
+            return std.math.cast(i64, gas_usize) orelse {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            };
+        }
+
+        inline fn sourceFromOffset(source: []const u8, offset_word: u256) []const u8 {
+            const offset = std.math.cast(usize, offset_word) orelse return &.{};
+            if (offset >= source.len) return &.{};
+            return source[offset..];
         }
     };
 }

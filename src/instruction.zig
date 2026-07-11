@@ -34,6 +34,10 @@ pub const system = @import("./instruction/system.zig");
 pub const memory = @import("./instruction/memory.zig");
 pub const logic = @import("./instruction/logic.zig");
 
+test {
+    _ = @import("./instruction/tail_dispatch_test.zig");
+}
+
 pub const Instruction = struct {
     opcode: Opcode,
     static_gas: u16,
@@ -461,12 +465,14 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 .{ .since = CustomRevision.beta, .gas = 4 },
             }) };
             if (opcode == .PUSH1) return .{ .constant = 4 };
+            if (opcode == .SSTORE) return .{ .constant = 17 };
             return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
         }
 
         pub fn staticGasForRevision(revision_value: CustomRevision, comptime opcode: Opcode) i64 {
             if (opcode == .ADD and revision_value == .beta) return 4;
             if (opcode == .PUSH1) return 4;
+            if (opcode == .SSTORE) return 17;
             return @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas);
         }
 
@@ -688,16 +694,61 @@ test "interpreter executes with non-Ethereum revision protocol" {
     try std.testing.expectEqual(@as(i64, 88), result.gas_left);
     try std.testing.expectEqual(@as(u256, 5), frame.frame.stack.pop());
 
+    const storage_code = [_]u8{
+        @intFromEnum(Opcode.PUSH1),  42,
+        @intFromEnum(Opcode.PUSH1),  0,
+        @intFromEnum(Opcode.SSTORE), @intFromEnum(Opcode.STOP),
+    };
+    var storage_msg = evmz.t.defaultMessage();
+    storage_msg.gas = 100;
+
+    var raw_storage_state = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer raw_storage_state.deinit();
+    var raw_storage_host = raw_storage_state.host();
+    var raw_storage_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
+        .host = &raw_storage_host,
+        .msg = &storage_msg,
+        .code = &storage_code,
+        .revision = .beta,
+    });
+    defer raw_storage_frame.deinit();
+    var raw_storage_interpreter = raw_storage_frame.interpreter();
+    const raw_storage_result = try raw_storage_interpreter.execute();
+
+    var storage_bytecode = try evmz.Bytecode.init(std.testing.allocator, &storage_code);
+    defer storage_bytecode.deinit(std.testing.allocator);
+    var prepared_storage_state = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer prepared_storage_state.deinit();
+    var prepared_storage_host = prepared_storage_state.host();
+    var prepared_storage_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
+        .host = &prepared_storage_host,
+        .msg = &storage_msg,
+        .bytecode = &storage_bytecode,
+        .revision = .beta,
+    });
+    defer prepared_storage_frame.deinit();
+    var prepared_storage_interpreter = prepared_storage_frame.interpreter();
+    const prepared_storage_result = try prepared_storage_interpreter.execute();
+
+    try std.testing.expectEqual(Interpreter.Status.success, raw_storage_result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, prepared_storage_result.status);
+    try std.testing.expectEqual(@as(i64, 92), raw_storage_result.gas_left);
+    try std.testing.expectEqual(raw_storage_result.gas_left, prepared_storage_result.gas_left);
+    try std.testing.expectEqual(@as(u256, 42), raw_storage_state.storageValue(0));
+    try std.testing.expectEqual(@as(u256, 42), prepared_storage_state.storageValue(0));
+
     const log_code = [_]u8{
         @intFromEnum(Opcode.PUSH1), 0,
         @intFromEnum(Opcode.PUSH1), 0,
         @intFromEnum(Opcode.PUSH1), 0,
         @intFromEnum(Opcode.LOG1),
     };
+    var log_bytecode = try evmz.Bytecode.init(std.testing.allocator, &log_code);
+    defer log_bytecode.deinit(std.testing.allocator);
     var log_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &log_code,
+        .bytecode = &log_bytecode,
         .revision = .beta,
     });
     defer log_frame.deinit();

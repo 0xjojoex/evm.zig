@@ -1,6 +1,12 @@
 const std = @import("std");
+const cli = @import("cli.zig");
+
+const stripPrefix = cli.stripPrefix;
+const parseNonZeroUsize = cli.parseNonZeroUsize;
+const parseUsize = cli.parseUsize;
 
 const max_command_output = 128 * 1024 * 1024;
+const default_warmup_ms = 100;
 
 const default_fixtures = [_][]const u8{
     "fixtures/vm-loop/arithmetic-loop",
@@ -10,6 +16,9 @@ const default_fixtures = [_][]const u8{
     "fixtures/vm-loop/storage-sload-loop",
     "fixtures/vm-loop/storage-sstore-loop",
     "fixtures/vm-loop/log0-loop",
+    "fixtures/vm-loop/log0-data32-loop",
+    "fixtures/vm-loop/log4-loop",
+    "fixtures/vm-loop/log4-data32-loop",
     "fixtures/vm-loop/erc20-mint",
     "fixtures/vm-loop/erc20-transfer",
     "fixtures/vm-loop/erc20-approval-transfer",
@@ -39,6 +48,7 @@ const Options = struct {
     engines: std.ArrayList(Engine) = .empty,
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
+    warmup_ms: usize = default_warmup_ms,
     spec: ?[]const u8 = "osaka",
     out_dir: ?[]const u8 = null,
     json: bool = false,
@@ -62,6 +72,9 @@ const Row = struct {
     timed_host_calls: ?u64,
     timed_host_calls_per_run: ?f64,
     logs: ?u64,
+    warmup_ms: ?u64,
+    warmup_calls: ?u64,
+    warmup_elapsed_ms: ?f64,
     samples_ms: []const f64,
 };
 
@@ -162,6 +175,11 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.num_runs = try parseNonZeroUsize(value);
         } else if (stripPrefix(arg, "--num-runs=")) |value| {
             options.num_runs = try parseNonZeroUsize(value);
+        } else if (std.mem.eql(u8, arg, "--warmup-ms")) {
+            const value = args.next() orelse return error.MissingWarmupMs;
+            options.warmup_ms = try parseUsize(value);
+        } else if (stripPrefix(arg, "--warmup-ms=")) |value| {
+            options.warmup_ms = try parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--spec")) {
             const value = args.next() orelse return error.MissingSpec;
             options.spec = try allocator.dupe(u8, value);
@@ -199,6 +217,7 @@ fn printUsage() void {
         \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, revm, evmone-baseline, evmone-advanced, revm-interpreter
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
+        \\  --warmup-ms <n>        discarded warmup duration for every engine, default 100; 0 disables
         \\  --spec <name>          fork spec forwarded to each engine, default osaka
         \\  --out-dir <dir>        raw output directory, default zig-out/compare/<timestamp>
         \\  --json                 print JSON summary instead of markdown table
@@ -288,7 +307,7 @@ fn engineCommand(
         try argv.append(allocator, "evmz");
     }
 
-    try appendFixtureArgs(allocator, &argv, fixture, options.num_runs, options.spec);
+    try appendFixtureArgs(allocator, &argv, fixture, options.num_runs, options.warmup_ms, options.spec);
 
     if (engine == .evmone_baseline) {
         try argv.append(allocator, "--mode");
@@ -303,6 +322,7 @@ fn appendFixtureArgs(
     argv: *std.ArrayList([]const u8),
     fixture: []const u8,
     num_runs: ?usize,
+    warmup_ms: usize,
     spec: ?[]const u8,
 ) !void {
     try argv.append(allocator, "--fixture");
@@ -316,6 +336,8 @@ fn appendFixtureArgs(
         try argv.append(allocator, "--num-runs");
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{runs}));
     }
+    try argv.append(allocator, "--warmup-ms");
+    try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{warmup_ms}));
 }
 
 fn runCommand(
@@ -421,6 +443,9 @@ fn parseMeasurement(
         .timed_host_calls = timed_host_calls,
         .timed_host_calls_per_run = hostCallsPerRun(timed_host_calls, times_ms.len),
         .logs = try optionalU64(keyValue(summary, "logs")),
+        .warmup_ms = try optionalU64(keyValue(summary, "warmup_ms")),
+        .warmup_calls = try optionalU64(keyValue(summary, "warmup_calls")),
+        .warmup_elapsed_ms = try optionalF64(keyValue(summary, "warmup_elapsed_ms")),
         .samples_ms = times_ms,
     };
 }
@@ -463,6 +488,14 @@ fn optionalU64(value: ?[]const u8) !?u64 {
     const text = value orelse return null;
     if (text.len == 0) return null;
     return try std.fmt.parseInt(u64, text, 10);
+}
+
+fn optionalF64(value: ?[]const u8) !?f64 {
+    const text = value orelse return null;
+    if (text.len == 0) return null;
+    const parsed = try std.fmt.parseFloat(f64, text);
+    if (!std.math.isFinite(parsed)) return error.NonFiniteValue;
+    return parsed;
 }
 
 fn medianMs(allocator: std.mem.Allocator, values: []const f64) !f64 {
@@ -515,7 +548,7 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
     defer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,timed_host_calls_per_run,logs\n");
+    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,timed_host_calls_per_run,logs,warmup_ms,warmup_calls,warmup_elapsed_ms\n");
     for (rows) |row| {
         try writer.print(
             "{s},{s},{s},{s},{d},{d:.6},{d:.6},{d:.6},{d:.6},{s},{s},",
@@ -542,6 +575,12 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
         try writeOptionalF64(writer, row.timed_host_calls_per_run);
         try writer.writeByte(',');
         try writeOptionalU64(writer, row.logs);
+        try writer.writeByte(',');
+        try writeOptionalU64(writer, row.warmup_ms);
+        try writer.writeByte(',');
+        try writeOptionalU64(writer, row.warmup_calls);
+        try writer.writeByte(',');
+        try writeOptionalF64(writer, row.warmup_elapsed_ms);
         try writer.writeByte('\n');
     }
 
@@ -572,7 +611,7 @@ fn renderMarkdown(allocator: std.mem.Allocator, rows: []const Row, out_dir: []co
     try writer.writeAll(
         \\# VM-core comparison
         \\
-        \\Scope: deployed runtime call through each engine's interpreter-level path. Fixture loading, init-code deployment, bytecode/cache preparation, frame/interpreter setup, and per-run transaction setup live outside the timed window where the runner has that shape. Rows use evmz direct `Interpreter.execute`, standalone evmone baseline/advanced analyzed-code execution, and revm analyzed `Bytecode` raw interpreter path.
+        \\Scope: deployed runtime call through each engine's interpreter-level path. Fixture loading, init-code deployment, bytecode/cache preparation, frame/interpreter setup, and per-run transaction setup live outside the timed window where the runner has that shape. Before recording samples, each runner repeats that same per-run path for the requested duration with fresh/reset host state; warmup samples and counters are discarded. Rows use evmz direct `Interpreter.execute`, standalone evmone baseline/advanced analyzed-code execution, and revm analyzed `Bytecode` raw interpreter path.
         \\
     );
     try writer.print("\nArtifacts: `{s}`\n\n", .{out_dir});
@@ -644,22 +683,11 @@ fn baseName(path: []const u8) []const u8 {
     return std.fs.path.basename(path);
 }
 
-fn stripPrefix(value: []const u8, prefix: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, value, prefix)) return null;
-    return value[prefix.len..];
-}
-
 fn parseProfile(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     if (!std.mem.eql(u8, value, "native") and !std.mem.eql(u8, value, "zkvm")) {
         return error.UnsupportedProfile;
     }
     return allocator.dupe(u8, value);
-}
-
-fn parseNonZeroUsize(value: []const u8) !usize {
-    const parsed = try std.fmt.parseInt(usize, value, 10);
-    if (parsed == 0) return error.ValueMustBeNonZero;
-    return parsed;
 }
 
 test "parse timing rows ignores non-floats" {
@@ -669,9 +697,12 @@ test "parse timing rows ignores non-floats" {
 }
 
 test "summary key values are parsed from first summary line" {
-    const line = firstSummaryLine("debug\nfixture=x engine=evmz scope=interpreter-prepared-execute runtime_bytes=3\n");
+    const line = firstSummaryLine("debug\nfixture=x engine=evmz scope=interpreter-prepared-execute runtime_bytes=3 warmup_ms=100 warmup_calls=42 warmup_elapsed_ms=100.125\n");
     try std.testing.expectEqualStrings("evmz", keyValue(line, "engine").?);
     try std.testing.expectEqualStrings("3", keyValue(line, "runtime_bytes").?);
+    try std.testing.expectEqual(@as(?u64, 100), try optionalU64(keyValue(line, "warmup_ms")));
+    try std.testing.expectEqual(@as(?u64, 42), try optionalU64(keyValue(line, "warmup_calls")));
+    try std.testing.expectApproxEqAbs(@as(f64, 100.125), (try optionalF64(keyValue(line, "warmup_elapsed_ms"))).?, 0.000_001);
     try std.testing.expect(keyValue(line, "missing") == null);
 }
 

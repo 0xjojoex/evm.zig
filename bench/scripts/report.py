@@ -29,6 +29,9 @@ VM_LOOP_FIXTURES = (
     "fixtures/vm-loop/storage-sload-loop",
     "fixtures/vm-loop/storage-sstore-loop",
     "fixtures/vm-loop/log0-loop",
+    "fixtures/vm-loop/log0-data32-loop",
+    "fixtures/vm-loop/log4-loop",
+    "fixtures/vm-loop/log4-data32-loop",
     "fixtures/vm-loop/erc20-mint",
     "fixtures/vm-loop/erc20-transfer",
     "fixtures/vm-loop/erc20-approval-transfer",
@@ -111,7 +114,7 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "cargo": tool_major_version(command_version(["cargo", "--version"])),
         "solc": solc_version(),
         "lane": "rust-native-release",
-        "rustflags": "-C target-cpu=native",
+        "rustflags": "-C target-cpu=native -C force-frame-pointers=no",
         "rust_lto": "fat",
     }
 
@@ -169,6 +172,9 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
                         len(times),
                     ),
                     "logs": logs,
+                    "warmup_ms": int_value(summary.get("warmup_ms")),
+                    "warmup_calls": int_value(summary.get("warmup_calls")),
+                    "warmup_elapsed_ms": float_value(summary.get("warmup_elapsed_ms")),
                     "median_ms": median(times),
                     "min_ms": min(times) if times else None,
                     "max_ms": max(times) if times else None,
@@ -189,6 +195,9 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
             "timed_host_calls",
             "timed_host_calls_per_run",
             "logs",
+            "warmup_ms",
+            "warmup_calls",
+            "warmup_elapsed_ms",
             "median_ms",
             "min_ms",
             "max_ms",
@@ -391,7 +400,7 @@ def command_env(argv: list[str]) -> dict[str, str] | None:
     if "revm-vm-loop" not in argv and "revm-kernel" not in argv:
         return None
     env = os.environ.copy()
-    env["RUSTFLAGS"] = "-C target-cpu=native"
+    env["RUSTFLAGS"] = "-C target-cpu=native -C force-frame-pointers=no"
     env["CARGO_PROFILE_RELEASE_LTO"] = "fat"
     env["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
     return env
@@ -551,8 +560,8 @@ def render_report(
         lines.append(f"- baseline: `{display_path(baseline_path)}`")
     lines.append("")
     lines.append(
-        "Portable release means Zig `ReleaseFast` for Zig/C++ runners and revm `cargo --release`. "
-        "No native CPU flags are enabled by this reporter."
+        "Native release means Zig `ReleaseFast` for Zig/C++ runners and revm `cargo --release`; "
+        "all compared engines explicitly omit frame pointers, and revm uses `target-cpu=native`."
     )
     lines.append("")
 

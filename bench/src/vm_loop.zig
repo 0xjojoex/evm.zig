@@ -18,6 +18,7 @@ const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;
 
 const max_contract_code_size = 256 * 1024 * 1024;
+const default_warmup_ms = 100;
 const proxy_target_address = evmz.addr(0x3000000000000000000000000000000000000003);
 
 const Options = struct {
@@ -26,6 +27,7 @@ const Options = struct {
     proxy_target_code_path: ?[]const u8 = null,
     call_data_hex: ?[]const u8 = null,
     num_runs: ?usize = null,
+    warmup_ms: usize = default_warmup_ms,
     gas_limit: ?u64 = null,
     revision: evmz.eth.Revision = .latest,
     engine: Engine = .evmz,
@@ -40,6 +42,7 @@ const ResolvedOptions = struct {
     proxy_target_code_path: ?[]const u8 = null,
     call_data_hex: []const u8,
     num_runs: usize,
+    warmup_ms: usize,
     gas_limit: u64,
     revision: evmz.eth.Revision,
     engine: Engine,
@@ -67,6 +70,16 @@ const ExecutorResources = enum {
     bounded_overlay_small,
     bounded_small,
     bounded,
+};
+
+const WarmupStats = struct {
+    calls: usize = 0,
+    elapsed_ns: u64 = 0,
+};
+
+const RuntimeMeasurement = struct {
+    elapsed_ns: u64,
+    counters: HostCounters,
 };
 
 const ExecutorRuntimeRunner = struct {
@@ -193,6 +206,11 @@ pub fn main(init: std.process.Init) !void {
             options.num_runs = try common.parseNonZeroUsize(value);
         } else if (common.stripPrefix(arg, "--num-runs=")) |value| {
             options.num_runs = try common.parseNonZeroUsize(value);
+        } else if (std.mem.eql(u8, arg, "--warmup-ms")) {
+            const value = args.next() orelse return error.MissingWarmupMs;
+            options.warmup_ms = try common.parseUsize(value);
+        } else if (common.stripPrefix(arg, "--warmup-ms=")) |value| {
+            options.warmup_ms = try common.parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--gas-limit")) {
             const value = args.next() orelse return error.MissingGasLimit;
             options.gas_limit = try parseNonZeroU64(value);
@@ -269,28 +287,34 @@ pub fn main(init: std.process.Init) !void {
         if (executor_runner) |*runner| runner.deinit();
     }
 
+    const warmup = try warmRuntimeCalls(
+        allocator,
+        if (executor_runner) |*runner| runner else null,
+        runtime_code,
+        call_data,
+        resolved,
+    );
+
     var timed_counters = HostCounters{};
     var run_index: usize = 0;
     while (run_index < resolved.num_runs) : (run_index += 1) {
-        var run_host = CountingHost.init(allocator, resolved.host_profile);
-        defer run_host.deinit();
-        var run_host_iface = run_host.host();
+        const measurement = try measureRuntimeCall(
+            allocator,
+            if (executor_runner) |*runner| runner else null,
+            runtime_code,
+            call_data,
+            resolved,
+        );
+        timed_counters.add(measurement.counters);
 
-        const elapsed_ns = if (executor_runner) |*runner|
-            try runner.timeRuntimeCall(call_data, resolved.gas_limit)
-        else
-            try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, resolved.revision, resolved.gas_limit);
-        try common.rejectNullHostTouches(resolved.host_profile, run_host.counters);
-        timed_counters.add(run_host.counters);
-
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+        const elapsed_ms = @as(f64, @floatFromInt(measurement.elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
         try stdout.print("{d:.6}\n", .{elapsed_ms});
     }
     try stdout.flush();
 
     if (resolved.summary) {
         std.debug.print(
-            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} support={s}..{s} gas_limit={d} runtime_bytes={d} proxy_target_runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d}\n",
+            "fixture={s} engine={s} scope={s} host_profile={s} spec={s} support={s}..{s} gas_limit={d} runtime_bytes={d} proxy_target_runtime_bytes={d} deploy_host_calls={d} timed_host_calls={d} logs={d} warmup_ms={d} warmup_calls={d} warmup_elapsed_ms={d:.3}\n",
             .{
                 resolved.fixture_dir orelse "",
                 engineName(resolved.engine),
@@ -305,6 +329,9 @@ pub fn main(init: std.process.Init) !void {
                 deploy_host.counters.total(),
                 timed_counters.total(),
                 timed_counters.log,
+                resolved.warmup_ms,
+                warmup.calls,
+                @as(f64, @floatFromInt(warmup.elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms)),
             },
         );
         timed_counters.print("timed");
@@ -323,6 +350,7 @@ fn printUsage() void {
         \\  --proxy-target-code-path <path>  optional executor-only proxy target init-code
         \\  --call-data <hex>             calldata hex for each runtime call
         \\  --num-runs, -n <n>            number of timed calls
+        \\  --warmup-ms <n>               discarded warmup duration in milliseconds, default 100; 0 disables
         \\  --gas-limit <n>               finite gas for each timed runtime call, default maxInt(i64)
         \\  --spec <name>                 fork spec, default latest; must be inside compiled support range
         \\  --engine <name>               evmz, evmz-executor
@@ -386,6 +414,7 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
         .proxy_target_code_path = options.proxy_target_code_path,
         .call_data_hex = call_data_hex orelse "",
         .num_runs = num_runs orelse 1,
+        .warmup_ms = options.warmup_ms,
         .gas_limit = gas_limit orelse defaultGasLimit(),
         .revision = options.revision,
         .engine = options.engine,
@@ -714,6 +743,54 @@ fn timeRuntimeCall(
     return timeRuntimeCallForProtocol(BenchProtocol, allocator, host, runtime_code, call_data, revision, gas_limit);
 }
 
+fn warmRuntimeCalls(
+    allocator: std.mem.Allocator,
+    executor_runner: ?*ExecutorRuntimeRunner,
+    runtime_code: []const u8,
+    call_data: []const u8,
+    options: ResolvedOptions,
+) !WarmupStats {
+    if (options.warmup_ms == 0) return .{};
+
+    const warmup_ms = std.math.cast(u64, options.warmup_ms) orelse return error.WarmupDurationOverflow;
+    const target_ns = std.math.mul(u64, warmup_ms, std.time.ns_per_ms) catch return error.WarmupDurationOverflow;
+    const start_ns = try common.monotonicNowNs();
+    var stats = WarmupStats{};
+    while (stats.elapsed_ns < target_ns) {
+        _ = try measureRuntimeCall(allocator, executor_runner, runtime_code, call_data, options);
+        stats.calls = std.math.add(usize, stats.calls, 1) catch return error.WarmupCallCountOverflow;
+        stats.elapsed_ns = (try common.monotonicNowNs()) - start_ns;
+    }
+    return stats;
+}
+
+fn measureRuntimeCall(
+    allocator: std.mem.Allocator,
+    executor_runner: ?*ExecutorRuntimeRunner,
+    runtime_code: []const u8,
+    call_data: []const u8,
+    options: ResolvedOptions,
+) !RuntimeMeasurement {
+    if (executor_runner) |runner| {
+        return .{
+            .elapsed_ns = try runner.timeRuntimeCall(call_data, options.gas_limit),
+            .counters = .{},
+        };
+    }
+
+    var run_host = CountingHost.init(allocator, options.host_profile);
+    defer run_host.deinit();
+    var run_host_iface = run_host.host();
+
+    const elapsed_ns = try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, options.revision, options.gas_limit);
+    try common.rejectNullHostTouches(options.host_profile, run_host.counters);
+
+    return .{
+        .elapsed_ns = elapsed_ns,
+        .counters = run_host.counters,
+    };
+}
+
 fn timeRuntimeCallForProtocol(
     comptime Protocol: type,
     allocator: std.mem.Allocator,
@@ -787,6 +864,7 @@ test "engine scope names make benchmark boundary explicit" {
         .contract_code_path = "x",
         .call_data_hex = "",
         .num_runs = 1,
+        .warmup_ms = 0,
         .gas_limit = defaultGasLimit(),
         .revision = .latest,
         .engine = .evmz,
@@ -799,6 +877,7 @@ test "engine scope names make benchmark boundary explicit" {
         .contract_code_path = "x",
         .call_data_hex = "",
         .num_runs = 1,
+        .warmup_ms = 0,
         .gas_limit = defaultGasLimit(),
         .revision = .latest,
         .engine = .evmz_executor,
@@ -811,6 +890,7 @@ test "engine scope names make benchmark boundary explicit" {
         .contract_code_path = "x",
         .call_data_hex = "",
         .num_runs = 1,
+        .warmup_ms = 0,
         .gas_limit = defaultGasLimit(),
         .revision = .latest,
         .engine = .evmz_executor,
@@ -854,8 +934,21 @@ test "resolves fixture defaults with CLI overrides" {
     try std.testing.expectEqualSlices(u8, "fixtures/vm-loop/ten-thousand-hashes/init.hex", resolved.contract_code_path);
     try std.testing.expectEqualSlices(u8, "30627b7c", trimFixtureText(resolved.call_data_hex));
     try std.testing.expectEqual(@as(usize, 2), resolved.num_runs);
+    try std.testing.expectEqual(@as(usize, default_warmup_ms), resolved.warmup_ms);
     try std.testing.expectEqual(defaultGasLimit(), resolved.gas_limit);
     try std.testing.expectEqual(HostProfile.null, resolved.host_profile);
+}
+
+test "resolves explicit zero warmup for cold diagnostics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resolved = try resolveOptions(std.testing.io, arena.allocator(), .{
+        .fixture_dir = "fixtures/vm-loop/arithmetic-loop",
+        .warmup_ms = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), resolved.warmup_ms);
 }
 
 test "proxy target is executor-only" {

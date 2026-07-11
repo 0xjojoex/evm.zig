@@ -1,0 +1,3 @@
+handrolled VM-loop fixture: 1000 loop iterations, 8 LOG0 operations with 32 zero data bytes per operation
+host: mock
+runtime bytes: 54

@@ -1,5 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
+const cli = @import("cli.zig");
 
 pub const Address = evmz.Address;
 pub const Host = evmz.Host;
@@ -24,6 +25,11 @@ pub fn benchmarkAllocator(init: std.process.Init) !std.mem.Allocator {
 const StorageKey = struct {
     address: Address,
     key: u256,
+};
+
+const StorageSlot = struct {
+    value: u256 = 0,
+    warm: bool = false,
 };
 
 pub const HostCounters = struct {
@@ -70,7 +76,7 @@ pub const HostCounters = struct {
 pub const CountingHost = struct {
     allocator: std.mem.Allocator,
     profile: HostProfile,
-    storage: std.AutoHashMap(StorageKey, u256),
+    storage: std.AutoHashMap(StorageKey, StorageSlot),
     counters: HostCounters = .{},
     tx_context: Host.TxContext,
 
@@ -78,7 +84,7 @@ pub const CountingHost = struct {
         return .{
             .allocator = allocator,
             .profile = profile,
-            .storage = std.AutoHashMap(StorageKey, u256).init(allocator),
+            .storage = std.AutoHashMap(StorageKey, StorageSlot).init(allocator),
             .tx_context = .{
                 .chain_id = 1,
                 .gas_price = 0,
@@ -104,7 +110,7 @@ pub const CountingHost = struct {
     }
 
     pub fn seedStorage(self: *CountingHost, address: Address, key: u256, value: u256) !void {
-        try self.storage.put(.{ .address = address, .key = key }, value);
+        try self.storage.put(.{ .address = address, .key = key }, .{ .value = value });
     }
 
     pub fn host(self: *CountingHost) Host {
@@ -169,7 +175,8 @@ pub const CountingHost = struct {
     noinline fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_read += 1;
-        return self.storage.get(.{ .address = address, .key = key }) orelse 0;
+        const slot = self.storage.get(.{ .address = address, .key = key }) orelse return 0;
+        return slot.value;
     }
 
     noinline fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
@@ -177,13 +184,11 @@ pub const CountingHost = struct {
         self.counters.storage_write += 1;
 
         const storage_key = StorageKey{ .address = address, .key = key };
-        const stored = self.storage.get(storage_key);
-        const previous = stored orelse 0;
-        if (previous == value) {
-            if (stored == null) try self.storage.put(storage_key, value);
-            return .assigned;
-        }
-        try self.storage.put(storage_key, value);
+        const result = try self.storage.getOrPut(storage_key);
+        if (!result.found_existing) result.value_ptr.* = .{};
+        const previous = result.value_ptr.value;
+        result.value_ptr.value = value;
+        if (previous == value) return .assigned;
         if (previous == 0 and value != 0) return .added;
         if (previous != 0 and value == 0) return .deleted;
         return .modified;
@@ -220,7 +225,11 @@ pub const CountingHost = struct {
     noinline fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.access_storage += 1;
-        return if (self.storage.contains(.{ .address = address, .key = key })) .warm else .cold;
+        const result = try self.storage.getOrPut(.{ .address = address, .key = key });
+        if (!result.found_existing) result.value_ptr.* = .{};
+        const was_warm = result.value_ptr.warm;
+        result.value_ptr.warm = true;
+        return if (was_warm) .warm else .cold;
     }
 
     noinline fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
@@ -278,6 +287,22 @@ test "counting host classifies same-value storage writes as assigned" {
     try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 0));
 }
 
+test "counting host tracks storage warmth independently from values" {
+    var counting_host = CountingHost.init(std.testing.allocator, .mock);
+    defer counting_host.deinit();
+    try counting_host.seedStorage(contract_address, 0, 1);
+    var host = counting_host.host();
+    const other_address = evmz.addr(0x3000000000000000000000000000000000000003);
+
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 0));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_address, 0));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 1));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_address, 1));
+    _ = try host.setStorage(contract_address, 2, 1);
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 2));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(other_address, 0));
+}
+
 pub fn monotonicNowNs() !u64 {
     var ts: std.posix.timespec = undefined;
     switch (std.posix.errno(std.posix.system.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts))) {
@@ -304,16 +329,9 @@ pub fn decodeHexAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     return bytes;
 }
 
-pub fn stripPrefix(value: []const u8, prefix: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, value, prefix)) return null;
-    return value[prefix.len..];
-}
-
-pub fn parseNonZeroUsize(value: []const u8) !usize {
-    const parsed = try std.fmt.parseUnsigned(usize, value, 10);
-    if (parsed == 0) return error.InvalidNumber;
-    return parsed;
-}
+pub const stripPrefix = cli.stripPrefix;
+pub const parseNonZeroUsize = cli.parseNonZeroUsize;
+pub const parseUsize = cli.parseUsize;
 
 pub fn parseHostProfile(value: []const u8) ?HostProfile {
     inline for (std.meta.fields(HostProfile)) |field| {

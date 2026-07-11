@@ -7,6 +7,10 @@ on:
         description: "Samples per engine/fixture"
         required: true
         default: "100"
+      warmup_ms:
+        description: "Discarded warmup duration per engine/fixture in milliseconds"
+        required: true
+        default: "100"
       spec:
         description: "Fork spec forwarded to each engine"
         required: true
@@ -44,6 +48,7 @@ jobs:
     env:
       OUT_DIR: zig-out/compare/benchmark-${{ github.run_id }}-${{ github.run_attempt }}
       NUM_RUNS: ${{ inputs.num_runs }}
+      WARMUP_MS: ${{ inputs.warmup_ms }}
       SPEC: ${{ inputs.spec }}
       BENCH_SUPPORT_MIN: ${{ inputs.bench_support_min }}
       BENCH_SUPPORT_MAX: ${{ inputs.bench_support_max }}
@@ -97,6 +102,7 @@ jobs:
           args=(
             --spec "${SPEC}"
             --num-runs "${NUM_RUNS}"
+            --warmup-ms "${WARMUP_MS}"
             --out-dir "${OUT_DIR}"
           )
 
@@ -129,6 +135,7 @@ jobs:
             echo "- Ref: \`${GITHUB_REF}\`"
             echo "- SHA: \`${GITHUB_SHA}\`"
             echo "- Runs: \`${NUM_RUNS}\`"
+            echo "- Warmup: \`${WARMUP_MS} ms\` per engine/fixture (discarded)"
             echo "- Spec: \`${SPEC}\`"
             echo "- evmz compiled fork range: \`${BENCH_SUPPORT_MIN}..${BENCH_SUPPORT_MAX}\`"
             echo "- Engines: \`${ENGINES}\`"

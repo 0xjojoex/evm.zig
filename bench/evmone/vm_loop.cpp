@@ -27,6 +27,7 @@ extern "C" evmc_vm* evmc_create_evmone() noexcept;
 namespace
 {
 constexpr auto max_gas = std::numeric_limits<int64_t>::max();
+constexpr size_t default_warmup_ms = 100;
 
 enum class Mode
 {
@@ -46,6 +47,7 @@ struct Options
     std::optional<std::string> contract_code_path;
     std::optional<std::string> call_data_hex;
     std::optional<size_t> num_runs;
+    size_t warmup_ms = default_warmup_ms;
     evmc_revision spec = EVMC_OSAKA;
     HostProfile host_profile = HostProfile::null;
     Mode mode = Mode::advanced;
@@ -58,6 +60,7 @@ struct ResolvedOptions
     std::string contract_code_path;
     std::string call_data_hex;
     size_t num_runs = 1;
+    size_t warmup_ms = default_warmup_ms;
     evmc_revision spec = EVMC_OSAKA;
     HostProfile host_profile = HostProfile::null;
     Mode mode = Mode::advanced;
@@ -72,9 +75,15 @@ struct HostCounters
 
 using StorageKey = std::array<uint8_t, 52>;
 
+struct StorageSlot
+{
+    evmc_bytes32 value{};
+    bool warm = false;
+};
+
 struct BenchHost
 {
-    std::map<StorageKey, evmc_bytes32> storage;
+    std::map<StorageKey, StorageSlot> storage;
     HostCounters counters;
 
     void record_host_call() noexcept { ++counters.total; }
@@ -184,7 +193,7 @@ evmc_bytes32 get_storage(evmc_host_context* context, const evmc_address* address
     host.record_host_call();
     const auto storage_key = make_storage_key(*address, *key);
     const auto it = host.storage.find(storage_key);
-    return it == host.storage.end() ? zero_bytes32() : it->second;
+    return it == host.storage.end() ? zero_bytes32() : it->second.value;
 }
 
 evmc_storage_status set_storage(
@@ -196,9 +205,9 @@ evmc_storage_status set_storage(
     auto& host = host_from_context(context);
     host.record_host_call();
     const auto storage_key = make_storage_key(*address, *key);
-    const auto it = host.storage.find(storage_key);
-    const auto previous = it == host.storage.end() ? zero_bytes32() : it->second;
-    host.storage[storage_key] = *value;
+    auto& slot = host.storage[storage_key];
+    const auto previous = slot.value;
+    slot.value = *value;
 
     if (is_zero(previous) && !is_zero(*value))
         return EVMC_STORAGE_ADDED;
@@ -279,7 +288,10 @@ evmc_access_status access_storage(evmc_host_context* context, const evmc_address
 {
     auto& host = host_from_context(context);
     host.record_host_call();
-    return host.storage.contains(make_storage_key(*address, *key)) ? EVMC_ACCESS_WARM : EVMC_ACCESS_COLD;
+    auto& slot = host.storage[make_storage_key(*address, *key)];
+    const auto was_warm = slot.warm;
+    slot.warm = true;
+    return was_warm ? EVMC_ACCESS_WARM : EVMC_ACCESS_COLD;
 }
 
 evmc_bytes32 get_transient_storage(evmc_host_context* context, const evmc_address*, const evmc_bytes32*) noexcept
@@ -408,14 +420,11 @@ ExecutionOutput execute_analyzed(
         throw std::runtime_error("evmone analyzed execution failed with status " + std::to_string(status));
     }
 
-    std::vector<uint8_t> output;
-    if (result.output_size != 0)
-        output.assign(result.output_data, result.output_data + result.output_size);
     release_result(result);
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     return ExecutionOutput{
-        std::move(output),
+        {},
         static_cast<uint64_t>(elapsed),
         host.counters,
     };
@@ -454,14 +463,11 @@ ExecutionOutput execute_baseline_analyzed(
         throw std::runtime_error("evmone baseline analyzed execution failed with status " + std::to_string(status));
     }
 
-    std::vector<uint8_t> output;
-    if (result.output_size != 0)
-        output.assign(result.output_data, result.output_data + result.output_size);
     release_result(result);
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     return ExecutionOutput{
-        std::move(output),
+        {},
         static_cast<uint64_t>(elapsed),
         host.counters,
     };
@@ -544,6 +550,17 @@ size_t parse_nonzero_usize(const std::string& value)
     const auto parsed = std::stoull(value, &parsed_index, 10);
     if (parsed_index != value.size() || parsed == 0)
         throw std::runtime_error("invalid non-zero integer '" + value + "'");
+    return static_cast<size_t>(parsed);
+}
+
+size_t parse_usize(const std::string& value)
+{
+    if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch); }))
+        throw std::runtime_error("invalid non-negative integer '" + value + "'");
+    size_t parsed_index = 0;
+    const auto parsed = std::stoull(value, &parsed_index, 10);
+    if (parsed_index != value.size() || parsed > std::numeric_limits<size_t>::max())
+        throw std::runtime_error("invalid non-negative integer '" + value + "'");
     return static_cast<size_t>(parsed);
 }
 
@@ -660,6 +677,7 @@ void print_usage()
         << "  --contract-code-path <path>  init-code hex file to deploy once\n"
         << "  --call-data <hex>            calldata hex for each runtime call\n"
         << "  --num-runs, -n <n>           number of timed calls\n"
+        << "  --warmup-ms <n>              discarded warmup duration in milliseconds, default 100; 0 disables\n"
         << "  --spec <name>                osaka, prague, cancun, shanghai, latest; default osaka\n"
         << "  --host-profile <null|mock>   fixture host profile label, default null\n"
         << "  --mode <advanced|baseline>   evmone mode, default advanced\n"
@@ -697,6 +715,7 @@ ResolvedOptions resolve_options(Options options)
         *options.contract_code_path,
         options.call_data_hex.value_or(""),
         options.num_runs.value_or(1),
+        options.warmup_ms,
         options.spec,
         options.host_profile,
         options.mode,
@@ -743,6 +762,10 @@ Options parse_args(int argc, char** argv)
             options.num_runs = parse_nonzero_usize(require_value("--num-runs"));
         else if (arg.starts_with("--num-runs="))
             options.num_runs = parse_nonzero_usize(std::string(arg.substr(11)));
+        else if (arg == "--warmup-ms")
+            options.warmup_ms = parse_usize(require_value("--warmup-ms"));
+        else if (arg.starts_with("--warmup-ms="))
+            options.warmup_ms = parse_usize(std::string(arg.substr(12)));
         else if (arg == "--spec")
         {
             const auto parsed = parse_spec(require_value("--spec"));
@@ -810,12 +833,38 @@ int main(int argc, char** argv)
         const auto advanced_analysis = evmone::advanced::analyze(options.spec, runtime_view);
         auto& evmone_vm = *static_cast<evmone::VM*>(vm.ptr);
 
+        const auto run_runtime_call = [&]() {
+            return options.mode == Mode::advanced ?
+                execute_analyzed(advanced_analysis, deploy.output, call_data, options.spec) :
+                execute_baseline_analyzed(evmone_vm, baseline_analysis, call_data, options.spec);
+        };
+
+        size_t warmup_calls = 0;
+        uint64_t warmup_elapsed_ns = 0;
+        if (options.warmup_ms != 0)
+        {
+            if (options.warmup_ms > std::numeric_limits<uint64_t>::max() / 1'000'000)
+                throw std::runtime_error("warmup duration is too large");
+            const auto warmup_target_ns = static_cast<uint64_t>(options.warmup_ms) * 1'000'000;
+            const auto warmup_start = std::chrono::steady_clock::now();
+            do
+            {
+                const auto measurement = run_runtime_call();
+                reject_null_host_touches(options.host_profile, measurement.counters);
+                if (warmup_calls == std::numeric_limits<size_t>::max())
+                    throw std::runtime_error("warmup call count overflow");
+                ++warmup_calls;
+                warmup_elapsed_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - warmup_start)
+                        .count());
+            } while (warmup_elapsed_ns < warmup_target_ns);
+        }
+
         HostCounters timed_counters;
         for (size_t run = 0; run < options.num_runs; ++run)
         {
-            const auto measurement = options.mode == Mode::advanced ?
-                execute_analyzed(advanced_analysis, deploy.output, call_data, options.spec) :
-                execute_baseline_analyzed(evmone_vm, baseline_analysis, call_data, options.spec);
+            const auto measurement = run_runtime_call();
             reject_null_host_touches(options.host_profile, measurement.counters);
             timed_counters.total += measurement.counters.total;
             timed_counters.logs += measurement.counters.logs;
@@ -834,6 +883,9 @@ int main(int argc, char** argv)
                 << " deploy_host_calls=" << deploy.counters.total
                 << " timed_host_calls=" << timed_counters.total
                 << " logs=" << timed_counters.logs
+                << " warmup_ms=" << options.warmup_ms
+                << " warmup_calls=" << warmup_calls
+                << " warmup_elapsed_ms=" << (static_cast<double>(warmup_elapsed_ns) / 1'000'000.0)
                 << "\n";
         }
     }
