@@ -2,7 +2,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 const common = @import("common.zig");
 
-const Protocol = evmz.EthProtocol;
+const Protocol = evmz.Evm.Protocol;
 const GrowableVm = evmz.Evm;
 const MemoryStore = evmz.state.MemoryStore;
 
@@ -217,7 +217,7 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
     });
     errdefer vm.deinit();
 
-    var block = vm.beginBlock(growableEnv(options.block_gas_limit));
+    var block = try vm.beginBlock(growableEnv(options.block_gas_limit));
     const block_result = try runTransactions(&block, options, access_list.entries);
     if (options.commit) try vm.commit();
     vm.deinit();
@@ -234,16 +234,8 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
 fn runExactLifecycle(
     allocator: std.mem.Allocator,
     options: Options,
-    comptime gas_limit: u64,
+    gas_limit: u64,
 ) !RunResult {
-    const ExactVm = evmz.vm.VmWithOptions(Protocol, .{
-        .block_policy = .{
-            .resource_bound = .{
-                .gas_derived = .{ .block_gas_limit = gas_limit },
-            },
-        },
-    });
-
     var memory = MemoryStore.init(allocator);
     defer memory.deinit();
     try seedState(allocator, &memory, options.case);
@@ -251,15 +243,15 @@ fn runExactLifecycle(
     defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var vm = try ExactVm.init(allocator, .{
+    var vm = try GrowableVm.initBound(allocator, .{
         .revision = options.spec,
         .state_reader = memory.reader(),
         .committer = memory.committer(),
-        .env = policyEnv(),
-    });
+        .env = growableEnv(gas_limit),
+    }, .{ .max_block_gas = gas_limit });
     errdefer vm.deinit();
 
-    var block = vm.beginBlock(policyEnv());
+    var block = try vm.beginBlock(growableEnv(gas_limit));
     const block_result = try runTransactions(&block, options, access_list.entries);
     if (options.commit) try vm.commit();
     vm.deinit();
@@ -392,10 +384,6 @@ fn growableEnv(block_gas_limit: u64) evmz.Env {
     return .{
         .gas_limit = block_gas_limit,
     };
-}
-
-fn policyEnv() evmz.vm.BlockPolicyEnv {
-    return .{};
 }
 
 fn parsePolicy(value: []const u8) ?Policy {

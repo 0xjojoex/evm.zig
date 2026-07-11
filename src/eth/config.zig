@@ -1,11 +1,10 @@
 //! Assembles the Ethereum `Definition` from the per-domain spec tables.
 //!
 //! `Options` is the user-facing override surface; `define`/`defineFor` merge
-//! those overrides onto the mainnet defaults (`defaultTransactionConfig`,
-//! `defaultCallConfig`, …) and return a filled `definition.Definition`. Each
-//! `default*` builder pulls its hooks from the sibling `eth/<domain>.zig`
-//! modules, so this file is the single wiring point between the fork schema
-//! (`definition.zig`) and the concrete Ethereum rules.
+//! those overrides onto complete Ethereum domain values and return a filled
+//! `definition.Definition`. Domain modules own their concrete rules and migrate
+//! their complete values beside those implementations; this file remains the
+//! single merge/wiring point between authoring and the neutral fork schema.
 
 const std = @import("std");
 
@@ -28,26 +27,17 @@ const Opcode = opcode_info.Opcode;
 pub fn Options(comptime R: type) type {
     return struct {
         name: []const u8 = "ethereum",
-        Revision: RevisionOptions(R) = .{},
-        Instruction: ?type = null,
-        Transaction: definition.TransactionConfig(R) = .default,
-        Settlement: definition.SettlementConfig(R) = .default,
-        Authorization: definition.AuthorizationConfig(R) = .default,
-        Block: definition.BlockConfig(R) = .default,
-        Call: definition.CallConfig(R) = .default,
-        Create: definition.CreateConfig(R) = .default,
-        Storage: definition.StorageConfig(R) = .default,
-        SelfDestruct: definition.SelfDestructConfig(R) = .default,
-        Precompile: ?type = null,
-    };
-}
-
-pub fn RevisionOptions(comptime R: type) type {
-    return struct {
-        revisions: ?[]const R = null,
-        latest: ?R = null,
-        stable: ?R = null,
-        isImpl: ?*const fn (R, R) bool = null,
+        revision: revision.Patch(R) = .{},
+        instruction: ?type = null,
+        transaction: definition.TransactionConfig(R) = .default,
+        settlement: definition.SettlementConfig(R) = .default,
+        authorization: definition.AuthorizationConfig(R) = .default,
+        block: system.Block.Patch(R) = .{},
+        call: definition.CallConfig(R) = .default,
+        create: definition.CreateConfig(R) = .default,
+        storage: definition.StorageConfig(R) = .default,
+        self_destruct: definition.SelfDestructConfig(R) = .default,
+        precompile: ?type = null,
     };
 }
 
@@ -56,20 +46,26 @@ pub fn define(comptime cfg: Options(Revision)) definition.Definition(Revision) {
 }
 
 pub fn defineFor(comptime R: type, comptime cfg: Options(R)) definition.Definition(R) {
-    const revision_config = resolvedRevisionConfig(R, cfg.Revision);
+    validateRevisionPatch(R, cfg.revision);
+    const revision_config = mergePatch(
+        definition.RevisionConfig(R),
+        revision.Patch(R),
+        defaultRevisionConfig(R),
+        cfg.revision,
+    );
     return .{
         .name = cfg.name,
         .revision = revision_config,
-        .instruction = domainOrDefault(R, cfg.Instruction, instruction, "Instruction"),
-        .transaction = mergeConfig(definition.TransactionConfig(R), defaultTransactionConfig(R), cfg.Transaction),
-        .settlement = mergeConfig(definition.SettlementConfig(R), defaultSettlementConfig(R), cfg.Settlement),
-        .authorization = mergeConfig(definition.AuthorizationConfig(R), defaultAuthorizationConfig(R), cfg.Authorization),
-        .block = mergeConfig(definition.BlockConfig(R), defaultBlockConfig(R), cfg.Block),
-        .call = mergeConfig(definition.CallConfig(R), defaultCallConfig(R), cfg.Call),
-        .create = mergeConfig(definition.CreateConfig(R), defaultCreateConfig(R), cfg.Create),
-        .storage = mergeConfig(definition.StorageConfig(R), defaultStorageConfig(R), cfg.Storage),
-        .self_destruct = mergeConfig(definition.SelfDestructConfig(R), defaultSelfDestructConfig(R), cfg.SelfDestruct),
-        .precompile = domainOrDefault(R, cfg.Precompile, precompile, "Precompile"),
+        .instruction = domainOrDefault(R, cfg.instruction, instruction, "instruction"),
+        .transaction = mergeConfig(definition.TransactionConfig(R), defaultTransactionConfig(R), cfg.transaction),
+        .settlement = mergeConfig(definition.SettlementConfig(R), defaultSettlementConfig(R), cfg.settlement),
+        .authorization = mergeConfig(definition.AuthorizationConfig(R), defaultAuthorizationConfig(R), cfg.authorization),
+        .block = mergePatch(definition.BlockConfig(R), system.Block.Patch(R), system.Block.config(R), cfg.block),
+        .call = mergeConfig(definition.CallConfig(R), defaultCallConfig(R), cfg.call),
+        .create = mergeConfig(definition.CreateConfig(R), defaultCreateConfig(R), cfg.create),
+        .storage = mergeConfig(definition.StorageConfig(R), defaultStorageConfig(R), cfg.storage),
+        .self_destruct = mergeConfig(definition.SelfDestructConfig(R), defaultSelfDestructConfig(R), cfg.self_destruct),
+        .precompile = domainOrDefault(R, cfg.precompile, precompile, "precompile"),
     };
 }
 
@@ -83,18 +79,20 @@ fn mergeConfig(comptime T: type, comptime base: T, comptime overrides: T) T {
     return result;
 }
 
-fn resolvedRevisionConfig(comptime R: type, comptime cfg: RevisionOptions(R)) definition.RevisionConfig(R) {
-    var resolved = defaultRevisionConfig(R);
-    if (cfg.revisions) |revisions| resolved.revisions = revisions;
-    if (cfg.latest) |latest| resolved.latest = latest;
-    if (cfg.stable) |stable| resolved.stable = stable;
-    if (cfg.isImpl) |isImpl| {
-        if (R == Revision) {
-            @compileError("eth.define does not support overriding Revision.isImpl while inheriting Ethereum defaults; construct evmz.Definition with complete domain configs for custom revision semantics");
+fn mergePatch(comptime Config: type, comptime Patch: type, comptime base: Config, comptime overrides: Patch) Config {
+    var result = base;
+    inline for (@typeInfo(Patch).@"struct".fields) |field| {
+        if (@field(overrides, field.name)) |value| {
+            @field(result, field.name) = value;
         }
-        resolved.isImpl = isImpl;
     }
-    return resolved;
+    return result;
+}
+
+fn validateRevisionPatch(comptime R: type, comptime patch: revision.Patch(R)) void {
+    if (patch.isImpl != null and R == Revision) {
+        @compileError("eth.define does not support overriding revision.isImpl while inheriting Ethereum defaults; construct evmz.Definition with complete domain configs for custom revision semantics");
+    }
 }
 
 fn defaultRevisionConfig(comptime R: type) definition.RevisionConfig(R) {
@@ -161,17 +159,6 @@ fn defaultAuthorizationConfig(comptime R: type) definition.AuthorizationConfig(R
             .successGasAdjustment = settlement.Authorization.successGasAdjustment,
             .invalidGasAdjustment = settlement.Authorization.invalidGasAdjustment,
             .malformedGasAdjustment = settlement.Authorization.malformedGasAdjustment,
-        };
-    }
-    return .default;
-}
-
-fn defaultBlockConfig(comptime R: type) definition.BlockConfig(R) {
-    if (R == Revision) {
-        return .{
-            .valueTransferLog = system.Block.valueTransferLog,
-            .blockStartSystemCalls = system.Block.blockStartSystemCalls,
-            .transactionWarmsCoinbase = system.Block.transactionWarmsCoinbase,
         };
     }
     return .default;
@@ -257,7 +244,7 @@ test "default ethereum config assembles through generic definition config" {
 }
 
 test "preset config uses generated support with ethereum revision semantics" {
-    const definition_value = define(.{ .Revision = .{
+    const definition_value = define(.{ .revision = .{
         .latest = .cancun,
         .stable = .cancun,
     } });
@@ -268,6 +255,19 @@ test "preset config uses generated support with ethereum revision semantics" {
     try std.testing.expect(full.contains(.london));
     try std.testing.expect(!Definition.Support.at(.cancun).contains(.prague));
     try std.testing.expectEqual(support.Resolution.runtime, Definition.resolveAvailability(.{ .since = .cancun }, full));
+}
+
+test "revision patch can restore semantic optional fields to neutral" {
+    const definition_value = define(.{ .revision = .{
+        .latest = @as(?Revision, null),
+        .stable = @as(?Revision, null),
+    } });
+    const Definition = definition.Bound(definition_value);
+
+    try std.testing.expectEqual(@as(?Revision, null), definition_value.revision.latest);
+    try std.testing.expectEqual(@as(?Revision, null), definition_value.revision.stable);
+    try std.testing.expectEqual(Revision.latest, Definition.latest);
+    try std.testing.expectEqual(Revision.latest, Definition.stable);
 }
 
 test "preset config accepts partial simple-domain overrides" {
@@ -313,14 +313,14 @@ test "preset config accepts partial simple-domain overrides" {
         }
     };
     const definition_value = define(.{
-        .Transaction = .{ .maxInitcodeSize = overrides.maxInitcodeSize },
-        .Authorization = .{ .active = overrides.authorizationActive },
-        .Block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
-        .Settlement = .{ .gasRefundCapDivisor = overrides.gasRefundCapDivisor },
-        .Call = .{ .callBaseGas = overrides.callBaseGas },
-        .Create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
-        .SelfDestruct = .{ .selfDestructRefundGas = overrides.selfDestructRefundGas },
-        .Storage = .{ .sstoreMinimumGas = overrides.sstoreMinimumGas },
+        .transaction = .{ .maxInitcodeSize = overrides.maxInitcodeSize },
+        .authorization = .{ .active = overrides.authorizationActive },
+        .block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
+        .settlement = .{ .gasRefundCapDivisor = overrides.gasRefundCapDivisor },
+        .call = .{ .callBaseGas = overrides.callBaseGas },
+        .create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
+        .self_destruct = .{ .selfDestructRefundGas = overrides.selfDestructRefundGas },
+        .storage = .{ .sstoreMinimumGas = overrides.sstoreMinimumGas },
     });
     const Definition = definition.Bound(definition_value);
     const Protocol = protocol_binding.Protocol(definition_value, Definition.Support.at(.london));
@@ -328,7 +328,7 @@ test "preset config accepts partial simple-domain overrides" {
     try std.testing.expect(!Protocol.Authorization.active(.london));
     try std.testing.expectEqual(@as(usize, 1000), Protocol.Transaction.maxInitcodeSize(.london));
     try std.testing.expect(Protocol.Authorization.warmsDelegatedTarget(.prague));
-    try std.testing.expect(Protocol.Block.transactionWarmsCoinbase(.london));
+    try std.testing.expect(Protocol.block.transactionWarmsCoinbase(.london));
     try std.testing.expectEqual(@as(u64, 4), Protocol.Settlement.gasRefundCapDivisor(.london));
     try std.testing.expectEqual(@as(i64, 77), Protocol.Call.callBaseGas(.london));
     try std.testing.expectEqual(@as(?usize, 999), Protocol.Create.createCodeSizeLimit(.london));

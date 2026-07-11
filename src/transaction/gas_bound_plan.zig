@@ -276,7 +276,7 @@ pub fn For(comptime Protocol: type) type {
 
         fn protocolWarmAccountReserve(revision: Protocol.Revision) usize {
             var count: usize = 2; // sender plus recipient or created address.
-            if (Protocol.Block.transactionWarmsCoinbase(revision)) count += 1;
+            if (Protocol.block.transactionWarmsCoinbase(revision)) count += 1;
             if (Protocol.Authorization.warmsDelegatedTarget(revision)) count += 1;
             return count;
         }
@@ -387,7 +387,7 @@ fn mul(comptime T: type, a: T, b: T) Error!T {
 
 fn ethereumTestProtocol() type {
     const eth = @import("../eth.zig");
-    return @import("../protocol.zig").ProtocolWithDispatch(eth.definition, eth.Support.all, .{});
+    return @import("../protocol.zig").ProtocolWithDispatch(eth.definition, eth.Protocol.Support.all, .{});
 }
 
 fn ethereumTestPlanner() type {
@@ -397,7 +397,7 @@ fn ethereumTestPlanner() type {
 test "bound gas plan input defaults to protocol support max" {
     const eth = @import("../eth.zig");
     const protocol = @import("../protocol.zig");
-    const Cancun = protocol.ProtocolWithDispatch(eth.definition, eth.Support.at(.cancun), .{});
+    const Cancun = protocol.ProtocolWithDispatch(eth.definition, eth.Protocol.Support.at(.cancun), .{});
     const Planner = For(Cancun);
     const input = Planner.Input{ .gas_limit = 1_000_000 };
 

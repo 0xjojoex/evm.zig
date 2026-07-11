@@ -1,4 +1,5 @@
 const std = @import("std");
+const definition = @import("../definition.zig");
 const support = @import("../protocol/support.zig");
 
 pub const Revision = enum(u8) {
@@ -36,6 +37,18 @@ pub const Revision = enum(u8) {
         return @intFromEnum(self) >= @intFromEnum(revision);
     }
 };
+
+/// Partial Ethereum authoring surface for a complete revision model.
+pub fn Patch(comptime R: type) type {
+    const PatchType = struct {
+        revisions: ??[]const R = null,
+        latest: ??R = null,
+        stable: ??R = null,
+        isImpl: ?*const fn (R, R) bool = null,
+    };
+    definition.assertPatchMirrors(definition.RevisionConfig(R), PatchType);
+    return PatchType;
+}
 
 pub const model = support.Model(Revision);
 pub const Availability = model.Availability;

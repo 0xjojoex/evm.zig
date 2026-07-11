@@ -5,7 +5,7 @@ const AccountState = evmz.state.Account;
 const Address = evmz.Address;
 const Executor = evmz.executor;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 
 test "runtime allocation audit sees no traffic for bounded prepared stop after setup" {
     var audit = CountingAllocator.init(std.testing.allocator);

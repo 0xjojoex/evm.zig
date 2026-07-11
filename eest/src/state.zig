@@ -6,9 +6,9 @@ const tx_validation = @import("tx_validation.zig");
 const Address = evmz.Address;
 const JsonValue = fixture_common.JsonValue;
 const transaction = evmz.transaction;
-const EthProtocol = evmz.EthProtocol;
+const EthProtocol = evmz.Evm.Protocol;
 const tx_protocol = transaction.For(EthProtocol);
-const Vm = evmz.Vm(EthProtocol);
+const Evm = evmz.Evm;
 
 const supported_exact_gas_bound_limits = [_]u64{
     1_000_000,
@@ -726,7 +726,7 @@ fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
 const FixtureHost = struct {
     allocator: std.mem.Allocator,
     store: *evmz.state.MemoryStore,
-    vm: Vm,
+    vm: Evm,
 
     const Self = @This();
 
@@ -743,7 +743,7 @@ const FixtureHost = struct {
 
         try seedMemoryStore(allocator, store, pre);
 
-        var vm = Vm.init(allocator, .{
+        var vm = Evm.init(allocator, .{
             .revision = revision,
             .state_reader = store.reader(),
             .block_hash_source = EestStateBlockHashSource.source(),
@@ -778,19 +778,13 @@ const FixtureHost = struct {
 };
 
 fn ExactFixtureHost(comptime gas_limit: u64) type {
-    const ExactVm = evmz.vm.VmWithOptions(EthProtocol, .{
-        .block_policy = .{
-            .resource_bound = .{
-                .gas_derived = .{ .block_gas_limit = gas_limit },
-            },
-        },
-    });
+    const ExactEvm = evmz.Evm;
 
     return struct {
         allocator: std.mem.Allocator,
         store: *evmz.state.MemoryStore,
-        vm: ExactVm,
-        env: ExactVm.BlockEnv,
+        vm: ExactEvm,
+        env: evmz.Env,
 
         const Self = @This();
 
@@ -807,20 +801,19 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
 
             try seedMemoryStore(allocator, store, pre);
 
-            const block_env = policyBlockEnv(env);
-            var vm = try ExactVm.init(allocator, .{
+            var vm = try ExactEvm.initBound(allocator, .{
                 .revision = spec,
                 .state_reader = store.reader(),
                 .block_hash_source = EestStateBlockHashSource.source(),
-                .env = block_env,
-            });
+                .env = env,
+            }, .{ .max_block_gas = gas_limit });
             errdefer vm.deinit();
 
             return .{
                 .allocator = allocator,
                 .store = store,
                 .vm = vm,
-                .env = block_env,
+                .env = env,
             };
         }
 
@@ -839,14 +832,13 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.store.clearAccounts();
             try seedMemoryStore(self.allocator, self.store, pre);
 
-            const block_env = policyBlockEnv(env);
             try self.vm.reset(.{
                 .revision = spec,
                 .state_reader = self.store.reader(),
                 .block_hash_source = EestStateBlockHashSource.source(),
-                .env = block_env,
+                .env = env,
             });
-            self.env = block_env;
+            self.env = env;
         }
 
         fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
@@ -858,23 +850,9 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         }
 
         fn transact(self: *Self, tx: evmz.Transaction) !evmz.TxResult {
-            var block = self.vm.beginBlock(self.env);
+            var block = try self.vm.beginBlock(self.env);
             return block.transact(tx);
         }
-    };
-}
-
-fn policyBlockEnv(env: evmz.Env) evmz.vm.BlockPolicyEnv {
-    return .{
-        .chain_id = env.chain_id,
-        .coinbase = env.coinbase,
-        .number = env.number,
-        .slot_number = env.slot_number,
-        .timestamp = env.timestamp,
-        .prev_randao = env.prev_randao,
-        .base_fee = env.base_fee,
-        .blob_base_fee = env.blob_base_fee,
-        .blob_schedule = env.blob_schedule,
     };
 }
 

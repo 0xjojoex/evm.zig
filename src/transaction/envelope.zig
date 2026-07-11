@@ -190,18 +190,18 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
 }
 
 test "set-code transaction rejects empty authorization list" {
-    const ethereum = @import("../eth.zig");
+    const Ethereum = @import("../eth.zig").Protocol;
     const hex = "04f86401808007830186a09400000000000000000000000000000000000000008080c0c001a04319a2e8066a9beedd85b227bf40cdecfb6134e6c1254f1e680895bc3131df31a059efad54e662f062d9af60acca08efb1d3d312742e381a600aac7c7989f892cc";
     var bytes: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, hex);
     try std.testing.expectEqual(
         RawValidationError.type_4_empty_authorization_list,
-        For(ethereum).classifyRawTransaction(.prague, &bytes).?,
+        For(Ethereum).classifyRawTransaction(.prague, &bytes).?,
     );
 }
 
 test "raw transaction validation uses comptime transaction kind policy" {
-    const ethereum = @import("../eth.zig");
+    const Ethereum = @import("../eth.zig").Protocol;
     const EarlySetCodeProtocol = struct {
         pub const Revision = EthRevision;
 
@@ -216,7 +216,7 @@ test "raw transaction validation uses comptime transaction kind policy" {
 
     try std.testing.expectEqual(
         RawValidationError.type_4_tx_pre_fork,
-        For(ethereum).classifyRawTransaction(.cancun, &malformed_set_code).?,
+        For(Ethereum).classifyRawTransaction(.cancun, &malformed_set_code).?,
     );
     try std.testing.expectEqual(
         RawValidationError.type_4_invalid_authorization_format,

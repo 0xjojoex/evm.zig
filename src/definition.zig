@@ -1,15 +1,12 @@
 //! Fork-configuration schema: the shape of a protocol `Definition`.
 //!
-//! A `Definition(R)` is a comptime *value* — a bundle of per-domain config
-//! structs (transaction, settlement, call, storage, …) whose fields are
-//! optional `*const fn` hooks keyed on a revision enum `R`. A null hook means
-//! "use the engine default"; a set hook overrides that one rule. `eth/config.zig`
-//! fills this schema in for mainnet; `protocol.zig`'s `Bound`/`Rules` turn a
-//! definition value into the bound namespace the runtime dispatches through.
+//! A `Definition(R)` is a comptime value: a bundle of per-domain policy configs
+//! keyed on a revision enum `R`. `eth/config.zig` fills this schema in for
+//! mainnet, while its authoring patches are resolved before protocol binding.
+//! The block domain is the first complete-config pilot; older domains still
+//! resolve optional hooks inside `Bound` while they migrate.
 //!
-//! This file defines only the schema and its defaults, no Ethereum rules. To
-//! add a variation point: add a field here, implement it in `eth/<domain>.zig`,
-//! and forward it from the matching `Bound*` type.
+//! This file defines only the schema and neutral defaults, no Ethereum rules.
 const std = @import("std");
 
 const address = @import("address.zig");
@@ -34,6 +31,10 @@ const Opcode = opcode_info.Opcode;
 pub fn Definition(comptime R: type) type {
     return struct {
         pub const Revision = R;
+
+        // pub fn yo() R {
+        //     return .{}
+        // }
 
         name: []const u8 = "custom",
         revision: RevisionConfig(R) = .{},
@@ -111,10 +112,52 @@ pub fn BlockConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        valueTransferLog: ?*const fn (R, Address, Address, u256) ?interface.ValueTransferLog = null,
-        blockStartSystemCalls: ?*const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = null,
-        transactionWarmsCoinbase: ?*const fn (R) bool = null,
+        valueTransferLog: *const fn (R, Address, Address, u256) ?interface.ValueTransferLog = noValueTransferLog,
+        blockStartSystemCalls: *const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = noBlockStartSystemCalls,
+        transactionWarmsCoinbase: *const fn (R) bool = doesNotWarmCoinbase,
+
+        fn noValueTransferLog(_: R, _: Address, _: Address, _: u256) ?interface.ValueTransferLog {
+            return null;
+        }
+
+        fn noBlockStartSystemCalls(_: R, _: interface.BlockStartContext) interface.BlockStartSystemCalls {
+            return .{};
+        }
+
+        fn doesNotWarmCoinbase(_: R) bool {
+            return false;
+        }
     };
+}
+
+/// Enforces that a hand-written patch remains a null-defaulted optional mirror
+/// of its complete config type.
+pub fn assertPatchMirrors(comptime Config: type, comptime Patch: type) void {
+    const config_fields = @typeInfo(Config).@"struct".fields;
+    const patch_fields = @typeInfo(Patch).@"struct".fields;
+
+    if (config_fields.len != patch_fields.len) {
+        @compileError("patch field count does not match config");
+    }
+
+    const empty_patch: Patch = .{};
+    inline for (config_fields) |field| {
+        if (!@hasField(Patch, field.name)) {
+            @compileError("patch is missing config field: " ++ field.name);
+        }
+        if (@FieldType(Patch, field.name) != ?field.type) {
+            @compileError("patch field must be optional config field type: " ++ field.name);
+        }
+        if (@field(empty_patch, field.name) != null) {
+            @compileError("patch field must default to null: " ++ field.name);
+        }
+    }
+
+    inline for (patch_fields) |field| {
+        if (!@hasField(Config, field.name)) {
+            @compileError("patch has no matching config field: " ++ field.name);
+        }
+    }
 }
 
 pub fn CallConfig(comptime R: type) type {
@@ -208,6 +251,7 @@ pub fn Bound(comptime definition: anytype) type {
     const InstructionSource = definition.instruction;
     const InstructionBase = instructionDomain(InstructionSource);
     const InstructionDomain = BoundInstruction(InstructionSource, InstructionBase, revision_model.Availability);
+    const block_config: BlockConfig(R) = definition.block;
     assertRequiredConfig("Definition.transaction", TransactionConfig(R), definition.transaction, &.{
         "blobSchedule",
         "blobVersionedHashActive",
@@ -222,11 +266,6 @@ pub fn Bound(comptime definition: anytype) type {
         "successGasAdjustment",
         "invalidGasAdjustment",
         "malformedGasAdjustment",
-    });
-    assertRequiredConfig("Definition.block", BlockConfig(R), definition.block, &.{
-        "valueTransferLog",
-        "blockStartSystemCalls",
-        "transactionWarmsCoinbase",
     });
     assertRequiredConfig("Definition.call", CallConfig(R), definition.call, &.{
         "callColdAccountAccessGas",
@@ -270,7 +309,7 @@ pub fn Bound(comptime definition: anytype) type {
         pub const Transaction = BoundTransaction(R, definition.transaction);
         pub const Settlement = BoundSettlement(R, definition.settlement);
         pub const Authorization = BoundAuthorization(R, definition.authorization);
-        pub const Block = BoundBlock(R, definition.block);
+        pub const block = block_config;
         pub const Call = BoundCall(R, definition.call);
         pub const Create = BoundCreate(R, definition.create);
         pub const Storage = BoundStorage(R, definition.storage);
@@ -502,22 +541,6 @@ fn BoundAuthorization(comptime R: type, comptime cfg: AuthorizationConfig(R)) ty
     };
 }
 
-fn BoundBlock(comptime R: type, comptime cfg: BlockConfig(R)) type {
-    return struct {
-        pub fn valueTransferLog(revision_value: R, from: Address, to: Address, amount: u256) ?interface.ValueTransferLog {
-            return if (cfg.valueTransferLog) |value_transfer_log| value_transfer_log(revision_value, from, to, amount) else null;
-        }
-
-        pub fn blockStartSystemCalls(revision_value: R, context: interface.BlockStartContext) interface.BlockStartSystemCalls {
-            return if (cfg.blockStartSystemCalls) |system_calls| system_calls(revision_value, context) else .{};
-        }
-
-        pub fn transactionWarmsCoinbase(revision_value: R) bool {
-            return if (cfg.transactionWarmsCoinbase) |warms| warms(revision_value) else false;
-        }
-    };
-}
-
 fn BoundCall(comptime R: type, comptime cfg: CallConfig(R)) type {
     return struct {
         pub fn callBaseGas(revision_value: R) i64 {
@@ -743,4 +766,17 @@ test "revision model accepts custom ordering function" {
     full.assertValid();
     try std.testing.expect(full.contains(.beta));
     try std.testing.expectEqual(support.Resolution.runtime, model.resolveAvailability(.{ .since = .beta }, full));
+}
+
+test "block config carries complete neutral policy" {
+    const R = enum { one };
+    const block = BlockConfig(R).default;
+    const zero_address = std.mem.zeroes(Address);
+
+    try std.testing.expectEqual(@as(?interface.ValueTransferLog, null), block.valueTransferLog(.one, zero_address, zero_address, 0));
+    try std.testing.expectEqual(@as(usize, 0), block.blockStartSystemCalls(.one, .{
+        .number = 0,
+        .timestamp = 0,
+    }).slice().len);
+    try std.testing.expect(!block.transactionWarmsCoinbase(.one));
 }

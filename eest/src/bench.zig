@@ -5,11 +5,11 @@ const fixture_common = @import("fixture.zig");
 
 const Address = evmz.Address;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const JsonValue = fixture_common.JsonValue;
 const transaction = evmz.transaction;
-const EthProtocol = evmz.EthProtocol;
-const Executor = evmz.Executor(EthProtocol);
+const EthProtocol = evmz.Evm.Protocol;
+const Executor = evmz.Executor;
 const tx_protocol = transaction.For(EthProtocol);
 
 const asArray = fixture_common.asArray;

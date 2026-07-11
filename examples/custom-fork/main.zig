@@ -5,24 +5,27 @@ const Revision = evmz.eth.Revision;
 
 const CustomFork = evmz.eth.define(.{
     .name = "custom-fork",
-    .Transaction = .{
+    .transaction = .{
         .maxInitcodeSize = maxInitcodeSize,
     },
-    .Settlement = .{
+    .settlement = .{
         .gasRefundCapDivisor = gasRefundCapDivisor,
     },
-    .Authorization = .{
+    .authorization = .{
         .warmsDelegatedTarget = warmsDelegatedTarget,
     },
-    .Block = .{
+    .block = .{
         .transactionWarmsCoinbase = transactionWarmsCoinbase,
     },
-    .Create = .{
+    .create = .{
         .createCodeSizeLimit = createCodeSizeLimit,
         .createInitCodeSizeLimit = createInitCodeSizeLimit,
     },
 });
-const CustomDefinition = evmz.definition.Bound(CustomFork);
+const CustomVM = evmz.Vm(Revision, CustomFork, .{
+    .support = .{ .min = .cancun, .max = .cancun },
+});
+const CustomProtocol = CustomVM.Protocol;
 
 fn warmsDelegatedTarget(revision: Revision) bool {
     return revision.isImpl(.prague);
@@ -57,16 +60,13 @@ comptime {
 }
 
 pub fn main(_: std.process.Init) !void {
-    const CustomProtocol = evmz.Protocol(CustomFork, .{ .support = CustomDefinition.Support.at(.cancun) });
-    const CustomVm = evmz.Vm(CustomProtocol);
-
-    var vm = CustomVm.init(std.heap.page_allocator, .{ .revision = .cancun });
+    var vm = CustomVM.init(std.heap.page_allocator, .{ .revision = .cancun });
     defer vm.deinit();
 
     if (CustomProtocol.Create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
     if (CustomProtocol.Transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
     if (CustomProtocol.Settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
     if (!CustomProtocol.Authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
-    if (!CustomProtocol.Block.transactionWarmsCoinbase(.london)) return error.CustomBlockMismatch;
-    std.debug.print("{s}: code size limit {d}\n", .{ CustomDefinition.name, CustomProtocol.Create.createCodeSizeLimit(.cancun).? });
+    if (!CustomProtocol.block.transactionWarmsCoinbase(.london)) return error.CustomBlockMismatch;
+    std.debug.print("{s}: code size limit {d}\n", .{ CustomFork.name, CustomProtocol.Create.createCodeSizeLimit(.cancun).? });
 }

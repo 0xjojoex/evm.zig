@@ -3,7 +3,7 @@ const evmz = @import("../evm.zig");
 
 const Address = evmz.Address;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 
 /// Header fields needed by block-start system contract hooks.
 pub const BlockHeader = evmz.protocol.interface.BlockStartContext;
@@ -13,7 +13,7 @@ pub const BlockHeader = evmz.protocol.interface.BlockStartContext;
 /// - EIP-2935 stores the previous block hash from Prague onward.
 pub fn applyBlockStart(executor: anytype, tx_context: Host.TxContext, header: BlockHeader) !void {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.Block.blockStartSystemCalls(executor.revision(), header);
+    const calls = Protocol.block.blockStartSystemCalls(executor.revision(), header);
     for (calls.slice()) |call| {
         try callSystemContract(executor, tx_context, call.sender, call.recipient, &call.input, call.gas);
     }
@@ -35,7 +35,7 @@ fn callSystemContract(
 test "block start calls Prague and Cancun system contracts" {
     const ethereum = evmz.eth;
 
-    const Executor = evmz.Executor(evmz.EthProtocol);
+    const Executor = evmz.Executor;
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .prague,
     });
@@ -63,7 +63,7 @@ test "block start calls Prague and Cancun system contracts" {
     beacon_root[31] = 0xbb;
 
     const tx_context = testTxContext();
-    const calls = evmz.EthProtocol.Block.blockStartSystemCalls(.prague, .{
+    const calls = evmz.Evm.Protocol.block.blockStartSystemCalls(.prague, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,

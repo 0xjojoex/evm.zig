@@ -31,11 +31,11 @@ const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
 const Changeset = evmz.state.Changeset;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const StateOverlay = evmz.state.Overlay;
 const transaction = evmz.transaction;
 const RevisionId = evmz.protocol.RevisionId;
-const EthProtocol = evmz.EthProtocol;
+const EthProtocol = evmz.Evm.Protocol;
 pub const Snapshot = StateOverlay.Snapshot;
 pub const TransientSnapshot = StateOverlay.TransientSnapshot;
 pub const EvmResult = Host.Result;
@@ -57,7 +57,7 @@ const runtime_frame_defs = @import("./executor/runtime_frames.zig");
 pub const state_io = @import("./executor/state_io.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
-const FrameIo = @import("./frame_io.zig");
+const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
 const TraceSink = trace.Sink;
 const tx_gas = @import("./transaction/gas.zig");
@@ -290,7 +290,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         revision_id: RevisionId,
         config: evmz.ExecutionConfig,
         trace_sink: ?*TraceSink = null,
-        last_call_output: FrameIo.ByteSlot,
+        last_call_output: frame_io.ByteSlot,
 
         /// Parameters that belong to transaction settlement rather than bytecode
         /// execution.
@@ -383,7 +383,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .block_hash_source = options.block_hash_source,
                 .config = options.config,
                 .trace_sink = null,
-                .last_call_output = FrameIo.ByteSlot.initGrowable(allocator),
+                .last_call_output = frame_io.ByteSlot.initGrowable(allocator),
             };
             executor.setTraceSink(options.trace_sink);
             return executor;
@@ -532,7 +532,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             if (recipient) |address| {
                 try self.warmAccessListAddress(address);
             }
-            if (Protocol.Block.transactionWarmsCoinbase(self.revision())) {
+            if (Protocol.block.transactionWarmsCoinbase(self.revision())) {
                 try self.warmAccessListAddress(tx_context.coinbase);
             }
         }
@@ -1420,17 +1420,18 @@ fn ethereumProtocolWith(comptime definition_name: []const u8, comptime overrides
     comptime var options = overrides;
     options.name = definition_name;
     const custom_definition = evmz.eth.define(options);
-    return evmz.protocol.binding.Protocol(custom_definition, evmz.eth.Support.all);
+    const CustomDefinition = evmz.definition.Bound(custom_definition);
+    return evmz.protocol.binding.Protocol(custom_definition, CustomDefinition.Support.all);
 }
 
 test "protocol definition drives call base gas" {
     const overrides = struct {
         fn callBaseGas(revision_value: evmz.eth.Revision) i64 {
-            return evmz.eth.Call.callBaseGas(revision_value) + 5;
+            return evmz.eth.system.Call.callBaseGas(revision_value) + 5;
         }
     };
     const ExpensiveCallProtocol = ethereumProtocolWith("expensive-call-base", .{
-        .Call = .{ .callBaseGas = overrides.callBaseGas },
+        .call = .{ .callBaseGas = overrides.callBaseGas },
     });
 
     const default_gas_left = try executeNestedBalanceCall(EthProtocol, .frontier);
@@ -1453,7 +1454,7 @@ test "protocol definition drives top-level delegated account access" {
         }
     };
     const ExpensiveTopLevelDelegatedAccessProtocol = ethereumProtocolWith("expensive-top-level-delegated-access", .{
-        .Call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
+        .call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
     });
 
     const default_gas_left = try executeTopLevelDelegatedCall(EthProtocol);
@@ -1478,7 +1479,7 @@ test "protocol definition drives top-frame value transfer state gas" {
         }
     };
     const ExpensiveTopFrameValueTransferProtocol = ethereumProtocolWith("expensive-top-frame-value-transfer", .{
-        .Call = .{ .topFrameValueTransferStateGas = overrides.topFrameValueTransferStateGas },
+        .call = .{ .topFrameValueTransferStateGas = overrides.topFrameValueTransferStateGas },
     });
 
     const default_result = try executeTopFrameValueTransfer(EthProtocol);
@@ -1497,7 +1498,7 @@ test "protocol definition drives empty call recipient touching" {
         }
     };
     const TouchEmptyCallRecipientProtocol = ethereumProtocolWith("touch-empty-call-recipient", .{
-        .Call = .{ .touchesEmptyCallRecipient = overrides.touchesEmptyCallRecipient },
+        .call = .{ .touchesEmptyCallRecipient = overrides.touchesEmptyCallRecipient },
     });
 
     try std.testing.expect(!try emptyCallRecipientMaterialized(EthProtocol));
@@ -1514,7 +1515,7 @@ test "protocol definition drives child call gas forwarding" {
         }
     };
     const ZeroChildGasProtocol = ethereumProtocolWith("zero-child-gas", .{
-        .Call = .{ .childGas = overrides.childGas },
+        .call = .{ .childGas = overrides.childGas },
     });
 
     try std.testing.expectEqual(@as(u256, 1), try executeCallResultStore(EthProtocol));
@@ -1530,7 +1531,7 @@ test "protocol definition drives create initcode word gas" {
         }
     };
     const ExpensiveCreateInitCodeProtocol = ethereumProtocolWith("expensive-create-initcode", .{
-        .Create = .{ .createInitCodeWordGas = overrides.createInitCodeWordGas },
+        .create = .{ .createInitCodeWordGas = overrides.createInitCodeWordGas },
     });
 
     try std.testing.expectEqual(Interpreter.Status.success, try executeCreateOpcodeStatus(EthProtocol));
@@ -1789,7 +1790,7 @@ test "protocol definition drives initial coinbase warm access" {
         }
     };
     const WarmCoinbaseProtocol = ethereumProtocolWith("warm-coinbase", .{
-        .Block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
+        .block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
     });
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
@@ -1882,13 +1883,13 @@ test "executor settleTransactionCosts applies refund and coinbase payment" {
 test "executor upfront charge uses comptime blob gas schedule" {
     const overrides = struct {
         fn blobSchedule(revision_value: evmz.eth.Revision) ?evmz.transaction.BlobSchedule {
-            var schedule = evmz.eth.Transaction.blobSchedule(revision_value) orelse return null;
+            var schedule = evmz.eth.transaction.Transaction.blobSchedule(revision_value) orelse return null;
             schedule.gas_per_blob *= 2;
             return schedule;
         }
     };
     const DoubleBlobGasProtocol = ethereumProtocolWith("double-blob-gas", .{
-        .Transaction = .{ .blobSchedule = overrides.blobSchedule },
+        .transaction = .{ .blobSchedule = overrides.blobSchedule },
     });
 
     const sender = evmz.addr(0xaaaa);
@@ -2020,7 +2021,7 @@ test "protocol definition drives authorization activation and success gas adjust
         }
     };
     const CustomAuthorizationProtocol = ethereumProtocolWith("custom-authorization", .{
-        .Authorization = .{
+        .authorization = .{
             .active = overrides.active,
             .successGasAdjustment = overrides.successGasAdjustment,
         },
@@ -2345,7 +2346,7 @@ test "protocol definition drives delegated transaction target warming" {
         }
     };
     const WarmDelegatedTargetProtocol = ethereumProtocolWith("warm-delegated-target", .{
-        .Authorization = .{ .warmsDelegatedTarget = overrides.warmsDelegatedTarget },
+        .authorization = .{ .warmsDelegatedTarget = overrides.warmsDelegatedTarget },
     });
     const sender = evmz.addr(0xaaaa);
     const authority = evmz.addr(0xbbbb);
@@ -2701,7 +2702,7 @@ test "protocol definition drives create transaction rollback state gas refund" {
         }
     };
     const CreateRollbackRefundProtocol = ethereumProtocolWith("create-rollback-refund", .{
-        .Create = .{ .createTransactionRollbackStateGasRefund = overrides.createTransactionRollbackStateGasRefund },
+        .create = .{ .createTransactionRollbackStateGasRefund = overrides.createTransactionRollbackStateGasRefund },
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3611,7 +3612,7 @@ test "protocol definition drives create runtime code size limit" {
         }
     };
     const TinyProtocol = ethereumProtocolWith("tiny-code-limit", .{
-        .Create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
+        .create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3641,7 +3642,7 @@ test "protocol definition drives create runtime prefix rejection" {
         }
     };
     const AllowEfProtocol = ethereumProtocolWith("allow-ef-create-code", .{
-        .Create = .{ .rejectsCreateCode = overrides.rejectsCreateCode },
+        .create = .{ .rejectsCreateCode = overrides.rejectsCreateCode },
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3688,7 +3689,7 @@ test "protocol definition drives create deposit gas" {
         }
     };
     const ExpensiveDepositProtocol = ethereumProtocolWith("expensive-create-deposit", .{
-        .Create = .{ .createDepositRegularGas = overrides.createDepositRegularGas },
+        .create = .{ .createDepositRegularGas = overrides.createDepositRegularGas },
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3731,7 +3732,7 @@ test "protocol definition drives created account initial nonce" {
         }
     };
     const NonceSevenProtocol = ethereumProtocolWith("create-nonce-seven", .{
-        .Create = .{ .createInitialNonce = overrides.createInitialNonce },
+        .create = .{ .createInitialNonce = overrides.createInitialNonce },
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3755,7 +3756,7 @@ test "protocol definition drives created account initial nonce" {
 
 test "protocol definition drives precompile warm access" {
     const NoPrecompiles = struct {
-        pub const Entry = evmz.eth.Precompile.Entry;
+        pub const Entry = evmz.eth.precompile.Entry;
 
         pub fn resolve(revision_value: evmz.eth.Revision, target: Address) ?Entry {
             _ = revision_value;
@@ -3779,7 +3780,7 @@ test "protocol definition drives precompile warm access" {
         }
     };
     const NoPrecompileProtocol = ethereumProtocolWith("no-precompiles", .{
-        .Precompile = NoPrecompiles,
+        .precompile = NoPrecompiles,
     });
     const precompile_address = evmz.addr(0x01);
 
@@ -3831,7 +3832,7 @@ test "protocol definition drives precompile execution" {
         };
     };
     const CustomPrecompileProtocol = ethereumProtocolWith("custom-precompile-execution", .{
-        .Precompile = CustomPrecompileOverrides.Precompile,
+        .precompile = CustomPrecompileOverrides.Precompile,
     });
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
@@ -3878,7 +3879,7 @@ test "protocol definition drives selfdestruct host policy" {
         }
     };
     const KeepSelfDestructBalanceProtocol = ethereumProtocolWith("keep-selfdestruct-balance", .{
-        .SelfDestruct = .{
+        .self_destruct = .{
             .selfDestructPolicy = overrides.selfDestructPolicy,
             .selfDestructRefundGas = overrides.selfDestructRefundGas,
         },

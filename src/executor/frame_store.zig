@@ -1,9 +1,10 @@
+// TODO: file name should be FrameStore
 const std = @import("std");
 
 const Host = @import("../Host.zig");
 const Interpreter = @import("../Interpreter.zig");
 const Memory = @import("../Memory.zig");
-const FrameIo = @import("../frame_io.zig");
+const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");
 const evmz = @import("../evm.zig");
 const Address = @import("../address.zig").Address;
@@ -15,13 +16,13 @@ pub const row_bytes =
     @sizeOf(Host.Message) +
     @sizeOf(Stack.Storage) +
     @sizeOf(Memory.Storage) +
-    @sizeOf(FrameIo.Slot);
+    @sizeOf(frame_io.Slot);
 
 frames: std.ArrayList(Interpreter.CallFrame) = .empty,
 messages: std.ArrayList(Host.Message) = .empty,
 stacks: std.ArrayList(Stack.Storage) = .empty,
 memories: std.ArrayList(Memory.Storage) = .empty,
-ios: std.ArrayList(FrameIo.Slot) = .empty,
+ios: std.ArrayList(frame_io.Slot) = .empty,
 max_rows: usize = 0,
 capacity_limit: ?usize = null,
 io_bytes_per_frame: ?usize = null,
@@ -259,9 +260,9 @@ fn ensureIoSlotCapacity(self: *FrameStore, allocator: std.mem.Allocator, capacit
     try self.ios.ensureTotalCapacityPrecise(allocator, capacity);
     while (self.ios.items.len < capacity) {
         const slot = if (self.io_bytes_per_frame) |bytes_per_frame|
-            try FrameIo.Slot.initBounded(allocator, bytes_per_frame)
+            try frame_io.Slot.initBounded(allocator, bytes_per_frame)
         else
-            FrameIo.Slot.initGrowable(allocator);
+            frame_io.Slot.initGrowable(allocator);
         self.ios.appendAssumeCapacity(slot);
     }
 }
@@ -347,7 +348,7 @@ test "frame store rebinds active rows after growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var first = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
         .revision = .latest,
@@ -365,7 +366,7 @@ test "frame store rebinds active rows after growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var second = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .revision = .latest,
@@ -404,7 +405,7 @@ test "bounded frame store uses reserved rows without growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var first = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
         .revision = .latest,
@@ -420,14 +421,14 @@ test "bounded frame store uses reserved rows without growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var second = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .revision = .latest,
     });
     defer second.deinit();
 
-    try std.testing.expectError(error.FrameCapacityExceeded, store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    try std.testing.expectError(error.FrameCapacityExceeded, store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .revision = .latest,
@@ -451,7 +452,7 @@ test "frame store io slot owns frame output and parent returndata without frame 
         .input_data = &.{},
         .value = 0,
     };
-    var lease = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var lease = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .revision = .latest,
@@ -492,7 +493,7 @@ test "bounded frame store reconfigures retained growable io slots" {
         .value = 0,
     };
 
-    var growable = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var growable = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .revision = .latest,
@@ -504,7 +505,7 @@ test "bounded frame store reconfigures retained growable io slots" {
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].return_data.capacity());
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].output_data.capacity());
 
-    var bounded = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var bounded = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .revision = .latest,
@@ -532,7 +533,7 @@ test "bounded frame store reuses reserved evm memory without allocator growth" {
         .value = 0,
     };
 
-    var first = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .revision = .latest,
@@ -544,7 +545,7 @@ test "bounded frame store reuses reserved evm memory without allocator growth" {
     try std.testing.expectEqual(@as(usize, 32), store.memories.items[0].capacity);
     try std.testing.expectEqual(@as(usize, 0), store.memories.items[0].items.len);
 
-    var second = try store.acquire(evmz.EthProtocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .revision = .latest,

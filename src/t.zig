@@ -434,7 +434,7 @@ pub const BytecodeResult = struct {
 };
 
 pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, revision: evmz.eth.Revision) !BytecodeResult {
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = host,
         .msg = msg,
         .code = code,
@@ -485,7 +485,7 @@ pub fn expectStackByRevision(code: []const u8, revision: evmz.eth.Revision, expe
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
@@ -513,7 +513,7 @@ test "environment opcodes delegate every tx context access to host" {
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode(.{ .ORIGIN, .GASPRICE }),

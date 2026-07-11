@@ -1,5 +1,6 @@
 const std = @import("std");
 const address = @import("../address.zig");
+const definition = @import("../definition.zig");
 const interface = @import("../protocol/interface.zig");
 const tx = @import("transaction.zig");
 const Revision = @import("revision.zig").Revision;
@@ -94,6 +95,30 @@ pub const Storage = struct {
 };
 
 pub const Block = struct {
+    const Self = @This();
+
+    /// Partial Ethereum authoring surface for the complete block policy.
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            valueTransferLog: ?*const fn (R, Address, Address, u256) ?interface.ValueTransferLog = null,
+            blockStartSystemCalls: ?*const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = null,
+            transactionWarmsCoinbase: ?*const fn (R) bool = null,
+        };
+        definition.assertPatchMirrors(definition.BlockConfig(R), PatchType);
+        return PatchType;
+    }
+
+    /// Complete Ethereum block policy, or the neutral policy for a custom
+    /// revision enum whose Ethereum semantics cannot be inherited.
+    pub fn config(comptime R: type) definition.BlockConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .valueTransferLog = Self.valueTransferLog,
+            .blockStartSystemCalls = Self.blockStartSystemCalls,
+            .transactionWarmsCoinbase = Self.transactionWarmsCoinbase,
+        };
+    }
+
     pub fn valueTransferLog(revision: Revision, from: Address, to: Address, amount: u256) ?interface.ValueTransferLog {
         if (!revision.isImpl(.amsterdam)) return null;
         if (amount == 0) return null;

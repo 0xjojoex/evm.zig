@@ -26,7 +26,7 @@ pub fn ProtocolWithDispatch(
     const hot_cold_dispatch = dispatcher.useHotColdDispatch(dispatch_config);
     const InstructionFacts = instruction_mod.For(DefinitionType, support_window);
     const AuthorizationFacts = DefinitionType.Authorization;
-    const BlockFacts = DefinitionType.Block;
+    const block_facts = DefinitionType.block;
     const CallFacts = DefinitionType.Call;
     const CreateFacts = DefinitionType.Create;
     const SettlementFacts = DefinitionType.Settlement;
@@ -54,7 +54,7 @@ pub fn ProtocolWithDispatch(
         pub const dispatch = dispatch_config;
         pub const hot_cold_dispatch_enabled = hot_cold_dispatch;
 
-        pub const Block = BlockFacts;
+        pub const block = block_facts;
         pub const Create = CreateFacts;
         pub const Settlement = SettlementFacts;
         pub const Storage = StorageFacts;
@@ -221,7 +221,8 @@ fn instructionFor(comptime ProtocolType: type, comptime opcode: opcode_info.Opco
 
 test "protocol type exposes resolved Ethereum facts" {
     const ethereum = @import("../eth.zig");
-    const CancunPlus = Protocol(ethereum.definition, ethereum.Support.since(.cancun));
+    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const CancunPlus = Protocol(ethereum.definition, Ethereum.Support.since(.cancun));
     const blobbasefee = comptime instructionFor(CancunPlus, .BLOBBASEFEE);
     const slotnum = comptime instructionFor(CancunPlus, .SLOTNUM);
     const balance = comptime instructionFor(CancunPlus, .BALANCE);
@@ -241,16 +242,16 @@ test "protocol type exposes resolved Ethereum facts" {
     try std.testing.expect(!CancunPlus.Instruction.entry(sload).hot_path);
     try std.testing.expectEqual(@as(?usize, ethereum.system.Create.max_code_size), CancunPlus.Create.createCodeSizeLimit(.cancun));
     try std.testing.expectEqual(@as(i64, 50), CancunPlus.Instruction.expByteGas(.cancun));
-    try std.testing.expectEqual(@as(?precompile_mod.Contract, .ecrecover), ethereum.Precompile.resolve(.cancun, address.addr(0x01)));
+    try std.testing.expectEqual(@as(?precompile_mod.Contract, .ecrecover), ethereum.precompile.resolve(.cancun, address.addr(0x01)));
     try std.testing.expect(CancunPlus.Precompile.active(.cancun, address.addr(0x01)));
 
-    const Amsterdam = Protocol(ethereum.definition, ethereum.Support.at(.amsterdam));
+    const Amsterdam = Protocol(ethereum.definition, Ethereum.Support.at(.amsterdam));
     try std.testing.expect(Amsterdam.hot_cold_dispatch_enabled);
     try std.testing.expectEqual(@as(?usize, ethereum.system.Create.amsterdam_max_code_size), Amsterdam.Create.createCodeSizeLimit(.amsterdam));
 
-    const AmsterdamWithoutHotCold = ProtocolWithDispatch(ethereum.definition, ethereum.Support.at(.amsterdam), .{ .hot_cold = .disabled });
+    const AmsterdamWithoutHotCold = ProtocolWithDispatch(ethereum.definition, Ethereum.Support.at(.amsterdam), .{ .hot_cold = .disabled });
     try std.testing.expect(!AmsterdamWithoutHotCold.hot_cold_dispatch_enabled);
 
-    const Frontier = Protocol(ethereum.definition, ethereum.Support.at(.frontier));
+    const Frontier = Protocol(ethereum.definition, Ethereum.Support.at(.frontier));
     try std.testing.expectEqual(@as(?usize, null), Frontier.Create.createCodeSizeLimit(.frontier));
 }

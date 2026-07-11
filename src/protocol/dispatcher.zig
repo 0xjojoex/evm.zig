@@ -1,4 +1,5 @@
 const std = @import("std");
+const definition_mod = @import("../definition.zig");
 const execution = @import("execution.zig");
 const instruction_mod = @import("instruction.zig");
 const opcode_info = @import("../opcode.zig");
@@ -403,27 +404,29 @@ pub fn hotPathFromResolved(tier: OpcodeTier, availability: Resolution, static_ga
 
 test "ethereum support windows resolve opcode availability" {
     const ethereum = @import("../eth.zig");
-    const Support = ethereum.Support;
+    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Support = Ethereum.Support;
 
-    const full = resolveDispatchTable(ethereum, Support.all);
+    const full = resolveDispatchTable(Ethereum, Support.all);
     try std.testing.expectEqual(Resolution.runtime, full[@intFromEnum(Opcode.BLOBBASEFEE)].availability);
     try std.testing.expectEqual(Resolution.runtime, full[@intFromEnum(Opcode.SLOTNUM)].availability);
 
-    const cancun_plus = resolveDispatchTable(ethereum, Support.since(.cancun));
+    const cancun_plus = resolveDispatchTable(Ethereum, Support.since(.cancun));
     try std.testing.expectEqual(Resolution.always, cancun_plus[@intFromEnum(Opcode.BLOBBASEFEE)].availability);
     try std.testing.expectEqual(Resolution.runtime, cancun_plus[@intFromEnum(Opcode.SLOTNUM)].availability);
     try std.testing.expectEqual(false, cancun_plus[@intFromEnum(Opcode.SLOTNUM)].hot_path);
 
-    const exact_cancun = resolveDispatchTable(ethereum, Support.at(.cancun));
+    const exact_cancun = resolveDispatchTable(Ethereum, Support.at(.cancun));
     try std.testing.expectEqual(Resolution.always, exact_cancun[@intFromEnum(Opcode.BLOBBASEFEE)].availability);
     try std.testing.expectEqual(Resolution.never, exact_cancun[@intFromEnum(Opcode.SLOTNUM)].availability);
 }
 
 test "ethereum support windows collapse stable static gas" {
     const ethereum = @import("../eth.zig");
-    const Support = ethereum.Support;
+    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Support = Ethereum.Support;
 
-    const full = resolveDispatchTable(ethereum, Support.all);
+    const full = resolveDispatchTable(Ethereum, Support.all);
     try std.testing.expectEqual(@as(?i64, null), full[@intFromEnum(Opcode.BALANCE)].staticGasConstant());
     try std.testing.expectEqual(@as(?i64, 2), full[@intFromEnum(Opcode.BASEFEE)].staticGasConstant());
     const balance_gas = switch (full[@intFromEnum(Opcode.BALANCE)].static_gas) {
@@ -436,14 +439,14 @@ test "ethereum support windows collapse stable static gas" {
     try std.testing.expectEqual(@as(i64, 700), balance_gas.items[2].gas);
     try std.testing.expectEqual(@as(i64, 100), balance_gas.items[3].gas);
 
-    const berlin_plus = resolveDispatchTable(ethereum, Support.since(.berlin));
+    const berlin_plus = resolveDispatchTable(Ethereum, Support.since(.berlin));
     try std.testing.expectEqual(@as(?i64, 100), berlin_plus[@intFromEnum(Opcode.BALANCE)].staticGasConstant());
     try std.testing.expectEqual(@as(?i64, 100), berlin_plus[@intFromEnum(Opcode.SLOAD)].staticGasConstant());
 
-    const cancun_plus = resolveDispatchTable(ethereum, Support.since(.cancun));
+    const cancun_plus = resolveDispatchTable(Ethereum, Support.since(.cancun));
     try std.testing.expectEqual(@as(?i64, null), cancun_plus[@intFromEnum(Opcode.CREATE)].staticGasConstant());
 
-    const exact_cancun = resolveDispatchTable(ethereum, Support.at(.cancun));
+    const exact_cancun = resolveDispatchTable(Ethereum, Support.at(.cancun));
     try std.testing.expectEqual(@as(?i64, 32000), exact_cancun[@intFromEnum(Opcode.CREATE)].staticGasConstant());
 }
 
@@ -498,14 +501,15 @@ test "static gas folding uses support containment instead of revision tag order"
 
 test "resolved hot path requires tier, always availability, and constant gas" {
     const ethereum = @import("../eth.zig");
-    const Support = ethereum.Support;
+    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Support = Ethereum.Support;
 
-    const full = resolveDispatchTable(ethereum, Support.all);
+    const full = resolveDispatchTable(Ethereum, Support.all);
     try std.testing.expect(full[@intFromEnum(Opcode.ADD)].hot_path);
     try std.testing.expect(full[@intFromEnum(Opcode.PUSH1)].hot_path);
     try std.testing.expect(!full[@intFromEnum(Opcode.PUSH0)].hot_path);
     try std.testing.expect(!full[@intFromEnum(Opcode.SLOAD)].hot_path);
 
-    const shanghai_plus = resolveDispatchTable(ethereum, Support.since(.shanghai));
+    const shanghai_plus = resolveDispatchTable(Ethereum, Support.since(.shanghai));
     try std.testing.expect(shanghai_plus[@intFromEnum(Opcode.PUSH0)].hot_path);
 }

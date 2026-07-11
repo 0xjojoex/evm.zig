@@ -7,9 +7,9 @@ const evmc = @cImport({
 
 const Address = evmz.Address;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
-const EthProtocol = evmz.EthProtocol;
-const Executor = evmz.Executor(EthProtocol);
+const Interpreter = evmz.interpreter;
+const EthProtocol = evmz.Evm.Protocol;
+const Executor = evmz.Executor;
 
 extern fn evmc_create_evmone() ?*evmc.evmc_vm;
 

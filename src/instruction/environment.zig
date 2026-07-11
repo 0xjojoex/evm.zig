@@ -255,7 +255,7 @@ test "BALANCE cold account access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.BALANCE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -292,7 +292,7 @@ test "EXTCODESIZE account access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.EXTCODESIZE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -331,7 +331,7 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
         0x3c, // EXTCODECOPY
     };
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,

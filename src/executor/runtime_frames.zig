@@ -1,7 +1,7 @@
 const evmz = @import("../evm.zig");
 
 const FrameStore = @import("./frame_store.zig");
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const Journal = @import("../state/Journal.zig");
 
 pub const ChildCreate = struct {

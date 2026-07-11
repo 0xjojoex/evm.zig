@@ -219,7 +219,8 @@ fn wordCount(len: usize) usize {
 }
 
 test "transaction gas helpers" {
-    const Ethereum = @import("../eth.zig");
+    const eth = @import("../eth.zig");
+    const Ethereum = eth.Protocol;
     const EthGas = For(Ethereum);
 
     try std.testing.expectEqual(@as(u64, 21_072), EthGas.intrinsicGas(.byzantium, &.{ 0, 1 }, 0, .{}));
@@ -229,7 +230,7 @@ test "transaction gas helpers" {
         .addresses = 1,
         .storage_keys = 3,
     }));
-    try std.testing.expectEqual(@as(u64, 5), Ethereum.transaction.calldataTokenCount(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(u64, 5), eth.transaction.calldataTokenCount(&.{ 0, 1 }));
     try std.testing.expectEqual(@as(u64, 21_020), EthGas.minimumGas(.istanbul, &.{ 0, 1 }, 0, .{}));
     try std.testing.expectEqual(@as(u64, 21_050), EthGas.minimumGas(.prague, &.{ 0, 1 }, 0, .{}));
     try std.testing.expectEqual(@as(u64, 15_020), EthGas.minimumGas(.amsterdam, &.{ 0, 1 }, 0, .{}));
@@ -269,7 +270,7 @@ test "transaction gas helpers" {
     try std.testing.expectEqual(std.math.maxInt(usize), EthGas.maxInitcodeSize(.london));
     try std.testing.expectEqual(@as(usize, 49_152), EthGas.maxInitcodeSize(.osaka));
     try std.testing.expectEqual(@as(usize, 131_072), EthGas.maxInitcodeSize(.amsterdam));
-    try std.testing.expectEqual(@as(u64, 7_424), Ethereum.transaction.accessListDataCost(.{ .addresses = 1, .storage_keys = 3 }));
+    try std.testing.expectEqual(@as(u64, 7_424), eth.transaction.accessListDataCost(.{ .addresses = 1, .storage_keys = 3 }));
     const storage_keys = [_]u256{ 1, 2, 3 };
     try std.testing.expectEqual(AccessListCounts{
         .addresses = 2,
@@ -281,7 +282,7 @@ test "transaction gas helpers" {
 }
 
 test "transaction gas plan computes executable gas after intrinsic and floor costs" {
-    const EthGas = For(@import("../eth.zig"));
+    const EthGas = For(@import("../eth.zig").Protocol);
     const istanbul = EthGas.gasPlan(.istanbul, &.{ 0, 1 }, 100_000, .{});
     try std.testing.expectEqual(@as(u64, 21_020), istanbul.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 0), istanbul.floor_gas);
@@ -397,15 +398,15 @@ test "transaction gas plan uses comptime protocol" {
 }
 
 test "Amsterdam gas plan executes only capped regular gas" {
-    const Ethereum = @import("../eth.zig");
-    const plan = For(Ethereum).gasPlan(.amsterdam, &.{}, 120_000_000, .{});
+    const eth = @import("../eth.zig");
+    const plan = For(eth.Protocol).gasPlan(.amsterdam, &.{}, 120_000_000, .{});
     try std.testing.expectEqual(@as(u64, 15_000), plan.intrinsic_gas);
-    try std.testing.expectEqual(@as(u64, Ethereum.transaction.max_transaction_gas_limit - 15_000), plan.execution.?.regular_left);
-    try std.testing.expectEqual(@as(u64, 120_000_000 - Ethereum.transaction.max_transaction_gas_limit), plan.execution.?.reservoir);
+    try std.testing.expectEqual(@as(u64, eth.transaction.max_transaction_gas_limit - 15_000), plan.execution.?.regular_left);
+    try std.testing.expectEqual(@as(u64, 120_000_000 - eth.transaction.max_transaction_gas_limit), plan.execution.?.reservoir);
 }
 
 test "Amsterdam create gas plan splits regular and state intrinsic gas" {
-    const plan = For(@import("../eth.zig")).gasPlan(.amsterdam, &([_]u8{1} ** 4059), 271_798, .{ .is_create = true });
+    const plan = For(@import("../eth.zig").Protocol).gasPlan(.amsterdam, &([_]u8{1} ** 4059), 271_798, .{ .is_create = true });
     try std.testing.expectEqual(@as(u64, 271_798), plan.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 88_198), plan.intrinsic_regular_gas);
     try std.testing.expectEqual(@as(u64, 183_600), plan.intrinsic_state_gas);

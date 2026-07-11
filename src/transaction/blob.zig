@@ -107,19 +107,20 @@ pub fn blobVersion(hash: u256) u8 {
 }
 
 test "transaction blob fee helpers" {
-    const Ethereum = @import("../eth.zig");
+    const eth = @import("../eth.zig");
+    const Ethereum = eth.Protocol;
     const EthBlob = For(Ethereum);
 
     try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(Ethereum.Transaction.blobSchedule(.cancun).?, 0x0e0000));
     try std.testing.expectEqual(@as(?BlobSchedule, null), EthBlob.blobSchedule(.shanghai));
     try std.testing.expectEqual(@as(u64, 6), EthBlob.blobSchedule(.cancun).?.max);
-    try std.testing.expectEqual(Ethereum.transaction.cancun_blob_base_fee_update_fraction, EthBlob.blobSchedule(.cancun).?.base_fee_update_fraction);
+    try std.testing.expectEqual(eth.transaction.cancun_blob_base_fee_update_fraction, EthBlob.blobSchedule(.cancun).?.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u64, 9), EthBlob.blobSchedule(.osaka).?.max);
     try std.testing.expectEqual(@as(usize, 6), EthBlob.maxBlobCountPerTransaction(.osaka));
-    try std.testing.expectEqual(Ethereum.transaction.prague_blob_base_fee_update_fraction, EthBlob.blobSchedule(.osaka).?.base_fee_update_fraction);
+    try std.testing.expectEqual(eth.transaction.prague_blob_base_fee_update_fraction, EthBlob.blobSchedule(.osaka).?.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u64, 14), EthBlob.blobSchedule(.amsterdam).?.target);
     try std.testing.expectEqual(@as(u64, 21), EthBlob.blobSchedule(.amsterdam).?.max);
-    try std.testing.expectEqual(Ethereum.transaction.amsterdam_blob_base_fee_update_fraction, EthBlob.blobSchedule(.amsterdam).?.base_fee_update_fraction);
+    try std.testing.expectEqual(eth.transaction.amsterdam_blob_base_fee_update_fraction, EthBlob.blobSchedule(.amsterdam).?.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u256, 19), EthBlob.blobBaseFeeForRevision(.cancun, 10_000_000));
     try std.testing.expectEqual(@as(u256, 7), EthBlob.blobBaseFeeForRevision(.osaka, 10_000_000));
     try std.testing.expectEqual(@as(u256, 786_432), EthBlob.calcExcessBlobGas(.prague, .{

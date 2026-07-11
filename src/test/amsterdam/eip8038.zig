@@ -3,10 +3,10 @@ const evmz = @import("../../evm.zig");
 
 const AccountState = evmz.state.Account;
 const Address = evmz.Address;
-const EthProtocol = evmz.EthProtocol;
-const Executor = evmz.Executor(EthProtocol);
+const EthProtocol = evmz.Evm.Protocol;
+const Executor = evmz.Executor;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
@@ -268,7 +268,7 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
@@ -294,7 +294,7 @@ fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.Acces
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
@@ -326,7 +326,7 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
         .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0xcc, 0xcc, .EXTCODECOPY, .STOP,
     });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,

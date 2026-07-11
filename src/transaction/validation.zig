@@ -219,12 +219,12 @@ fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_sc
     return blob.blobGasForSchedule(schedule, blob_count);
 }
 
-fn ethereumDefinition() type {
-    return @import("../eth.zig");
+fn ethereumProtocol() type {
+    return @import("../eth.zig").Protocol;
 }
 
 test "transaction prepayment includes blob gas" {
-    try std.testing.expectEqual(@as(u256, 4_286_432), For(ethereumDefinition()).prepaymentCost(.cancun, 500_000, 7, 1, 6));
+    try std.testing.expectEqual(@as(u256, 4_286_432), For(ethereumProtocol()).prepaymentCost(.cancun, 500_000, 7, 1, 6));
 }
 
 test "transaction prepayment uses comptime blob gas" {
@@ -248,7 +248,7 @@ test "transaction prepayment uses comptime blob gas" {
         };
     };
     const hashes = [_]u256{@as(u256, 0x01) << 248} ** 2;
-    const input = For(ethereumDefinition()).Input{
+    const input = For(ethereumProtocol()).Input{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 500_000,
@@ -257,7 +257,7 @@ test "transaction prepayment uses comptime blob gas" {
         .blob_hashes = &hashes,
     };
 
-    const default = For(ethereumDefinition()).maxPrepaymentCost(input).?;
+    const default = For(ethereumProtocol()).maxPrepaymentCost(input).?;
     const custom = For(DoubleBlobGasProtocol).maxPrepaymentCost(.{
         .revision = input.revision,
         .kind = input.kind,
@@ -277,7 +277,7 @@ test "transaction validation uses runtime blob schedule" {
     };
 
     schedule.max = 1;
-    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -290,7 +290,7 @@ test "transaction validation uses runtime blob schedule" {
 
     schedule.max = 6;
     schedule.gas_per_blob = eth_transaction.blob_gas_per_blob * 2;
-    const cost = For(ethereumDefinition()).maxPrepaymentCost(.{
+    const cost = For(ethereumProtocol()).maxPrepaymentCost(.{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 500_000,
@@ -303,7 +303,7 @@ test "transaction validation uses runtime blob schedule" {
 }
 
 test "transaction validation rejects intrinsic gas below limit" {
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 21_000,
         .input = &.{0xff},
@@ -312,7 +312,7 @@ test "transaction validation rejects intrinsic gas below limit" {
 }
 
 test "transaction validation rejects Prague floor gas" {
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .gas_limit = 21_100,
         .input = &.{ 1, 1, 1, 1 },
@@ -322,19 +322,19 @@ test "transaction validation rejects Prague floor gas" {
 
 test "transaction validation applies Amsterdam calldata floor" {
     const amsterdam_floor_input = [_]u8{1} ** 63;
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .gas_limit = 21_200,
         .input = &.{ 1, 1, 1, 1 },
         .sender_balance = 1_000_000,
     }));
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 16_031,
         .input = &amsterdam_floor_input,
         .sender_balance = 1_000_000,
     }).?);
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 16_032,
         .input = &amsterdam_floor_input,
@@ -344,19 +344,19 @@ test "transaction validation applies Amsterdam calldata floor" {
 
 test "transaction validation includes Amsterdam access-list data surcharge" {
     const access_counts = AccessListCounts{ .addresses = 1, .storage_keys = 1 };
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .gas_limit = 25_300,
         .access_list_counts = access_counts,
         .sender_balance = 100_000,
     }));
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 24_327,
         .access_list_counts = access_counts,
         .sender_balance = 100_000,
     }).?);
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 24_328,
         .access_list_counts = access_counts,
@@ -365,7 +365,7 @@ test "transaction validation includes Amsterdam access-list data surcharge" {
 }
 
 test "transaction validation checks max fee balance" {
-    try std.testing.expectEqual(ValidationError.insufficient_account_funds, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.insufficient_account_funds, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -380,7 +380,7 @@ test "transaction validation checks max fee balance" {
 }
 
 test "transaction validation rejects typed transaction before fork" {
-    try std.testing.expectEqual(ValidationError.type_2_tx_pre_fork, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_2_tx_pre_fork, For(ethereumProtocol()).validate(.{
         .revision = .berlin,
         .kind = .dynamic_fee,
         .gas_limit = 21_000,
@@ -390,13 +390,13 @@ test "transaction validation rejects typed transaction before fork" {
 }
 
 test "transaction validation rejects non-EOA sender after London" {
-    try std.testing.expectEqual(ValidationError.sender_not_eoa, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.sender_not_eoa, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 21_000,
         .sender_code_kind = .non_delegating,
         .sender_balance = 21_000,
     }).?);
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .berlin,
         .gas_limit = 21_000,
         .sender_code_kind = .non_delegating,
@@ -405,7 +405,7 @@ test "transaction validation rejects non-EOA sender after London" {
 }
 
 test "transaction validation rejects nonce overflow" {
-    try std.testing.expectEqual(ValidationError.nonce_is_max, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.nonce_is_max, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .is_create = true,
         .gas_limit = 100_000,
@@ -416,7 +416,7 @@ test "transaction validation rejects nonce overflow" {
 }
 
 test "transaction validation rejects nonce mismatch" {
-    try std.testing.expectEqual(ValidationError.nonce_mismatch, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.nonce_mismatch, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 21_000,
         .gas_price = 1,
@@ -427,7 +427,7 @@ test "transaction validation rejects nonce mismatch" {
 }
 
 test "transaction validation rejects blob contract creation" {
-    try std.testing.expectEqual(ValidationError.type_3_tx_contract_creation, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_contract_creation, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .kind = .blob,
         .is_create = true,
@@ -443,7 +443,7 @@ test "transaction validation rejects blob contract creation" {
 }
 
 test "transaction validation rejects block gas allowance" {
-    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 90_000,
         .block_gas_limit = 80_000,
@@ -453,19 +453,19 @@ test "transaction validation rejects block gas allowance" {
 }
 
 test "transaction validation applies Osaka transaction gas cap" {
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .gas_limit = eth_transaction.max_transaction_gas_limit,
         .gas_price = 1,
         .sender_balance = eth_transaction.max_transaction_gas_limit,
     }));
-    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .gas_limit = eth_transaction.max_transaction_gas_limit + 1,
         .gas_price = 1,
         .sender_balance = eth_transaction.max_transaction_gas_limit + 1,
     }).?);
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .gas_limit = eth_transaction.max_transaction_gas_limit + 1,
         .gas_price = 1,
@@ -608,7 +608,7 @@ test "transaction validation uses comptime policy" {
         };
     };
 
-    try std.testing.expectEqual(ValidationError.type_1_tx_pre_fork, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_1_tx_pre_fork, For(ethereumProtocol()).validate(.{
         .revision = .frontier,
         .kind = .access_list,
         .gas_limit = 21_000,
@@ -627,7 +627,7 @@ test "transaction validation uses comptime policy" {
 
 test "transaction validation does not apply Osaka total gas cap after Amsterdam" {
     const fixture_gas: u64 = 120_000_000;
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = fixture_gas,
         .gas_price = 1,
@@ -638,7 +638,7 @@ test "transaction validation does not apply Osaka total gas cap after Amsterdam"
 
 test "transaction validation caps Amsterdam intrinsic regular gas" {
     const too_many_addresses = (eth_transaction.max_transaction_gas_limit - 15_000) / (eth_transaction.amsterdam_access_list_address_gas + eth_transaction.access_list_address_data_gas) + 1;
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 30_000_000,
         .access_list_counts = .{ .addresses = too_many_addresses },
@@ -651,7 +651,7 @@ test "transaction validation caps Amsterdam calldata floor gas" {
     defer std.testing.allocator.free(input);
     @memset(input, 1);
 
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .gas_limit = 30_000_000,
         .input = input,
@@ -659,7 +659,7 @@ test "transaction validation caps Amsterdam calldata floor gas" {
 }
 
 test "transaction validation rejects old type gas price below base fee" {
-    try std.testing.expectEqual(ValidationError.insufficient_max_fee_per_gas, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.insufficient_max_fee_per_gas, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 21_000,
         .gas_price = 999,
@@ -672,7 +672,7 @@ test "transaction validation rejects blob shape errors" {
     const seven_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 7;
     const ten_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 10;
 
-    try std.testing.expectEqual(ValidationError.type_3_tx_zero_blobs, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_zero_blobs, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -680,7 +680,7 @@ test "transaction validation rejects blob shape errors" {
         .max_fee_per_blob_gas = 1,
         .sender_balance = 1_000_000,
     }).?);
-    try std.testing.expectEqual(ValidationError.type_3_tx_invalid_blob_versioned_hash, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_invalid_blob_versioned_hash, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -689,7 +689,7 @@ test "transaction validation rejects blob shape errors" {
         .blob_hashes = &.{@as(u256, 0x02) << 248},
         .sender_balance = 1_000_000,
     }).?);
-    try std.testing.expectEqual(ValidationError.type_3_tx_blob_count_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_blob_count_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -698,7 +698,7 @@ test "transaction validation rejects blob shape errors" {
         .blob_hashes = &seven_blob_hashes,
         .sender_balance = 10_000_000,
     }).?);
-    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .kind = .blob,
         .gas_limit = 21_000,
@@ -710,14 +710,14 @@ test "transaction validation rejects blob shape errors" {
 }
 
 test "transaction validation rejects set-code shape errors" {
-    try std.testing.expectEqual(ValidationError.type_4_empty_authorization_list, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_4_empty_authorization_list, For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .kind = .set_code,
         .gas_limit = 21_000,
         .max_fee_per_gas = 1,
         .sender_balance = 1_000_000,
     }).?);
-    try std.testing.expectEqual(ValidationError.type_4_tx_contract_creation, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.type_4_tx_contract_creation, For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .kind = .set_code,
         .is_create = true,
@@ -726,7 +726,7 @@ test "transaction validation rejects set-code shape errors" {
         .authorization_count = 1,
         .sender_balance = 1_000_000,
     }).?);
-    try std.testing.expectEqual(ValidationError.sender_not_eoa, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.sender_not_eoa, For(ethereumProtocol()).validate(.{
         .revision = .prague,
         .kind = .set_code,
         .gas_limit = 100_000,
@@ -739,7 +739,7 @@ test "transaction validation rejects set-code shape errors" {
 
 test "transaction validation rejects oversized initcode" {
     var initcode = [_]u8{0} ** (eth_transaction.max_initcode_size + 1);
-    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .shanghai,
         .is_create = true,
         .gas_limit = 1_000_000,
@@ -747,7 +747,7 @@ test "transaction validation rejects oversized initcode" {
         .sender_balance = 1_000_000,
     }).?);
 
-    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .osaka,
         .is_create = true,
         .gas_limit = 1_000_000,
@@ -755,7 +755,7 @@ test "transaction validation rejects oversized initcode" {
         .sender_balance = 1_000_000,
     }).?);
 
-    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .is_create = true,
         .gas_limit = 4_000_000,
@@ -766,7 +766,7 @@ test "transaction validation rejects oversized initcode" {
     const oversized_amsterdam = try std.testing.allocator.alloc(u8, eth_transaction.amsterdam_max_initcode_size + 1);
     defer std.testing.allocator.free(oversized_amsterdam);
     @memset(oversized_amsterdam, 0);
-    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumDefinition()).validate(.{
+    try std.testing.expectEqual(ValidationError.initcode_size_exceeded, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
         .is_create = true,
         .gas_limit = 1_000_000,

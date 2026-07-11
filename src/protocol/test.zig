@@ -272,13 +272,16 @@ fn TestPrecompile(comptime R: type) type {
 
 test "protocol type exposes dispatch facts" {
     const eth = @import("../eth.zig");
-    const CancunPlus = Protocol(eth.definition, eth.Support.since(.cancun));
+    const Ethereum = definition.Bound(eth.definition);
+    const CancunPlus = Protocol(eth.definition, Ethereum.Support.since(.cancun));
     const blobbasefee = comptime instructionFor(CancunPlus, .BLOBBASEFEE);
     const slotnum = comptime instructionFor(CancunPlus, .SLOTNUM);
     const balance = comptime instructionFor(CancunPlus, .BALANCE);
     const add = comptime instructionFor(CancunPlus, .ADD);
     const add_entry = comptime CancunPlus.Instruction.entry(add);
 
+    try std.testing.expectEqual(eth.Revision.cancun, CancunPlus.support.min);
+    try std.testing.expectEqual(Ethereum.Support.all.max, CancunPlus.support.max);
     try std.testing.expectEqual(Resolution.always, CancunPlus.Instruction.availability(blobbasefee));
     try std.testing.expectEqual(Resolution.runtime, CancunPlus.Instruction.availability(slotnum));
     try std.testing.expectEqual(@as(?i64, 100), CancunPlus.Instruction.staticGasConstant(balance));
@@ -290,9 +293,12 @@ test "protocol type exposes dispatch facts" {
 
 test "transaction resolver defaults engine protocol shape" {
     const eth = @import("../eth.zig");
+    const Ethereum = definition.Bound(eth.definition);
     assertValidDefinition(eth.definition);
 
-    const Cancun = Protocol(eth.definition, eth.Support.at(.cancun));
+    const Cancun = Protocol(eth.definition, Ethereum.Support.at(.cancun));
+    try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.min);
+    try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.max);
     try std.testing.expectEqual(tx.Transaction, Cancun.Transaction.Value);
     try std.testing.expectEqual(tx.TransactionView, Cancun.Transaction.View);
     try std.testing.expectEqual(tx.ValidationError, Cancun.Transaction.ValidationError);

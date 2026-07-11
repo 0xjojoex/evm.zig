@@ -8,7 +8,7 @@ const JumpDestMap = @import("./code/JumpDestMap.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 const Stack = @import("./Stack.zig");
-const FrameIo = @import("./frame_io.zig");
+const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
 const tail_dispatch = @import("./interpreter/tail_dispatch.zig");
 const Opcode = @import("./opcode.zig").Opcode;
@@ -139,7 +139,7 @@ pub fn InitFor(comptime Protocol: type) type {
         trace_sink: ?*trace.Sink = null,
         memory_allocator: ?std.mem.Allocator = null,
         memory_retain_capacity: bool = false,
-        io: ?*FrameIo.Slot = null,
+        io: ?*frame_io.Slot = null,
     };
 }
 
@@ -152,7 +152,7 @@ const FrameInit = struct {
     trace_sink: ?*trace.Sink = null,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
-    io: ?*FrameIo.Slot = null,
+    io: ?*frame_io.Slot = null,
 };
 
 fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
@@ -170,11 +170,14 @@ fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
 }
 
 pub fn For(comptime ProtocolType: type) type {
+    const StatusType = Status;
+
     return struct {
         const Self = @This();
         const Instructions = instruction.For(Protocol);
 
         pub const Protocol = ProtocolType;
+        pub const Status = StatusType;
 
         call_frame: *CallFrame,
 
@@ -330,7 +333,7 @@ pub const CallFrame = struct {
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
     return_data: []u8 = &.{},
-    io: *FrameIo.Slot = undefined,
+    io: *frame_io.Slot = undefined,
     output_data: []u8 = &.{},
     jumpdests: JumpDestMap = .empty,
     bytecode: ?*Bytecode = null,
@@ -670,7 +673,7 @@ pub const CallFrameSlot = struct {
     frame: CallFrame = undefined,
     stack_storage: Stack.Storage = undefined,
     memory_storage: Memory.Storage = .empty,
-    io_storage: FrameIo.Slot = undefined,
+    io_storage: frame_io.Slot = undefined,
     msg: Host.Message = undefined,
 
     pub fn initFor(self: *CallFrameSlot, comptime Protocol: type, allocator: std.mem.Allocator, options: InitFor(Protocol)) !void {
@@ -678,7 +681,7 @@ pub const CallFrameSlot = struct {
     }
 
     fn initRaw(self: *CallFrameSlot, allocator: std.mem.Allocator, options: FrameInit) !void {
-        self.io_storage = FrameIo.Slot.initGrowable(allocator);
+        self.io_storage = frame_io.Slot.initGrowable(allocator);
         errdefer self.io_storage.deinit();
 
         var frame_options = options;
@@ -719,7 +722,7 @@ test "call frame can execute with externally supplied stack storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = FrameIo.Slot.initGrowable(std.testing.allocator);
+    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
     try frame.init(std.testing.allocator, .{
@@ -732,7 +735,7 @@ test "call frame can execute with externally supplied stack storage" {
     defer frame.deinit();
     try std.testing.expect(frame.stack.slots == &stack_storage);
 
-    var interpreter = For(evmz.EthProtocol).init(&frame);
+    var interpreter = For(evmz.Evm.Protocol).init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -762,7 +765,7 @@ test "call frame can execute with externally supplied memory storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = FrameIo.Slot.initGrowable(std.testing.allocator);
+    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
     try frame.init(std.testing.allocator, .{
@@ -775,7 +778,7 @@ test "call frame can execute with externally supplied memory storage" {
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
 
-    var interpreter = For(evmz.EthProtocol).init(&frame);
+    var interpreter = For(evmz.Evm.Protocol).init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -816,7 +819,7 @@ test "interpreter trace sink records step start and end" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sink();
-    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -941,7 +944,7 @@ test "interpreter trace schema controls step emission" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sinkWithoutEvents();
-    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -1097,7 +1100,7 @@ test "interpreter can execute prepared bytecode jumpdest map" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -1131,7 +1134,7 @@ test "prepared bytecode preserves truncated push semantics" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -1165,7 +1168,7 @@ test "prepared bytecode keeps CODESIZE semantic length" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,

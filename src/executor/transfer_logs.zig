@@ -6,7 +6,7 @@ const Host = evmz.Host;
 
 pub fn emit(executor: anytype, from: Address, to: Address, amount: u256) !void {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const transfer_log = Protocol.Block.valueTransferLog(executor.revision(), from, to, amount) orelse return;
+    const transfer_log = Protocol.block.valueTransferLog(executor.revision(), from, to, amount) orelse return;
 
     const topics = [_]u256{
         transfer_log.topic,
@@ -27,7 +27,7 @@ test "value transfer log metadata comes from comptime protocol" {
     const CustomProtocol = struct {
         pub const Revision = evmz.eth.Revision;
 
-        pub const Block = struct {
+        pub const block = struct {
             pub fn valueTransferLog(
                 revision: Revision,
                 from: Address,

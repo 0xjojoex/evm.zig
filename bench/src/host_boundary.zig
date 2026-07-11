@@ -3,7 +3,7 @@ const evmz = @import("evmz");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const evmc = evmz.c_api.evmc;
 const evmc_common = evmz.c_api.common;
 const host2c = evmz.c_api.host2c;
@@ -349,7 +349,7 @@ fn runBytecodeHostOp(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,

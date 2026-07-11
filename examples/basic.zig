@@ -39,16 +39,20 @@ pub fn main(init: std.process.Init) !void {
         .to = contract,
         .gas_limit = gas_limit,
     });
+    const executed = switch (result) {
+        .executed => |value| value,
+        .rejected => return error.ExampleTransactionRejected,
+    };
     var diff = try vm.changeset();
     defer diff.deinit(allocator);
     const stored = storageValue(&diff, contract, 0);
-    if (result.status != .success) return error.ExampleTransactionFailed;
+    if (executed.status != .success) return error.ExampleTransactionFailed;
     if (stored != 42) return error.ExampleStorageMismatch;
 
-    std.debug.print("status: {s}\n", .{@tagName(result.status)});
-    std.debug.print("gas used: {d}\n", .{result.gas_used});
+    std.debug.print("status: {s}\n", .{@tagName(executed.status)});
+    std.debug.print("gas used: {d}\n", .{executed.gas.used});
     std.debug.print("return: 0x", .{});
-    printHex(result.output);
+    printHex(executed.output);
     std.debug.print("\n", .{});
     std.debug.print("storage[0]: {d}\n", .{stored});
 }

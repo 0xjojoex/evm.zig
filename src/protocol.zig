@@ -46,48 +46,12 @@ pub const assertRevisionSupported = support.assertRevisionSupported;
 pub const revisionIdForProtocol = support.revisionIdForProtocol;
 pub const decodeRevisionForProtocol = support.decodeRevisionForProtocol;
 
-/// Bind a protocol definition to a support window and dispatch options.
-///
-/// `.support` defaults to the definition's full revision window. Dispatch
-/// options accept either `.dispatch.hot_cold` or `.hot_cold_dispatch`.
-pub fn Protocol(comptime definition_value: anytype, comptime options: anytype) type {
-    const support_window = definitionSupport(definition_value, options);
-    const dispatch_config = definitionDispatchConfig(options);
-    return ProtocolWithDispatch(definition_value, support_window, dispatch_config);
-}
-
-fn definitionSupport(comptime definition_value: anytype, comptime options: anytype) definition.Bound(definition_value).Support {
-    const BoundDefinition = definition.Bound(definition_value);
-    const Options = @TypeOf(options);
-    switch (@typeInfo(Options)) {
-        .@"struct" => {},
-        else => @compileError("Protocol options must be a struct literal"),
-    }
-
-    if (@hasField(Options, "support")) {
-        return options.support;
-    }
-
-    return BoundDefinition.Support.all;
-}
-
-fn definitionDispatchConfig(comptime options: anytype) DispatchConfig {
-    const Options = @TypeOf(options);
-    var dispatch_config = DispatchConfig{};
-
-    if (@hasField(Options, "dispatch")) {
-        const dispatch_options = options.dispatch;
-        const DispatchOptions = @TypeOf(dispatch_options);
-        if (@hasField(DispatchOptions, "hot_cold")) {
-            dispatch_config.hot_cold = dispatch_options.hot_cold;
-        }
-    }
-
-    if (@hasField(Options, "hot_cold_dispatch")) {
-        dispatch_config.hot_cold = options.hot_cold_dispatch;
-    }
-
-    return dispatch_config;
+/// Bind a protocol definition to one concrete support window.
+pub fn Protocol(
+    comptime definition_value: anytype,
+    comptime support_window: definition.Bound(definition_value).Support,
+) type {
+    return ProtocolWithDispatch(definition_value, support_window, .{});
 }
 
 test {

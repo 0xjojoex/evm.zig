@@ -101,7 +101,7 @@ test "fork-gated opcodes are invalid before their activation fork" {
 }
 
 test "fork-dependent static gas follows legacy schedules" {
-    const EthInstructions = For(evmz.EthProtocol);
+    const EthInstructions = For(evmz.Evm.Protocol);
     try std.testing.expectEqual(@as(i64, 20), EthInstructions.staticGasForRevision(.frontier, .BALANCE));
     try std.testing.expectEqual(@as(i64, 400), EthInstructions.staticGasForRevision(.byzantium, .BALANCE));
     try std.testing.expectEqual(@as(i64, 700), EthInstructions.staticGasForRevision(.istanbul, .BALANCE));
@@ -121,7 +121,7 @@ test "fork-dependent static gas follows legacy schedules" {
 }
 
 test "execute charges dynamic and fixed static gas" {
-    const Mainnet = evmz.EthProtocol;
+    const Mainnet = evmz.Evm.Protocol;
     const IstanbulProtocol = evmz.eth.fork(.istanbul);
 
     try std.testing.expectEqual(@as(i64, 99_980), try executeBalance(Mainnet, .frontier));
@@ -252,11 +252,11 @@ fn DispatchOverrideProtocol(comptime add_target: definition.ExecutionTarget) typ
     return struct {
         pub const Revision = evmz.eth.Revision;
         pub const hot_cold_dispatch_enabled = true;
-        pub const Instruction = evmz.EthProtocol.Instruction;
-        pub const Storage = evmz.EthProtocol.Storage;
-        pub const Call = evmz.EthProtocol.Call;
-        pub const Create = evmz.EthProtocol.Create;
-        pub const SelfDestruct = evmz.EthProtocol.SelfDestruct;
+        pub const Instruction = evmz.Evm.Protocol.Instruction;
+        pub const Storage = evmz.Evm.Protocol.Storage;
+        pub const Call = evmz.Evm.Protocol.Call;
+        pub const Create = evmz.Evm.Protocol.Create;
+        pub const SelfDestruct = evmz.Evm.Protocol.SelfDestruct;
 
         pub fn staticGas(comptime opcode: Opcode) definition.StaticGas {
             return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
@@ -266,8 +266,8 @@ fn DispatchOverrideProtocol(comptime add_target: definition.ExecutionTarget) typ
             return @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas);
         }
 
-        pub fn opcodeAvailability(comptime opcode: Opcode) evmz.EthProtocol.Availability {
-            return evmz.EthProtocol.opcodeAvailability(opcode);
+        pub fn opcodeAvailability(comptime opcode: Opcode) evmz.Evm.Protocol.Availability {
+            return evmz.Evm.Protocol.opcodeAvailability(opcode);
         }
 
         pub fn dispatchEntry(comptime opcode: Opcode) definition.DispatchEntry {
@@ -397,7 +397,7 @@ test "static gas helper uses resolved rule gas" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(Opcode.CALL)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,

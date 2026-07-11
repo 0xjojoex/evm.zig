@@ -190,7 +190,7 @@ test "EXP byte gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.EXP)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,

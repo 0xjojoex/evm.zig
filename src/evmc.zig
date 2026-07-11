@@ -118,7 +118,7 @@ fn execute(
         .code_address = fromEvmcAddress(msg.*.code_address),
     };
 
-    var frame = evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.heap.c_allocator, .{
+    var frame = evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.heap.c_allocator, .{
         .host = &host_,
         .msg = &message,
         .code = code[0..code_size],

@@ -5,11 +5,11 @@ const executor_module = @import("../executor.zig");
 const Address = evmz.Address;
 const Bytecode = evmz.Bytecode;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const Journal = @import("../state/Journal.zig");
 const Opcode = evmz.Opcode;
 const eip7702 = @import("./eip7702.zig");
-const FrameIo = @import("../frame_io.zig");
+const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
 const runtime_frames = @import("./runtime_frames.zig");
 const transaction = @import("../transaction.zig");
@@ -1130,7 +1130,7 @@ pub fn For(comptime Executor: type) type {
 }
 
 test "CREATE final stabilization reuses already-stable output" {
-    const Executor = executor_module.Executor(evmz.EthProtocol);
+    const Executor = executor_module.Executor(evmz.Evm.Protocol);
     const runtime = For(Executor);
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -1140,7 +1140,7 @@ test "CREATE final stabilization reuses already-stable output" {
     defer executor.deinit();
 
     executor.last_call_output.deinit();
-    executor.last_call_output = FrameIo.ByteSlot.initGrowable(std.testing.allocator);
+    executor.last_call_output = frame_io.ByteSlot.initGrowable(std.testing.allocator);
     _ = try executor.setLastOutput(&.{0xaa});
     const result = (try runtime.stabilizeFinalResult(&executor, Host.Result.fromCreate(evmz.addr(0x1234), .{
         .status = .success,

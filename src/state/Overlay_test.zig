@@ -11,17 +11,17 @@ const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
 
 const EthereumFinalizer = struct {
-    revision: evmz.EthProtocol.Revision,
+    revision: evmz.Evm.Protocol.Revision,
 
     pub fn selfDestructFinalization(
         self: @This(),
         created_in_transaction: bool,
     ) evmz.protocol.interface.SelfDestructFinalization {
-        return evmz.EthProtocol.SelfDestruct.selfDestructFinalization(self.revision, created_in_transaction);
+        return evmz.Evm.Protocol.SelfDestruct.selfDestructFinalization(self.revision, created_in_transaction);
     }
 };
 
-fn ethereumFinalizer(revision: evmz.EthProtocol.Revision) EthereumFinalizer {
+fn ethereumFinalizer(revision: evmz.Evm.Protocol.Revision) EthereumFinalizer {
     return .{ .revision = revision };
 }
 
@@ -544,7 +544,7 @@ test "bounded state resources report deleted account capacity exhaustion" {
     try overlay.markSelfdestructed(address);
     const Finalizer = struct {
         pub fn selfDestructFinalization(_: @This(), created_in_transaction: bool) evmz.protocol.interface.SelfDestructFinalization {
-            return evmz.eth.SelfDestruct.selfDestructFinalization(.london, created_in_transaction);
+            return evmz.eth.system.SelfDestruct.selfDestructFinalization(.london, created_in_transaction);
         }
     };
     try std.testing.expectError(error.DeletedAccountCapacityExceeded, overlay.finalizeTransaction(Finalizer{}));

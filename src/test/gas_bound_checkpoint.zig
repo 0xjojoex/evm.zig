@@ -2,7 +2,6 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const Address = evmz.Address;
-const EthProtocol = evmz.EthProtocol;
 const DefaultVm = evmz.Evm;
 const MemoryStore = evmz.state.MemoryStore;
 const Transaction = evmz.Transaction;
@@ -14,13 +13,8 @@ const block_gas_limit: u64 = 300_000;
 const sender = evmz.addr(0xaaaa);
 const default_contract = evmz.addr(0xbbbb);
 
-const ExactVm = evmz.vm.VmWithOptions(EthProtocol, .{
-    .block_policy = .{
-        .resource_bound = .{
-            .gas_derived = .{ .block_gas_limit = block_gas_limit },
-        },
-    },
-});
+const ExactEvm = evmz.Evm;
+const block_bound: ExactEvm.BlockBound = .{ .max_block_gas = block_gas_limit };
 
 const TxCase = struct {
     name: []const u8,
@@ -112,7 +106,7 @@ test "gas bound checkpoint block overlay fails by block gas not capacity" {
 }
 
 test "gas bound checkpoint documents byte caps still unmodeled" {
-    const resources = try ExactVm.boundedRuntimeResourcesForBlockPolicy(.osaka);
+    const resources = try ExactEvm.boundedRuntimeResources(.osaka, block_bound);
 
     try std.testing.expect(resources.logs != null);
     try std.testing.expect(resources.journal_entries != null);
@@ -124,6 +118,69 @@ test "gas bound checkpoint documents byte caps still unmodeled" {
     try std.testing.expectEqual(@as(?usize, null), resources.io_bytes_per_frame);
     try std.testing.expectEqual(@as(?usize, null), resources.scratch_bytes_per_frame);
     try std.testing.expectEqual(@as(?usize, null), resources.result_bytes);
+}
+
+test "runtime block bound rejects a zero gas envelope" {
+    try std.testing.expectError(
+        error.InvalidBlockGasBound,
+        ExactEvm.boundedRuntimeResources(.osaka, .{ .max_block_gas = 0 }),
+    );
+}
+
+test "runtime block bound locks reserved resources to the initialized revision" {
+    var vm = try ExactEvm.initBound(std.testing.allocator, .{
+        .revision = .cancun,
+        .env = .{ .gas_limit = block_gas_limit },
+    }, block_bound);
+    defer vm.deinit();
+
+    try std.testing.expectError(
+        error.RuntimeResourcesLocked,
+        vm.reset(.{
+            .revision = .osaka,
+            .env = .{ .gas_limit = block_gas_limit },
+        }),
+    );
+}
+
+test "runtime block bound validates every block environment" {
+    var vm = try ExactEvm.initBound(std.testing.allocator, .{
+        .revision = .osaka,
+    }, block_bound);
+    defer vm.deinit();
+
+    try std.testing.expectError(error.InvalidBlockGasLimit, vm.beginBlock(.{}));
+    try std.testing.expectError(
+        error.BlockGasLimitExceedsBound,
+        vm.beginBlock(.{ .gas_limit = block_gas_limit + 1 }),
+    );
+
+    _ = try vm.beginBlock(.{ .gas_limit = block_gas_limit });
+    try vm.reset(.{ .revision = .osaka });
+    try std.testing.expectError(
+        error.BlockGasLimitExceedsBound,
+        vm.beginBlock(.{ .gas_limit = block_gas_limit + 1 }),
+    );
+}
+
+test "runtime block bound requires block session execution" {
+    var vm = try ExactEvm.initBound(std.testing.allocator, .{
+        .revision = .osaka,
+    }, block_bound);
+    defer vm.deinit();
+
+    const tx: Transaction = .{
+        .sender = sender,
+        .to = default_contract,
+        .gas_limit = 21_000,
+    };
+    try std.testing.expectError(error.BlockSessionRequired, vm.transact(tx));
+    try std.testing.expectError(error.BlockSessionRequired, vm.transactCommit(tx));
+    try std.testing.expectError(error.BlockSessionRequired, vm.systemCall(.{
+        .sender = sender,
+        .recipient = default_contract,
+        .gas = 21_000,
+    }));
 }
 
 fn expectTxCase(case: TxCase) !void {
@@ -147,7 +204,7 @@ fn runGrowableTx(case: TxCase) !TxResult {
     });
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{ .gas_limit = block_gas_limit });
+    var block = try vm.beginBlock(.{ .gas_limit = block_gas_limit });
     return block.transact(txFromCase(case));
 }
 
@@ -156,13 +213,14 @@ fn runExactTx(case: TxCase) !TxResult {
     defer memory.deinit();
     try seedSenderAndCode(&memory, case.to, case.code);
 
-    var vm = try ExactVm.init(std.testing.allocator, .{
+    var vm = try ExactEvm.initBound(std.testing.allocator, .{
         .revision = case.revision,
         .state_reader = memory.reader(),
-    });
+        .env = .{ .gas_limit = block_gas_limit },
+    }, block_bound);
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{});
+    var block = try vm.beginBlock(.{ .gas_limit = block_gas_limit });
     return block.transact(txFromCase(case));
 }
 
@@ -199,7 +257,7 @@ fn runGrowableStorageOverlayBlock() !BlockRun {
     });
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{ .gas_limit = block_gas_limit });
+    var block = try vm.beginBlock(.{ .gas_limit = block_gas_limit });
     return runStorageOverlayBlock(&block);
 }
 
@@ -208,13 +266,14 @@ fn runExactStorageOverlayBlock() !BlockRun {
     defer memory.deinit();
     try seedStorageOverlayBlock(&memory);
 
-    var vm = try ExactVm.init(std.testing.allocator, .{
+    var vm = try ExactEvm.initBound(std.testing.allocator, .{
         .revision = .osaka,
         .state_reader = memory.reader(),
-    });
+        .env = .{ .gas_limit = block_gas_limit },
+    }, block_bound);
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{});
+    var block = try vm.beginBlock(.{ .gas_limit = block_gas_limit });
     return runStorageOverlayBlock(&block);
 }
 

@@ -118,7 +118,7 @@ fn runVector(
     else
         null;
 
-    const validation_error = evmz.transaction.envelope.For(evmz.EthProtocol).classifyRawTransaction(revision, tx_bytes);
+    const validation_error = evmz.transaction.envelope.For(evmz.Evm.Protocol).classifyRawTransaction(revision, tx_bytes);
     if (expected_exception) |expected| {
         if (validation_error) |err| {
             if (tx_validation.rawValidationErrorMatchesEest(err, expected)) {

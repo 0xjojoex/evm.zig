@@ -4,7 +4,7 @@ const common = @import("common.zig");
 const kernel_evmone = @import("kernel_evmone.zig");
 
 const Host = common.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 
 const default_iterations = 100_000;
 const default_repeats = 5;
@@ -280,7 +280,7 @@ fn measureEvmz(
 
     counting_host.resetCounters();
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,

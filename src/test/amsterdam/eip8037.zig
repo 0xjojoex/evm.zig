@@ -3,10 +3,10 @@ const evmz = @import("../../evm.zig");
 
 const AccountState = evmz.state.Account;
 const Address = evmz.Address;
-const EthProtocol = evmz.EthProtocol;
-const Executor = evmz.Executor(EthProtocol);
+const EthProtocol = evmz.Evm.Protocol;
+const Executor = evmz.Executor;
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
+const Interpreter = evmz.interpreter;
 const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;

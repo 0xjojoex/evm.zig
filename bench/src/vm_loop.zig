@@ -4,14 +4,15 @@ const build_options = @import("build_options");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
-const Ethereum = evmz.eth;
-const BenchSupport = Ethereum.Support.range(
-    parseBuildSpec(build_options.support_min),
-    parseBuildSpec(build_options.support_max),
-);
-const BenchProtocol = evmz.Protocol(Ethereum.definition, .{ .support = BenchSupport });
-const Executor = evmz.Executor(BenchProtocol);
+const Interpreter = evmz.interpreter;
+const BenchVM = evmz.EvmWith(.{
+    .support = .{
+        .min = parseBuildSpec(build_options.support_min),
+        .max = parseBuildSpec(build_options.support_max),
+    },
+});
+const BenchProtocol = BenchVM.Protocol;
+const Executor = BenchVM.Executor;
 const CountingHost = common.CountingHost;
 const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;

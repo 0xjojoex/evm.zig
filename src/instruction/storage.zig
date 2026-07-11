@@ -30,17 +30,17 @@ fn storageStatus(status: Host.StorageStatus) DefinitionStorageStatus {
 }
 
 test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
-    const ethereum = evmz.eth;
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 200, .refund = 4800 }, ethereum.Storage.sstoreGas(.constantinople, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 5000, .refund = 0 }, ethereum.Storage.sstoreGas(.petersburg, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 800, .refund = 4200 }, ethereum.Storage.sstoreGas(.istanbul, .modified_restored));
+    const storage = evmz.eth.system.Storage;
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 200, .refund = 4800 }, storage.sstoreGas(.constantinople, .modified_restored));
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 5000, .refund = 0 }, storage.sstoreGas(.petersburg, .modified_restored));
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 800, .refund = 4200 }, storage.sstoreGas(.istanbul, .modified_restored));
 }
 
 test "Amsterdam SSTORE separates access and write gas from state gas" {
-    const ethereum = evmz.eth;
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 10_000, .refund = 0 }, ethereum.Storage.sstoreGas(.amsterdam, .added));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = 10_000 }, ethereum.Storage.sstoreGas(.amsterdam, .added_deleted));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = -2_480 }, ethereum.Storage.sstoreGas(.amsterdam, .deleted_restored));
+    const storage = evmz.eth.system.Storage;
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.amsterdam, .added));
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.amsterdam, .added_deleted));
+    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.amsterdam, .deleted_restored));
 }
 
 pub fn For(comptime ProtocolType: type) type {
@@ -151,7 +151,7 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.SLOAD)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -206,7 +206,7 @@ test "SSTORE gas and state gas come from comptime protocol" {
     msg.gas_reservoir = 5;
     const code = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -242,7 +242,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     };
     const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
@@ -272,7 +272,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     };
     const bytecode = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
@@ -304,7 +304,7 @@ test "cold SLOAD out of gas stops before storage read" {
     };
     const bytecode = &.{ 0x60, 0x00, 0x54 };
 
-    var frame = try evmz.Interpreter.OwnedCallFrame(evmz.EthProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,

@@ -52,12 +52,15 @@ var vm = evmz.Evm.init(allocator, .{
 });
 defer vm.deinit();
 
-const result = try vm.transact(.{
+const executed = switch (try vm.transact(.{
     .sender = evmz.addr(0xaaaa),
     .to = evmz.addr(0xbbbb),
     .gas_limit = 100_000,
-});
-// result.status, result.gas_used, result.output
+})) {
+    .executed => |value| value,
+    .rejected => return error.TransactionRejected,
+};
+// executed.status, executed.gas.used, executed.output
 // vm.changeset() gives you the state diff to commit or discard.
 ```
 
@@ -74,8 +77,31 @@ zig build example
 runtime. If your embedder targets exactly one fork, bind it at compile time:
 
 ```zig
-const CancunVm = evmz.Vm(evmz.eth.fork(.cancun));
+const CancunVM = evmz.EvmWith(.{
+    .support = evmz.Evm.Support.at(.cancun),
+});
 ```
+
+## Bound runtime resources
+
+Normal initialization is infallible and growable. Embedded and zkVM callers
+can reserve a gas-derived capacity envelope explicitly:
+
+```zig
+var vm = try evmz.Evm.initBound(allocator, .{
+    .revision = .cancun,
+    .state_reader = memory.reader(),
+    .env = .{ .gas_limit = 30_000_000 },
+}, .{
+    .max_block_gas = 30_000_000,
+});
+
+var block = try vm.beginBlock(.{ .gas_limit = 30_000_000 });
+```
+
+The bound controls allocation capacity; `Env.gas_limit` remains actual runtime
+block data. Bounded VMs validate it against the allocation envelope and execute
+transactions and system calls through `BlockSession`.
 
 ## Bring your own chain
 
@@ -84,8 +110,12 @@ Ethereum's constants, gas tables, and activation schedule live in one preset:
 precompile addresses — is another definition value bound the same way:
 
 ```zig
-const MyVm = evmz.Vm(evmz.Protocol(MyChainDefinition, .{}));
+const MyVM = evmz.Vm(MyRevision, MyChainDefinition, .{});
 ```
+
+The returned type carries its matching `Protocol`, `Executor`, `Interpreter`,
+`Transaction`, `TxResult`, and `TxStatus` types. Lowercase modules such as
+`evmz.executor` remain available for low-level generic work.
 
 `evmz.protocol.assertValidDefinition` reports exactly what a definition must
 provide, and `examples/custom-fork/` is a working downstream-style template.

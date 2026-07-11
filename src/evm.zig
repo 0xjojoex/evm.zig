@@ -12,7 +12,7 @@ pub const ExecutionConfig = @import("./ExecutionConfig.zig");
 pub const executor = @import("./executor.zig");
 pub const Host = @import("./Host.zig");
 pub const instruction = @import("./instruction.zig");
-pub const Interpreter = @import("./Interpreter.zig");
+pub const interpreter = @import("./Interpreter.zig");
 pub const opcode = @import("./opcode.zig");
 pub const precompile = @import("./precompile.zig");
 pub const protocol = @import("./protocol.zig");
@@ -24,11 +24,15 @@ pub const transaction = @import("./transaction.zig");
 pub const uint256 = @import("./uint256.zig");
 pub const vm = @import("./vm.zig");
 
-pub const EthProtocol = eth.Protocol;
-/// The Ethereum-mainnet execution engine (`Executor(EthProtocol)`).
-pub const EthExecutor = Executor(EthProtocol);
-/// The Ethereum-mainnet VM — the usual entry point (`Vm(EthProtocol)`).
-pub const Evm = Vm(EthProtocol);
+/// Compose a concrete VM type from a Definition and typed options.
+pub const Vm = vm.Vm;
+/// The Ethereum-mainnet VM — the usual ready-to-use entry point.
+pub const Evm = Vm(eth.Revision, eth.definition, .{});
+
+/// Derive an Ethereum VM with typed support and dispatch options.
+pub fn EvmWith(comptime options: vm.OptionsFor(eth.definition)) type {
+    return Vm(eth.Revision, eth.definition, options);
+}
 
 /// keccak256 of the empty byte string — code hash of an account with no code.
 pub const empty_code_hash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
@@ -41,7 +45,8 @@ pub const Committer = vm.Committer;
 pub const Definition = definition.Definition;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;
-pub const Executor = executor.Executor;
+pub const Executor = Evm.Executor;
+pub const Interpreter = Evm.Interpreter;
 pub const Log = vm.Log;
 pub const Message = executor.Message;
 pub const Opcode = opcode.Opcode;
@@ -49,12 +54,9 @@ pub const OpcodeInfo = opcode.OpInfo;
 pub const RevisionConfig = definition.RevisionConfig;
 pub const RevisionModel = definition.RevisionModel;
 pub const StateReader = vm.StateReader;
-pub const Transaction = EthProtocol.Transaction.Value;
-pub const TxResult = vm.TxResultFor(EthProtocol);
-pub const TxStatus = vm.TxStatus;
-pub const Vm = vm.Vm;
-
-pub const Protocol = protocol.Protocol;
+pub const Transaction = Evm.Transaction;
+pub const TxResult = Evm.TxResult;
+pub const TxStatus = Evm.TxStatus;
 
 /// Number of 32-byte EVM words spanning `size` bytes (rounded up).
 pub fn calcWordSize(comptime T: type, size: T) T {

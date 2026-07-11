@@ -9,10 +9,11 @@ const std = @import("std");
 
 const evmz = @import("evm.zig");
 const address = @import("./address.zig");
+const definition_module = @import("./definition.zig");
 const executor_module = @import("./executor.zig");
-const resource_bound = @import("./executor/resource_bound.zig");
 const Host = @import("./Host.zig");
-const Interpreter = @import("./Interpreter.zig");
+const interpreter_module = @import("./Interpreter.zig");
+const protocol_module = @import("./protocol.zig");
 const transaction = @import("./transaction.zig");
 
 const Address = address.Address;
@@ -61,40 +62,6 @@ pub const Env = struct {
             .base_fee = self.base_fee,
             .blob_base_fee = self.blob_base_fee,
             .blob_hashes = blob_hashes,
-        };
-    }
-};
-
-/// Block/environment values for VMs whose block gas limit comes from a
-/// comptime resource policy.
-///
-/// `gas_limit` is intentionally not exposed here: the VM injects the policy gas
-/// limit when it builds the internal `Env`.
-pub const BlockPolicyEnv = struct {
-    chain_id: u256 = 1,
-    coinbase: Address = std.mem.zeroes(Address),
-    number: u64 = 0,
-    slot_number: u64 = 0,
-    timestamp: u64 = 0,
-    prev_randao: u256 = 0,
-    base_fee: u256 = 0,
-    blob_base_fee: u256 = 0,
-    /// Optional dynamic chain/fixture override for blob gas rules.
-    /// When null, transaction validation and settlement use the protocol schedule for the active revision.
-    blob_schedule: ?transaction.BlobSchedule = null,
-
-    fn toEnv(self: BlockPolicyEnv, gas_limit: u64) Env {
-        return .{
-            .chain_id = self.chain_id,
-            .coinbase = self.coinbase,
-            .number = self.number,
-            .slot_number = self.slot_number,
-            .timestamp = self.timestamp,
-            .gas_limit = gas_limit,
-            .prev_randao = self.prev_randao,
-            .base_fee = self.base_fee,
-            .blob_base_fee = self.blob_base_fee,
-            .blob_schedule = self.blob_schedule,
         };
     }
 };
@@ -176,49 +143,159 @@ pub const SystemCall = struct {
     gas: u64,
 };
 
+/// Gas-derived allocation envelope for `initBound`.
+///
+/// This is an implementation capacity, not the consensus block environment;
+/// each `beginBlock` still receives the actual `Env.gas_limit`.
+pub const BlockBound = struct {
+    max_block_gas: u64,
+    max_live_frames: usize = executor_module.default_max_live_frames,
+};
+const BlockBoundType = BlockBound;
+
+/// Public composition options specialized to one Definition value.
+pub fn OptionsFor(comptime definition_value: anytype) type {
+    const Definition = definition_module.Bound(definition_value);
+    return struct {
+        support: Definition.Support = Definition.Support.all,
+        dispatch: protocol_module.DispatchConfig = .{},
+    };
+}
+
+/// Compose a concrete VM type.
+///
+/// `R` is explicit because ZLS cannot recover the revision type through a
+/// comptime Definition value. The options parameter becomes concrete once
+/// `definition_value` is known.
+pub fn Vm(
+    comptime R: type,
+    comptime definition_value: definition_module.Definition(R),
+    comptime options: OptionsFor(definition_value),
+) type {
+    const Definition = definition_module.Bound(definition_value);
+    const ProtocolType = protocol_module.ProtocolWithDispatch(definition_value, options.support, options.dispatch);
+    return Typed(
+        R,
+        ProtocolType,
+        Definition.Support,
+        OptionsFor(definition_value),
+        ProtocolType.Instruction,
+        // The current Definition schema uses the engine transaction vocabulary.
+        // Keep these concrete for ZLS; Typed verifies Protocol coherence below.
+        transaction.Transaction,
+        transaction.TransactionView,
+        transaction.ValidationError,
+        transaction.Prepared(ProtocolType),
+        transaction.PrepareResult(ProtocolType),
+        TxResultFor(ProtocolType),
+        executor_module.Executor(ProtocolType),
+        interpreter_module.For(ProtocolType),
+    );
+}
+
 /// The runtime VM bound to a concrete `Protocol`.
 ///
 /// Returns the facade described in the module doc: an object held across blocks
 /// that validates and runs `Protocol` transactions via `transact`, groups them
 /// into a block through `BlockSession`, and commits the resulting state diff.
 /// `evm.zig` exposes the mainnet instantiation as `Evm`.
-pub fn Vm(comptime Protocol: type) type {
-    return VmWithOptions(Protocol, .{});
+pub fn ResolvedVm(comptime Protocol: type) type {
+    const SupportType = if (@hasDecl(Protocol, "Support")) Protocol.Support else void;
+    const InstructionType = if (@hasDecl(Protocol, "Instruction")) Protocol.Instruction else void;
+    return Typed(
+        Protocol.Revision,
+        Protocol,
+        SupportType,
+        void,
+        InstructionType,
+        Protocol.Transaction.Value,
+        Protocol.Transaction.View,
+        Protocol.Transaction.ValidationError,
+        transaction.Prepared(Protocol),
+        transaction.PrepareResult(Protocol),
+        TxResultFor(Protocol),
+        executor_module.Executor(Protocol),
+        interpreter_module.For(Protocol),
+    );
 }
 
-pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype) type {
-    const vm_options = parseVmOptions(options_literal);
-    const block_resource_bound = vm_options.resource_bound;
-    const block_policy_gas_limit = vm_options.blockGasLimit();
-    const block_policy_max_live_frames = vm_options.max_live_frames;
+/// Internal ZLS carrier. Keep Definition-dependent public types flat: wrapping
+/// them in a descriptor type makes ZLS lose their fields and enum tags.
+fn Typed(
+    comptime RevisionType: type,
+    comptime ProtocolType: type,
+    comptime SupportType: type,
+    comptime OptionsType: type,
+    comptime InstructionType: type,
+    comptime TransactionType: type,
+    comptime TransactionViewType: type,
+    comptime ValidationErrorType: type,
+    comptime PreparedTransactionType: type,
+    comptime PreparedTransactionResultType: type,
+    comptime TxResultType: type,
+    comptime ExecutorType: type,
+    comptime InterpreterType: type,
+) type {
+    if (ProtocolType.Revision != RevisionType) @compileError("Protocol revision mismatch");
+    if (@hasDecl(ProtocolType, "Support")) {
+        if (ProtocolType.Support != SupportType) @compileError("Protocol support mismatch");
+    } else if (SupportType != void) {
+        @compileError("Protocol support mismatch");
+    }
+    if (@hasDecl(ProtocolType, "Instruction")) {
+        if (ProtocolType.Instruction != InstructionType) @compileError("Protocol instruction mismatch");
+    } else if (InstructionType != void) {
+        @compileError("Protocol instruction mismatch");
+    }
+    if (ProtocolType.Transaction.Value != TransactionType) @compileError("Protocol transaction mismatch");
+    if (ProtocolType.Transaction.View != TransactionViewType) @compileError("Protocol transaction view mismatch");
+    if (ProtocolType.Transaction.ValidationError != ValidationErrorType) @compileError("Protocol validation error mismatch");
+    if (transaction.Prepared(ProtocolType) != PreparedTransactionType) @compileError("Prepared transaction mismatch");
+    if (transaction.PrepareResult(ProtocolType) != PreparedTransactionResultType) @compileError("Prepared transaction result mismatch");
+    if (TxResultFor(ProtocolType) != TxResultType) @compileError("Transaction result mismatch");
+    if (executor_module.Executor(ProtocolType) != ExecutorType) @compileError("Executor mismatch");
+    if (interpreter_module.For(ProtocolType) != InterpreterType) @compileError("Interpreter mismatch");
+
+    const ProtocolNamespace = ProtocolType;
+    const TxRuntime = transaction.For(ProtocolType);
+    const TxStatusType = TxStatus;
 
     return struct {
         const Self = @This();
-        const Executor = executor_module.Executor(Protocol);
-        const tx_protocol = transaction.For(Protocol);
-        const has_block_resource_policy = block_resource_bound != null;
+        const tx_protocol = TxRuntime;
 
-        pub const Transaction = Protocol.Transaction.Value;
-        pub const TxResult = TxResultFor(Protocol);
-        pub const PreparedTransaction = transaction.Prepared(Protocol);
-        pub const PreparedTransactionResult = transaction.PrepareResult(Protocol);
+        pub const Protocol = ProtocolNamespace;
+        pub const Options = OptionsType;
+        pub const Support = SupportType;
+        pub const Revision = RevisionType;
+        pub const Instruction = InstructionType;
+        pub const Transaction = TransactionType;
+        pub const TransactionView = TransactionViewType;
+        pub const ValidationError = ValidationErrorType;
+        pub const TxResult = TxResultType;
+        pub const TxStatus = TxStatusType;
+        pub const PreparedTransaction = PreparedTransactionType;
+        pub const PreparedTransactionResult = PreparedTransactionResultType;
+        pub const Executor = ExecutorType;
+        pub const Interpreter = InterpreterType;
 
         /// Low-level execution substrate for diagnostics, fixtures, and benchmarks.
         executor: Executor,
         /// Current block/environment values used to build transaction host contexts.
-        env: BlockEnv,
+        env: Env,
         /// Optional sink used by `commit` to persist the overlay diff.
         committer: ?Committer,
+        /// Resource envelope enforced by the block-session API.
+        block_bound: ?BlockBoundType,
 
-        pub const BlockEnv = if (has_block_resource_policy) BlockPolicyEnv else Env;
-        pub const InitResult = if (has_block_resource_policy) anyerror!Self else Self;
+        pub const BlockBound = BlockBoundType;
 
         pub const Init = struct {
-            revision: Protocol.Revision,
+            revision: RevisionType,
             state_reader: ?StateReader = null,
             block_hash_source: ?BlockHashSource = null,
             committer: ?Committer = null,
-            env: BlockEnv = .{},
+            env: Env = .{},
             config: evmz.ExecutionConfig = .base,
             trace_sink: ?*evmz.trace.Sink = null,
         };
@@ -342,13 +419,7 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             }
         };
 
-        pub fn init(allocator: std.mem.Allocator, options: Init) InitResult {
-            if (comptime has_block_resource_policy) {
-                return initWithRuntimeResourcesInternal(allocator, options, .{
-                    .bounded = try boundedRuntimeResourcesForBlockPolicy(options.revision),
-                });
-            }
-
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
             return .{
                 .executor = Executor.init(allocator, .{
                     .revision = options.revision,
@@ -359,19 +430,27 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
                 }),
                 .env = options.env,
                 .committer = options.committer,
+                .block_bound = null,
             };
+        }
+
+        /// Initialize a VM with a gas-derived, locked runtime-resource envelope.
+        pub fn initBound(allocator: std.mem.Allocator, options: Init, bound: BlockBoundType) !Self {
+            var result = try initWithRuntimeResourcesInternal(allocator, options, .{
+                .bounded = try boundedRuntimeResources(options.revision, bound),
+            });
+            result.executor.lockRuntimeResources();
+            result.block_bound = bound;
+            return result;
         }
 
         /// Initialize a VM and reserve reusable execution resources up front.
         pub fn initWithRuntimeResources(allocator: std.mem.Allocator, options: Init, runtime_resources: executor_module.RuntimeResources) !Self {
-            if (comptime has_block_resource_policy) {
-                @compileError("block resource policy VMs reserve resources through init");
-            }
             return initWithRuntimeResourcesInternal(allocator, options, runtime_resources);
         }
 
         fn initWithRuntimeResourcesInternal(allocator: std.mem.Allocator, options: Init, runtime_resources: executor_module.RuntimeResources) !Self {
-            var result = Self{
+            return .{
                 .executor = try Executor.initWithRuntimeResources(allocator, .{
                     .revision = options.revision,
                     .state_reader = options.state_reader,
@@ -381,29 +460,18 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
                 }, runtime_resources),
                 .env = options.env,
                 .committer = options.committer,
+                .block_bound = null,
             };
-            if (comptime has_block_resource_policy) {
-                result.executor.lockRuntimeResources();
-            }
-            return result;
         }
 
-        pub fn boundedRuntimeResourcesForBlockPolicy(revision: Protocol.Revision) !executor_module.BoundedRuntimeResources {
-            if (comptime !has_block_resource_policy) {
-                @compileError("boundedRuntimeResourcesForBlockPolicy requires .block_policy.resource_bound");
-            }
-            const envelope = try resourceEnvelopeForBlockPolicy(revision);
+        pub fn boundedRuntimeResources(revision: RevisionType, bound: BlockBoundType) !executor_module.BoundedRuntimeResources {
+            if (bound.max_block_gas == 0) return error.InvalidBlockGasBound;
+            const envelope = try tx_protocol.gas_bound.resourceEnvelope(.{
+                .revision = revision,
+                .block_gas_limit = bound.max_block_gas,
+                .max_live_frames = bound.max_live_frames,
+            });
             return executor_module.BoundedRuntimeResources.fromResourceEnvelope(envelope);
-        }
-
-        fn resourceEnvelopeForBlockPolicy(revision: Protocol.Revision) !resource_bound.Envelope {
-            return switch (block_resource_bound.?) {
-                .gas_derived => |gas| try tx_protocol.gas_bound.resourceEnvelope(.{
-                    .revision = revision,
-                    .block_gas_limit = gas.block_gas_limit,
-                    .max_live_frames = block_policy_max_live_frames,
-                }),
-            };
         }
 
         pub fn deinit(self: *Self) void {
@@ -423,12 +491,12 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             self.committer = options.committer;
         }
 
-        pub fn setEnv(self: *Self, env: BlockEnv) void {
+        pub fn beginBlock(self: *Self, env: Env) !BlockSession {
+            if (self.block_bound) |bound| {
+                if (env.gas_limit == 0) return error.InvalidBlockGasLimit;
+                if (env.gas_limit > bound.max_block_gas) return error.BlockGasLimitExceedsBound;
+            }
             self.env = env;
-        }
-
-        pub fn beginBlock(self: *Self, env: BlockEnv) BlockSession {
-            self.setEnv(env);
             return .{ .vm = self };
         }
 
@@ -459,9 +527,7 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
 
         /// Execute an explicit non-transaction system call.
         pub fn systemCall(self: *Self, call: SystemCall) !EvmResult {
-            if (comptime has_block_resource_policy) {
-                @compileError("block resource policy VMs must execute system calls through BlockSession");
-            }
+            try self.requireDirectExecution();
             return self.executeSystemCall(call);
         }
 
@@ -486,9 +552,7 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
 
         /// Execute one protocol transaction into the VM overlay.
         pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
-            if (comptime has_block_resource_policy) {
-                @compileError("block resource policy VMs must transact through BlockSession");
-            }
+            try self.requireDirectExecution();
             const prepared = try self.prepareTransaction(tx);
             return switch (prepared) {
                 .rejected => |err| .{ .rejected = err },
@@ -535,9 +599,6 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
         /// Convenience for one-off callers. Block executors should usually call
         /// `transact` many times, then one `commit`.
         pub fn transactCommit(self: *Self, tx: Self.Transaction) !Self.TxResult {
-            if (comptime has_block_resource_policy) {
-                @compileError("block resource policy VMs must transact through BlockSession");
-            }
             const result = try self.transact(tx);
             switch (result) {
                 .rejected => return result,
@@ -545,6 +606,10 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             }
             try self.commit();
             return result;
+        }
+
+        fn requireDirectExecution(self: *const Self) !void {
+            if (self.block_bound != null) return error.BlockSessionRequired;
         }
 
         fn stateFacts(self: *Self, view: Protocol.Transaction.View) !transaction.StateFacts {
@@ -591,7 +656,7 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             };
         }
 
-        fn txStatus(status: Interpreter.Status) TxStatus {
+        fn txStatus(status: interpreter_module.Status) TxStatusType {
             return switch (status) {
                 .success => .success,
                 .revert => .revert,
@@ -629,95 +694,10 @@ pub fn VmWithOptions(comptime Protocol: type, comptime options_literal: anytype)
             self.executor.discardChanges();
         }
 
-        fn applyBlockEnvPolicy(env: BlockEnv) Env {
-            if (comptime has_block_resource_policy) {
-                return env.toEnv(block_policy_gas_limit.?);
-            }
-            return env;
-        }
-
         fn runtimeEnv(self: *const Self) Env {
-            return applyBlockEnvPolicy(self.env);
+            return self.env;
         }
     };
-}
-
-const ParsedVmOptions = struct {
-    resource_bound: ?BlockResourceBoundSource = null,
-    max_live_frames: usize = executor_module.default_max_live_frames,
-
-    fn blockGasLimit(self: ParsedVmOptions) ?u64 {
-        return switch (self.resource_bound orelse return null) {
-            .gas_derived => |gas| gas.block_gas_limit,
-        };
-    }
-};
-
-const GasDerivedBlockResourceBound = struct {
-    block_gas_limit: u64,
-};
-
-const BlockResourceBoundSource = union(enum) {
-    gas_derived: GasDerivedBlockResourceBound,
-};
-
-fn parseVmOptions(comptime options: anytype) ParsedVmOptions {
-    const Options = @TypeOf(options);
-    switch (@typeInfo(Options)) {
-        .@"struct" => {},
-        else => @compileError("Vm options must be a struct literal"),
-    }
-
-    var parsed = ParsedVmOptions{};
-    if (@hasField(Options, "block_policy")) {
-        const block_policy = options.block_policy;
-        const BlockPolicy = @TypeOf(block_policy);
-        switch (@typeInfo(BlockPolicy)) {
-            .@"struct" => {},
-            else => @compileError("Vm block_policy must be a struct literal"),
-        }
-        if (!@hasField(BlockPolicy, "resource_bound")) {
-            @compileError("Vm block_policy must provide resource_bound");
-        }
-        parsed.resource_bound = parseBlockResourceBound(block_policy.resource_bound);
-        if (@hasField(BlockPolicy, "max_live_frames")) {
-            parsed.max_live_frames = block_policy.max_live_frames;
-        }
-    }
-    return parsed;
-}
-
-fn parseBlockResourceBound(comptime resource_bound_options: anytype) BlockResourceBoundSource {
-    const ResourceBound = @TypeOf(resource_bound_options);
-    switch (@typeInfo(ResourceBound)) {
-        .@"struct" => {},
-        else => @compileError("Vm block_policy.resource_bound must be a struct literal"),
-    }
-
-    if (@hasField(ResourceBound, "gas_derived")) {
-        return .{
-            .gas_derived = parseGasDerivedBlockResourceBound(resource_bound_options.gas_derived),
-        };
-    }
-
-    @compileError("Vm block_policy.resource_bound must provide gas_derived");
-}
-
-fn parseGasDerivedBlockResourceBound(comptime gas_derived: anytype) GasDerivedBlockResourceBound {
-    const GasDerived = @TypeOf(gas_derived);
-    switch (@typeInfo(GasDerived)) {
-        .@"struct" => {},
-        else => @compileError("Vm block_policy.resource_bound.gas_derived must be a struct literal"),
-    }
-
-    if (!@hasField(GasDerived, "block_gas_limit")) {
-        @compileError("Vm block_policy.resource_bound.gas_derived must provide block_gas_limit");
-    }
-    if (gas_derived.block_gas_limit == 0) {
-        @compileError("Vm block_policy.resource_bound.gas_derived.block_gas_limit must be non-zero");
-    }
-
-    return .{ .block_gas_limit = gas_derived.block_gas_limit };
 }
 
 const Default = evmz.Evm;
@@ -785,7 +765,7 @@ test "Vm executor runs low-level standalone call" {
         vm.env.txContext(call.sender, 0, context_gas_limit, &.{}),
         .{ .call = call },
     )).expectCall();
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(interpreter_module.Status.success, result.status);
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -821,7 +801,7 @@ test "Vm executor runs low-level standalone create" {
         vm.env.txContext(create.sender, 0, context_gas_limit, &.{}),
         .{ .create = create },
     )).expectCreate();
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(interpreter_module.Status.success, result.status);
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
 
     var diff = try vm.changeset();
@@ -1432,7 +1412,7 @@ test "Vm preparation uses comptime transaction gas policy" {
         };
     };
 
-    const HighIntrinsicVm = Vm(HighIntrinsicProtocol);
+    const HighIntrinsicVm = ResolvedVm(HighIntrinsicProtocol);
     var custom_vm = HighIntrinsicVm.init(std.testing.allocator, .{
         .revision = .london,
         .state_reader = memory.reader(),
@@ -1513,7 +1493,7 @@ test "Vm preparation accepts custom transaction value" {
         };
     };
 
-    const CustomVm = Vm(CustomProtocol);
+    const CustomVm = ResolvedVm(CustomProtocol);
     var vm = CustomVm.init(std.testing.allocator, .{
         .revision = .custom,
         .env = .{ .gas_limit = 99_000 },
@@ -1558,7 +1538,7 @@ test "BlockSession validation rejection skips rollback snapshot" {
     try std.testing.expect((try vm.getAccount(sender)) != null);
     failing_allocator.fail_index = failing_allocator.alloc_index;
 
-    var block = vm.beginBlock(.{ .gas_limit = 1_000_000 });
+    var block = try vm.beginBlock(.{ .gas_limit = 1_000_000 });
     const rejected = try block.transact(.{
         .sender = sender,
         .nonce = 99,
@@ -1582,7 +1562,7 @@ test "Vm systemCall uses bound executor protocol" {
         .gas = 50_000,
     });
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(interpreter_module.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{}, result.outputData());
 }
 
@@ -1601,7 +1581,7 @@ test "BlockSession accumulates block gas and rolls back overflow transaction" {
     });
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{ .gas_limit = 29_000 });
+    var block = try vm.beginBlock(.{ .gas_limit = 29_000 });
     const accepted = try expectExecuted(try block.transact(.{
         .sender = sender,
         .to = recipient,
@@ -1641,7 +1621,7 @@ test "BlockSession builds borrowed receipt view with cumulative gas and logs" {
     });
     defer vm.deinit();
 
-    var block = vm.beginBlock(.{ .gas_limit = 1_000_000 });
+    var block = try vm.beginBlock(.{ .gas_limit = 1_000_000 });
     const result = try expectExecuted(try block.transact(.{
         .sender = sender,
         .to = recipient,
