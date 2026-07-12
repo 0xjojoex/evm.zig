@@ -90,7 +90,8 @@ pub fn ModelConfig(comptime Revision: type) type {
         revisions: ?[]const Revision = null,
         latest: ?Revision = null,
         stable: ?Revision = null,
-        isImpl: *const fn (Revision, Revision) bool = orderedIsImpl(Revision),
+        order: *const fn (Revision, Revision) std.math.Order = enumTagOrder(Revision),
+        semantics: type = IdentitySemantics(Revision),
     };
 }
 
@@ -101,23 +102,50 @@ pub fn Model(comptime Revision: type) type {
 pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revision)) type {
     const default_revisions: []const Revision = std.enums.values(Revision);
     const configured_revisions = cfg.revisions orelse default_revisions;
+    const configured_set = std.enums.EnumSet(Revision).initMany(configured_revisions);
+    const Semantics = cfg.semantics;
     if (configured_revisions.len == 0) {
         @compileError("Revision.revisions must not be empty");
+    }
+    assertRevisionOrder(Revision, configured_revisions, cfg.order);
+    assertSemantics(Revision, Semantics);
+    const latest_revision = cfg.latest orelse configured_revisions[configured_revisions.len - 1];
+    const stable_revision = cfg.stable orelse latest_revision;
+    if (!configured_set.contains(latest_revision)) {
+        @compileError("Revision.latest is not present in Revision.revisions: " ++ @tagName(latest_revision));
+    }
+    if (!configured_set.contains(stable_revision)) {
+        @compileError("Revision.stable is not present in Revision.revisions: " ++ @tagName(stable_revision));
     }
 
     return struct {
         pub const revisions = configured_revisions;
-        pub const latest = cfg.latest orelse revisions[revisions.len - 1];
-        pub const stable = cfg.stable orelse latest;
+        pub const latest = latest_revision;
+        pub const stable = stable_revision;
+        pub const RevisionSemantics = Semantics;
+        pub const BaseRevision = Semantics.BaseRevision;
 
-        pub fn isImpl(current: Revision, fork: Revision) bool {
-            return cfg.isImpl(current, fork);
+        pub fn order(a: Revision, b: Revision) std.math.Order {
+            return cfg.order(a, b);
+        }
+
+        pub fn isImpl(current: Revision, required: Revision) bool {
+            return includes(cfg.order, current, required);
+        }
+
+        pub fn baseRevision(revision: Revision) BaseRevision {
+            return Semantics.baseRevision(revision);
+        }
+
+        pub fn isConfigured(revision: Revision) bool {
+            return configured_set.contains(revision);
         }
 
         pub const Availability = union(enum) {
             never,
             always,
             since: Revision,
+            gate: *const fn (Revision) bool,
         };
 
         pub const Support = struct {
@@ -143,17 +171,27 @@ pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revisi
             }
 
             pub fn assertValid(comptime self: Support) void {
-                if (comptime !cfg.isImpl(self.max, self.min)) {
+                if (comptime !isConfigured(self.min)) {
+                    @compileError("definition support minimum is not configured: " ++ @tagName(self.min));
+                }
+                if (comptime !isConfigured(self.max)) {
+                    @compileError("definition support maximum is not configured: " ++ @tagName(self.max));
+                }
+                if (comptime !includes(cfg.order, self.max, self.min)) {
                     @compileError("definition support window has max before min: " ++ @tagName(self.min) ++ ".." ++ @tagName(self.max));
                 }
             }
 
             pub fn isValid(self: Support) bool {
-                return cfg.isImpl(self.max, self.min);
+                return isConfigured(self.min) and
+                    isConfigured(self.max) and
+                    includes(cfg.order, self.max, self.min);
             }
 
             pub fn contains(self: Support, revision: Revision) bool {
-                return cfg.isImpl(revision, self.min) and cfg.isImpl(self.max, revision);
+                return isConfigured(revision) and
+                    includes(cfg.order, revision, self.min) and
+                    includes(cfg.order, self.max, revision);
             }
         };
 
@@ -163,21 +201,85 @@ pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revisi
                 .never => .never,
                 .always => .always,
                 .since => |activation| {
-                    if (comptime cfg.isImpl(support.min, activation)) return .always;
-                    if (comptime !cfg.isImpl(support.max, activation)) return .never;
+                    if (comptime includes(cfg.order, support.min, activation)) return .always;
+                    if (comptime !includes(cfg.order, support.max, activation)) return .never;
                     return .runtime;
+                },
+                .gate => |active| {
+                    var any_active = false;
+                    var any_inactive = false;
+                    inline for (revisions) |revision| {
+                        if (comptime support.contains(revision)) {
+                            if (comptime active(revision)) {
+                                any_active = true;
+                            } else {
+                                any_inactive = true;
+                            }
+                        }
+                    }
+                    if (any_active and any_inactive) return .runtime;
+                    if (any_active) return .always;
+                    return .never;
                 },
             };
         }
     };
 }
 
-fn orderedIsImpl(comptime Revision: type) *const fn (Revision, Revision) bool {
+pub fn IdentitySemantics(comptime Revision: type) type {
     return struct {
-        fn f(current: Revision, fork: Revision) bool {
-            return @intFromEnum(current) >= @intFromEnum(fork);
+        pub const BaseRevision = Revision;
+
+        pub fn baseRevision(revision: Revision) BaseRevision {
+            return revision;
+        }
+    };
+}
+
+fn assertSemantics(comptime Revision: type, comptime Semantics: type) void {
+    if (!@hasDecl(Semantics, "BaseRevision")) {
+        @compileError("Revision semantics missing BaseRevision");
+    }
+    switch (@typeInfo(Semantics.BaseRevision)) {
+        .@"enum" => {},
+        else => @compileError("Revision semantics BaseRevision must be an enum"),
+    }
+    if (!std.meta.hasFn(Semantics, "baseRevision")) {
+        @compileError("Revision semantics missing baseRevision");
+    }
+
+    const base_revision: *const fn (Revision) Semantics.BaseRevision = Semantics.baseRevision;
+    _ = base_revision;
+}
+
+fn enumTagOrder(comptime Revision: type) *const fn (Revision, Revision) std.math.Order {
+    return struct {
+        fn f(a: Revision, b: Revision) std.math.Order {
+            return std.math.order(@intFromEnum(a), @intFromEnum(b));
         }
     }.f;
+}
+
+fn includes(comptime orderFn: anytype, current: anytype, required: @TypeOf(current)) bool {
+    return orderFn(current, required) != .lt;
+}
+
+fn assertRevisionOrder(
+    comptime Revision: type,
+    comptime revisions: []const Revision,
+    comptime orderFn: *const fn (Revision, Revision) std.math.Order,
+) void {
+    @setEvalBranchQuota(100_000);
+    inline for (revisions, 0..) |revision, index| {
+        if (orderFn(revision, revision) != .eq) {
+            @compileError("revision order must compare " ++ @tagName(revision) ++ " equal to itself");
+        }
+        inline for (revisions[index + 1 ..]) |later| {
+            if (orderFn(revision, later) != .lt or orderFn(later, revision) != .gt) {
+                @compileError("revision order disagrees with revisions sequence: " ++ @tagName(revision) ++ " before " ++ @tagName(later));
+            }
+        }
+    }
 }
 
 test "support window resolves availability gates" {
@@ -209,6 +311,25 @@ test "support window contains specs inclusively" {
     try std.testing.expect(exact_prague.contains(.prague));
     try std.testing.expect(!exact_prague.contains(.cancun));
     try std.testing.expect(!exact_prague.contains(.osaka));
+}
+
+test "support windows reject enum values omitted from the configured sequence" {
+    const R = enum { alpha, beta, gamma };
+    const revision = ModelWithConfig(R, .{
+        .revisions = &.{ .alpha, .gamma },
+    });
+    const Support = revision.Support;
+    const Protocol = struct {
+        pub const Revision = R;
+        pub const support = Support.all;
+    };
+
+    try std.testing.expect(revision.isConfigured(.alpha));
+    try std.testing.expect(!revision.isConfigured(.beta));
+    try std.testing.expect(revision.isConfigured(.gamma));
+    try std.testing.expect(!Support.at(.beta).isValid());
+    try std.testing.expect(!Support.all.contains(.beta));
+    try std.testing.expect(!revisionSupported(Protocol, .beta));
 }
 
 test "protocol support check is conditional on support declaration" {

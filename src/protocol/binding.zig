@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const interface = @import("interface.zig");
+const types = @import("types.zig");
+const validate = @import("validate.zig");
 const dispatcher = @import("dispatcher.zig");
 const instruction_mod = @import("instruction.zig");
 const transaction_mod = @import("transaction.zig");
@@ -8,6 +9,8 @@ const definition_mod = @import("../definition.zig");
 const address = @import("../address.zig");
 const opcode_info = @import("../opcode.zig");
 const precompile_mod = @import("../precompile.zig");
+const precompile_runtime = @import("../execution/precompile_runtime.zig");
+const tx_settlement = @import("../transaction/settlement.zig");
 const support_mod = @import("support.zig");
 const Resolution = support_mod.Resolution;
 
@@ -21,23 +24,24 @@ pub fn ProtocolWithDispatch(
     comptime dispatch_config: dispatcher.DispatchConfig,
 ) type {
     const DefinitionType = definition_mod.Bound(definition_value);
-    interface.assertValidProtocolDefinition(DefinitionType);
+    validate.assertValidProtocolDefinition(DefinitionType);
     support_window.assertValid();
     const hot_cold_dispatch = dispatcher.useHotColdDispatch(dispatch_config);
     const InstructionFacts = instruction_mod.For(DefinitionType, support_window);
-    const AuthorizationFacts = DefinitionType.Authorization;
+    const authorization_facts = DefinitionType.authorization;
     const block_facts = DefinitionType.block;
-    const CallFacts = DefinitionType.Call;
-    const CreateFacts = DefinitionType.Create;
-    const SettlementFacts = DefinitionType.Settlement;
-    const SelfDestructFacts = DefinitionType.SelfDestruct;
-    const StorageFacts = DefinitionType.Storage;
+    const call_facts = DefinitionType.call;
+    const create_facts = DefinitionType.create;
+    const settlement_facts = DefinitionType.settlement;
+    const self_destruct_facts = DefinitionType.self_destruct;
+    const storage_facts = DefinitionType.storage;
     const TransactionFacts = transaction_mod.For(DefinitionType);
 
     return struct {
         const Self = @This();
 
         pub const Revision = DefinitionType.Revision;
+        pub const BaseRevision = DefinitionType.BaseRevision;
         pub const revisions = DefinitionType.revisions;
         pub const Support = DefinitionType.Support;
         pub const Availability = DefinitionType.Availability;
@@ -47,6 +51,9 @@ pub fn ProtocolWithDispatch(
         pub const opcodeAvailabilityByte = DefinitionType.opcodeAvailabilityByte;
         pub const opcodeAvailability = DefinitionType.opcodeAvailability;
         pub const resolveAvailability = DefinitionType.resolveAvailability;
+        pub const order = DefinitionType.order;
+        pub const isImpl = DefinitionType.isImpl;
+        pub const baseRevision = DefinitionType.baseRevision;
         pub const staticGasForRevisionByte = DefinitionType.staticGasForRevisionByte;
         pub const staticGasForRevision = DefinitionType.staticGasForRevision;
 
@@ -54,12 +61,17 @@ pub fn ProtocolWithDispatch(
         pub const dispatch = dispatch_config;
         pub const hot_cold_dispatch_enabled = hot_cold_dispatch;
 
+        pub const transaction = DefinitionType.transaction;
+        pub const settlement = settlement_facts;
+        pub const authorization = authorization_facts;
         pub const block = block_facts;
-        pub const Create = CreateFacts;
-        pub const Settlement = SettlementFacts;
-        pub const Storage = StorageFacts;
+        pub const call = call_facts;
+        pub const create = create_facts;
+        pub const storage = storage_facts;
+        pub const self_destruct = self_destruct_facts;
+
+        pub const Settlement = tx_settlement.Default;
         pub const Transaction = TransactionFacts;
-        pub const Authorization = AuthorizationFacts;
         pub const Precompile = struct {
             pub fn active(revision: DefinitionType.Revision, target: address.Address) bool {
                 if (comptime std.meta.hasFn(DefinitionType.Precompile, "active")) {
@@ -69,34 +81,14 @@ pub fn ProtocolWithDispatch(
             }
 
             pub fn execute(
-                allocator: std.mem.Allocator,
                 revision: DefinitionType.Revision,
                 target: address.Address,
-                input_data: []const u8,
-                gas: i64,
-            ) precompile_mod.Error!?precompile_mod.Result {
+                precompile_call: precompile_runtime.PrecompileCall,
+            ) precompile_mod.Error!?precompile_runtime.PrecompileOutcome {
                 const entry = DefinitionType.Precompile.resolve(revision, target) orelse return null;
-                return try DefinitionType.Precompile.execute(allocator, revision, entry, input_data, gas);
-            }
-
-            pub fn executeWithOutputBuffer(
-                allocator: std.mem.Allocator,
-                revision: DefinitionType.Revision,
-                target: address.Address,
-                input_data: []const u8,
-                gas: i64,
-                output_buffer: ?[]u8,
-            ) precompile_mod.Error!?precompile_mod.Result {
-                const entry = DefinitionType.Precompile.resolve(revision, target) orelse return null;
-                if (comptime std.meta.hasFn(DefinitionType.Precompile, "executeWithOutputBuffer")) {
-                    return try DefinitionType.Precompile.executeWithOutputBuffer(allocator, revision, entry, input_data, gas, output_buffer);
-                }
-                return try DefinitionType.Precompile.execute(allocator, revision, entry, input_data, gas);
+                return try DefinitionType.Precompile.execute(revision, entry, precompile_call);
             }
         };
-        pub const Call = CallFacts;
-        pub const SelfDestruct = SelfDestructFacts;
-
         const byte = struct {
             pub fn entry(comptime opcode_byte: u8) dispatcher.DispatchEntry {
                 return dispatcher.resolveDispatchEntryByte(DefinitionType, support_window, opcode_byte);
@@ -204,7 +196,7 @@ pub fn ProtocolWithDispatch(
                 return InstructionFacts.accountReadColdAccessGas(revision);
             }
 
-            pub fn codeAccountAccessGas(revision: DefinitionType.Revision, status: interface.AccountAccessStatus) ?i64 {
+            pub fn codeAccountAccessGas(revision: DefinitionType.Revision, status: types.AccountAccessStatus) ?i64 {
                 return InstructionFacts.codeAccountAccessGas(revision, status);
             }
         };
@@ -240,18 +232,18 @@ test "protocol type exposes resolved Ethereum facts" {
     try std.testing.expect(CancunPlus.Instruction.entry(push0).hot_path);
     try std.testing.expect(!CancunPlus.Instruction.entry(slotnum).hot_path);
     try std.testing.expect(!CancunPlus.Instruction.entry(sload).hot_path);
-    try std.testing.expectEqual(@as(?usize, ethereum.system.Create.max_code_size), CancunPlus.Create.createCodeSizeLimit(.cancun));
+    try std.testing.expectEqual(@as(?usize, ethereum.system.Create.max_code_size), CancunPlus.create.createCodeSizeLimit(.cancun));
     try std.testing.expectEqual(@as(i64, 50), CancunPlus.Instruction.expByteGas(.cancun));
     try std.testing.expectEqual(@as(?precompile_mod.Contract, .ecrecover), ethereum.precompile.resolve(.cancun, address.addr(0x01)));
     try std.testing.expect(CancunPlus.Precompile.active(.cancun, address.addr(0x01)));
 
     const Amsterdam = Protocol(ethereum.definition, Ethereum.Support.at(.amsterdam));
     try std.testing.expect(Amsterdam.hot_cold_dispatch_enabled);
-    try std.testing.expectEqual(@as(?usize, ethereum.system.Create.amsterdam_max_code_size), Amsterdam.Create.createCodeSizeLimit(.amsterdam));
+    try std.testing.expectEqual(@as(?usize, ethereum.system.Create.amsterdam_max_code_size), Amsterdam.create.createCodeSizeLimit(.amsterdam));
 
     const AmsterdamWithoutHotCold = ProtocolWithDispatch(ethereum.definition, Ethereum.Support.at(.amsterdam), .{ .hot_cold = .disabled });
     try std.testing.expect(!AmsterdamWithoutHotCold.hot_cold_dispatch_enabled);
 
     const Frontier = Protocol(ethereum.definition, Ethereum.Support.at(.frontier));
-    try std.testing.expectEqual(@as(?usize, null), Frontier.Create.createCodeSizeLimit(.frontier));
+    try std.testing.expectEqual(@as(?usize, null), Frontier.create.createCodeSizeLimit(.frontier));
 }

@@ -17,6 +17,7 @@ pub const ExcessBlobGasInput = blob_mod.ExcessBlobGasInput;
 pub const TxKind = transaction_mod.TxKind;
 pub const SenderCodeKind = transaction_mod.SenderCodeKind;
 pub const IntrinsicGasOptions = gas_mod.IntrinsicGasOptions;
+pub const FloorGasInput = gas_mod.FloorGasInput;
 pub const GasCharge = gas_mod.GasCharge;
 pub const InitialGas = gas_mod.InitialGas;
 pub const ExecutionGas = gas_mod.ExecutionGas;
@@ -30,22 +31,20 @@ pub const EnvFacts = transaction_mod.EnvFacts;
 pub const PreparationAccount = transaction_mod.PreparationAccount;
 pub const PreparationStateAccess = transaction_mod.PreparationStateAccess;
 pub const PreparationBlockProgress = transaction_mod.PreparationBlockProgress;
-pub const ExecutionContext = transaction_mod.ExecutionContext;
 pub const TransactionScope = transaction_mod.TransactionScope;
 pub const RootFrame = transaction_mod.RootFrame;
 pub const FeeInput = settlement_mod.FeeInput;
-pub const Settlement = settlement_mod.Settlement;
-pub const SettlementFees = settlement_mod.SettlementFees;
 pub const ExecutionGasResult = settlement_mod.ExecutionGasResult;
 pub const BlockGas = settlement_mod.BlockGas;
 pub const ResultGas = settlement_mod.ResultGas;
-pub const SettlementCosts = settlement_mod.SettlementCosts;
-pub const SettlementPrecharge = settlement_mod.Precharge;
 pub const SenderRecovery = signing.SenderRecovery;
 pub const SenderRecoveryError = signing.SenderRecoveryError;
 
 pub const transactionView = transaction_mod.transactionView;
 pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
+pub const executionContext = transaction_mod.executionContext;
+pub const executionMessage = transaction_mod.executionMessage;
+pub const executionRequest = transaction_mod.executionRequest;
 pub const accessListCounts = gas_mod.accessListCounts;
 pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;
 pub const calcExcessBlobGasForSchedule = blob_mod.calcExcessBlobGasForSchedule;
@@ -98,8 +97,9 @@ test "transaction facade exposes root frame and transaction scope" {
     } };
     const scope = TransactionScope{
         .context = .{
-            .origin = sender,
-            .coinbase = recipient,
+            .chain = .{ .chain_id = 1 },
+            .block = .{ .coinbase = recipient },
+            .transaction = .{ .origin = sender },
         },
         .access_list = &access_list,
         .authorization_list = &authorization_list,
@@ -114,6 +114,17 @@ test "transaction facade exposes root frame and transaction scope" {
     try std.testing.expectEqual(@as(usize, 1), scope.access_list.len);
     try std.testing.expectEqual(@as(usize, 1), scope.authorization_list.len);
     try std.testing.expectEqual(@as(usize, 1), scope.authorizationCount());
+
+    const request = executionRequest(scope.context, root, .{
+        .regular_left = 79_000,
+        .reservoir = 3,
+    });
+    try std.testing.expectEqualDeep(scope.context, request.context);
+    const message = request.message.call;
+    try std.testing.expectEqual(sender, message.sender);
+    try std.testing.expectEqual(recipient, message.recipient);
+    try std.testing.expectEqual(@as(u64, 79_000), message.gas);
+    try std.testing.expectEqual(@as(u64, 3), message.gas_reservoir);
 }
 
 test "transaction bound namespace carries comptime protocol" {
@@ -121,7 +132,7 @@ test "transaction bound namespace carries comptime protocol" {
     const DoubleBlobProtocol = struct {
         pub const Revision = enum { test_revision };
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn blobSchedule(revision: Revision) ?BlobSchedule {
                 _ = revision;
                 return .{

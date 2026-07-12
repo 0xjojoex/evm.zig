@@ -646,7 +646,12 @@ fn paddedWord(input: []const u8, word_index: usize) [32]u8 {
 fn executeEthereumPrecompileForTest(allocator: std.mem.Allocator, revision: Revision, target: Address, input_data: []const u8, gas: i64) Error!?Result {
     const eth_precompile = @import("eth/precompile.zig");
     const contract = eth_precompile.resolve(revision, target) orelse return null;
-    return try eth_precompile.execute(allocator, revision, contract, input_data, gas);
+    return try executeContract(contract, .{
+        .allocator = allocator,
+        .revision = revision,
+        .input_data = input_data,
+        .gas = gas,
+    });
 }
 
 test "Ethereum precompile activation follows revisions" {

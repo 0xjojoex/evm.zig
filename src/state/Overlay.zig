@@ -490,7 +490,9 @@ pub fn setBalance(self: *Overlay, address: Address, value: u256) !void {
 pub fn addBalance(self: *Overlay, address: Address, value: u256) !void {
     if (value == 0) return;
     const current = try self.getBalance(address);
-    try self.setBalance(address, current + value);
+    const next = std.math.add(u256, current, value) catch return error.BalanceOverflow;
+    std.debug.assert(next >= current);
+    try self.setBalance(address, next);
 }
 
 pub fn subtractBalance(self: *Overlay, address: Address, value: u256) !bool {
@@ -1350,7 +1352,7 @@ pub fn finalizeTransaction(self: *Overlay, finalizer: anytype) !void {
     var it = self.selfdestructed_accounts.keyIterator();
     while (it.next()) |address| {
         try self.journal.append(self.allocator, .{ .selfdestruct_cleared = address.* });
-        const policy: evmz.protocol.interface.SelfDestructFinalization =
+        const policy: evmz.protocol.SelfDestructFinalization =
             finalizer.selfDestructFinalization(self.created_contracts.contains(address.*));
         if (policy.clear_storage) {
             try self.journalStorageOverlayRemovedForAddress(address.*, &removed_storage_keys);

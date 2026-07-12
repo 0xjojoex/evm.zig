@@ -15,6 +15,7 @@ const tail_dispatch = @import("../interpreter/tail_dispatch.zig");
 const runtime_frames = @import("./runtime_frames.zig");
 const transaction = @import("../transaction.zig");
 const call_scratch_storage = @import("./call_scratch.zig");
+const context_adapter = @import("./context.zig");
 
 pub fn For(comptime Executor: type) type {
     return struct {
@@ -432,12 +433,14 @@ pub fn For(comptime Executor: type) type {
             return result;
         }
 
-        fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.protocol.interface.DelegatedAccountAccess {
+        fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.protocol.DelegatedAccountAccess {
             const already_warm = self.state.warm_accounts.contains(target);
-            const access = Protocol.Call.topLevelDelegatedAccountAccess(
+            const access = Protocol.call.topLevelDelegatedAccountAccess(
                 self.revision(),
-                Protocol.Precompile.active(self.revision(), target),
-                already_warm,
+                .{
+                    .target_is_precompile = Protocol.Precompile.active(self.revision(), target),
+                    .already_warm = already_warm,
+                },
             ) orelse return null;
             if (access.status == .cold and !already_warm) {
                 try self.state.warmAccount(target);
@@ -459,11 +462,15 @@ pub fn For(comptime Executor: type) type {
             gas: *transaction.ExecutionGas,
         ) !TopFrameStateGasCharge {
             const same_address = std.mem.eql(u8, &sender, &recipient);
-            const account_exists = if (value == 0 or same_address)
-                true
+            const creates_account = if (value == 0 or same_address)
+                false
             else
-                try self.state.accountExists(recipient);
-            const charge_i64 = Protocol.Call.topFrameValueTransferStateGas(self.revision(), value, same_address, account_exists);
+                !try self.state.accountExists(recipient);
+            const charge_i64 = Protocol.call.topFrameValueTransferStateGas(self.revision(), .{
+                .value = value,
+                .same_address = same_address,
+                .creates_account = creates_account,
+            });
             if (charge_i64 == 0) return .{};
 
             const charge = std.math.cast(u64, charge_i64) orelse std.math.maxInt(u64);
@@ -516,14 +523,18 @@ pub fn For(comptime Executor: type) type {
                 };
             }
 
-            const host_result = (try runPrecompileCall(
-                self,
-                0,
-                recipient,
-                input,
-                std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
-            )) orelse unreachable;
+            const message = Host.Message{
+                .depth = 0,
+                .kind = .call,
+                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .recipient = recipient,
+                .sender = sender,
+                .input_data = input,
+                .value = value,
+                .code_address = recipient,
+            };
+            const host_result = (try runPrecompileCall(self, &message)) orelse unreachable;
             const result = host_result.expectCall();
             return .{
                 .status = result.status,
@@ -653,7 +664,8 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn currentTxContext(self: *const Executor) !Host.TxContext {
-            return self.tx_context orelse error.MissingTxContext;
+            const context = self.execution_context orelse return error.MissingTxContext;
+            return context_adapter.toHost(context);
         }
 
         pub fn getTxContext(ptr: *anyopaque) !Host.TxContext {
@@ -817,7 +829,7 @@ pub fn For(comptime Executor: type) type {
 
             const resolved = try resolvedCodeAddress(self, msg.code_address);
             if (!resolved.delegated and Protocol.Precompile.active(self.revision(), msg.code_address)) {
-                if (try runPrecompileCall(self, msg.depth, msg.code_address, msg.input_data, msg.gas, msg.gas_reservoir)) |result| {
+                if (try runPrecompileCall(self, &msg)) |result| {
                     if (result.status() == .success) {
                         try touchEmptyCallRecipient(self, msg);
                     }
@@ -849,42 +861,53 @@ pub fn For(comptime Executor: type) type {
 
         fn runPrecompileCall(
             self: *Executor,
-            depth: u16,
-            recipient: Address,
-            input: []const u8,
-            gas: i64,
-            gas_reservoir: i64,
+            msg: *const Host.Message,
         ) !?Host.Result {
             self.clearLastOutput();
-            var scratch = try callScratch(self, depth);
+            var scratch = try callScratch(self, msg.depth);
             defer scratch.deinit();
 
             const output_buffer = if (self.last_call_output.bounded) self.last_call_output.buf else null;
-            const precompile_result = Protocol.Precompile.executeWithOutputBuffer(
-                scratch.allocator,
+            var host_iface = self.host();
+            const precompile_outcome = Protocol.Precompile.execute(
                 self.revision(),
-                recipient,
-                input,
-                gas,
-                output_buffer,
+                msg.code_address,
+                .{
+                    .allocator = scratch.allocator,
+                    .host = &host_iface,
+                    .message = msg,
+                    .output_buffer = output_buffer,
+                    .runtime = self.precompile_runtime,
+                },
             ) catch |err| switch (err) {
                 error.NotImplemented => return Host.Result.fromCall(.{
                     .status = .invalid,
                     .output_data = &.{},
                     .gas_left = 0,
                     .gas_refund = 0,
-                    .gas_reservoir = gas_reservoir,
+                    .gas_reservoir = msg.gas_reservoir,
                 }),
                 error.OutputBufferTooSmall => return error.ResultOutputCapacityExceeded,
                 else => return err,
             };
-            const result = precompile_result orelse return null;
+            const outcome = precompile_outcome orelse return null;
+            const result = switch (outcome) {
+                .result => |result| result,
+                .service_error => |err| return err,
+            };
 
             defer if (result.output_owned and result.output_data.len != 0) scratch.allocator.free(result.output_data);
-            const output = if (result.output_owned)
-                try self.setLastOutput(result.output_data)
-            else
-                try self.assumeLastOutputWritten(result.output_data.len);
+            const output = if (result.output_owned) output: {
+                break :output try self.setLastOutput(result.output_data);
+            } else if (result.output_data.len == 0) output: {
+                break :output &.{};
+            } else output: {
+                const buffer = output_buffer orelse return error.InvalidPrecompileOutput;
+                if (result.output_data.ptr != buffer.ptr or result.output_data.len > buffer.len) {
+                    return error.InvalidPrecompileOutput;
+                }
+                break :output try self.assumeLastOutputWritten(result.output_data.len);
+            };
             const status: Interpreter.Status = switch (result.status) {
                 .success => .success,
                 .failure => .invalid,
@@ -895,7 +918,7 @@ pub fn For(comptime Executor: type) type {
                 .output_data = output,
                 .gas_left = if (status == .success) result.gas_left else 0,
                 .gas_refund = 0,
-                .gas_reservoir = gas_reservoir,
+                .gas_reservoir = msg.gas_reservoir,
             });
         }
 
@@ -908,7 +931,7 @@ pub fn For(comptime Executor: type) type {
         }
 
         fn touchEmptyCallRecipient(self: *Executor, msg: Host.Message) !void {
-            if (msg.kind != .call or !Protocol.Call.touchesEmptyCallRecipient(self.revision())) return;
+            if (msg.kind != .call or !Protocol.call.touchesEmptyCallRecipient(self.revision())) return;
             _ = try self.getOrCreateAccount(msg.recipient);
         }
 
@@ -1009,8 +1032,8 @@ pub fn For(comptime Executor: type) type {
             }
 
             const next_nonce = std.math.add(u64, caller.nonce, 1) catch return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
-            if (Protocol.Create.createWarmsCreatedAddress(self.revision())) {
-                try self.warmAccessListAddress(create_address);
+            if (Protocol.create.createWarmsCreatedAddress(self.revision())) {
+                try self.warmAccount(create_address);
             }
             self.traceAccountAccess(create_address, msg.depth);
             const account_pre_existing = try self.state.accountExists(create_address);
@@ -1030,8 +1053,12 @@ pub fn For(comptime Executor: type) type {
 
             _ = try self.state.subtractBalance(msg.sender, msg.value);
             try self.state.addBalance(create_address, msg.value);
-            try executor_module.transfer_logs.emit(self, msg.sender, create_address, msg.value);
-            try self.state.setNonce(create_address, Protocol.Create.createInitialNonce(self.revision()));
+            try executor_module.transfer_logs.emit(self, .{
+                .from = msg.sender,
+                .to = create_address,
+                .amount = msg.value,
+            });
+            try self.state.setNonce(create_address, Protocol.create.createInitialNonce(self.revision()));
             try self.state.clearCode(create_address);
             try self.state.markCreatedContract(create_address);
 
@@ -1064,7 +1091,7 @@ pub fn For(comptime Executor: type) type {
             }
 
             const output = try self.setLastOutput(result.output_data);
-            const account_state_gas_refund = Protocol.Create.createAccountStateGasRefund(self.revision(), child.account_pre_existing);
+            const account_state_gas_refund = Protocol.create.createAccountStateGasRefund(self.revision(), child.account_pre_existing);
             if (result.status != .success) {
                 try self.state.revertToCheckpoint(child.checkpoint_state);
                 checkpoint_open = false;
@@ -1079,14 +1106,14 @@ pub fn For(comptime Executor: type) type {
                 });
             }
 
-            if (Protocol.Create.createCodeSizeLimit(self.revision())) |limit| {
+            if (Protocol.create.createCodeSizeLimit(self.revision())) |limit| {
                 if (output.len > limit) {
                     try self.state.revertToCheckpoint(child.checkpoint_state);
                     checkpoint_open = false;
                     return createFailureFromResult(self, child.address, result, .out_of_gas);
                 }
             }
-            if (Protocol.Create.rejectsCreateCode(self.revision(), output)) {
+            if (Protocol.create.rejectsCreateCode(self.revision(), output)) {
                 try self.state.revertToCheckpoint(child.checkpoint_state);
                 checkpoint_open = false;
                 return createFailureFromResult(self, child.address, result, .invalid);
@@ -1097,13 +1124,13 @@ pub fn For(comptime Executor: type) type {
                 checkpoint_open = false;
                 return createFailureFromResult(self, child.address, result, .out_of_gas);
             };
-            const deposit_regular_cost = Protocol.Create.createDepositRegularGas(self.revision(), runtime_size) orelse {
+            const deposit_regular_cost = Protocol.create.createDepositRegularGas(self.revision(), runtime_size) orelse {
                 try self.state.revertToCheckpoint(child.checkpoint_state);
                 checkpoint_open = false;
                 return createFailureFromResult(self, child.address, result, .out_of_gas);
             };
             if (result.gas_left < deposit_regular_cost) {
-                if (Protocol.Create.createDepositRegularGasOogCommits(self.revision())) {
+                if (Protocol.create.createDepositRegularGasOogCommits(self.revision())) {
                     self.state.commitCheckpoint(child.checkpoint_state);
                     checkpoint_open = false;
                     return Host.Result.fromCreate(child.address, .{
@@ -1124,7 +1151,7 @@ pub fn For(comptime Executor: type) type {
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
-            const deposit_state_gas = Protocol.Create.createDepositStateGas(self.revision(), runtime_size) orelse {
+            const deposit_state_gas = Protocol.create.createDepositStateGas(self.revision(), runtime_size) orelse {
                 try self.state.revertToCheckpoint(child.checkpoint_state);
                 checkpoint_open = false;
                 return createFailureFromResult(self, child.address, deposit_result, .out_of_gas);

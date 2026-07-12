@@ -314,7 +314,7 @@ fn runStorageOverlayBlock(block: anytype) !BlockRun {
             },
         }
     }
-    const summary = block.finish();
+    const summary = try block.finish();
     return .{
         .accepted = accepted,
         .rejected = rejected,

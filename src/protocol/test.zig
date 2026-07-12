@@ -4,11 +4,12 @@ const address = @import("../address.zig");
 const definition = @import("../definition.zig");
 const opcode_info = @import("../opcode.zig");
 const precompile_mod = @import("../precompile.zig");
+const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const tx = @import("../transaction.zig");
 const tx_gas = @import("../transaction/gas.zig");
 
 const protocol = @import("../protocol.zig");
-const interface = protocol.interface;
+const types = @import("types.zig");
 const Protocol = protocol.binding.Protocol;
 const Resolution = protocol.Resolution;
 const ExecutionTarget = protocol.ExecutionTarget;
@@ -114,7 +115,7 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
             return 0;
         }
 
-        fn floorGas(_: R, _: []const u8, _: tx_gas.IntrinsicGasOptions) ?u64 {
+        fn floorGas(_: R, _: tx_gas.FloorGasInput) ?u64 {
             return null;
         }
 
@@ -177,7 +178,7 @@ fn testCallConfig(comptime R: type) definition.CallConfig(R) {
             return 0;
         }
 
-        fn callNewAccountGas(_: R, _: u256, _: bool) interface.CallNewAccountGas {
+        fn callNewAccountGas(_: R, _: types.CallNewAccountInput) types.CallNewAccountGas {
             return .{};
         }
 
@@ -189,8 +190,8 @@ fn testCallConfig(comptime R: type) definition.CallConfig(R) {
             return false;
         }
 
-        fn childGas(_: R, requested: i64, available: i64) interface.ChildGas {
-            return .{ .gas = @min(requested, available) };
+        fn childGas(_: R, input: types.ChildGasInput) types.ChildGas {
+            return .{ .gas = @min(input.requested, input.available) };
         }
     };
     return .{
@@ -219,7 +220,7 @@ fn testCreateConfig(comptime R: type, comptime create_code_size_limit: ?*const f
         }
     };
     return .{
-        .createCodeSizeLimit = create_code_size_limit,
+        .createCodeSizeLimit = create_code_size_limit orelse definition.CreateConfig(R).default.createCodeSizeLimit,
         .createDepositRegularGas = F.createDepositRegularGas,
         .createInitialNonce = F.createInitialNonce,
         .createInitCodeWordGas = F.createInitCodeWordGas,
@@ -228,7 +229,7 @@ fn testCreateConfig(comptime R: type, comptime create_code_size_limit: ?*const f
 
 fn testStorageConfig(comptime R: type) definition.StorageConfig(R) {
     const F = struct {
-        fn sstoreGas(_: R, _: interface.StorageStatus) interface.StorageGas {
+        fn sstoreGas(_: R, _: types.StorageStatus) types.StorageGas {
             return .{};
         }
     };
@@ -237,7 +238,7 @@ fn testStorageConfig(comptime R: type) definition.StorageConfig(R) {
 
 fn testSelfDestructConfig(comptime R: type) definition.SelfDestructConfig(R) {
     const F = struct {
-        fn selfDestructPolicy(_: R, _: bool, _: bool) interface.SelfDestructPolicy {
+        fn selfDestructPolicy(_: R, _: types.SelfDestructPolicyInput) types.SelfDestructPolicy {
             return .{
                 .clear_balance = false,
                 .reset_nonce = false,
@@ -245,11 +246,11 @@ fn testSelfDestructConfig(comptime R: type) definition.SelfDestructConfig(R) {
             };
         }
 
-        fn selfDestructFinalization(_: R, _: bool) interface.SelfDestructFinalization {
+        fn selfDestructFinalization(_: R, _: bool) types.SelfDestructFinalization {
             return .{};
         }
 
-        fn selfDestructNewAccountGas(_: R, _: bool, _: bool, _: bool) interface.CallNewAccountGas {
+        fn selfDestructNewAccountGas(_: R, _: types.SelfDestructNewAccountInput) types.CallNewAccountGas {
             return .{};
         }
 
@@ -274,12 +275,10 @@ fn TestPrecompile(comptime R: type) type {
         }
 
         pub fn execute(
-            _: std.mem.Allocator,
             _: R,
             _: Entry,
-            _: []const u8,
-            _: i64,
-        ) precompile_mod.Error!precompile_mod.Result {
+            _: precompile_runtime.PrecompileCall,
+        ) precompile_mod.Error!precompile_runtime.PrecompileOutcome {
             unreachable;
         }
     };
@@ -329,11 +328,46 @@ test "transaction resolver defaults engine protocol shape" {
 
 test "protocol contract accepts non-Ethereum revision model" {
     const FakeRevision = enum(u8) {
-        alpha,
-        beta,
+        alpha = 10,
+        beta = 2,
+    };
+    const FakeSemantics = struct {
+        pub const BaseRevision = @import("../eth/revision.zig").Revision;
+
+        pub fn baseRevision(revision_value: FakeRevision) BaseRevision {
+            return switch (revision_value) {
+                .alpha => .london,
+                .beta => .cancun,
+            };
+        }
+    };
+    const FakeGates = struct {
+        fn blobOpcodes(revision_value: FakeRevision) bool {
+            return revision_value == .beta;
+        }
+    };
+    const FakeOrder = struct {
+        fn order(a: FakeRevision, b: FakeRevision) std.math.Order {
+            const a_index: u8 = switch (a) {
+                .alpha => 0,
+                .beta => 1,
+            };
+            const b_index: u8 = switch (b) {
+                .alpha => 0,
+                .beta => 1,
+            };
+            return std.math.order(a_index, b_index);
+        }
+    };
+    const fake_revision_config: definition.RevisionConfig(FakeRevision) = .{
+        .revisions = &.{ .alpha, .beta },
+        .latest = .beta,
+        .stable = .alpha,
+        .order = FakeOrder.order,
+        .semantics = FakeSemantics,
     };
 
-    const fake_revision = RevisionModel(FakeRevision);
+    const fake_revision = definition.RevisionModel(FakeRevision, fake_revision_config);
     const FakeInstruction = struct {
         pub const Value = u8;
 
@@ -350,6 +384,7 @@ test "protocol contract accepts non-Ethereum revision model" {
         }
 
         pub fn availability(comptime value: Value) fake_revision.Availability {
+            if (value == @intFromEnum(opcode_info.Opcode.LOG1)) return .{ .gate = FakeGates.blobOpcodes };
             return if (info(value).defined) .always else .never;
         }
 
@@ -377,24 +412,41 @@ test "protocol contract accepts non-Ethereum revision model" {
             return if (revision_value == .beta) 42 else null;
         }
     };
-    const FakeDefinition = testDefinition(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
+    const FakeDefinition = comptime blk: {
+        var value = testDefinition(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
+        value.revision = fake_revision_config;
+        break :blk value;
+    };
     const FakeBound = definition.Bound(FakeDefinition);
 
     assertValidProtocolDefinition(FakeDefinition);
 
     const FakeProtocol = Protocol(FakeDefinition, FakeBound.Support.all);
     const fake_add = comptime instructionFor(FakeProtocol, .ADD);
+    const fake_log1 = comptime instructionFor(FakeProtocol, .LOG1);
     try std.testing.expectEqual(Resolution.always, FakeProtocol.Instruction.availability(fake_add));
+    try std.testing.expectEqual(Resolution.runtime, FakeProtocol.Instruction.availability(fake_log1));
     try std.testing.expectEqual(@as(?i64, null), FakeProtocol.Instruction.staticGasConstant(fake_add));
     try std.testing.expectEqual(OpcodeTier.hot, FakeProtocol.Instruction.tier(fake_add));
     try std.testing.expect(!FakeProtocol.Instruction.entry(fake_add).hot_path);
-    try std.testing.expectEqual(@as(?usize, 42), FakeProtocol.Create.createCodeSizeLimit(.beta));
+    try std.testing.expectEqual(@as(?usize, 42), FakeProtocol.create.createCodeSizeLimit(.beta));
+    try std.testing.expectEqual(FakeRevision.beta, FakeBound.latest);
+    try std.testing.expectEqual(FakeRevision.alpha, FakeBound.stable);
+    try std.testing.expect(FakeBound.Support.all.contains(.beta));
+    try std.testing.expectEqual(std.math.Order.lt, FakeProtocol.order(.alpha, .beta));
+    try std.testing.expectEqual(FakeSemantics.BaseRevision.cancun, FakeProtocol.baseRevision(.beta));
 
     const AlphaProtocol = Protocol(FakeDefinition, FakeBound.Support.at(.alpha));
     const alpha_add = comptime instructionFor(AlphaProtocol, .ADD);
+    const alpha_log1 = comptime instructionFor(AlphaProtocol, .LOG1);
     try std.testing.expectEqual(@as(?i64, 3), AlphaProtocol.Instruction.staticGasConstant(alpha_add));
     try std.testing.expect(AlphaProtocol.Instruction.entry(alpha_add).hot_path);
-    try std.testing.expectEqual(@as(?usize, null), AlphaProtocol.Create.createCodeSizeLimit(.alpha));
+    try std.testing.expectEqual(Resolution.never, AlphaProtocol.Instruction.availability(alpha_log1));
+    try std.testing.expectEqual(@as(?usize, null), AlphaProtocol.create.createCodeSizeLimit(.alpha));
+
+    const BetaProtocol = Protocol(FakeDefinition, FakeBound.Support.at(.beta));
+    const beta_log1 = comptime instructionFor(BetaProtocol, .LOG1);
+    try std.testing.expectEqual(Resolution.always, BetaProtocol.Instruction.availability(beta_log1));
 }
 
 test "definition-owned instruction type can compose custom opcode identity" {

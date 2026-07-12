@@ -24,7 +24,7 @@ pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
     return std.mem.readInt(u256, &b.bytes, .big);
 }
 
-pub const max_blob_hashes = evmz.Evm.Protocol.Transaction.blobMaxCount(.amsterdam);
+pub const max_blob_hashes = evmz.transaction.For(evmz.Evm.Protocol).blob.maxBlobCount(.amsterdam);
 
 pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
     var result = std.mem.zeroes(evmc.evmc_bytes32);

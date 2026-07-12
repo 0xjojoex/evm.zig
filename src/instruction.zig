@@ -4,6 +4,7 @@ const opcode_info = @import("opcode.zig");
 const Opcode = opcode_info.Opcode;
 const std = @import("std");
 const definition = @import("./protocol.zig");
+const protocol_types = @import("./protocol/types.zig");
 const evmz = @import("./evm.zig");
 const Interpreter = @import("./Interpreter.zig");
 const CallFrame = Interpreter.CallFrame;
@@ -257,10 +258,10 @@ fn DispatchOverrideProtocol(comptime add_target: definition.ExecutionTarget) typ
         pub const Revision = evmz.eth.Revision;
         pub const hot_cold_dispatch_enabled = true;
         pub const Instruction = evmz.Evm.Protocol.Instruction;
-        pub const Storage = evmz.Evm.Protocol.Storage;
-        pub const Call = evmz.Evm.Protocol.Call;
-        pub const Create = evmz.Evm.Protocol.Create;
-        pub const SelfDestruct = evmz.Evm.Protocol.SelfDestruct;
+        pub const storage = evmz.Evm.Protocol.storage;
+        pub const call = evmz.Evm.Protocol.call;
+        pub const create = evmz.Evm.Protocol.create;
+        pub const self_destruct = evmz.Evm.Protocol.self_destruct;
 
         pub fn staticGas(comptime opcode: Opcode) definition.StaticGas {
             return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
@@ -453,11 +454,44 @@ test "static gas helper uses resolved rule gas" {
 }
 
 test "interpreter executes with non-Ethereum revision protocol" {
-    const CustomRevision = enum(u8) { alpha, beta };
-    const revision = definition.RevisionModel(CustomRevision);
+    const CustomRevision = enum(u8) {
+        alpha = 10,
+        beta = 2,
+    };
+    const Order = struct {
+        fn order(a: CustomRevision, b: CustomRevision) std.math.Order {
+            const rank = struct {
+                fn of(revision: CustomRevision) u8 {
+                    return switch (revision) {
+                        .alpha => 0,
+                        .beta => 1,
+                    };
+                }
+            }.of;
+            return std.math.order(rank(a), rank(b));
+        }
+    };
+    const Semantics = struct {
+        pub const BaseRevision = CustomRevision;
+
+        pub fn baseRevision(revision_value: CustomRevision) BaseRevision {
+            return revision_value;
+        }
+    };
+    const Gates = struct {
+        fn logging(revision_value: CustomRevision) bool {
+            return revision_value == .beta;
+        }
+    };
+    const revision = definition.support.ModelWithConfig(CustomRevision, .{
+        .revisions = &.{ .alpha, .beta },
+        .order = Order.order,
+        .semantics = Semantics,
+    });
 
     const CustomProtocol = struct {
         pub const Revision = CustomRevision;
+        pub const isImpl = revision.isImpl;
 
         pub fn staticGas(comptime opcode: Opcode) definition.StaticGas {
             if (opcode == .ADD) return .{ .revision_bands = definition.StaticGasBands.from(.{
@@ -482,7 +516,7 @@ test "interpreter executes with non-Ethereum revision protocol" {
         }
 
         pub fn opcodeAvailability(comptime opcode: Opcode) revision.Availability {
-            if (opcode == .LOG1) return .never;
+            if (opcode == .LOG1) return .{ .gate = Gates.logging };
             return .always;
         }
 
@@ -501,14 +535,14 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 return null;
             }
 
-            pub fn codeAccountAccessGas(revision_value: CustomRevision, status: definition.interface.AccountAccessStatus) ?i64 {
+            pub fn codeAccountAccessGas(revision_value: CustomRevision, status: protocol_types.AccountAccessStatus) ?i64 {
                 _ = revision_value;
                 _ = status;
                 return null;
             }
         };
 
-        pub const Storage = struct {
+        pub const storage = struct {
             pub fn sloadColdStorageAccessGas(revision_value: CustomRevision) ?i64 {
                 _ = revision_value;
                 return null;
@@ -519,26 +553,26 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 return null;
             }
 
-            pub fn sstoreStorageAccessGas(revision_value: CustomRevision, status: definition.interface.AccountAccessStatus) ?i64 {
+            pub fn sstoreStorageAccessGas(revision_value: CustomRevision, status: protocol_types.AccountAccessStatus) ?i64 {
                 _ = revision_value;
                 _ = status;
                 return null;
             }
 
-            pub fn sstoreGas(revision_value: CustomRevision, status: definition.interface.StorageStatus) definition.interface.StorageGas {
+            pub fn sstoreGas(revision_value: CustomRevision, status: protocol_types.StorageStatus) protocol_types.StorageGas {
                 _ = revision_value;
                 _ = status;
                 return .{};
             }
 
-            pub fn sstoreStateGas(revision_value: CustomRevision, status: definition.interface.StorageStatus) definition.interface.StorageStateGas {
+            pub fn sstoreStateGas(revision_value: CustomRevision, status: protocol_types.StorageStatus) protocol_types.StorageStateGas {
                 _ = revision_value;
                 _ = status;
                 return .{};
             }
         };
 
-        pub const Call = struct {
+        pub const call = struct {
             pub fn callBaseGas(revision_value: CustomRevision) i64 {
                 _ = revision_value;
                 return 40;
@@ -559,18 +593,15 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 return 0;
             }
 
-            pub fn callNewAccountGas(revision_value: CustomRevision, value: u256, account_exists: bool) definition.interface.CallNewAccountGas {
+            pub fn callNewAccountGas(revision_value: CustomRevision, input: protocol_types.CallNewAccountInput) protocol_types.CallNewAccountGas {
                 _ = revision_value;
-                _ = value;
-                _ = account_exists;
+                _ = input;
                 return .{};
             }
 
-            pub fn topFrameValueTransferStateGas(revision_value: CustomRevision, value: u256, same_address: bool, account_exists: bool) i64 {
+            pub fn topFrameValueTransferStateGas(revision_value: CustomRevision, input: protocol_types.TopFrameValueTransferInput) i64 {
                 _ = revision_value;
-                _ = value;
-                _ = same_address;
-                _ = account_exists;
+                _ = input;
                 return 0;
             }
 
@@ -582,12 +613,10 @@ test "interpreter executes with non-Ethereum revision protocol" {
 
             pub fn topLevelDelegatedAccountAccess(
                 revision_value: CustomRevision,
-                target_is_precompile: bool,
-                already_warm: bool,
-            ) ?definition.interface.DelegatedAccountAccess {
+                input: protocol_types.TopLevelDelegatedAccountAccessInput,
+            ) ?protocol_types.DelegatedAccountAccess {
                 _ = revision_value;
-                _ = target_is_precompile;
-                _ = already_warm;
+                _ = input;
                 return null;
             }
 
@@ -596,14 +625,13 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 return false;
             }
 
-            pub fn childGas(revision_value: CustomRevision, requested: i64, available: i64) definition.interface.ChildGas {
+            pub fn childGas(revision_value: CustomRevision, input: protocol_types.ChildGasInput) protocol_types.ChildGas {
                 _ = revision_value;
-                _ = available;
-                return .{ .gas = requested };
+                return .{ .gas = @min(input.requested, input.available) };
             }
         };
 
-        pub const Create = struct {
+        pub const create = struct {
             pub fn createInitCodeSizeLimit(revision_value: CustomRevision) ?usize {
                 _ = revision_value;
                 return null;
@@ -621,15 +649,13 @@ test "interpreter executes with non-Ethereum revision protocol" {
             }
         };
 
-        pub const SelfDestruct = struct {
+        pub const self_destruct = struct {
             pub fn selfDestructPolicy(
                 revision_value: CustomRevision,
-                same_address: bool,
-                created_in_transaction: bool,
-            ) definition.interface.SelfDestructPolicy {
+                input: protocol_types.SelfDestructPolicyInput,
+            ) protocol_types.SelfDestructPolicy {
                 _ = revision_value;
-                _ = same_address;
-                _ = created_in_transaction;
+                _ = input;
                 return .{
                     .clear_balance = true,
                     .reset_nonce = false,
@@ -637,7 +663,7 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 };
             }
 
-            pub fn selfDestructFinalization(revision_value: CustomRevision, created_in_transaction: bool) definition.interface.SelfDestructFinalization {
+            pub fn selfDestructFinalization(revision_value: CustomRevision, created_in_transaction: bool) protocol_types.SelfDestructFinalization {
                 _ = revision_value;
                 _ = created_in_transaction;
                 return .{ .delete_account = true, .clear_storage = true };
@@ -645,14 +671,10 @@ test "interpreter executes with non-Ethereum revision protocol" {
 
             pub fn selfDestructNewAccountGas(
                 revision_value: CustomRevision,
-                same_address: bool,
-                transfers_balance: bool,
-                account_exists: bool,
-            ) definition.interface.CallNewAccountGas {
+                input: protocol_types.SelfDestructNewAccountInput,
+            ) protocol_types.CallNewAccountGas {
                 _ = revision_value;
-                _ = same_address;
-                _ = transfers_balance;
-                _ = account_exists;
+                _ = input;
                 return .{};
             }
 
@@ -693,6 +715,18 @@ test "interpreter executes with non-Ethereum revision protocol" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 88), result.gas_left);
     try std.testing.expectEqual(@as(u256, 5), frame.frame.stack.pop());
+
+    var alpha_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .alpha,
+    });
+    defer alpha_frame.deinit();
+    var alpha_interpreter = alpha_frame.interpreter();
+    const alpha_result = try alpha_interpreter.execute();
+    try std.testing.expectEqual(Interpreter.Status.success, alpha_result.status);
+    try std.testing.expectEqual(@as(i64, 89), alpha_result.gas_left);
 
     const storage_code = [_]u8{
         @intFromEnum(Opcode.PUSH1),  42,
@@ -743,13 +777,15 @@ test "interpreter executes with non-Ethereum revision protocol" {
         @intFromEnum(Opcode.PUSH1), 0,
         @intFromEnum(Opcode.LOG1),
     };
+    var log_msg = evmz.t.defaultMessage();
+    log_msg.gas = 10_000;
     var log_bytecode = try evmz.Bytecode.init(std.testing.allocator, &log_code);
     defer log_bytecode.deinit(std.testing.allocator);
     var log_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
         .host = &host,
-        .msg = &msg,
+        .msg = &log_msg,
         .bytecode = &log_bytecode,
-        .revision = .beta,
+        .revision = .alpha,
     });
     defer log_frame.deinit();
     var log_interpreter = log_frame.interpreter();
@@ -758,6 +794,21 @@ test "interpreter executes with non-Ethereum revision protocol" {
 
     try std.testing.expectEqual(Interpreter.Status.invalid, log_result.status);
     try std.testing.expectEqual(@as(usize, 0), mock_host.logs.items.len);
+
+    var beta_log_state = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer beta_log_state.deinit();
+    var beta_log_host = beta_log_state.host();
+    var beta_log_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
+        .host = &beta_log_host,
+        .msg = &log_msg,
+        .bytecode = &log_bytecode,
+        .revision = .beta,
+    });
+    defer beta_log_frame.deinit();
+    var beta_log_interpreter = beta_log_frame.interpreter();
+    const beta_log_result = try beta_log_interpreter.execute();
+    try std.testing.expectEqual(Interpreter.Status.success, beta_log_result.status);
+    try std.testing.expectEqual(@as(usize, 1), beta_log_state.logs.items.len);
 }
 
 pub fn staticGas(opcode: Opcode) u16 {
@@ -1136,6 +1187,13 @@ pub fn For(comptime ProtocolType: type) type {
             return Interpreter.For(Protocol).revision(frame);
         }
 
+        pub inline fn revisionIncludes(current: Protocol.Revision, activation: Protocol.Revision) bool {
+            if (comptime @hasDecl(Protocol, "isImpl")) {
+                return Protocol.isImpl(current, activation);
+            }
+            return @intFromEnum(current) >= @intFromEnum(activation);
+        }
+
         pub inline fn staticGasForFrame(frame: *CallFrame, comptime opcode: Opcode) i64 {
             return switch (comptime Self.dispatchEntryForOpcode(opcode).static_gas) {
                 .constant => |gas| gas,
@@ -1225,12 +1283,12 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         inline fn staticGasFromBands(revision: Protocol.Revision, comptime bands: definition.StaticGasBands) i64 {
-            const revision_id = @intFromEnum(revision);
             const len: usize = bands.len;
             inline for (0..len) |offset| {
                 const index = len - 1 - offset;
                 const band = bands.items[index];
-                if (revision_id >= band.since) return band.gas;
+                const activation = definition.decodeRevision(Protocol.Revision, band.since);
+                if (Self.revisionIncludes(revision, activation)) return band.gas;
             }
             unreachable;
         }
@@ -1248,7 +1306,8 @@ pub fn For(comptime ProtocolType: type) type {
                 .runtime => switch (comptime Protocol.opcodeAvailability(opcode)) {
                     .always => true,
                     .never => failInvalid(frame),
-                    .since => |activation| if (@intFromEnum(Self.frameRevision(frame)) >= @intFromEnum(activation)) true else failInvalid(frame),
+                    .since => |activation| if (Self.revisionIncludes(Self.frameRevision(frame), activation)) true else failInvalid(frame),
+                    .gate => |active| if (active(Self.frameRevision(frame))) true else failInvalid(frame),
                 },
             };
         }

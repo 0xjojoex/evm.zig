@@ -83,10 +83,10 @@ pub fn For(comptime ProtocolType: type) type {
             }
 
             const revision = Self.frameRevision(frame);
-            frame.trackGas(Protocol.Call.callBaseGas(revision) - evmz.instruction.For(Protocol).staticGasForFrame(frame, op));
+            frame.trackGas(Protocol.call.callBaseGas(revision) - evmz.instruction.For(Protocol).staticGasForFrame(frame, op));
             if (frame.status != .running) return;
 
-            if (Protocol.Call.callColdAccountAccessGas(revision)) |cold_account_access_gas| {
+            if (Protocol.call.callColdAccountAccessGas(revision)) |cold_account_access_gas| {
                 if (try frame.host.accessAccount(address) == .cold) {
                     frame.trackGas(cold_account_access_gas);
                     if (frame.status != .running) return;
@@ -111,7 +111,7 @@ pub fn For(comptime ProtocolType: type) type {
                 .gas_reservoir = frame.gas_reservoir,
             };
 
-            const value_transfer_gas: i64 = if (value > 0) Protocol.Call.callValueTransferGas(revision) else 0;
+            const value_transfer_gas: i64 = if (value > 0) Protocol.call.callValueTransferGas(revision) else 0;
             frame.trackGas(value_transfer_gas);
             if (frame.status != .running) return;
 
@@ -121,7 +121,10 @@ pub fn For(comptime ProtocolType: type) type {
 
             if (op == Opcode.CALL) {
                 const account_exists = try frame.host.accountExists(address);
-                const new_account_gas = Protocol.Call.callNewAccountGas(revision, value, account_exists);
+                const new_account_gas = Protocol.call.callNewAccountGas(revision, .{
+                    .value = value,
+                    .account_exists = account_exists,
+                });
                 frame.trackGas(new_account_gas.regular);
                 if (frame.status != .running) return;
                 account_state_gas = new_account_gas.state;
@@ -131,12 +134,15 @@ pub fn For(comptime ProtocolType: type) type {
             if (frame.status != .running) return;
 
             if (try frame.host.accessDelegatedAccount(address)) |delegated_access_status| {
-                const delegated_access_cost = Protocol.Call.delegatedAccountAccessGas(revision, delegated_access_status == .cold);
+                const delegated_access_cost = Protocol.call.delegatedAccountAccessGas(revision, delegated_access_status == .cold);
                 frame.trackGas(delegated_access_cost);
                 if (frame.status != .running) return;
             }
 
-            const child_gas = Protocol.Call.childGas(revision, msg.gas, frame.gas_left);
+            const child_gas = Protocol.call.childGas(revision, .{
+                .requested = msg.gas,
+                .available = frame.gas_left,
+            });
             if (child_gas.out_of_gas) {
                 frame.failWithStatus(.out_of_gas);
                 return;
@@ -144,7 +150,7 @@ pub fn For(comptime ProtocolType: type) type {
             msg.gas = child_gas.gas;
 
             if (value > 0) {
-                const stipend = Protocol.Call.callValueStipend(revision);
+                const stipend = Protocol.call.callValueStipend(revision);
                 msg.gas += stipend;
                 frame.gas_left += stipend;
             }
@@ -190,7 +196,7 @@ pub fn For(comptime ProtocolType: type) type {
             const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
             const revision = Self.frameRevision(frame);
-            if (Protocol.Create.createInitCodeSizeLimit(revision)) |limit| {
+            if (Protocol.create.createInitCodeSizeLimit(revision)) |limit| {
                 if (size_usize > limit) {
                     frame.failWithStatus(.out_of_gas);
                     return;
@@ -200,7 +206,7 @@ pub fn For(comptime ProtocolType: type) type {
             if (!try frame.expandMemory(offset_usize, size_usize)) return;
 
             const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
-            const init_code_word_cost = Protocol.Create.createInitCodeWordGas(revision, is_create2);
+            const init_code_word_cost = Protocol.create.createInitCodeWordGas(revision, is_create2);
             const init_code_cost = std.math.mul(i64, init_code_word_cost, evmz.calcWordSize(i64, size_i64)) catch {
                 frame.failWithStatus(.out_of_gas);
                 return;
@@ -209,7 +215,7 @@ pub fn For(comptime ProtocolType: type) type {
             if (frame.status != .running) return;
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
-            const account_state_gas = Protocol.Create.createAccountStateGas(revision);
+            const account_state_gas = Protocol.create.createAccountStateGas(revision);
             frame.trackStateGas(account_state_gas);
             if (frame.status != .running) return;
 
@@ -224,7 +230,10 @@ pub fn For(comptime ProtocolType: type) type {
                 .create2_salt = salt,
             };
 
-            const child_gas = Protocol.Call.childGas(revision, msg.gas, frame.gas_left);
+            const child_gas = Protocol.call.childGas(revision, .{
+                .requested = msg.gas,
+                .available = frame.gas_left,
+            });
             if (child_gas.out_of_gas) {
                 frame.failWithStatus(.out_of_gas);
                 return;
@@ -261,7 +270,7 @@ pub fn For(comptime ProtocolType: type) type {
             const transfers_balance = balance > 0 and !same_address;
             const revision = Self.frameRevision(frame);
 
-            if (Protocol.SelfDestruct.selfDestructColdAccountAccessGas(revision)) |cold_account_access_cost| {
+            if (Protocol.self_destruct.selfDestructColdAccountAccessGas(revision)) |cold_account_access_cost| {
                 if (try frame.host.accessAccount(address) == .cold) {
                     frame.trackGas(cold_account_access_cost);
                     if (frame.status != .running) return;
@@ -269,11 +278,13 @@ pub fn For(comptime ProtocolType: type) type {
             }
             frame.traceAccountAccess(address);
 
-            const new_account_gas = Protocol.SelfDestruct.selfDestructNewAccountGas(
+            const new_account_gas = Protocol.self_destruct.selfDestructNewAccountGas(
                 revision,
-                same_address,
-                transfers_balance,
-                try frame.host.accountExists(address),
+                .{
+                    .same_address = same_address,
+                    .transfers_balance = transfers_balance,
+                    .account_exists = try frame.host.accountExists(address),
+                },
             );
             frame.trackGas(new_account_gas.regular);
             if (frame.status != .running) return;
@@ -282,7 +293,7 @@ pub fn For(comptime ProtocolType: type) type {
             const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
 
             if (should_refund) {
-                frame.gas_refund += Protocol.SelfDestruct.selfDestructRefundGas(revision);
+                frame.gas_refund += Protocol.self_destruct.selfDestructRefundGas(revision);
             }
 
             frame.status = .success;

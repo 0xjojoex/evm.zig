@@ -198,20 +198,20 @@ pub const Transaction = struct {
         return gas;
     }
 
-    pub fn floorGas(revision: Revision, input: []const u8, options: tx_gas.IntrinsicGasOptions) ?u64 {
+    pub fn floorGas(revision: Revision, input: tx_gas.FloorGasInput) ?u64 {
         if (!revision.isImpl(.prague)) return null;
         const floor_data_cost = if (revision.isImpl(.amsterdam)) blk: {
-            const bytes = std.math.cast(u64, input.len) orelse return null;
+            const bytes = std.math.cast(u64, input.input.len) orelse return null;
             const floor_tokens = std.math.mul(u64, bytes, 4) catch return null;
             break :blk std.math.mul(u64, floor_tokens, 16) catch return null;
         } else blk: {
-            const tokens = calldataTokenCount(input) orelse return null;
+            const tokens = calldataTokenCount(input.input) orelse return null;
             break :blk std.math.mul(u64, tokens, 10) catch return null;
         };
         const floor_base_gas = if (revision.isImpl(.amsterdam)) amsterdam_tx_base_cost else 21_000;
         var gas = std.math.add(u64, floor_base_gas, floor_data_cost) catch return null;
         if (revision.isImpl(.amsterdam)) {
-            gas = std.math.add(u64, gas, accessListDataCost(options.access_list_counts) orelse return null) catch return null;
+            gas = std.math.add(u64, gas, accessListDataCost(input.options.access_list_counts) orelse return null) catch return null;
         }
         return gas;
     }

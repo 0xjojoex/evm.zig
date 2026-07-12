@@ -210,12 +210,16 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
         fn execute(
             ptr: ?*anyopaque,
             inner: *Executor,
-            engine_root: RootFrame,
-            gas: transaction.ExecutionGas,
+            request: evmz.execution.EvmExecutionRequest,
         ) !Interpreter.Result {
             _ = ptr;
             _ = inner;
-            _ = engine_root;
+            const gas = switch (request.message) {
+                inline else => |message| transaction.ExecutionGas{
+                    .regular_left = message.gas,
+                    .reservoir = message.gas_reservoir,
+                },
+            };
             try std.testing.expectEqual(@as(u64, 50_394), gas.regular_left);
             try std.testing.expectEqual(@as(u64, evmz.eth.transaction.amsterdam_new_account_state_gas), gas.reservoir);
             return .{
@@ -232,10 +236,10 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
     try executor.beginTransactionScope(scope, root);
     const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
-            .coinbase = tx_context.coinbase,
+            .fee_recipient = tx_context.coinbase,
             .payer = sender,
             .value = root.value(),
         }),

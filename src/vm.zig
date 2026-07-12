@@ -11,6 +11,8 @@ const evmz = @import("evm.zig");
 const address = @import("./address.zig");
 const definition_module = @import("./definition.zig");
 const executor_module = @import("./executor.zig");
+const executor_context = @import("./executor/context.zig");
+const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter_module = @import("./Interpreter.zig");
 const protocol_module = @import("./protocol.zig");
@@ -63,15 +65,20 @@ pub const Env = struct {
             .blob_hashes = blob_hashes,
         };
     }
+
+    /// Project VM environment values into one concrete engine request context.
+    pub fn executionContext(
+        self: Env,
+        origin: Address,
+        gas_price: u256,
+        blob_hashes: []const u256,
+    ) execution.ExecutionContext {
+        return executor_context.fromHost(self.txContext(origin, gas_price, self.gas_limit, blob_hashes));
+    }
 };
 
 /// Terminal status of a transaction that reached execution.
-pub const TxStatus = enum {
-    success,
-    revert,
-    invalid,
-    out_of_gas,
-};
+pub const TxStatus = protocol_module.BlockTransactionStatus;
 
 /// Execution payload for a transaction that passed validation and ran.
 ///
@@ -93,7 +100,7 @@ pub const TxExecutionResult = struct {
 pub fn TxResultFor(comptime Protocol: type) type {
     return union(enum) {
         executed: TxExecutionResult,
-        rejected: Protocol.Transaction.ValidationError,
+        rejected: Protocol.transaction.ValidationError,
     };
 }
 
@@ -142,6 +149,14 @@ pub const SystemCall = struct {
     gas: u64,
 };
 
+/// Header facts not already carried by `Env` that seed before-block hooks.
+pub const BeforeBlockInput = struct {
+    parent_hash: ?[32]u8 = null,
+    parent_beacon_block_root: ?[32]u8 = null,
+};
+pub const AfterTransactionContext = protocol_module.AfterTransactionContext;
+pub const FinalizeBlockContext = protocol_module.FinalizeBlockContext;
+
 /// Gas-derived allocation envelope for `initBound`.
 ///
 /// This is an implementation capacity, not the consensus block environment;
@@ -175,15 +190,12 @@ pub fn Vm(
     const ProtocolType = protocol_module.ProtocolWithDispatch(definition_value, options.support, options.dispatch);
     return Typed(
         R,
+        ProtocolType.BaseRevision,
         ProtocolType,
         Definition.Support,
         OptionsFor(definition_value),
-        ProtocolType.Instruction,
-        // The current Definition schema uses the engine transaction vocabulary.
-        // Keep these concrete for ZLS; Typed verifies Protocol coherence below.
-        transaction.Transaction,
-        transaction.TransactionView,
-        ProtocolType.Transaction.ValidationError,
+        ProtocolType.Instruction.Value,
+        ProtocolType.transaction.ValidationError,
         transaction.Prepared(ProtocolType),
         transaction.PrepareResult(ProtocolType),
         TxResultFor(ProtocolType),
@@ -192,42 +204,15 @@ pub fn Vm(
     );
 }
 
-/// The runtime VM bound to a concrete `Protocol`.
-///
-/// Returns the facade described in the module doc: an object held across blocks
-/// that validates and runs `Protocol` transactions via `transact`, groups them
-/// into a block through `BlockSession`, and commits the resulting state diff.
-/// `evm.zig` exposes the mainnet instantiation as `Evm`.
-pub fn ResolvedVm(comptime Protocol: type) type {
-    const SupportType = if (@hasDecl(Protocol, "Support")) Protocol.Support else void;
-    const InstructionType = if (@hasDecl(Protocol, "Instruction")) Protocol.Instruction else void;
-    return Typed(
-        Protocol.Revision,
-        Protocol,
-        SupportType,
-        void,
-        InstructionType,
-        Protocol.Transaction.Value,
-        Protocol.Transaction.View,
-        Protocol.Transaction.ValidationError,
-        transaction.Prepared(Protocol),
-        transaction.PrepareResult(Protocol),
-        TxResultFor(Protocol),
-        executor_module.Executor(Protocol),
-        interpreter_module.For(Protocol),
-    );
-}
-
 /// Internal ZLS carrier. Keep Definition-dependent public types flat: wrapping
 /// them in a descriptor type makes ZLS lose their fields and enum tags.
 fn Typed(
     comptime RevisionType: type,
+    comptime BaseRevisionType: type,
     comptime ProtocolType: type,
     comptime SupportType: type,
     comptime OptionsType: type,
-    comptime InstructionType: type,
-    comptime TransactionType: type,
-    comptime TransactionViewType: type,
+    comptime InstructionValueType: type,
     comptime ValidationErrorType: type,
     comptime PreparedTransactionType: type,
     comptime PreparedTransactionResultType: type,
@@ -236,19 +221,20 @@ fn Typed(
     comptime InterpreterType: type,
 ) type {
     if (ProtocolType.Revision != RevisionType) @compileError("Protocol revision mismatch");
+    if (@hasDecl(ProtocolType, "BaseRevision")) {
+        if (ProtocolType.BaseRevision != BaseRevisionType) @compileError("Protocol base revision mismatch");
+    } else if (BaseRevisionType != RevisionType) {
+        @compileError("Protocol base revision mismatch");
+    }
     if (@hasDecl(ProtocolType, "Support")) {
         if (ProtocolType.Support != SupportType) @compileError("Protocol support mismatch");
     } else if (SupportType != void) {
         @compileError("Protocol support mismatch");
     }
-    if (@hasDecl(ProtocolType, "Instruction")) {
-        if (ProtocolType.Instruction != InstructionType) @compileError("Protocol instruction mismatch");
-    } else if (InstructionType != void) {
-        @compileError("Protocol instruction mismatch");
-    }
-    if (ProtocolType.Transaction.Value != TransactionType) @compileError("Protocol transaction mismatch");
-    if (ProtocolType.Transaction.View != TransactionViewType) @compileError("Protocol transaction view mismatch");
-    if (ProtocolType.Transaction.ValidationError != ValidationErrorType) @compileError("Protocol validation error mismatch");
+    if (ProtocolType.Instruction.Value != InstructionValueType) @compileError("Protocol instruction value mismatch");
+    if (ProtocolType.Transaction.Value != transaction.Transaction) @compileError("Protocol transaction mismatch");
+    if (ProtocolType.Transaction.View != transaction.TransactionView) @compileError("Protocol transaction view mismatch");
+    if (ProtocolType.transaction.ValidationError != ValidationErrorType) @compileError("Protocol validation error mismatch");
     if (transaction.Prepared(ProtocolType) != PreparedTransactionType) @compileError("Prepared transaction mismatch");
     if (transaction.PrepareResult(ProtocolType) != PreparedTransactionResultType) @compileError("Prepared transaction result mismatch");
     if (TxResultFor(ProtocolType) != TxResultType) @compileError("Transaction result mismatch");
@@ -256,6 +242,7 @@ fn Typed(
     if (interpreter_module.For(ProtocolType) != InterpreterType) @compileError("Interpreter mismatch");
 
     const ProtocolNamespace = ProtocolType;
+    const ProtocolInstruction = ProtocolType.Instruction;
     const TxRuntime = transaction.For(ProtocolType);
     const TxStatusType = TxStatus;
 
@@ -267,9 +254,70 @@ fn Typed(
         pub const Options = OptionsType;
         pub const Support = SupportType;
         pub const Revision = RevisionType;
-        pub const Instruction = InstructionType;
-        pub const Transaction = TransactionType;
-        pub const TransactionView = TransactionViewType;
+        pub const BaseRevision = BaseRevisionType;
+        /// Editor-facing instruction API rebuilt around the flat Value carrier.
+        pub const Instruction = struct {
+            pub const Value = InstructionValueType;
+            pub const Context = ProtocolInstruction.Context;
+
+            pub fn fromByte(comptime opcode_byte: u8) Value {
+                return ProtocolInstruction.fromByte(opcode_byte);
+            }
+
+            pub fn context(comptime value: Value) Context {
+                return ProtocolInstruction.context(value);
+            }
+
+            pub fn entry(comptime value: Value) protocol_module.DispatchEntry {
+                return ProtocolInstruction.entry(value);
+            }
+
+            pub fn info(comptime value: Value) protocol_module.OpInfo {
+                return ProtocolInstruction.info(value);
+            }
+
+            pub fn rawAvailability(comptime value: Value) ProtocolType.Availability {
+                return ProtocolInstruction.rawAvailability(value);
+            }
+
+            pub fn availability(comptime value: Value) protocol_module.Resolution {
+                return ProtocolInstruction.availability(value);
+            }
+
+            pub fn staticGasForRevision(revision: RevisionType, comptime value: Value) i64 {
+                return ProtocolInstruction.staticGasForRevision(revision, value);
+            }
+
+            pub fn tier(comptime value: Value) protocol_module.OpcodeTier {
+                return ProtocolInstruction.tier(value);
+            }
+
+            pub fn executionTarget(comptime value: Value) protocol_module.ExecutionTarget {
+                return ProtocolInstruction.executionTarget(value);
+            }
+
+            pub fn staticGas(comptime value: Value) protocol_module.StaticGas {
+                return ProtocolInstruction.staticGas(value);
+            }
+
+            pub fn staticGasConstant(comptime value: Value) ?i64 {
+                return ProtocolInstruction.staticGasConstant(value);
+            }
+
+            pub fn expByteGas(revision: RevisionType) i64 {
+                return ProtocolInstruction.expByteGas(revision);
+            }
+
+            pub fn accountReadColdAccessGas(revision: RevisionType) ?i64 {
+                return ProtocolInstruction.accountReadColdAccessGas(revision);
+            }
+
+            pub fn codeAccountAccessGas(revision: RevisionType, status: protocol_module.AccountAccessStatus) ?i64 {
+                return ProtocolInstruction.codeAccountAccessGas(revision, status);
+            }
+        };
+        pub const Transaction = transaction.Transaction;
+        pub const TransactionView = transaction.TransactionView;
         pub const ValidationError = ValidationErrorType;
         pub const TxResult = TxResultType;
         pub const TxStatus = TxStatusType;
@@ -277,6 +325,13 @@ fn Typed(
         pub const PreparedTransactionResult = PreparedTransactionResultType;
         pub const Executor = ExecutorType;
         pub const Interpreter = InterpreterType;
+
+        pub fn baseRevision(revision: Revision) BaseRevision {
+            if (comptime @hasDecl(Protocol, "baseRevision")) {
+                return Protocol.baseRevision(revision);
+            }
+            return revision;
+        }
 
         /// Low-level execution substrate for diagnostics, fixtures, and benchmarks.
         executor: Executor,
@@ -293,6 +348,7 @@ fn Typed(
             revision: RevisionType,
             state_reader: ?StateReader = null,
             block_hash_source: ?BlockHashSource = null,
+            precompile_runtime: ?evmz.execution.PrecompileRuntime = null,
             committer: ?Committer = null,
             env: Env = .{},
             config: evmz.ExecutionConfig = .base,
@@ -312,14 +368,38 @@ fn Typed(
         /// each executable call then snapshots before execution so the final fold
         /// can still roll back without tearing down the block.
         pub const BlockSession = struct {
+            const AcceptedTransaction = struct {
+                index: u64,
+                status: TxStatusType,
+                gas_used: u64,
+            };
+
             vm: *Self,
             /// Cumulative receipt gas for accepted transactions.
             gas_used: u64 = 0,
             /// Cumulative block/header gas for accepted transactions.
             block_gas: transaction.BlockGas = .{},
             tx_count: u64 = 0,
+            pending_after: ?AcceptedTransaction = null,
+
+            /// Run definition-owned work before payload execution begins.
+            /// Family-owned actions can be applied before or after this call.
+            pub fn beforeBlock(self: *BlockSession, input: BeforeBlockInput) !void {
+                const env = self.vm.runtimeEnv();
+                try executor_module.system_contracts.applyBeforeBlock(
+                    &self.vm.executor,
+                    self.lifecycleTxContext(),
+                    .{
+                        .number = env.number,
+                        .timestamp = env.timestamp,
+                        .parent_hash = input.parent_hash,
+                        .parent_beacon_block_root = input.parent_beacon_block_root,
+                    },
+                );
+            }
 
             pub fn transact(self: *BlockSession, tx: Self.Transaction) !Self.TxResult {
+                try self.flushAfterTransaction();
                 const prepared = try self.vm.prepareTransaction(tx, .{
                     .receipt_gas_used = self.gas_used,
                     .block_gas = self.block_gas,
@@ -333,8 +413,18 @@ fn Typed(
                         var trace_checkpoint_open = true;
                         errdefer if (trace_checkpoint_open) {
                             self.vm.executor.traceSnapshotLifecycle(.revert, &pre_tx);
+                            self.vm.executor.restore(&pre_tx) catch {};
                         };
 
+                        try executor_module.system_contracts.applyBeforeTransaction(
+                            &self.vm.executor,
+                            self.lifecycleTxContext(),
+                            .{
+                                .number = self.vm.runtimeEnv().number,
+                                .timestamp = self.vm.runtimeEnv().timestamp,
+                                .transaction_index = self.tx_count,
+                            },
+                        );
                         const result = try self.vm.executePreparedTransaction(executable);
                         const next_gas_used = std.math.add(u64, self.gas_used, result.gas.used) catch {
                             trace_checkpoint_open = false;
@@ -352,6 +442,11 @@ fn Typed(
                         self.gas_used = next_gas_used;
                         self.block_gas = next_block_gas;
                         self.tx_count += 1;
+                        self.pending_after = .{
+                            .index = self.tx_count - 1,
+                            .status = result.status,
+                            .gas_used = result.gas.used,
+                        };
                         self.vm.executor.traceSnapshotLifecycle(.commit, &pre_tx);
                         trace_checkpoint_open = false;
                         return .{ .executed = result };
@@ -369,7 +464,55 @@ fn Typed(
                 };
             }
 
+            /// Run definition-owned work after the caller has consumed or copied
+            /// the accepted transaction's logs. Lifecycle system calls replace
+            /// the VM's borrowed log view just like any other execution scope.
+            pub fn afterTransaction(self: *BlockSession) !void {
+                if (self.pending_after == null) return error.NoPendingTransaction;
+                try self.flushAfterTransaction();
+            }
+
+            fn flushAfterTransaction(self: *BlockSession) !void {
+                const accepted = self.pending_after orelse return;
+                try executor_module.system_contracts.applyAfterTransaction(
+                    &self.vm.executor,
+                    self.lifecycleTxContext(),
+                    .{
+                        .number = self.vm.runtimeEnv().number,
+                        .timestamp = self.vm.runtimeEnv().timestamp,
+                        .transaction_index = accepted.index,
+                        .status = accepted.status,
+                        .gas_used = accepted.gas_used,
+                        .cumulative_gas_used = self.gas_used,
+                        .cumulative_block_gas = self.block_gas.total,
+                        .cumulative_state_gas = self.block_gas.state,
+                    },
+                );
+                self.pending_after = null;
+            }
+
+            /// Run definition-owned finalization calls and return their owned,
+            /// prefixed outputs. The family STF decides how those outputs are
+            /// interpreted and combined with family-owned finality data.
+            pub fn finalizeBlock(self: *BlockSession, allocator: std.mem.Allocator) ![]const []const u8 {
+                try self.flushAfterTransaction();
+                return executor_module.system_contracts.applyFinalizeBlock(
+                    &self.vm.executor,
+                    self.lifecycleTxContext(),
+                    allocator,
+                    .{
+                        .number = self.vm.runtimeEnv().number,
+                        .timestamp = self.vm.runtimeEnv().timestamp,
+                        .transaction_count = self.tx_count,
+                        .gas_used = self.gas_used,
+                        .block_gas = self.block_gas.total,
+                        .state_gas = self.block_gas.state,
+                    },
+                );
+            }
+
             pub fn systemCall(self: *BlockSession, call: SystemCall) !EvmResult {
+                try self.flushAfterTransaction();
                 var pre_call = try self.vm.executor.snapshot();
                 defer pre_call.deinit(self.vm.executor.allocator);
                 self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_call);
@@ -407,7 +550,10 @@ fn Typed(
                 return result;
             }
 
-            pub fn finish(self: *const BlockSession) BlockResult {
+            /// Flush the final after-transaction phase and return block progress.
+            /// Consume or copy the last receipt's borrowed logs before calling.
+            pub fn finish(self: *BlockSession) !BlockResult {
+                try self.flushAfterTransaction();
                 return .{
                     .gas_used = self.gas_used,
                     .block_gas = self.block_gas,
@@ -420,6 +566,11 @@ fn Typed(
                 try self.vm.executor.restore(pre_tx);
                 return error.BlockGasExceeded;
             }
+
+            fn lifecycleTxContext(self: *const BlockSession) Host.TxContext {
+                const env = self.vm.runtimeEnv();
+                return env.txContext(addr(0), 0, env.gas_limit, &.{});
+            }
         };
 
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
@@ -428,6 +579,7 @@ fn Typed(
                     .revision = options.revision,
                     .state_reader = options.state_reader,
                     .block_hash_source = options.block_hash_source,
+                    .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
                     .trace_sink = options.trace_sink,
                 }),
@@ -458,6 +610,7 @@ fn Typed(
                     .revision = options.revision,
                     .state_reader = options.state_reader,
                     .block_hash_source = options.block_hash_source,
+                    .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
                     .trace_sink = options.trace_sink,
                 }, runtime_resources),
@@ -487,6 +640,7 @@ fn Typed(
                 .revision = options.revision,
                 .state_reader = options.state_reader,
                 .block_hash_source = options.block_hash_source,
+                .precompile_runtime = options.precompile_runtime,
                 .config = options.config,
                 .trace_sink = options.trace_sink,
             });
@@ -526,10 +680,7 @@ fn Typed(
         /// Block-level callers use this for execution-derived writes such as
         /// withdrawal credits while keeping `BlockSession` limited to tx folding.
         pub fn creditBalance(self: *Self, address_value: Address, amount: u256) !void {
-            if (amount == 0) return;
-            const current_balance = try self.executor.state.getBalance(address_value);
-            const next_balance = std.math.add(u256, current_balance, amount) catch return error.BalanceOverflow;
-            try self.executor.state.setBalance(address_value, next_balance);
+            try self.executor.addBalance(address_value, amount);
         }
 
         /// Borrow logs emitted by the most recent transaction/system-call scope.
@@ -589,22 +740,23 @@ fn Typed(
         }
 
         fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !TxExecutionResult {
-            try self.executor.beginTransactionScope(prepared.scope, prepared.root);
+            // Scope opening consumes context plus root identity. The Ethereum
+            // shell rebuilds the final request after authorization adjusts gas.
+            const scope_request = transaction.executionRequest(
+                prepared.scope.context,
+                prepared.root,
+                prepared.execution_gas orelse transaction.ExecutionGas.legacy(0),
+            );
+            try self.executor.beginMessageScope(scope_request, .{});
             errdefer self.executor.closeTransaction();
             const result = try self.executor.runTopLevelTransaction(prepared.scope, prepared.root, .{
                 .execution = prepared.execution_gas,
                 .settlement = prepared.settlement,
             });
 
-            const costs = try tx_protocol.settlement.planCosts(prepared.settlement, .{
-                .gas_left = result.gas_left,
-                .gas_refund = result.gas_refund,
-                .gas_reservoir = result.gas_reservoir,
-                .state_gas_spent = result.state_gas_spent,
-            });
             return .{
                 .status = txStatus(result.status),
-                .gas = costs.gas,
+                .gas = result.gas,
                 .output = result.output_data,
                 .created_address = if (result.status == .success) prepared.created_address else null,
             };
@@ -734,6 +886,17 @@ fn expectRejected(result: Default.TxResult) !EthValidationError {
         .executed => error.UnexpectedExecution,
         .rejected => |err| err,
     };
+}
+
+test "Env execution context derives opcode-visible gas limit from the environment" {
+    const origin = addr(0xaaaa);
+    const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };
+    const context = env.executionContext(origin, 7, &.{});
+
+    try std.testing.expectEqual(@as(u256, 10), context.chain.chain_id);
+    try std.testing.expectEqual(@as(u64, 30_000_000), context.block.gas_limit);
+    try std.testing.expectEqual(origin, context.transaction.origin);
+    try std.testing.expectEqual(@as(u256, 7), context.transaction.gas_price);
 }
 
 test "Vm exposes protocol verbs and low-level executor field" {
@@ -1296,155 +1459,17 @@ test "Vm preparation uses comptime transaction gas policy" {
         .rejected => return error.UnexpectedRejection,
     }
 
-    const HighIntrinsicProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub const Transaction = struct {
-            pub const Value = transaction.Transaction;
-            pub const View = transaction.TransactionView;
-            pub const ValidationError = EthValidationError;
-
-            pub fn view(value: Value) View {
-                return transaction.transactionView(value);
-            }
-
-            pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
-                return evmz.eth.transaction_prepare.For(ProtocolType).prepare(input);
-            }
-
-            pub fn kindActive(revision: Revision, kind: transaction.TxKind) bool {
-                _ = revision;
-                _ = kind;
-                return true;
-            }
-
-            pub fn allowsContractCreation(revision: Revision, kind: transaction.TxKind) bool {
-                _ = revision;
-                _ = kind;
-                return true;
-            }
-
-            pub fn requiresAuthorizationList(revision: Revision, kind: transaction.TxKind) bool {
-                _ = revision;
-                _ = kind;
-                return false;
-            }
-
-            pub fn rejectsNonDelegatingSenderCode(revision: Revision, kind: transaction.TxKind) bool {
-                _ = revision;
-                _ = kind;
-                return false;
-            }
-
-            pub fn blobSchedule(revision: Revision) ?transaction.BlobSchedule {
-                _ = revision;
-                return null;
-            }
-
-            pub fn blobVersionedHashActive(revision: Revision, version: u8) bool {
-                _ = revision;
-                _ = version;
-                return false;
-            }
-
-            pub fn maxInitcodeSize(revision: Revision) usize {
-                _ = revision;
-                return std.math.maxInt(usize);
-            }
-
-            pub fn intrinsicBaseGas(revision: Revision, options: transaction.IntrinsicGasOptions) ?u64 {
-                _ = revision;
-                _ = options;
-                return 42_000;
-            }
-
-            pub fn createIntrinsicGas(revision: Revision) ?u64 {
-                _ = revision;
-                return 0;
-            }
-
-            pub fn dataByteGas(revision: Revision, byte: u8) u64 {
-                _ = revision;
-                _ = byte;
-                return 0;
-            }
-
-            pub fn accessListAddressGas(revision: Revision) u64 {
-                _ = revision;
-                return 0;
-            }
-
-            pub fn storageKeyGas(revision: Revision) u64 {
-                _ = revision;
-                return 0;
-            }
-
-            pub fn accessListDataGas(revision: Revision, counts: transaction.AccessListCounts) ?u64 {
-                _ = revision;
-                _ = counts;
-                return 0;
-            }
-
-            pub fn initCodeWordGas(revision: Revision) u64 {
-                _ = revision;
-                return 0;
-            }
-
-            pub fn authorizationIntrinsicGas(revision: Revision) u64 {
-                _ = revision;
-                return 0;
-            }
-
-            pub fn intrinsicStateGas(revision: Revision, options: transaction.IntrinsicGasOptions) ?u64 {
-                _ = revision;
-                _ = options;
-                return 0;
-            }
-
-            pub fn floorGas(revision: Revision, input: []const u8, options: transaction.IntrinsicGasOptions) ?u64 {
-                _ = revision;
-                _ = input;
-                _ = options;
-                return null;
-            }
-
-            pub fn regularGasLimit(revision: Revision, gas_limit: u64) u64 {
-                _ = revision;
-                return gas_limit;
-            }
-
-            pub fn intrinsicRegularGasLimit(revision: Revision) ?u64 {
-                _ = revision;
-                return null;
-            }
-
-            pub fn totalGasLimit(revision: Revision) ?u64 {
-                _ = revision;
-                return null;
-            }
-        };
-
-        pub const Settlement = struct {
-            pub const Plan = transaction.Settlement;
-
-            pub fn baseFeeActive(revision: Revision) bool {
-                _ = revision;
-                return true;
-            }
-
-            pub fn gasRefundCapDivisor(revision: Revision) u64 {
-                _ = revision;
-                return 5;
-            }
-
-            pub fn usesStateGasAccounting(revision: Revision) bool {
-                _ = revision;
-                return false;
-            }
-        };
+    const Overrides = struct {
+        fn intrinsicBaseGas(_: evmz.eth.Revision, _: transaction.IntrinsicGasOptions) ?u64 {
+            return 42_000;
+        }
     };
-
-    const HighIntrinsicVm = ResolvedVm(HighIntrinsicProtocol);
+    const HighIntrinsicDefinition = evmz.eth.define(.{ .transaction = .{
+        .intrinsicBaseGas = Overrides.intrinsicBaseGas,
+    } });
+    const HighIntrinsicVm = Vm(evmz.eth.Revision, HighIntrinsicDefinition, .{
+        .support = .{ .min = .london, .max = .london },
+    });
     var custom_vm = HighIntrinsicVm.init(std.testing.allocator, .{
         .revision = .london,
         .state_reader = memory.reader(),
@@ -1457,99 +1482,7 @@ test "Vm preparation uses comptime transaction gas policy" {
         .executable => try std.testing.expect(false),
         .rejected => |err| try std.testing.expectEqual(EthValidationError.intrinsic_gas_too_low, err),
     }
-}
-
-test "Vm preparation accepts custom transaction value" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-
-    const CustomProtocol = struct {
-        pub const Revision = enum { custom };
-
-        pub const Transaction = struct {
-            pub const Value = struct {
-                from: Address,
-                target: Address,
-                amount: u256 = 0,
-                gas: u64,
-            };
-            pub const View = transaction.TransactionView;
-            pub const ValidationError = enum { rejected };
-
-            pub fn view(value: Value) View {
-                return .{
-                    .sender = value.from,
-                    .to = value.target,
-                    .gas_limit = value.gas,
-                    .value = value.amount,
-                };
-            }
-
-            pub fn prepare(comptime ProtocolType: type, input: transaction.PrepareInput(ProtocolType)) !transaction.PrepareResult(ProtocolType) {
-                const tx_view = ProtocolType.Transaction.view(input.tx);
-                return .{ .executable = .{
-                    .created_address = null,
-                    .scope = .{
-                        .context = .init(input.env, tx_view.sender, 7, input.env.gas_limit, &.{}),
-                    },
-                    .root = .init(.{
-                        .sender = tx_view.sender,
-                        .to = tx_view.to,
-                        .gas_limit = tx_view.gas_limit,
-                        .value = tx_view.value,
-                    }),
-                    .execution_gas = transaction.ExecutionGas.legacy(12_345),
-                    .settlement = .{
-                        .revision = input.revision,
-                        .marker = 9,
-                    },
-                } };
-            }
-        };
-
-        pub const Settlement = struct {
-            pub const Plan = struct {
-                revision: Revision,
-                marker: u8,
-            };
-
-            pub fn costs(comptime ProtocolType: type, plan: Plan, result: transaction.ExecutionGasResult) !transaction.SettlementCosts {
-                _ = ProtocolType;
-                _ = plan;
-                _ = result;
-                return .{
-                    .gas = .{},
-                    .sender_refund = 0,
-                    .coinbase_payment = 0,
-                };
-            }
-        };
-    };
-
-    const CustomVm = ResolvedVm(CustomProtocol);
-    var vm = CustomVm.init(std.testing.allocator, .{
-        .revision = .custom,
-        .env = .{ .gas_limit = 99_000 },
-    });
-    defer vm.deinit();
-
-    const prepared = try vm.prepareTransaction(.{
-        .from = sender,
-        .target = recipient,
-        .amount = 5,
-        .gas = 50_000,
-    }, .{});
-
-    const executable = switch (prepared) {
-        .rejected => return error.UnexpectedRejection,
-        .executable => |value| value,
-    };
-
-    try std.testing.expectEqual(@as(u256, 7), executable.scope.context.gas_price);
-    try std.testing.expectEqual(@as(u64, 12_345), executable.execution_gas.?.regular_left);
-    try std.testing.expectEqual(@as(u8, 9), executable.settlement.marker);
-    try std.testing.expectEqual(@as(u64, 50_000), executable.root.gasLimit());
-    try std.testing.expectEqual(@as(u256, 5), executable.root.value());
+    try std.testing.expectEqual(transaction.Transaction, HighIntrinsicVm.Transaction);
 }
 
 test "BlockSession validation rejection skips rollback snapshot" {
@@ -1580,7 +1513,7 @@ test "BlockSession validation rejection skips rollback snapshot" {
     });
     try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
     try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 0), block.finish().tx_count);
+    try std.testing.expectEqual(@as(u64, 0), (try block.finish()).tx_count);
 }
 
 test "Vm systemCall uses bound executor protocol" {
@@ -1622,7 +1555,7 @@ test "BlockSession rejects transaction whose gas limit exceeds remaining block d
     }));
     try std.testing.expectEqual(TxStatus.success, accepted.status);
     try std.testing.expectEqual(@as(u64, 15_000), accepted.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
+    try std.testing.expectEqual(@as(u64, 1), (try block.finish()).tx_count);
 
     const rejected = try block.transact(.{
         .sender = sender,
@@ -1630,7 +1563,7 @@ test "BlockSession rejects transaction whose gas limit exceeds remaining block d
         .gas_limit = 29_000,
     });
     try std.testing.expectEqual(EthValidationError.gas_allowance_exceeded, try expectRejected(rejected));
-    try std.testing.expectEqual(@as(u64, 1), block.finish().tx_count);
+    try std.testing.expectEqual(@as(u64, 1), (try block.finish()).tx_count);
 
     var diff = try vm.changeset();
     defer diff.deinit(std.testing.allocator);

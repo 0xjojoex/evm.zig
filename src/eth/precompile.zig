@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
+const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const precompile = @import("../precompile.zig");
 const Revision = @import("revision.zig").Revision;
 
@@ -19,35 +20,17 @@ pub fn active(revision: Revision, target: Address) bool {
 }
 
 pub fn execute(
-    allocator: std.mem.Allocator,
     revision: Revision,
     entry: Entry,
-    input_data: []const u8,
-    gas: i64,
-) precompile.Error!precompile.Result {
-    return precompile.executeContract(entry, .{
-        .allocator = allocator,
+    call: precompile_runtime.PrecompileCall,
+) precompile.Error!precompile_runtime.PrecompileOutcome {
+    return .{ .result = try precompile.executeContract(entry, .{
+        .allocator = call.allocator,
         .revision = revision,
-        .input_data = input_data,
-        .gas = gas,
-    });
-}
-
-pub fn executeWithOutputBuffer(
-    allocator: std.mem.Allocator,
-    revision: Revision,
-    entry: Entry,
-    input_data: []const u8,
-    gas: i64,
-    output_buffer: ?[]u8,
-) precompile.Error!precompile.Result {
-    return precompile.executeContract(entry, .{
-        .allocator = allocator,
-        .revision = revision,
-        .input_data = input_data,
-        .gas = gas,
-        .output_buffer = output_buffer,
-    });
+        .input_data = call.message.input_data,
+        .gas = call.message.gas,
+        .output_buffer = call.output_buffer,
+    }) };
 }
 
 fn minimumRevision(contract: Entry) Revision {
@@ -98,7 +81,23 @@ test "precompile activation follows Ethereum revisions" {
 test "precompile execution applies Ethereum activation before catalog execution" {
     try std.testing.expectEqual(null, resolve(.frontier, Entry.modexp.toAddress()));
 
-    const result = try execute(std.testing.allocator, .byzantium, .modexp, &.{}, 0);
+    var mock_host = @import("../t.zig").MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const message: @import("../Host.zig").Message = .{
+        .depth = 0,
+        .kind = .call,
+        .gas = 0,
+        .sender = address.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+    const outcome = try execute(.byzantium, .modexp, .{
+        .allocator = std.testing.allocator,
+        .host = &host,
+        .message = &message,
+    });
+    const result = outcome.result;
     try std.testing.expectEqual(precompile.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);

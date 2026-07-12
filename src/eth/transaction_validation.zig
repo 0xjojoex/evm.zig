@@ -73,6 +73,8 @@ pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
         const gas_protocol = gas.For(Protocol);
+        const transaction = ProtocolType.transaction;
+        const settlement = ProtocolType.settlement;
 
         pub const Protocol = ProtocolType;
         pub const Input = ValidationInput(Protocol);
@@ -98,7 +100,7 @@ pub fn For(comptime ProtocolType: type) type {
                 return .intrinsic_gas_too_low;
             }
 
-            if (Protocol.Transaction.intrinsicRegularGasLimit(input.revision)) |regular_intrinsic_limit| {
+            if (transaction.intrinsicRegularGasLimit(input.revision)) |regular_intrinsic_limit| {
                 const capped_intrinsic = @max(gas_plan.intrinsic_regular_gas, gas_plan.floor_gas);
                 if (capped_intrinsic > regular_intrinsic_limit) return .intrinsic_gas_too_low;
             }
@@ -115,7 +117,7 @@ pub fn For(comptime ProtocolType: type) type {
                 return .initcode_size_exceeded;
             }
 
-            if (Protocol.Transaction.totalGasLimit(input.revision)) |limit| {
+            if (transaction.totalGasLimit(input.revision)) |limit| {
                 if (input.gas_limit > limit) return .gas_allowance_exceeded;
             }
 
@@ -151,23 +153,23 @@ pub fn For(comptime ProtocolType: type) type {
                 if (max_fee < input.base_fee) return .insufficient_max_fee_per_gas;
             }
 
-            if ((input.kind == .legacy or input.kind == .access_list) and Protocol.Settlement.baseFeeActive(input.revision) and input.gas_price < input.base_fee) {
+            if ((input.kind == .legacy or input.kind == .access_list) and settlement.baseFeeActive(input.revision) and input.gas_price < input.base_fee) {
                 return .insufficient_max_fee_per_gas;
             }
 
             if (input.kind == .blob) {
                 const max_blob_fee = input.max_fee_per_blob_gas orelse 0;
                 if (max_blob_fee < input.blob_base_fee) return .insufficient_max_fee_per_blob_gas;
-                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_3_tx_contract_creation;
+                if (!transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_3_tx_contract_creation;
                 if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
                 for (input.blob_hashes) |hash| {
-                    if (!Protocol.Transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
+                    if (!transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
                 }
             }
 
             if (input.kind == .set_code) {
-                if (!Protocol.Transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
-                if (Protocol.Transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
+                if (!transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
+                if (transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
             }
 
             if (input.tx_nonce) |tx_nonce| {
@@ -182,7 +184,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn validateSenderCode(input: Input) ?ValidationError {
             definition_support.assertRevisionSupported(Protocol, input.revision);
-            if (Protocol.Transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) {
+            if (transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) {
                 return .sender_not_eoa;
             }
             return null;
@@ -211,7 +213,7 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         fn inactiveTransactionKindError(revision: Protocol.Revision, kind: TxKind) ?ValidationError {
-            if (Protocol.Transaction.kindActive(revision, kind)) return null;
+            if (transaction.kindActive(revision, kind)) return null;
             return switch (kind) {
                 .legacy => null,
                 .access_list => .type_1_tx_pre_fork,
@@ -223,10 +225,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         fn exceedsBlockGasAllowance(input: Input) bool {
             if (input.block_gas_limit == 0) return false;
-            const uses_state_gas_accounting = if (comptime @hasDecl(Protocol.Settlement, "usesStateGasAccounting"))
-                Protocol.Settlement.usesStateGasAccounting(input.revision)
-            else
-                false;
+            const uses_state_gas_accounting = settlement.usesStateGasAccounting(input.revision);
             if (uses_state_gas_accounting) {
                 const regular_available = input.block_gas_limit -| input.block_progress.block_gas.regular;
                 const state_available = input.block_gas_limit -| input.block_progress.block_gas.state;
@@ -240,7 +239,7 @@ pub fn For(comptime ProtocolType: type) type {
 }
 
 fn effectiveBlobSchedule(comptime Protocol: type, revision: Protocol.Revision, blob_schedule: ?blob.BlobSchedule) ?blob.BlobSchedule {
-    return blob_schedule orelse Protocol.Transaction.blobSchedule(revision);
+    return blob_schedule orelse Protocol.transaction.blobSchedule(revision);
 }
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
@@ -269,7 +268,7 @@ test "transaction prepayment uses comptime blob gas" {
     const DoubleBlobGasProtocol = struct {
         pub const Revision = EthRevision;
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn blobSchedule(revision: Revision) ?blob.BlobSchedule {
                 _ = revision;
                 return .{
@@ -554,7 +553,7 @@ test "transaction validation uses comptime policy" {
     const CustomPolicyProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn kindActive(revision: Revision, kind: TxKind) bool {
                 _ = revision;
                 _ = kind;
@@ -653,10 +652,9 @@ test "transaction validation uses comptime policy" {
                 return 0;
             }
 
-            pub fn floorGas(revision: Revision, input: []const u8, options: gas.IntrinsicGasOptions) ?u64 {
+            pub fn floorGas(revision: Revision, input: gas.FloorGasInput) ?u64 {
                 _ = revision;
                 _ = input;
-                _ = options;
                 return null;
             }
 
@@ -676,8 +674,13 @@ test "transaction validation uses comptime policy" {
             }
         };
 
-        pub const Settlement = struct {
+        pub const settlement = struct {
             pub fn baseFeeActive(revision: Revision) bool {
+                _ = revision;
+                return false;
+            }
+
+            pub fn usesStateGasAccounting(revision: Revision) bool {
                 _ = revision;
                 return false;
             }

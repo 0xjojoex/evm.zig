@@ -62,15 +62,21 @@ pub fn For(comptime Executor: type) type {
                     const balance = try getBalance(ptr, address);
                     const same_address = std.mem.eql(u8, &address, &beneficiary);
                     const should_refund = !self.state.selfdestructed_accounts.contains(address);
-                    const policy = Protocol.SelfDestruct.selfDestructPolicy(
+                    const policy = Protocol.self_destruct.selfDestructPolicy(
                         self.revision(),
-                        same_address,
-                        self.state.created_contracts.contains(address),
+                        .{
+                            .same_address = same_address,
+                            .created_in_transaction = self.state.created_contracts.contains(address),
+                        },
                     );
                     if (balance > 0) {
                         if (!same_address) {
                             try self.state.addBalance(beneficiary, balance);
-                            try evmz.executor.transfer_logs.emit(self, address, beneficiary, balance);
+                            try evmz.executor.transfer_logs.emit(self, .{
+                                .from = address,
+                                .to = beneficiary,
+                                .amount = balance,
+                            });
                         }
                         if (policy.clear_balance) {
                             try self.state.setBalance(address, 0);

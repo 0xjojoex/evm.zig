@@ -1,20 +1,19 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
-const Address = evmz.Address;
 const Host = evmz.Host;
 
-pub fn emit(executor: anytype, from: Address, to: Address, amount: u256) !void {
+pub fn emit(executor: anytype, input: evmz.protocol.ValueTransferInput) !void {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const transfer_log = Protocol.block.valueTransferLog(executor.revision(), from, to, amount) orelse return;
+    const transfer_log = Protocol.block.valueTransferLog(executor.revision(), input) orelse return;
 
     const topics = [_]u256{
         transfer_log.topic,
-        evmz.address.toU256(from),
-        evmz.address.toU256(to),
+        evmz.address.toU256(input.from),
+        evmz.address.toU256(input.to),
     };
     var data: [32]u8 = undefined;
-    std.mem.writeInt(u256, &data, amount, .big);
+    std.mem.writeInt(u256, &data, input.amount, .big);
 
     try executor.state.emitLog(Host.Log{
         .address = transfer_log.address,
@@ -30,14 +29,10 @@ test "value transfer log metadata comes from comptime protocol" {
         pub const block = struct {
             pub fn valueTransferLog(
                 revision: Revision,
-                from: Address,
-                to: Address,
-                amount: u256,
-            ) ?evmz.protocol.interface.ValueTransferLog {
+                input: evmz.protocol.ValueTransferInput,
+            ) ?evmz.protocol.ValueTransferLog {
                 _ = revision;
-                _ = from;
-                _ = to;
-                _ = amount;
+                _ = input;
                 return .{
                     .address = evmz.addr(0x77),
                     .topic = 0x1234,
@@ -83,7 +78,11 @@ test "value transfer log metadata comes from comptime protocol" {
     var executor = FakeExecutor{ .state = .{ .allocator = std.testing.allocator } };
     defer executor.state.deinit();
 
-    try emit(&executor, evmz.addr(1), evmz.addr(2), 3);
+    try emit(&executor, .{
+        .from = evmz.addr(1),
+        .to = evmz.addr(2),
+        .amount = 3,
+    });
 
     try std.testing.expectEqual(@as(usize, 1), executor.state.logs.items.len);
     const event_log = executor.state.logs.items[0];

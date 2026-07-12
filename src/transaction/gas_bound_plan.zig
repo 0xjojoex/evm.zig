@@ -204,7 +204,7 @@ pub fn For(comptime Protocol: type) type {
                 },
                 .transient_storage_entries = transient_entries,
                 .max_code_bytes = Self.maxCodeSize(input.revision),
-                .max_initcode_bytes = Protocol.Transaction.maxInitcodeSize(input.revision),
+                .max_initcode_bytes = Protocol.transaction.maxInitcodeSize(input.revision),
             };
         }
 
@@ -242,42 +242,42 @@ pub fn For(comptime Protocol: type) type {
 
         pub fn effectiveGasLimit(revision: Protocol.Revision, gas_limit: u64, scope: Scope) u64 {
             return switch (scope) {
-                .transaction => Protocol.Transaction.regularGasLimit(revision, gas_limit),
+                .transaction => Protocol.transaction.regularGasLimit(revision, gas_limit),
                 .gas_budget => gas_limit,
             };
         }
 
         pub fn maxCodeSize(revision: Protocol.Revision) usize {
-            return Protocol.Create.createCodeSizeLimit(revision) orelse legacy_max_code_size;
+            return Protocol.create.createCodeSizeLimit(revision) orelse legacy_max_code_size;
         }
 
         fn accountWarmCost(revision: Protocol.Revision) u64 {
-            return Protocol.Transaction.accessListAddressGas(revision);
+            return Protocol.transaction.accessListAddressGas(revision);
         }
 
         fn storageKeyWarmCost(revision: Protocol.Revision) u64 {
-            return Protocol.Transaction.storageKeyGas(revision);
+            return Protocol.transaction.storageKeyGas(revision);
         }
 
         fn storageOverlayEntryCost(revision: Protocol.Revision) u64 {
-            const state_gas = Protocol.Storage.sstoreStateGas(revision, .added);
+            const state_gas = Protocol.storage.sstoreStateGas(revision, .added);
             if (state_gas.charge <= 0) return legacy_storage_overlay_entry_gas;
 
-            const storage_access = Protocol.Storage.sstoreStorageAccessGas(revision, .cold) orelse 0;
-            const storage_write = Protocol.Storage.sstoreGas(revision, .added).cost;
+            const storage_access = Protocol.storage.sstoreStorageAccessGas(revision, .cold) orelse 0;
+            const storage_write = Protocol.storage.sstoreGas(revision, .added).cost;
             const regular_gas = std.math.add(i64, storage_access, storage_write) catch return std.math.maxInt(u64);
             return std.math.cast(u64, regular_gas) orelse std.math.maxInt(u64);
         }
 
         fn createWarmCost(revision: Protocol.Revision) u64 {
-            if (Protocol.Transaction.intrinsicRegularGasLimit(revision) != null) return amsterdam_create_warm_cost;
+            if (Protocol.transaction.intrinsicRegularGasLimit(revision) != null) return amsterdam_create_warm_cost;
             return legacy_create_warm_cost;
         }
 
         fn protocolWarmAccountReserve(revision: Protocol.Revision) usize {
             var count: usize = 2; // sender plus recipient or created address.
             if (Protocol.block.transactionWarmsCoinbase(revision)) count += 1;
-            if (Protocol.Authorization.warmsDelegatedTarget(revision)) count += 1;
+            if (Protocol.authorization.warmsDelegatedTarget(revision)) count += 1;
             return count;
         }
 

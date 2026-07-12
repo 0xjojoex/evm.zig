@@ -242,6 +242,20 @@ pub fn build(b: *std.Build) void {
             const run_example = b.addRunArtifact(example);
             const run_step = b.step("example", "Run the example");
             run_step.dependOn(&run_example.step);
+
+            const example_tests = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = root_source_file,
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "evmz", .module = example_mod },
+                    },
+                }),
+            });
+            example_tests.use_llvm = true;
+            const example_test_step = b.step("example-test", "Run tests in the selected Zig example");
+            example_test_step.dependOn(&b.addRunArtifact(example_tests).step);
         } else {
             if (!is_native_profile) {
                 std.debug.panic("C examples require -Dprofile=native", .{});

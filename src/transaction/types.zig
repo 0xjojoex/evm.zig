@@ -3,13 +3,15 @@
 //! One transaction flows through several representations. Keep them distinct:
 //!
 //!   raw bytes ─(transaction/envelope.zig)-> Transaction ─(prepare)->
-//!     TransactionView ─> Prepared{scope, root} ─(executor)-> Host.Message
+//!     TransactionView ─> Prepared{scope, root} ─> EvmExecutionRequest
 
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
+const execution = @import("../execution.zig");
 const BlobSchedule = @import("./blob.zig").BlobSchedule;
 const BlockGas = @import("./settlement.zig").BlockGas;
+const ExecutionGas = @import("./gas.zig").ExecutionGas;
 
 pub const AccessListCounts = struct {
     addresses: usize = 0,
@@ -59,8 +61,9 @@ pub const FeeFields = struct {
     max_fee_per_blob_gas: ?u256 = null,
 };
 
-/// Ethereum-shaped protocol transaction value used by the default VM surface.
-/// Custom definitions can provide their own `Definition.Transaction.Value`.
+/// Ethereum-shaped transaction value used by Definition-backed `Vm` types.
+/// Representation-changing families own a concrete facade above the executor
+/// rather than replacing this engine transaction value.
 pub const Transaction = struct {
     kind: TxKind = .legacy,
     sender: Address,
@@ -149,37 +152,27 @@ pub const PreparationBlockProgress = struct {
     block_gas: BlockGas = .{},
 };
 
-pub const ExecutionContext = struct {
-    chain_id: u256 = 1,
-    gas_price: u256 = 0,
-    origin: Address,
-    coinbase: Address,
-    number: u64 = 0,
-    slot_number: u64 = 0,
-    timestamp: u64 = 0,
-    gas_limit: u64 = 0,
-    prev_randao: u256 = 0,
-    base_fee: u256 = 0,
-    blob_base_fee: u256 = 0,
-    blob_hashes: []const u256 = &.{},
-
-    pub fn init(env: EnvFacts, origin: Address, gas_price: u256, gas_limit: u64, blob_hashes: []const u256) ExecutionContext {
-        return .{
-            .chain_id = env.chain_id,
-            .gas_price = gas_price,
-            .origin = origin,
+/// Project preparation facts into the engine's concrete opcode-visible context.
+pub fn executionContext(env: EnvFacts, origin: Address, gas_price: u256, gas_limit: u64, blob_hashes: []const u256) execution.ExecutionContext {
+    return .{
+        .chain = .{ .chain_id = env.chain_id },
+        .block = .{
             .coinbase = env.coinbase,
             .number = env.number,
             .slot_number = env.slot_number,
             .timestamp = env.timestamp,
             .gas_limit = gas_limit,
-            .prev_randao = env.prev_randao,
+            .difficulty_or_prev_randao = env.prev_randao,
             .base_fee = env.base_fee,
             .blob_base_fee = env.blob_base_fee,
+        },
+        .transaction = .{
+            .origin = origin,
+            .gas_price = gas_price,
             .blob_hashes = blob_hashes,
-        };
-    }
-};
+        },
+    };
+}
 
 /// Transaction-scoped execution environment: the data that belongs to the whole
 /// transaction rather than to the top-level call/create frame.
@@ -188,7 +181,9 @@ pub const ExecutionContext = struct {
 /// accounting shell warms the `access_list` and applies the `authorization_list`;
 /// the interpreter never sees them. Paired with a `RootFrame` in `Prepared`.
 pub const TransactionScope = struct {
-    context: ExecutionContext,
+    pub const Context = execution.ExecutionContext;
+
+    context: Context,
     access_list: []const AccessListEntry = &.{},
     authorization_list: []const AuthorizationTuple = &.{},
     /// Count of authorization tuples *parsed* from the transaction. May exceed
@@ -239,12 +234,12 @@ pub fn effectiveGasPrice(env: EnvFacts, view: TransactionView) u256 {
     };
 }
 
-/// The top-level message a transaction initiates: a call to `to`, or a create.
+/// The transaction-derived top-level call/create plan.
 ///
-/// The pure execution message — sender/target/input/gas/value only. Transaction
-/// -scope data (access list, authorizations, block/tx context) lives on
-/// `TransactionScope`, not here. Built by `rootFrame`, consumed by the executor;
-/// it is the root of the call tree that inner `Host.Message` frames descend from.
+/// `gas_limit` is the original transaction cap, not the resolved post-intrinsic
+/// engine budget. Transaction-scope data (access list, authorizations, block/tx
+/// context) lives on `TransactionScope`; execution later combines this root with
+/// `ExecutionGas` to form the gas-bearing executor message.
 pub const RootFrame = union(enum) {
     /// A message call to `recipient`.
     call: Call,
@@ -328,6 +323,37 @@ pub const RootFrame = union(enum) {
     }
 };
 
+/// Project a transaction root and its resolved post-intrinsic gas into the
+/// concrete engine message consumed by `Executor.executeMessage`.
+pub fn executionMessage(root: RootFrame, gas: ExecutionGas) execution.Message {
+    return switch (root) {
+        .call => |call| .{ .call = .{
+            .sender = call.sender,
+            .recipient = call.recipient,
+            .input = call.input,
+            .gas = gas.regular_left,
+            .gas_reservoir = gas.reservoir,
+            .value = call.value,
+        } },
+        .create => |create| .{ .create = .{
+            .sender = create.sender,
+            .init_code = create.init_code,
+            .gas = gas.regular_left,
+            .gas_reservoir = gas.reservoir,
+            .value = create.value,
+        } },
+    };
+}
+
+/// Build the immutable EVM request after family lifecycle has resolved the
+/// message gas budget.
+pub fn executionRequest(context: execution.ExecutionContext, root: RootFrame, gas: ExecutionGas) execution.EvmExecutionRequest {
+    return .{
+        .context = context,
+        .message = executionMessage(root, gas),
+    };
+}
+
 /// A validated transaction ready to execute: the pipeline output of `prepare`.
 pub fn Prepared(comptime Protocol: type) type {
     return struct {
@@ -338,14 +364,14 @@ pub fn Prepared(comptime Protocol: type) type {
         /// The top-level call/create the executor runs.
         root: RootFrame,
         /// Resolved execution gas; null when the transaction has no execution step.
-        execution_gas: ?@import("./gas.zig").ExecutionGas,
+        execution_gas: ?ExecutionGas,
         settlement: Protocol.Settlement.Plan,
     };
 }
 
 pub fn PrepareResult(comptime Protocol: type) type {
     return union(enum) {
-        rejected: Protocol.Transaction.ValidationError,
+        rejected: Protocol.transaction.ValidationError,
         executable: Prepared(Protocol),
     };
 }
@@ -355,7 +381,7 @@ pub fn PrepareInput(comptime Protocol: type) type {
         pub const ProtocolType = Protocol;
 
         revision: Protocol.Revision,
-        tx: Protocol.Transaction.Value,
+        tx: Transaction,
         env: EnvFacts,
         block: PreparationBlockProgress = .{},
         state: PreparationStateAccess,

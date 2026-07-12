@@ -1,7 +1,7 @@
 const std = @import("std");
 const address = @import("../address.zig");
 const definition = @import("../definition.zig");
-const interface = @import("../protocol/interface.zig");
+const types = @import("../protocol/types.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
@@ -36,6 +36,29 @@ const cold_sload_cost: i64 = 2100;
 const cold_sload_gas: i64 = cold_sload_cost - warm_storage_read_cost;
 
 pub const Storage = struct {
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            sloadColdStorageAccessGas: ?*const fn (R) ?i64 = null,
+            sstoreMinimumGas: ?*const fn (R) ?i64 = null,
+            sstoreStorageAccessGas: ?*const fn (R, types.AccountAccessStatus) ?i64 = null,
+            sstoreGas: ?*const fn (R, types.StorageStatus) types.StorageGas = null,
+            sstoreStateGas: ?*const fn (R, types.StorageStatus) types.StorageStateGas = null,
+        };
+        definition.assertPatchMirrors(definition.StorageConfig(R), PatchType);
+        return PatchType;
+    }
+
+    pub fn config(comptime R: type) definition.StorageConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .sloadColdStorageAccessGas = @This().sloadColdStorageAccessGas,
+            .sstoreMinimumGas = @This().sstoreMinimumGas,
+            .sstoreStorageAccessGas = @This().sstoreStorageAccessGas,
+            .sstoreGas = @This().sstoreGas,
+            .sstoreStateGas = @This().sstoreStateGas,
+        };
+    }
+
     pub fn sloadColdStorageAccessGas(revision: Revision) ?i64 {
         if (!revision.isImpl(.berlin)) return null;
         if (revision.isImpl(.amsterdam)) return tx.amsterdam_cold_storage_access_cost - warm_storage_read_cost;
@@ -46,7 +69,7 @@ pub const Storage = struct {
         return if (revision.isImpl(.istanbul)) @intCast(tx.call_stipend) else null;
     }
 
-    pub fn sstoreStorageAccessGas(revision: Revision, status: interface.AccountAccessStatus) ?i64 {
+    pub fn sstoreStorageAccessGas(revision: Revision, status: types.AccountAccessStatus) ?i64 {
         if (!revision.isImpl(.berlin)) return null;
         return switch (status) {
             .cold => if (revision.isImpl(.amsterdam))
@@ -60,7 +83,7 @@ pub const Storage = struct {
         };
     }
 
-    pub fn sstoreGas(revision: Revision, status: interface.StorageStatus) interface.StorageGas {
+    pub fn sstoreGas(revision: Revision, status: types.StorageStatus) types.StorageGas {
         if (revision.isImpl(.amsterdam)) {
             const storage_write: i64 = @intCast(tx.amsterdam_storage_write_cost);
             const clear_refund: i64 = @intCast(tx.amsterdam_storage_clear_refund);
@@ -98,7 +121,7 @@ pub const Storage = struct {
         };
     }
 
-    pub fn sstoreStateGas(revision: Revision, status: interface.StorageStatus) interface.StorageStateGas {
+    pub fn sstoreStateGas(revision: Revision, status: types.StorageStatus) types.StorageStateGas {
         if (!revision.isImpl(.amsterdam)) return .{};
         const state_gas = std.math.cast(i64, tx.amsterdam_storage_set_state_gas) orelse std.math.maxInt(i64);
         return switch (status) {
@@ -115,9 +138,11 @@ pub const Block = struct {
     /// Partial Ethereum authoring surface for the complete block policy.
     pub fn Patch(comptime R: type) type {
         const PatchType = struct {
-            valueTransferLog: ?*const fn (R, Address, Address, u256) ?interface.ValueTransferLog = null,
-            blockStartSystemCalls: ?*const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = null,
-            blockEndSystemCalls: ?*const fn (R, interface.BlockEndContext) interface.BlockEndSystemCalls = null,
+            valueTransferLog: ?*const fn (R, types.ValueTransferInput) ?types.ValueTransferLog = null,
+            beforeBlock: ?*const fn (R, types.BeforeBlockContext) types.BlockSystemCalls = null,
+            beforeTransaction: ?*const fn (R, types.BeforeTransactionContext) types.BlockSystemCalls = null,
+            afterTransaction: ?*const fn (R, types.AfterTransactionContext) types.BlockSystemCalls = null,
+            finalizeBlock: ?*const fn (R, types.FinalizeBlockContext) types.FinalizeSystemCalls = null,
             transactionWarmsCoinbase: ?*const fn (R) bool = null,
         };
         definition.assertPatchMirrors(definition.BlockConfig(R), PatchType);
@@ -130,24 +155,26 @@ pub const Block = struct {
         if (R != Revision) return .default;
         return .{
             .valueTransferLog = Self.valueTransferLog,
-            .blockStartSystemCalls = Self.blockStartSystemCalls,
-            .blockEndSystemCalls = Self.blockEndSystemCalls,
+            .beforeBlock = Self.beforeBlock,
+            .beforeTransaction = Self.beforeTransaction,
+            .afterTransaction = Self.afterTransaction,
+            .finalizeBlock = Self.finalizeBlock,
             .transactionWarmsCoinbase = Self.transactionWarmsCoinbase,
         };
     }
 
-    pub fn valueTransferLog(revision: Revision, from: Address, to: Address, amount: u256) ?interface.ValueTransferLog {
+    pub fn valueTransferLog(revision: Revision, input: types.ValueTransferInput) ?types.ValueTransferLog {
         if (!revision.isImpl(.amsterdam)) return null;
-        if (amount == 0) return null;
-        if (std.mem.eql(u8, &from, &to)) return null;
+        if (input.amount == 0) return null;
+        if (std.mem.eql(u8, &input.from, &input.to)) return null;
         return .{
             .address = system_address,
             .topic = value_transfer_log_topic,
         };
     }
 
-    pub fn blockStartSystemCalls(revision: Revision, context: interface.BlockStartContext) interface.BlockStartSystemCalls {
-        var calls = interface.BlockStartSystemCalls{};
+    pub fn beforeBlock(revision: Revision, context: types.BeforeBlockContext) types.BlockSystemCalls {
+        var calls = types.BlockSystemCalls{};
         if (context.number == 0) return calls;
 
         if (revision.isImpl(.cancun)) {
@@ -155,7 +182,7 @@ pub const Block = struct {
                 calls.append(.{
                     .sender = system_address,
                     .recipient = beacon_roots_address,
-                    .input = root,
+                    .input = .{ .word = root },
                     .gas = system_call_gas,
                 });
             }
@@ -166,7 +193,7 @@ pub const Block = struct {
                 calls.append(.{
                     .sender = system_address,
                     .recipient = history_storage_address,
-                    .input = hash,
+                    .input = .{ .word = hash },
                     .gas = system_call_gas,
                 });
             }
@@ -175,16 +202,24 @@ pub const Block = struct {
         return calls;
     }
 
-    pub fn blockEndSystemCalls(revision: Revision, context: interface.BlockEndContext) interface.BlockEndSystemCalls {
-        var calls = interface.BlockEndSystemCalls{};
+    pub fn beforeTransaction(_: Revision, _: types.BeforeTransactionContext) types.BlockSystemCalls {
+        return .{};
+    }
+
+    pub fn afterTransaction(_: Revision, _: types.AfterTransactionContext) types.BlockSystemCalls {
+        return .{};
+    }
+
+    pub fn finalizeBlock(revision: Revision, context: types.FinalizeBlockContext) types.FinalizeSystemCalls {
+        var calls = types.FinalizeSystemCalls{};
         if (context.number == 0) return calls;
         if (!revision.isImpl(.prague)) return calls;
 
-        calls.append(eip7002.blockEndSystemCall(system_address, system_call_gas));
-        calls.append(eip7251.blockEndSystemCall(system_address, system_call_gas));
+        calls.append(eip7002.finalizeSystemCall(system_address, system_call_gas));
+        calls.append(eip7251.finalizeSystemCall(system_address, system_call_gas));
         if (revision.isImpl(.amsterdam)) {
-            calls.append(eip8282.builderDepositBlockEndSystemCall(system_address, system_call_gas));
-            calls.append(eip8282.builderExitBlockEndSystemCall(system_address, system_call_gas));
+            calls.append(eip8282.builderDepositFinalizeSystemCall(system_address, system_call_gas));
+            calls.append(eip8282.builderExitFinalizeSystemCall(system_address, system_call_gas));
         }
         return calls;
     }
@@ -228,6 +263,43 @@ fn sstoreActionCost(revision: Revision) StorageActionCost {
 pub const Create = struct {
     pub const max_code_size = 0x6000;
     pub const amsterdam_max_code_size = 0x10000;
+
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            createCodeSizeLimit: ?*const fn (R) ?usize = null,
+            rejectsCreateCode: ?*const fn (R, []const u8) bool = null,
+            createDepositRegularGas: ?*const fn (R, i64) ?i64 = null,
+            createDepositStateGas: ?*const fn (R, i64) ?i64 = null,
+            createDepositRegularGasOogCommits: ?*const fn (R) bool = null,
+            createAccountStateGasRefund: ?*const fn (R, bool) i64 = null,
+            createTransactionRollbackStateGasRefund: ?*const fn (R) i64 = null,
+            createWarmsCreatedAddress: ?*const fn (R) bool = null,
+            createInitialNonce: ?*const fn (R) u64 = null,
+            createInitCodeSizeLimit: ?*const fn (R) ?usize = null,
+            createInitCodeWordGas: ?*const fn (R, bool) i64 = null,
+            createAccountStateGas: ?*const fn (R) i64 = null,
+        };
+        definition.assertPatchMirrors(definition.CreateConfig(R), PatchType);
+        return PatchType;
+    }
+
+    pub fn config(comptime R: type) definition.CreateConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .createCodeSizeLimit = @This().createCodeSizeLimit,
+            .rejectsCreateCode = @This().rejectsCreateCode,
+            .createDepositRegularGas = @This().createDepositRegularGas,
+            .createDepositStateGas = @This().createDepositStateGas,
+            .createDepositRegularGasOogCommits = @This().createDepositRegularGasOogCommits,
+            .createAccountStateGasRefund = @This().createAccountStateGasRefund,
+            .createTransactionRollbackStateGasRefund = @This().createTransactionRollbackStateGasRefund,
+            .createWarmsCreatedAddress = @This().createWarmsCreatedAddress,
+            .createInitialNonce = @This().createInitialNonce,
+            .createInitCodeSizeLimit = @This().createInitCodeSizeLimit,
+            .createInitCodeWordGas = @This().createInitCodeWordGas,
+            .createAccountStateGas = @This().createAccountStateGas,
+        };
+    }
 
     pub fn createCodeSizeLimit(revision: Revision) ?usize {
         if (!revision.isImpl(.spurious_dragon)) return null;
@@ -296,6 +368,39 @@ pub const Create = struct {
 };
 
 pub const Call = struct {
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            callBaseGas: ?*const fn (R) i64 = null,
+            callColdAccountAccessGas: ?*const fn (R) ?i64 = null,
+            callValueTransferGas: ?*const fn (R) i64 = null,
+            callValueStipend: ?*const fn (R) i64 = null,
+            callNewAccountGas: ?*const fn (R, types.CallNewAccountInput) types.CallNewAccountGas = null,
+            topFrameValueTransferStateGas: ?*const fn (R, types.TopFrameValueTransferInput) i64 = null,
+            delegatedAccountAccessGas: ?*const fn (R, bool) i64 = null,
+            topLevelDelegatedAccountAccess: ?*const fn (R, types.TopLevelDelegatedAccountAccessInput) ?types.DelegatedAccountAccess = null,
+            touchesEmptyCallRecipient: ?*const fn (R) bool = null,
+            childGas: ?*const fn (R, types.ChildGasInput) types.ChildGas = null,
+        };
+        definition.assertPatchMirrors(definition.CallConfig(R), PatchType);
+        return PatchType;
+    }
+
+    pub fn config(comptime R: type) definition.CallConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .callBaseGas = @This().callBaseGas,
+            .callColdAccountAccessGas = @This().callColdAccountAccessGas,
+            .callValueTransferGas = @This().callValueTransferGas,
+            .callValueStipend = @This().callValueStipend,
+            .callNewAccountGas = @This().callNewAccountGas,
+            .topFrameValueTransferStateGas = @This().topFrameValueTransferStateGas,
+            .delegatedAccountAccessGas = @This().delegatedAccountAccessGas,
+            .topLevelDelegatedAccountAccess = @This().topLevelDelegatedAccountAccess,
+            .touchesEmptyCallRecipient = @This().touchesEmptyCallRecipient,
+            .childGas = @This().childGas,
+        };
+    }
+
     pub fn callBaseGas(revision: Revision) i64 {
         if (revision.isImpl(.berlin)) return warm_storage_read_cost;
         if (revision.isImpl(.tangerine_whistle)) return 700;
@@ -322,11 +427,11 @@ pub const Call = struct {
         return @intCast(tx.call_stipend);
     }
 
-    pub fn callNewAccountGas(revision: Revision, value: u256, account_exists: bool) interface.CallNewAccountGas {
+    pub fn callNewAccountGas(revision: Revision, input: types.CallNewAccountInput) types.CallNewAccountGas {
         const charges_new_account = if (revision.isImpl(.spurious_dragon))
-            value > 0 and !account_exists
+            input.value > 0 and !input.account_exists
         else
-            !account_exists;
+            !input.account_exists;
         if (!charges_new_account) return .{};
         if (revision.isImpl(.amsterdam)) {
             return .{ .state = std.math.cast(i64, tx.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64) };
@@ -334,9 +439,9 @@ pub const Call = struct {
         return .{ .regular = account_creation_cost };
     }
 
-    pub fn topFrameValueTransferStateGas(revision: Revision, value: u256, same_address: bool, account_exists: bool) i64 {
+    pub fn topFrameValueTransferStateGas(revision: Revision, input: types.TopFrameValueTransferInput) i64 {
         if (!revision.isImpl(.amsterdam)) return 0;
-        if (value == 0 or same_address or account_exists) return 0;
+        if (input.value == 0 or input.same_address or !input.creates_account) return 0;
         return std.math.cast(i64, tx.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64);
     }
 
@@ -346,10 +451,9 @@ pub const Call = struct {
         return cold_account_access_cost;
     }
 
-    pub fn topLevelDelegatedAccountAccess(revision: Revision, target_is_precompile: bool, already_warm: bool) ?interface.DelegatedAccountAccess {
+    pub fn topLevelDelegatedAccountAccess(revision: Revision, input: types.TopLevelDelegatedAccountAccessInput) ?types.DelegatedAccountAccess {
         if (!revision.isImpl(.amsterdam)) return null;
-        _ = target_is_precompile;
-        _ = already_warm;
+        _ = input;
         return .{
             .status = .cold,
             .gas = @This().delegatedAccountAccessGas(revision, true),
@@ -360,29 +464,51 @@ pub const Call = struct {
         return !revision.isImpl(.spurious_dragon);
     }
 
-    pub fn childGas(revision: Revision, requested: i64, available: i64) interface.ChildGas {
+    pub fn childGas(revision: Revision, input: types.ChildGasInput) types.ChildGas {
         if (revision.isImpl(.tangerine_whistle)) {
-            return .{ .gas = @min(requested, available - @divFloor(available, 64)) };
+            return .{ .gas = @min(input.requested, input.available - @divFloor(input.available, 64)) };
         }
-        if (requested > available) return .{ .gas = 0, .out_of_gas = true };
-        return .{ .gas = requested };
+        if (input.requested > input.available) return .{ .gas = 0, .out_of_gas = true };
+        return .{ .gas = input.requested };
     }
 };
 
 pub const SelfDestruct = struct {
-    pub fn selfDestructPolicy(
-        revision: Revision,
-        same_address: bool,
-        created_in_transaction: bool,
-    ) interface.SelfDestructPolicy {
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            selfDestructPolicy: ?*const fn (R, types.SelfDestructPolicyInput) types.SelfDestructPolicy = null,
+            selfDestructFinalization: ?*const fn (R, bool) types.SelfDestructFinalization = null,
+            selfDestructNewAccountGas: ?*const fn (R, types.SelfDestructNewAccountInput) types.CallNewAccountGas = null,
+            selfDestructColdAccountAccessGas: ?*const fn (R) ?i64 = null,
+            selfDestructRefundGas: ?*const fn (R) i64 = null,
+        };
+        definition.assertPatchMirrors(definition.SelfDestructConfig(R), PatchType);
+        return PatchType;
+    }
+
+    pub fn config(comptime R: type) definition.SelfDestructConfig(R) {
+        if (R != Revision) return .default;
         return .{
-            .clear_balance = !same_address or ((!revision.isImpl(.cancun) or created_in_transaction) and !revision.isImpl(.amsterdam)),
-            .reset_nonce = same_address and revision.isImpl(.amsterdam) and created_in_transaction,
-            .mark_selfdestructed = !same_address or !revision.isImpl(.amsterdam) or created_in_transaction,
+            .selfDestructPolicy = @This().selfDestructPolicy,
+            .selfDestructFinalization = @This().selfDestructFinalization,
+            .selfDestructNewAccountGas = @This().selfDestructNewAccountGas,
+            .selfDestructColdAccountAccessGas = @This().selfDestructColdAccountAccessGas,
+            .selfDestructRefundGas = @This().selfDestructRefundGas,
         };
     }
 
-    pub fn selfDestructFinalization(revision: Revision, created_in_transaction: bool) interface.SelfDestructFinalization {
+    pub fn selfDestructPolicy(
+        revision: Revision,
+        input: types.SelfDestructPolicyInput,
+    ) types.SelfDestructPolicy {
+        return .{
+            .clear_balance = !input.same_address or ((!revision.isImpl(.cancun) or input.created_in_transaction) and !revision.isImpl(.amsterdam)),
+            .reset_nonce = input.same_address and revision.isImpl(.amsterdam) and input.created_in_transaction,
+            .mark_selfdestructed = !input.same_address or !revision.isImpl(.amsterdam) or input.created_in_transaction,
+        };
+    }
+
+    pub fn selfDestructFinalization(revision: Revision, created_in_transaction: bool) types.SelfDestructFinalization {
         if (revision.isImpl(.amsterdam) and created_in_transaction) {
             return .{
                 .clear_storage = true,
@@ -398,17 +524,15 @@ pub const SelfDestruct = struct {
 
     pub fn selfDestructNewAccountGas(
         revision: Revision,
-        same_address: bool,
-        transfers_balance: bool,
-        account_exists: bool,
-    ) interface.CallNewAccountGas {
-        const charges_new_account = if (!revision.isImpl(.tangerine_whistle) or same_address)
+        input: types.SelfDestructNewAccountInput,
+    ) types.CallNewAccountGas {
+        const charges_new_account = if (!revision.isImpl(.tangerine_whistle) or input.same_address)
             false
         else if (revision.isImpl(.spurious_dragon))
-            transfers_balance
+            input.transfers_balance
         else
             true;
-        if (!charges_new_account or account_exists) return .{};
+        if (!charges_new_account or input.account_exists) return .{};
         if (revision.isImpl(.amsterdam)) {
             return .{
                 .regular = std.math.cast(i64, tx.amsterdam_account_write_cost) orelse std.math.maxInt(i64),

@@ -1,3 +1,8 @@
+//! Comptime validation for Definition and generated Protocol contracts.
+//!
+//! Implementer-facing hook semantics and neutral defaults live in
+//! `definition.zig`; shared semantic values live in `types.zig`.
+
 const std = @import("std");
 
 const address = @import("../address.zig");
@@ -5,150 +10,17 @@ const execution = @import("execution.zig");
 const instruction_mod = @import("instruction.zig");
 const opcode_info = @import("../opcode.zig");
 const precompile = @import("../precompile.zig");
+const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const support = @import("support.zig");
 const transaction_protocol = @import("transaction.zig");
 const tx = @import("../transaction/types.zig");
+const tx_settlement = @import("../transaction/settlement.zig");
 
-const Address = address.Address;
 const RevisionId = support.RevisionId;
 
-pub const SelfDestructPolicy = struct {
-    clear_balance: bool,
-    reset_nonce: bool,
-    mark_selfdestructed: bool,
-};
-
-pub const SelfDestructFinalization = struct {
-    delete_account: bool = false,
-    clear_storage: bool = false,
-    reset_account: bool = false,
-};
-
-pub const CallNewAccountGas = struct {
-    regular: i64 = 0,
-    state: i64 = 0,
-};
-
-pub const AccountAccessStatus = enum {
-    cold,
-    warm,
-};
-
-pub const StorageStatus = enum {
-    assigned,
-    added,
-    deleted,
-    modified,
-    deleted_added,
-    modified_deleted,
-    deleted_restored,
-    added_deleted,
-    modified_restored,
-};
-
-pub const StorageGas = struct {
-    cost: i64 = 0,
-    refund: i64 = 0,
-};
-
-pub const StorageStateGas = struct {
-    charge: i64 = 0,
-    refund: i64 = 0,
-};
-
-pub const ValueTransferLog = struct {
-    address: Address,
-    topic: u256,
-};
-
-pub const BlockStartContext = struct {
-    number: u64,
-    timestamp: u64,
-    parent_hash: ?[32]u8 = null,
-    parent_beacon_block_root: ?[32]u8 = null,
-};
-
-pub const BlockStartSystemCall = struct {
-    sender: Address,
-    recipient: Address,
-    input: [32]u8,
-    gas: u64,
-};
-
-pub const BlockStartSystemCalls = struct {
-    pub const capacity = 4;
-
-    items: [capacity]BlockStartSystemCall = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *BlockStartSystemCalls, call: BlockStartSystemCall) void {
-        std.debug.assert(self.len < capacity);
-        self.items[self.len] = call;
-        self.len += 1;
-    }
-
-    pub fn slice(self: *const BlockStartSystemCalls) []const BlockStartSystemCall {
-        return self.items[0..self.len];
-    }
-};
-
-pub const BlockEndContext = struct {
-    number: u64,
-    timestamp: u64,
-};
-
-pub const BlockEndSystemCall = struct {
-    sender: Address,
-    recipient: Address,
-    input: []const u8 = &.{},
-    gas: u64,
-    request_type: u8,
-    require_code: bool = false,
-};
-
-pub const BlockEndSystemCalls = struct {
-    pub const capacity = 4;
-
-    items: [capacity]BlockEndSystemCall = undefined,
-    len: usize = 0,
-
-    pub fn append(self: *BlockEndSystemCalls, call: BlockEndSystemCall) void {
-        std.debug.assert(self.len < capacity);
-        self.items[self.len] = call;
-        self.len += 1;
-    }
-
-    pub fn slice(self: *const BlockEndSystemCalls) []const BlockEndSystemCall {
-        return self.items[0..self.len];
-    }
-};
-
-pub const DelegatedAccountAccess = struct {
-    status: AccountAccessStatus,
-    gas: i64 = 0,
-};
-
-pub const AuthorizationGasAdjustment = struct {
-    regular_refund: u64 = 0,
-    state_refund: u64 = 0,
-
-    pub fn add(self: *AuthorizationGasAdjustment, other: AuthorizationGasAdjustment) void {
-        self.regular_refund = std.math.add(u64, self.regular_refund, other.regular_refund) catch std.math.maxInt(u64);
-        self.state_refund = std.math.add(u64, self.state_refund, other.state_refund) catch std.math.maxInt(u64);
-    }
-};
-
-pub const ChildGas = struct {
-    gas: i64,
-    out_of_gas: bool = false,
-};
-
-// Definition values are nominally typed: the compiler checks the domain
-// config fields at construction and `Bound` enforces required fields. What
+// Definition values are nominally typed and complete before binding. What
 // remains here are the boundaries where user-provided *types* enter the
-// engine — the instruction namespace, the precompile namespace, and the
-// revision model — plus the generic transaction wiring that fn-type
-// coercion cannot express.
+// engine — instruction, precompile, revision, and transaction preparation.
 pub fn assertValidDispatchDefinition(comptime Definition: type) void {
     const support_window = comptime assertDefinitionModel(Definition);
     assertDispatchSurfaceTypes(Definition, support_window);
@@ -162,7 +34,7 @@ pub fn assertValidProtocolDefinition(comptime Definition: type) void {
 pub fn assertValidDefinition(comptime Definition: type) void {
     assertValidProtocolDefinition(Definition);
     assertInstructionDynamicGasTypes(Definition);
-    assertResolvedTransactionDomainTypes(Definition, transaction_protocol.For(Definition));
+    assertTransactionPreparationType(Definition);
 }
 
 fn requireDecl(comptime Definition: type, comptime name: []const u8) void {
@@ -209,6 +81,17 @@ fn assertDefinitionModel(comptime Definition: type) Definition.Support {
     if (@typeInfo(std.meta.Tag(Definition.Revision)).int.bits > @bitSizeOf(RevisionId)) {
         @compileError("Definition.Revision tag type is too large for runtime revision storage");
     }
+
+    switch (@typeInfo(Definition.BaseRevision)) {
+        .@"enum" => {},
+        else => @compileError("Definition.BaseRevision must be an enum"),
+    }
+    requireNestedFn(Definition, "Definition", "baseRevision");
+    requireNestedFn(Definition, "Definition", "order");
+    const base_revision_fn: *const fn (Definition.Revision) Definition.BaseRevision = Definition.baseRevision;
+    const order_fn: *const fn (Definition.Revision, Definition.Revision) std.math.Order = Definition.order;
+    _ = base_revision_fn;
+    _ = order_fn;
 
     switch (@typeInfo(Definition.Support)) {
         .@"struct" => {},
@@ -324,38 +207,22 @@ fn assertPrecompileDomainTypes(comptime Definition: type) void {
     requireNestedFn(Precompile, "Definition.Precompile", "resolve");
     requireNestedFn(Precompile, "Definition.Precompile", "execute");
     requireOptionalNestedFn(Precompile, "Definition.Precompile", "active");
-    requireOptionalNestedFn(Precompile, "Definition.Precompile", "executeWithOutputBuffer");
 
     const revision = Definition.revisions[0];
-    const entry: ?Precompile.Entry = Precompile.resolve(revision, zeroAddress());
+    const entry: ?Precompile.Entry = Precompile.resolve(revision, address.zero_address);
     _ = entry;
 
     const Execute = fn (
-        std.mem.Allocator,
         Definition.Revision,
         Precompile.Entry,
-        []const u8,
-        i64,
-    ) precompile.Error!precompile.Result;
+        precompile_runtime.PrecompileCall,
+    ) precompile.Error!precompile_runtime.PrecompileOutcome;
     const execute: Execute = Precompile.execute;
     _ = execute;
 
     if (comptime std.meta.hasFn(Precompile, "active")) {
-        const active: bool = Precompile.active(revision, zeroAddress());
+        const active: bool = Precompile.active(revision, address.zero_address);
         _ = active;
-    }
-
-    if (comptime std.meta.hasFn(Precompile, "executeWithOutputBuffer")) {
-        const ExecuteWithOutputBuffer = fn (
-            std.mem.Allocator,
-            Definition.Revision,
-            Precompile.Entry,
-            []const u8,
-            i64,
-            ?[]u8,
-        ) precompile.Error!precompile.Result;
-        const execute_with_output_buffer: ExecuteWithOutputBuffer = Precompile.executeWithOutputBuffer;
-        _ = execute_with_output_buffer;
     }
 }
 
@@ -375,32 +242,17 @@ fn assertInstructionDynamicGasTypes(comptime Definition: type) void {
     _ = code_account_access_gas;
 }
 
-pub fn assertResolvedTransactionDomainTypes(comptime Definition: type, comptime ResolvedTransaction: type) void {
-    switch (@typeInfo(ResolvedTransaction)) {
-        .@"struct" => {},
-        else => @compileError("Protocol.Transaction must be a struct namespace"),
-    }
-    requireNestedDecl(ResolvedTransaction, "Protocol.Transaction", "Value");
-    requireNestedDecl(ResolvedTransaction, "Protocol.Transaction", "View");
-    requireNestedDecl(ResolvedTransaction, "Protocol.Transaction", "ValidationError");
-    requireNestedFn(ResolvedTransaction, "Protocol.Transaction", "view");
-    requireNestedFn(ResolvedTransaction, "Protocol.Transaction", "prepare");
-
-    const DefinitionTransaction = Definition.Transaction;
-    if (!std.meta.hasFn(DefinitionTransaction, "view") and
-        (ResolvedTransaction.Value != tx.Transaction or ResolvedTransaction.View != tx.TransactionView))
-    {
-        @compileError("Definition.Transaction.view is required when overriding Transaction.Value or Transaction.View");
-    }
+fn assertTransactionPreparationType(comptime Definition: type) void {
+    const TransactionApi = transaction_protocol.For(Definition);
     const ProtocolLike = struct {
         pub const Revision = Definition.Revision;
-        pub const Transaction = ResolvedTransaction;
-        pub const Settlement = Definition.Settlement;
+        pub const transaction = Definition.transaction;
+        pub const Transaction = TransactionApi;
+        pub const settlement = Definition.settlement;
+        pub const Settlement = tx_settlement.Default;
     };
 
-    const view_fn: fn (ResolvedTransaction.Value) ResolvedTransaction.View = ResolvedTransaction.view;
-    _ = view_fn;
-    const prepare_result_type = @TypeOf(ResolvedTransaction.prepare(ProtocolLike, @as(tx.PrepareInput(ProtocolLike), undefined)));
+    const prepare_result_type = @TypeOf(TransactionApi.prepare(ProtocolLike, @as(tx.PrepareInput(ProtocolLike), undefined)));
     switch (@typeInfo(prepare_result_type)) {
         .error_union => |info| {
             if (info.payload != tx.PrepareResult(ProtocolLike)) {
@@ -409,10 +261,6 @@ pub fn assertResolvedTransactionDomainTypes(comptime Definition: type, comptime 
         },
         else => @compileError("Protocol.Transaction.prepare must return an error union"),
     }
-}
-
-fn zeroAddress() Address {
-    return address.addr(0);
 }
 
 test "support value protocol exposes methods" {

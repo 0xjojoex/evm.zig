@@ -307,7 +307,8 @@ pub fn For(comptime ProtocolType: type) type {
                 .runtime => switch (comptime Protocol.opcodeAvailability(opcode)) {
                     .always => null,
                     .never => fail(ctx, ip, sp, gas, .invalid),
-                    .since => |activation| if (ctx.frame.revision_id >= @intFromEnum(activation)) null else fail(ctx, ip, sp, gas, .invalid),
+                    .since => |activation| if (Instructions.revisionIncludes(Instructions.frameRevision(ctx.frame), activation)) null else fail(ctx, ip, sp, gas, .invalid),
+                    .gate => |active| if (active(Instructions.frameRevision(ctx.frame))) null else fail(ctx, ip, sp, gas, .invalid),
                 },
             };
         }

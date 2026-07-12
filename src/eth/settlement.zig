@@ -1,33 +1,27 @@
 const std = @import("std");
-const address = @import("../address.zig");
-const support = @import("../protocol/support.zig");
-const contract = @import("../protocol/interface.zig");
+const definition = @import("../definition.zig");
+const contract = @import("../protocol/types.zig");
 const tx = @import("transaction.zig");
-const tx_settlement = @import("../transaction/settlement.zig");
 const Revision = @import("revision.zig").Revision;
-const Address = address.Address;
 
 pub const Settlement = struct {
-    pub const Plan = tx_settlement.Plan;
-
-    pub fn revisionId(plan: Plan) support.RevisionId {
-        return plan.revision_id;
-    }
-
-    pub fn precharge(plan: Plan) tx_settlement.Precharge {
-        return .{
-            .payer = plan.payer,
-            .upfront_debit = plan.upfront_debit,
-            .minimum_balance = plan.minimum_balance,
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            baseFeeActive: ?*const fn (R) bool = null,
+            gasRefundCapDivisor: ?*const fn (R) u64 = null,
+            usesStateGasAccounting: ?*const fn (R) bool = null,
         };
+        definition.assertPatchMirrors(definition.SettlementConfig(R), PatchType);
+        return PatchType;
     }
 
-    pub fn feeRecipient(plan: Plan) ?Address {
-        return plan.coinbase;
-    }
-
-    pub fn costs(comptime Protocol: type, plan: Plan, result: tx_settlement.ExecutionGasResult) !tx_settlement.SettlementCosts {
-        return tx_settlement.For(Protocol).settlementCosts(plan, result);
+    pub fn config(comptime R: type) definition.SettlementConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .baseFeeActive = @This().baseFeeActive,
+            .gasRefundCapDivisor = @This().gasRefundCapDivisor,
+            .usesStateGasAccounting = @This().usesStateGasAccounting,
+        };
     }
 
     pub fn baseFeeActive(revision: Revision) bool {
@@ -44,6 +38,29 @@ pub const Settlement = struct {
 };
 
 pub const Authorization = struct {
+    pub fn Patch(comptime R: type) type {
+        const PatchType = struct {
+            active: ?*const fn (R) bool = null,
+            warmsDelegatedTarget: ?*const fn (R) bool = null,
+            successGasAdjustment: ?*const fn (R, contract.AuthorizationSuccessInput) contract.AuthorizationGasAdjustment = null,
+            invalidGasAdjustment: ?*const fn (R) contract.AuthorizationGasAdjustment = null,
+            malformedGasAdjustment: ?*const fn (R, usize) contract.AuthorizationGasAdjustment = null,
+        };
+        definition.assertPatchMirrors(definition.AuthorizationConfig(R), PatchType);
+        return PatchType;
+    }
+
+    pub fn config(comptime R: type) definition.AuthorizationConfig(R) {
+        if (R != Revision) return .default;
+        return .{
+            .active = @This().active,
+            .warmsDelegatedTarget = @This().warmsDelegatedTarget,
+            .successGasAdjustment = @This().successGasAdjustment,
+            .invalidGasAdjustment = @This().invalidGasAdjustment,
+            .malformedGasAdjustment = @This().malformedGasAdjustment,
+        };
+    }
+
     pub fn warmsDelegatedTarget(revision: Revision) bool {
         return revision.isImpl(.prague) and !revision.isImpl(.amsterdam);
     }
@@ -54,30 +71,27 @@ pub const Authorization = struct {
 
     pub fn successGasAdjustment(
         revision: Revision,
-        account_exists: bool,
-        clears_delegation: bool,
-        cur_delegated: bool,
-        pre_delegated: bool,
+        input: contract.AuthorizationSuccessInput,
     ) contract.AuthorizationGasAdjustment {
         if (revision.isImpl(.amsterdam)) {
             var adjustment = contract.AuthorizationGasAdjustment{};
-            if (account_exists) {
+            if (input.account_exists) {
                 adjustment.add(.{
                     .regular_refund = tx.amsterdam_account_write_cost,
                     .state_refund = tx.amsterdam_new_account_state_gas,
                 });
             }
-            if (clears_delegation) {
+            if (input.clears_delegation) {
                 adjustment.add(.{ .state_refund = tx.amsterdam_auth_base_state_gas });
-                if (cur_delegated and !pre_delegated) {
+                if (input.delegated_before_tuple and !input.delegated_before_first_tuple) {
                     adjustment.add(.{ .state_refund = tx.amsterdam_auth_base_state_gas });
                 }
-            } else if (cur_delegated or pre_delegated) {
+            } else if (input.delegated_before_tuple or input.delegated_before_first_tuple) {
                 adjustment.add(.{ .state_refund = tx.amsterdam_auth_base_state_gas });
             }
             return adjustment;
         }
-        if (!account_exists) return .{};
+        if (!input.account_exists) return .{};
         return .{ .regular_refund = tx.authorization_existing_account_refund_gas };
     }
 

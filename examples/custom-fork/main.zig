@@ -57,16 +57,21 @@ fn createInitCodeSizeLimit(revision: Revision) ?usize {
 
 comptime {
     evmz.protocol.assertValidDefinition(CustomFork);
+    if (CustomProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) @compileError("custom create limit mismatch");
+    if (CustomProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) @compileError("custom transaction limit mismatch");
+    if (CustomProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) @compileError("custom settlement mismatch");
+    if (!CustomProtocol.authorization.warmsDelegatedTarget(.prague)) @compileError("custom authorization mismatch");
+    if (!CustomProtocol.block.transactionWarmsCoinbase(.london)) @compileError("custom block mismatch");
 }
 
 pub fn main(_: std.process.Init) !void {
     var vm = CustomVM.init(std.heap.page_allocator, .{ .revision = .cancun });
     defer vm.deinit();
 
-    if (CustomProtocol.Create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
-    if (CustomProtocol.Transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
-    if (CustomProtocol.Settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
-    if (!CustomProtocol.Authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
+    if (CustomProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
+    if (CustomProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
+    if (CustomProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
+    if (!CustomProtocol.authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
     if (!CustomProtocol.block.transactionWarmsCoinbase(.london)) return error.CustomBlockMismatch;
-    std.debug.print("{s}: code size limit {d}\n", .{ CustomFork.name, CustomProtocol.Create.createCodeSizeLimit(.cancun).? });
+    std.debug.print("{s}: code size limit {d}\n", .{ CustomFork.name, CustomProtocol.create.createCodeSizeLimit(.cancun).? });
 }

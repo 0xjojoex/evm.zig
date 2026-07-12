@@ -60,6 +60,7 @@ pub fn decodeEnvelope(bytes: []const u8) !TransactionEnvelope {
 pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
+        const transaction = ProtocolType.transaction;
 
         pub const Protocol = ProtocolType;
 
@@ -89,7 +90,7 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         fn validateSetCodeTransaction(revision: Protocol.Revision, payload: []const u8) DecodeError!void {
-            if (!Protocol.Transaction.kindActive(revision, tx.TxKind.set_code)) return error.Type4PreFork;
+            if (!transaction.kindActive(revision, tx.TxKind.set_code)) return error.Type4PreFork;
 
             validateSetCodePayload(payload) catch |err| return switch (err) {
                 error.EmptyAuthorizationList => error.EmptyAuthorizationList,
@@ -205,7 +206,7 @@ test "raw transaction validation uses comptime transaction kind policy" {
     const EarlySetCodeProtocol = struct {
         pub const Revision = EthRevision;
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn kindActive(revision: Revision, kind: tx.TxKind) bool {
                 _ = revision;
                 return kind == .set_code;

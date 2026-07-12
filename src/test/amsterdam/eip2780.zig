@@ -109,10 +109,10 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
     try executor.beginTransactionScope(scope, root);
     const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
-            .coinbase = tx_context.coinbase,
+            .fee_recipient = tx_context.coinbase,
             .payer = sender,
             .value = root.value(),
         }),
@@ -154,11 +154,10 @@ const ExecuteTx = struct {
     fn execute(
         ptr: ?*anyopaque,
         inner: *Executor,
-        engine_root: RootFrame,
-        gas: transaction.ExecutionGas,
+        request: evmz.execution.EvmExecutionRequest,
     ) !Interpreter.Result {
         _ = ptr;
-        return inner.executeTransactionMessage(engine_root, gas);
+        return inner.executeTransactionRequest(request);
     }
 };
 

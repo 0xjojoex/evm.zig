@@ -30,13 +30,13 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
-const protocol_mod = @import("../protocol.zig");
 
-pub const Protocol = protocol_mod.Protocol(eth_config.define(.{}), .{});
-pub const BlockHeader = Executor.system_contracts.BlockHeader;
-pub const BlockEndContext = Executor.system_contracts.BlockEndContext;
+const definition = eth_config.define(.{});
+const Vm = vm.Vm(Revision, definition, .{});
+pub const Protocol = Vm.Protocol;
+pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
+pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
 pub const ParentBlobGas = transaction.ExcessBlobGasInput;
-const Vm = vm.ResolvedVm(Protocol);
 const EthBlob = transaction.For(Protocol).blob;
 const Env = vm.Env;
 const BlockHashSource = vm.BlockHashSource;
@@ -307,12 +307,12 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         evm.executor.setTraceSink(&recorder_sink);
     }
 
+    var block = try evm.beginBlock(input.env);
     if (input.block_header) |header| {
-        Executor.system_contracts.applyBlockStart(
-            &evm.executor,
-            input.env.txContext(address.addr(0), 0, input.env.gas_limit, &.{}),
-            header,
-        ) catch |err| switch (err) {
+        block.beforeBlock(.{
+            .parent_hash = header.parent_hash,
+            .parent_beacon_block_root = header.parent_beacon_block_root,
+        }) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             error.SystemCallFailed => return .{ .status = .system_contract_failed },
             else => return err,
@@ -323,7 +323,6 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     // header state outside the payload transaction trace.
     evm.executor.setTraceSink(payload_trace_sink);
 
-    var block = try evm.beginBlock(input.env);
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     defer {
         for (encoded_receipts.items) |encoded_receipt| allocator.free(encoded_receipt);
@@ -394,6 +393,11 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         const encoded_receipt = try encodeReceipt(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
+        block.afterTransaction() catch |err| switch (err) {
+            error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
+            error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
+            else => return err,
+        };
     }
 
     const effective_parent_blob_gas = if (input.revision.isImpl(.cancun))
@@ -426,7 +430,7 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     // Keep payload transaction tracing scoped to payload transactions.
     evm.executor.setTraceSink(if (record_block_access_list) &recorder_sink else null);
-    const derived_requests = deriveRequests(allocator, &evm, input, deposit_request_data.items) catch |err| switch (err) {
+    const derived_requests = deriveRequests(allocator, &block, deposit_request_data.items) catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         error.SystemCallFailed => return .{ .status = .system_contract_failed },
         else => return err,
@@ -791,7 +795,7 @@ fn applyWithdrawals(evm: *Vm, withdrawals: []const mpt.Withdrawal) !void {
     }
 }
 
-fn deriveRequests(allocator: std.mem.Allocator, evm: *Vm, input: BlockInput, deposit_request_data: []const u8) ![]const []const u8 {
+fn deriveRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession, deposit_request_data: []const u8) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (requests.items) |request| allocator.free(request);
@@ -806,7 +810,7 @@ fn deriveRequests(allocator: std.mem.Allocator, evm: *Vm, input: BlockInput, dep
         deposit_request_owned = false;
     }
 
-    const block_end_requests = try deriveBlockEndRequests(allocator, evm, input);
+    const block_end_requests = try deriveFinalizeRequests(allocator, block);
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
     try requests.appendSlice(allocator, block_end_requests);
@@ -816,26 +820,8 @@ fn deriveRequests(allocator: std.mem.Allocator, evm: *Vm, input: BlockInput, dep
     return try requests.toOwnedSlice(allocator);
 }
 
-fn deriveBlockEndRequests(allocator: std.mem.Allocator, evm: *Vm, input: BlockInput) ![]const []const u8 {
-    return try Executor.system_contracts.applyBlockEnd(
-        &evm.executor,
-        input.env.txContext(address.addr(0), 0, input.env.gas_limit, &.{}),
-        allocator,
-        blockEndContext(input),
-    );
-}
-
-fn blockEndContext(input: BlockInput) BlockEndContext {
-    if (input.block_header) |header| {
-        return .{
-            .number = header.number,
-            .timestamp = header.timestamp,
-        };
-    }
-    return .{
-        .number = input.env.number,
-        .timestamp = input.env.timestamp,
-    };
+fn deriveFinalizeRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession) ![]const []const u8 {
+    return block.finalizeBlock(allocator);
 }
 
 fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
@@ -1519,26 +1505,33 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     }
 }
 
-test "Amsterdam block end system calls include builder request predeploys" {
-    const context = BlockEndContext{ .number = 1, .timestamp = 0 };
-    const calls = eth_system.Block.blockEndSystemCalls(.amsterdam, context);
+test "Amsterdam finalize calls include builder request predeploys" {
+    const context = FinalizeBlockContext{
+        .number = 1,
+        .timestamp = 0,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
+    };
+    const calls = eth_system.Block.finalizeBlock(.amsterdam, context);
 
     try std.testing.expectEqual(@as(usize, 4), calls.len);
-    try std.testing.expectEqualSlices(u8, &eth_system.withdrawal_request_predeploy_address, &calls.items[0].recipient);
-    try std.testing.expectEqual(eip7002.request_type, calls.items[0].request_type);
-    try std.testing.expect(calls.items[0].require_code);
+    try std.testing.expectEqualSlices(u8, &eth_system.withdrawal_request_predeploy_address, &calls.items[0].call.recipient);
+    try std.testing.expectEqual(eip7002.request_type, calls.items[0].output_prefix);
+    try std.testing.expect(calls.items[0].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.consolidation_request_predeploy_address, &calls.items[1].recipient);
-    try std.testing.expectEqual(eip7251.request_type, calls.items[1].request_type);
-    try std.testing.expect(calls.items[1].require_code);
+    try std.testing.expectEqualSlices(u8, &eth_system.consolidation_request_predeploy_address, &calls.items[1].call.recipient);
+    try std.testing.expectEqual(eip7251.request_type, calls.items[1].output_prefix);
+    try std.testing.expect(calls.items[1].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.builder_deposit_request_predeploy_address, &calls.items[2].recipient);
-    try std.testing.expectEqual(eip8282.builder_deposit_request_type, calls.items[2].request_type);
-    try std.testing.expect(calls.items[2].require_code);
+    try std.testing.expectEqualSlices(u8, &eth_system.builder_deposit_request_predeploy_address, &calls.items[2].call.recipient);
+    try std.testing.expectEqual(eip8282.builder_deposit_request_type, calls.items[2].output_prefix);
+    try std.testing.expect(calls.items[2].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.builder_exit_request_predeploy_address, &calls.items[3].recipient);
-    try std.testing.expectEqual(eip8282.builder_exit_request_type, calls.items[3].request_type);
-    try std.testing.expect(calls.items[3].require_code);
+    try std.testing.expectEqualSlices(u8, &eth_system.builder_exit_request_predeploy_address, &calls.items[3].call.recipient);
+    try std.testing.expectEqual(eip8282.builder_exit_request_type, calls.items[3].output_prefix);
+    try std.testing.expect(calls.items[3].call.require_code);
 }
 
 test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reachable" {

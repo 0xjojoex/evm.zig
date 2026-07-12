@@ -14,6 +14,15 @@ pub const IntrinsicGasOptions = struct {
     creates_account: bool = false,
 };
 
+/// Facts used to derive the transaction input-data floor.
+///
+/// Keeping this as one named value lets future transaction families add
+/// floor-relevant facts without changing the Definition hook signature.
+pub const FloorGasInput = struct {
+    input: []const u8,
+    options: IntrinsicGasOptions = .{},
+};
+
 /// Gas charged in the two Amsterdam dimensions.
 ///
 /// Regular gas is the classic EVM resource bounded by the transaction cap.
@@ -77,6 +86,7 @@ pub const GasPlan = struct {
 pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
+        const transaction = ProtocolType.transaction;
 
         pub const Protocol = ProtocolType;
 
@@ -90,7 +100,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn maxInitcodeSize(revision: Protocol.Revision) usize {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.maxInitcodeSize(revision);
+            return transaction.maxInitcodeSize(revision);
         }
 
         pub fn intrinsicGasForTransaction(revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
@@ -102,22 +112,22 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn intrinsicRegularGasForTransaction(revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            var gas: u64 = Protocol.Transaction.intrinsicBaseGas(revision, options) orelse return null;
+            var gas: u64 = transaction.intrinsicBaseGas(revision, options) orelse return null;
             if (options.is_create) {
-                gas = std.math.add(u64, gas, Protocol.Transaction.createIntrinsicGas(revision) orelse return null) catch return null;
+                gas = std.math.add(u64, gas, transaction.createIntrinsicGas(revision) orelse return null) catch return null;
             }
             for (input) |byte| {
-                gas = std.math.add(u64, gas, Protocol.Transaction.dataByteGas(revision, byte)) catch return null;
+                gas = std.math.add(u64, gas, transaction.dataByteGas(revision, byte)) catch return null;
             }
             const access_list_address_count = std.math.cast(u64, options.access_list_counts.addresses) orelse return null;
             const access_list_storage_key_count = std.math.cast(u64, options.access_list_counts.storage_keys) orelse return null;
-            const access_list_address_cost = std.math.mul(u64, access_list_address_count, Protocol.Transaction.accessListAddressGas(revision)) catch return null;
-            const access_list_storage_key_cost = std.math.mul(u64, access_list_storage_key_count, Protocol.Transaction.storageKeyGas(revision)) catch return null;
+            const access_list_address_cost = std.math.mul(u64, access_list_address_count, transaction.accessListAddressGas(revision)) catch return null;
+            const access_list_storage_key_cost = std.math.mul(u64, access_list_storage_key_count, transaction.storageKeyGas(revision)) catch return null;
             gas = std.math.add(u64, gas, access_list_address_cost) catch return null;
             gas = std.math.add(u64, gas, access_list_storage_key_cost) catch return null;
-            gas = std.math.add(u64, gas, Protocol.Transaction.accessListDataGas(revision, options.access_list_counts) orelse return null) catch return null;
+            gas = std.math.add(u64, gas, transaction.accessListDataGas(revision, options.access_list_counts) orelse return null) catch return null;
             if (options.is_create) {
-                const initcode_word_charge = Protocol.Transaction.initCodeWordGas(revision);
+                const initcode_word_charge = transaction.initCodeWordGas(revision);
                 if (initcode_word_charge != 0) {
                     const words = std.math.cast(u64, wordCount(input.len)) orelse return null;
                     const initcode_cost = std.math.mul(u64, words, initcode_word_charge) catch return null;
@@ -125,19 +135,19 @@ pub fn For(comptime ProtocolType: type) type {
                 }
             }
             const auth_count = std.math.cast(u64, options.authorization_count) orelse return null;
-            const auth_cost = std.math.mul(u64, auth_count, Protocol.Transaction.authorizationIntrinsicGas(revision)) catch return null;
+            const auth_cost = std.math.mul(u64, auth_count, transaction.authorizationIntrinsicGas(revision)) catch return null;
             gas = std.math.add(u64, gas, auth_cost) catch return null;
             return gas;
         }
 
         pub fn intrinsicStateGasForTransaction(revision: Protocol.Revision, options: IntrinsicGasOptions) ?u64 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.intrinsicStateGas(revision, options);
+            return transaction.intrinsicStateGas(revision, options);
         }
 
         pub fn intrinsicBaseGas(revision: Protocol.Revision, options: IntrinsicGasOptions) ?u64 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.intrinsicBaseGas(revision, options);
+            return transaction.intrinsicBaseGas(revision, options);
         }
 
         pub fn gasPlan(revision: Protocol.Revision, input: []const u8, gas_limit: u64, options: IntrinsicGasOptions) GasPlan {
@@ -175,7 +185,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn regularGasLimit(revision: Protocol.Revision, gas_limit: u64) u64 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.regularGasLimit(revision, gas_limit);
+            return transaction.regularGasLimit(revision, gas_limit);
         }
 
         pub fn minimumGas(revision: Protocol.Revision, input: []const u8, authorization_count: usize, access_list_counts: AccessListCounts) ?u64 {
@@ -200,7 +210,10 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn floorGasForTransaction(revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.floorGas(revision, input, options);
+            return transaction.floorGas(revision, .{
+                .input = input,
+                .options = options,
+            });
         }
     };
 }
@@ -322,7 +335,7 @@ test "transaction gas plan uses comptime protocol" {
     const CustomProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn intrinsicBaseGas(revision: Revision, options: IntrinsicGasOptions) ?u64 {
                 _ = revision;
                 _ = options;
@@ -369,10 +382,9 @@ test "transaction gas plan uses comptime protocol" {
                 return @as(u64, @intCast(options.authorization_count)) + 23;
             }
 
-            pub fn floorGas(revision: Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
+            pub fn floorGas(revision: Revision, input: FloorGasInput) ?u64 {
                 _ = revision;
                 _ = input;
-                _ = options;
                 return 31;
             }
 

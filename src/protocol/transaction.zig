@@ -1,149 +1,24 @@
-const std = @import("std");
-
-const tx_blob = @import("../transaction/blob.zig");
-const tx_gas = @import("../transaction/gas.zig");
 const tx = @import("../transaction/types.zig");
 
-fn declOr(comptime Namespace: type, comptime name: []const u8, comptime default_value: anytype) @TypeOf(if (@hasDecl(Namespace, name)) @field(Namespace, name) else default_value) {
-    return if (@hasDecl(Namespace, name)) @field(Namespace, name) else default_value;
-}
-
 pub fn For(comptime Definition: type) type {
-    const DefinitionTransaction = Definition.Transaction;
+    const DefinitionTransaction = Definition.transaction;
 
     return struct {
         const Self = @This();
 
-        /// The concrete transaction struct callers construct and submit — the
-        /// engine default (`tx.Transaction`) unless the definition overrides it.
-        pub const Value = declOr(DefinitionTransaction, "Value", tx.Transaction);
-        /// Read-only projection of a `Value` used by the execution/gas paths.
-        pub const View = declOr(DefinitionTransaction, "View", tx.TransactionView);
+        /// Engine-owned transaction value used by every Definition-backed VM.
+        pub const Value = tx.Transaction;
+        /// Read-only projection consumed by validation, gas, and preparation.
+        pub const View = tx.TransactionView;
         /// Reason a transaction is rejected during pre-execution validation.
         pub const ValidationError = DefinitionTransaction.ValidationError;
 
         pub fn view(value: Value) View {
-            if (comptime std.meta.hasFn(DefinitionTransaction, "view")) {
-                return DefinitionTransaction.view(value);
-            }
-            if (comptime Value != tx.Transaction or View != tx.TransactionView) {
-                @compileError("Definition.Transaction.view is required when overriding Transaction.Value or Transaction.View");
-            }
             return tx.transactionView(value);
         }
 
         pub fn prepare(comptime Protocol: type, input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
-            if (comptime std.meta.hasFn(DefinitionTransaction, "prepare")) {
-                return DefinitionTransaction.prepare(Protocol, input);
-            }
-            @compileError("Definition.Transaction.prepare is required");
-        }
-
-        pub fn kindActive(revision: Definition.Revision, kind: tx.TxKind) bool {
-            return DefinitionTransaction.kindActive(revision, kind);
-        }
-
-        pub fn allowsContractCreation(revision: Definition.Revision, kind: tx.TxKind) bool {
-            return DefinitionTransaction.allowsContractCreation(revision, kind);
-        }
-
-        pub fn requiresAuthorizationList(revision: Definition.Revision, kind: tx.TxKind) bool {
-            return DefinitionTransaction.requiresAuthorizationList(revision, kind);
-        }
-
-        pub fn rejectsNonDelegatingSenderCode(revision: Definition.Revision, kind: tx.TxKind) bool {
-            return DefinitionTransaction.rejectsNonDelegatingSenderCode(revision, kind);
-        }
-
-        pub fn isDelegationCode(revision: Definition.Revision, code: []const u8) bool {
-            if (comptime std.meta.hasFn(DefinitionTransaction, "isDelegationCode")) {
-                return DefinitionTransaction.isDelegationCode(revision, code);
-            }
-            return false;
-        }
-
-        pub fn blobGasPerBlob(revision: Definition.Revision) u64 {
-            const schedule = Self.blobSchedule(revision) orelse return 0;
-            return schedule.gas_per_blob;
-        }
-
-        pub fn blobSchedule(revision: Definition.Revision) ?tx_blob.BlobSchedule {
-            return DefinitionTransaction.blobSchedule(revision);
-        }
-
-        pub fn blobMaxCount(revision: Definition.Revision) usize {
-            const schedule = Self.blobSchedule(revision) orelse return 0;
-            return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
-        }
-
-        pub fn blobMaxCountPerTransaction(revision: Definition.Revision) usize {
-            const schedule = Self.blobSchedule(revision) orelse return 0;
-            return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
-        }
-
-        pub fn blobReservePriceActive(revision: Definition.Revision) bool {
-            const schedule = Self.blobSchedule(revision) orelse return false;
-            return schedule.reserve_price_active;
-        }
-
-        pub fn blobVersionedHashActive(revision: Definition.Revision, version: u8) bool {
-            return DefinitionTransaction.blobVersionedHashActive(revision, version);
-        }
-
-        pub fn maxInitcodeSize(revision: Definition.Revision) usize {
-            return DefinitionTransaction.maxInitcodeSize(revision);
-        }
-
-        pub fn intrinsicBaseGas(revision: Definition.Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return DefinitionTransaction.intrinsicBaseGas(revision, options);
-        }
-
-        pub fn createIntrinsicGas(revision: Definition.Revision) ?u64 {
-            return DefinitionTransaction.createIntrinsicGas(revision);
-        }
-
-        pub fn dataByteGas(revision: Definition.Revision, byte: u8) u64 {
-            return DefinitionTransaction.dataByteGas(revision, byte);
-        }
-
-        pub fn accessListAddressGas(revision: Definition.Revision) u64 {
-            return DefinitionTransaction.accessListAddressGas(revision);
-        }
-
-        pub fn storageKeyGas(revision: Definition.Revision) u64 {
-            return DefinitionTransaction.storageKeyGas(revision);
-        }
-
-        pub fn accessListDataGas(revision: Definition.Revision, counts: tx_gas.AccessListCounts) ?u64 {
-            return DefinitionTransaction.accessListDataGas(revision, counts);
-        }
-
-        pub fn initCodeWordGas(revision: Definition.Revision) u64 {
-            return DefinitionTransaction.initCodeWordGas(revision);
-        }
-
-        pub fn authorizationIntrinsicGas(revision: Definition.Revision) u64 {
-            return DefinitionTransaction.authorizationIntrinsicGas(revision);
-        }
-
-        pub fn intrinsicStateGas(revision: Definition.Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return DefinitionTransaction.intrinsicStateGas(revision, options);
-        }
-
-        pub fn floorGas(revision: Definition.Revision, input: []const u8, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return DefinitionTransaction.floorGas(revision, input, options);
-        }
-
-        pub fn regularGasLimit(revision: Definition.Revision, gas_limit: u64) u64 {
-            return DefinitionTransaction.regularGasLimit(revision, gas_limit);
-        }
-
-        pub fn intrinsicRegularGasLimit(revision: Definition.Revision) ?u64 {
-            return DefinitionTransaction.intrinsicRegularGasLimit(revision);
-        }
-
-        pub fn totalGasLimit(revision: Definition.Revision) ?u64 {
-            return DefinitionTransaction.totalGasLimit(revision);
+            return DefinitionTransaction.Preparation.For(Protocol).prepare(input);
         }
 
         comptime {

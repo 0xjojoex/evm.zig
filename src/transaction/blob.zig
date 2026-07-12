@@ -23,12 +23,13 @@ pub const ExcessBlobGasInput = struct {
 pub fn For(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
+        const transaction = ProtocolType.transaction;
 
         pub const Protocol = ProtocolType;
 
         pub fn blobSchedule(revision: Protocol.Revision) ?BlobSchedule {
             definition_support.assertRevisionSupported(Protocol, revision);
-            return Protocol.Transaction.blobSchedule(revision);
+            return transaction.blobSchedule(revision);
         }
 
         pub fn blobBaseFeeForRevision(revision: Protocol.Revision, excess_blob_gas: u256) ?u256 {
@@ -111,7 +112,7 @@ test "transaction blob fee helpers" {
     const Ethereum = eth.Protocol;
     const EthBlob = For(Ethereum);
 
-    try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(Ethereum.Transaction.blobSchedule(.cancun).?, 0x0e0000));
+    try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(Ethereum.transaction.blobSchedule(.cancun).?, 0x0e0000));
     try std.testing.expectEqual(@as(?BlobSchedule, null), EthBlob.blobSchedule(.shanghai));
     try std.testing.expectEqual(@as(u64, 6), EthBlob.blobSchedule(.cancun).?.max);
     try std.testing.expectEqual(eth.transaction.cancun_blob_base_fee_update_fraction, EthBlob.blobSchedule(.cancun).?.base_fee_update_fraction);
@@ -140,7 +141,7 @@ test "transaction blob helpers accept comptime protocol" {
     const TestProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Transaction = struct {
+        pub const transaction = struct {
             pub fn blobSchedule(revision: Revision) ?BlobSchedule {
                 return .{
                     .target = 2,
@@ -161,7 +162,7 @@ test "transaction blob helpers accept comptime protocol" {
         .parent_base_fee_per_gas = 1_000_000,
     };
     const Bound = For(TestProtocol);
-    const schedule = TestProtocol.Transaction.blobSchedule(.osaka).?;
+    const schedule = TestProtocol.transaction.blobSchedule(.osaka).?;
 
     try std.testing.expectEqual(@as(u64, 4), Bound.blobSchedule(.cancun).?.max);
     try std.testing.expectEqual(@as(usize, 4), Bound.maxBlobCount(.cancun));

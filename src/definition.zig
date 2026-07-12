@@ -3,50 +3,73 @@
 //! A `Definition(R)` is a comptime value: a bundle of per-domain policy configs
 //! keyed on a revision enum `R`. `eth/config.zig` fills this schema in for
 //! mainnet, while its authoring patches are resolved before protocol binding.
-//! The block domain is the first complete-config pilot; older domains still
-//! resolve optional hooks inside `Bound` while they migrate.
+//! Every value domain is complete before `Bound`; binding only resolves the
+//! engine-owned instruction, transaction, settlement, and precompile APIs.
 //!
-//! This file defines only the schema and neutral defaults, no Ethereum rules.
+//! ## Implementer contract
+//!
+//! This file is the canonical contract for definition implementers—the Zig
+//! equivalent of Rust trait declarations and their default methods. Each Config
+//! field documents one semantic hook and supplies an intentional neutral
+//! default. `protocol/types.zig` owns shared input/output value types;
+//! `protocol/validate.zig` owns compile-time shape diagnostics. Neither owns
+//! hook semantics. Ethereum implementations and EIP rationale live beside
+//! their domain in `eth/`.
+//!
+//! On Definition-backed Protocols, lowercase `Protocol.transaction`,
+//! `.settlement`, `.authorization`, `.block`, `.call`, `.create`, `.storage`,
+//! and `.self_destruct` are semantic values. Uppercase `Protocol.Transaction`,
+//! `.Settlement`, `.Instruction`, and `.Precompile` are generated APIs that
+//! carry engine-owned types; definitions do not replace those representations.
+//!
+//! This file defines schema and neutral defaults only, never Ethereum rules.
 const std = @import("std");
 
 const address = @import("address.zig");
 const opcode_info = @import("opcode.zig");
 const dispatcher = @import("protocol/dispatcher.zig");
-const interface = @import("protocol/interface.zig");
+const types = @import("protocol/types.zig");
 const instruction_mod = @import("protocol/instruction.zig");
 const support = @import("protocol/support.zig");
 const tx = @import("transaction/types.zig");
 const tx_blob = @import("transaction/blob.zig");
 const tx_gas = @import("transaction/gas.zig");
-const tx_settlement = @import("transaction/settlement.zig");
 
 const Address = address.Address;
 const Opcode = opcode_info.Opcode;
 
+const NeutralTransactionValidationError = enum { unsupported };
+
+const NeutralTransactionPreparation = struct {
+    pub fn For(comptime Protocol: type) type {
+        return struct {
+            pub fn prepare(_: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
+                return error.UnsupportedTransactionPreparation;
+            }
+        };
+    }
+};
+
 /// The fork-configuration value type over a revision enum `R`.
 ///
-/// A comptime value of this type bundles the per-domain config structs (each a
-/// set of optional `*const fn` hooks) plus the instruction/precompile namespaces.
+/// A comptime value of this type bundles complete per-domain config values plus
+/// the instruction/precompile namespaces.
 /// `Bound(value)` turns it into the runtime dispatch namespace.
 pub fn Definition(comptime R: type) type {
     return struct {
         pub const Revision = R;
 
-        // pub fn yo() R {
-        //     return .{}
-        // }
-
         name: []const u8 = "custom",
         revision: RevisionConfig(R) = .{},
         instruction: type,
-        transaction: TransactionConfig(R),
-        settlement: SettlementConfig(R),
-        authorization: AuthorizationConfig(R),
-        block: BlockConfig(R),
-        call: CallConfig(R),
-        create: CreateConfig(R),
-        storage: StorageConfig(R),
-        self_destruct: SelfDestructConfig(R),
+        transaction: TransactionConfig(R) = .default,
+        settlement: SettlementConfig(R) = .default,
+        authorization: AuthorizationConfig(R) = .default,
+        block: BlockConfig(R) = .default,
+        call: CallConfig(R) = .default,
+        create: CreateConfig(R) = .default,
+        storage: StorageConfig(R) = .default,
+        self_destruct: SelfDestructConfig(R) = .default,
         precompile: type,
     };
 }
@@ -57,30 +80,92 @@ pub fn TransactionConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        Preparation: ?type = null,
+        /// Pre-execution validation and normalization into an executable request.
+        Preparation: type = NeutralTransactionPreparation,
         /// Protocol-owned rejection reason returned by `Preparation`.
-        ValidationError: ?type = null,
-        kindActive: ?*const fn (R, tx.TxKind) bool = null,
-        allowsContractCreation: ?*const fn (R, tx.TxKind) bool = null,
-        requiresAuthorizationList: ?*const fn (R, tx.TxKind) bool = null,
-        rejectsNonDelegatingSenderCode: ?*const fn (R, tx.TxKind) bool = null,
-        isDelegationCode: ?*const fn (R, []const u8) bool = null,
-        blobSchedule: ?*const fn (R) ?tx_blob.BlobSchedule = null,
-        blobVersionedHashActive: ?*const fn (R, u8) bool = null,
-        maxInitcodeSize: ?*const fn (R) usize = null,
-        intrinsicBaseGas: ?*const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = null,
-        createIntrinsicGas: ?*const fn (R) ?u64 = null,
-        dataByteGas: ?*const fn (R, u8) u64 = null,
-        accessListAddressGas: ?*const fn (R) u64 = null,
-        storageKeyGas: ?*const fn (R) u64 = null,
-        accessListDataGas: ?*const fn (R, tx_gas.AccessListCounts) ?u64 = null,
-        initCodeWordGas: ?*const fn (R) u64 = null,
-        authorizationIntrinsicGas: ?*const fn (R) u64 = null,
-        intrinsicStateGas: ?*const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = null,
-        floorGas: ?*const fn (R, []const u8, tx_gas.IntrinsicGasOptions) ?u64 = null,
-        regularGasLimit: ?*const fn (R, u64) u64 = null,
-        intrinsicRegularGasLimit: ?*const fn (R) ?u64 = null,
-        totalGasLimit: ?*const fn (R) ?u64 = null,
+        ValidationError: type = NeutralTransactionValidationError,
+        /// Whether an engine transaction kind is valid at `revision`.
+        kindActive: *const fn (R, tx.TxKind) bool = neverTransactionKind,
+        /// Whether `kind` may target contract creation rather than a call.
+        allowsContractCreation: *const fn (R, tx.TxKind) bool = neverTransactionKind,
+        /// Whether `kind` requires a non-empty authorization list.
+        requiresAuthorizationList: *const fn (R, tx.TxKind) bool = neverTransactionKind,
+        /// Whether non-delegation sender code invalidates the transaction.
+        rejectsNonDelegatingSenderCode: *const fn (R, tx.TxKind) bool = neverTransactionKind,
+        /// Classifies code accepted as a delegation designator for sender checks.
+        isDelegationCode: *const fn (R, []const u8) bool = neverDelegationCode,
+        /// Returns the active blob market schedule, or null when blobs are inactive.
+        blobSchedule: *const fn (R) ?tx_blob.BlobSchedule = noBlobSchedule,
+        /// Whether a version byte is valid for blob versioned hashes.
+        blobVersionedHashActive: *const fn (R, u8) bool = noBlobVersion,
+        /// Maximum transaction initcode bytes; the neutral default is unbounded.
+        maxInitcodeSize: *const fn (R) usize = unlimitedInitcodeSize,
+        /// Base intrinsic regular gas, or null when it cannot be represented.
+        intrinsicBaseGas: *const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = noIntrinsicGas,
+        /// Additional intrinsic regular gas for contract-creation transactions.
+        createIntrinsicGas: *const fn (R) ?u64 = noCreateIntrinsicGas,
+        /// Intrinsic regular gas charged for one calldata byte.
+        dataByteGas: *const fn (R, u8) u64 = noDataByteGas,
+        /// Intrinsic regular gas charged per access-list address.
+        accessListAddressGas: *const fn (R) u64 = noRevisionGas,
+        /// Intrinsic regular gas charged per access-list storage key.
+        storageKeyGas: *const fn (R) u64 = noRevisionGas,
+        /// Additional intrinsic data gas for access-list encoding.
+        accessListDataGas: *const fn (R, tx_gas.AccessListCounts) ?u64 = noAccessListDataGas,
+        /// Intrinsic regular gas charged per initcode word.
+        initCodeWordGas: *const fn (R) u64 = noRevisionGas,
+        /// Intrinsic regular gas charged per authorization tuple.
+        authorizationIntrinsicGas: *const fn (R) u64 = noRevisionGas,
+        /// Intrinsic state gas for the transaction, when dimensional gas is active.
+        intrinsicStateGas: *const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = noIntrinsicGas,
+        /// Transaction floor gas derived from input and intrinsic options.
+        floorGas: *const fn (R, tx_gas.FloorGasInput) ?u64 = noFloorGas,
+        /// Regular execution-gas allowance derived from the declared gas limit.
+        regularGasLimit: *const fn (R, u64) u64 = unchangedRegularGasLimit,
+        /// Optional protocol cap on intrinsic regular gas.
+        intrinsicRegularGasLimit: *const fn (R) ?u64 = noRevisionOptionalGas,
+        /// Optional protocol cap on the transaction's total declared gas.
+        totalGasLimit: *const fn (R) ?u64 = noRevisionOptionalGas,
+
+        fn neverTransactionKind(_: R, _: tx.TxKind) bool {
+            return false;
+        }
+        fn neverDelegationCode(_: R, _: []const u8) bool {
+            return false;
+        }
+        fn noBlobSchedule(_: R) ?tx_blob.BlobSchedule {
+            return null;
+        }
+        fn noBlobVersion(_: R, _: u8) bool {
+            return false;
+        }
+        fn unlimitedInitcodeSize(_: R) usize {
+            return std.math.maxInt(usize);
+        }
+        fn noIntrinsicGas(_: R, _: tx_gas.IntrinsicGasOptions) ?u64 {
+            return 0;
+        }
+        fn noCreateIntrinsicGas(_: R) ?u64 {
+            return 0;
+        }
+        fn noDataByteGas(_: R, _: u8) u64 {
+            return 0;
+        }
+        fn noRevisionGas(_: R) u64 {
+            return 0;
+        }
+        fn noAccessListDataGas(_: R, _: tx_gas.AccessListCounts) ?u64 {
+            return 0;
+        }
+        fn noFloorGas(_: R, _: tx_gas.FloorGasInput) ?u64 {
+            return null;
+        }
+        fn unchangedRegularGasLimit(_: R, gas_limit: u64) u64 {
+            return gas_limit;
+        }
+        fn noRevisionOptionalGas(_: R) ?u64 {
+            return null;
+        }
     };
 }
 
@@ -90,9 +175,19 @@ pub fn SettlementConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        baseFeeActive: ?*const fn (R) bool = null,
-        gasRefundCapDivisor: ?*const fn (R) u64 = null,
-        usesStateGasAccounting: ?*const fn (R) bool = null,
+        /// Whether base-fee validation and priority-fee derivation are active.
+        baseFeeActive: *const fn (R) bool = inactive,
+        /// Divisor limiting the execution gas refund applied at settlement.
+        gasRefundCapDivisor: *const fn (R) u64 = legacyRefundCapDivisor,
+        /// Whether settlement accounts for separate regular and state gas pools.
+        usesStateGasAccounting: *const fn (R) bool = inactive,
+
+        fn inactive(_: R) bool {
+            return false;
+        }
+        fn legacyRefundCapDivisor(_: R) u64 {
+            return 2;
+        }
     };
 }
 
@@ -102,11 +197,29 @@ pub fn AuthorizationConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        active: ?*const fn (R) bool = null,
-        warmsDelegatedTarget: ?*const fn (R) bool = null,
-        successGasAdjustment: ?*const fn (R, bool, bool, bool, bool) interface.AuthorizationGasAdjustment = null,
-        invalidGasAdjustment: ?*const fn (R) interface.AuthorizationGasAdjustment = null,
-        malformedGasAdjustment: ?*const fn (R, usize) interface.AuthorizationGasAdjustment = null,
+        /// Whether authorization tuples are processed at this revision.
+        active: *const fn (R) bool = inactive,
+        /// Whether a delegation target is added to the initial warm set.
+        warmsDelegatedTarget: *const fn (R) bool = inactive,
+        /// Refund adjustments after one authorization tuple succeeds.
+        successGasAdjustment: *const fn (R, types.AuthorizationSuccessInput) types.AuthorizationGasAdjustment = noSuccessGasAdjustment,
+        /// Refund adjustments when an authorization tuple is invalid.
+        invalidGasAdjustment: *const fn (R) types.AuthorizationGasAdjustment = noGasAdjustment,
+        /// Refund adjustments for authorization entries missing from input.
+        malformedGasAdjustment: *const fn (R, usize) types.AuthorizationGasAdjustment = noMalformedGasAdjustment,
+
+        fn inactive(_: R) bool {
+            return false;
+        }
+        fn noSuccessGasAdjustment(_: R, _: types.AuthorizationSuccessInput) types.AuthorizationGasAdjustment {
+            return .{};
+        }
+        fn noGasAdjustment(_: R) types.AuthorizationGasAdjustment {
+            return .{};
+        }
+        fn noMalformedGasAdjustment(_: R, _: usize) types.AuthorizationGasAdjustment {
+            return .{};
+        }
     };
 }
 
@@ -116,20 +229,36 @@ pub fn BlockConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        valueTransferLog: *const fn (R, Address, Address, u256) ?interface.ValueTransferLog = noValueTransferLog,
-        blockStartSystemCalls: *const fn (R, interface.BlockStartContext) interface.BlockStartSystemCalls = noBlockStartSystemCalls,
-        blockEndSystemCalls: *const fn (R, interface.BlockEndContext) interface.BlockEndSystemCalls = noBlockEndSystemCalls,
+        /// Optional protocol log emitted for a nonzero value transfer.
+        valueTransferLog: *const fn (R, types.ValueTransferInput) ?types.ValueTransferLog = noValueTransferLog,
+        /// System calls executed before payload transactions begin.
+        beforeBlock: *const fn (R, types.BeforeBlockContext) types.BlockSystemCalls = noBeforeBlock,
+        /// System calls executed after validation and inside transaction rollback.
+        beforeTransaction: *const fn (R, types.BeforeTransactionContext) types.BlockSystemCalls = noBeforeTransaction,
+        /// System calls executed after the caller consumes transaction logs.
+        afterTransaction: *const fn (R, types.AfterTransactionContext) types.BlockSystemCalls = noAfterTransaction,
+        /// Final system calls whose outputs are returned to the family STF.
+        finalizeBlock: *const fn (R, types.FinalizeBlockContext) types.FinalizeSystemCalls = noFinalizeBlock,
+        /// Whether the transaction scope initially warms the fee recipient.
         transactionWarmsCoinbase: *const fn (R) bool = doesNotWarmCoinbase,
 
-        fn noValueTransferLog(_: R, _: Address, _: Address, _: u256) ?interface.ValueTransferLog {
+        fn noValueTransferLog(_: R, _: types.ValueTransferInput) ?types.ValueTransferLog {
             return null;
         }
 
-        fn noBlockStartSystemCalls(_: R, _: interface.BlockStartContext) interface.BlockStartSystemCalls {
+        fn noBeforeBlock(_: R, _: types.BeforeBlockContext) types.BlockSystemCalls {
             return .{};
         }
 
-        fn noBlockEndSystemCalls(_: R, _: interface.BlockEndContext) interface.BlockEndSystemCalls {
+        fn noBeforeTransaction(_: R, _: types.BeforeTransactionContext) types.BlockSystemCalls {
+            return .{};
+        }
+
+        fn noAfterTransaction(_: R, _: types.AfterTransactionContext) types.BlockSystemCalls {
+            return .{};
+        }
+
+        fn noFinalizeBlock(_: R, _: types.FinalizeBlockContext) types.FinalizeSystemCalls {
             return .{};
         }
 
@@ -142,12 +271,8 @@ pub fn BlockConfig(comptime R: type) type {
 /// Enforces that a hand-written patch remains a null-defaulted optional mirror
 /// of its complete config type.
 pub fn assertPatchMirrors(comptime Config: type, comptime Patch: type) void {
-    const config_fields = @typeInfo(Config).@"struct".fields;
-    const patch_fields = @typeInfo(Patch).@"struct".fields;
-
-    if (config_fields.len != patch_fields.len) {
-        @compileError("patch field count does not match config");
-    }
+    const config_fields = std.meta.fields(Config);
+    const patch_fields = std.meta.fields(Patch);
 
     const empty_patch: Patch = .{};
     inline for (config_fields) |field| {
@@ -175,16 +300,51 @@ pub fn CallConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        callBaseGas: ?*const fn (R) i64 = null,
-        callColdAccountAccessGas: ?*const fn (R) ?i64 = null,
-        callValueTransferGas: ?*const fn (R) i64 = null,
-        callValueStipend: ?*const fn (R) i64 = null,
-        callNewAccountGas: ?*const fn (R, u256, bool) interface.CallNewAccountGas = null,
-        topFrameValueTransferStateGas: ?*const fn (R, u256, bool, bool) i64 = null,
-        delegatedAccountAccessGas: ?*const fn (R, bool) i64 = null,
-        topLevelDelegatedAccountAccess: ?*const fn (R, bool, bool) ?interface.DelegatedAccountAccess = null,
-        touchesEmptyCallRecipient: ?*const fn (R) bool = null,
-        childGas: ?*const fn (R, i64, i64) interface.ChildGas = null,
+        /// Base dynamic gas charged by CALL-family instructions.
+        callBaseGas: *const fn (R) i64 = noRevisionGas,
+        /// Additional gas for a cold target account, or null when not modeled.
+        callColdAccountAccessGas: *const fn (R) ?i64 = noOptionalRevisionGas,
+        /// Regular gas charged when a CALL transfers nonzero value.
+        callValueTransferGas: *const fn (R) i64 = noRevisionGas,
+        /// Gas stipend added to a value-transferring child call.
+        callValueStipend: *const fn (R) i64 = noRevisionGas,
+        /// Regular/state gas charged when CALL creates a recipient account.
+        callNewAccountGas: *const fn (R, types.CallNewAccountInput) types.CallNewAccountGas = noNewAccountGas,
+        /// State gas charged by top-frame value transfer account creation.
+        topFrameValueTransferStateGas: *const fn (R, types.TopFrameValueTransferInput) i64 = noTopFrameStateGas,
+        /// Gas charged to access an account through delegation code.
+        delegatedAccountAccessGas: *const fn (R, bool) i64 = noDelegatedAccessGas,
+        /// Optional top-level delegated account access and warm/cold status.
+        topLevelDelegatedAccountAccess: *const fn (R, types.TopLevelDelegatedAccountAccessInput) ?types.DelegatedAccountAccess = noTopLevelDelegatedAccess,
+        /// Whether a zero-value CALL touches an empty recipient account.
+        touchesEmptyCallRecipient: *const fn (R) bool = neverTouchesEmptyRecipient,
+        /// Child gas grant and out-of-gas decision for a requested allowance.
+        childGas: *const fn (R, types.ChildGasInput) types.ChildGas = allAvailableChildGas,
+
+        fn noRevisionGas(_: R) i64 {
+            return 0;
+        }
+        fn noOptionalRevisionGas(_: R) ?i64 {
+            return null;
+        }
+        fn noNewAccountGas(_: R, _: types.CallNewAccountInput) types.CallNewAccountGas {
+            return .{};
+        }
+        fn noTopFrameStateGas(_: R, _: types.TopFrameValueTransferInput) i64 {
+            return 0;
+        }
+        fn noDelegatedAccessGas(_: R, _: bool) i64 {
+            return 0;
+        }
+        fn noTopLevelDelegatedAccess(_: R, _: types.TopLevelDelegatedAccountAccessInput) ?types.DelegatedAccountAccess {
+            return null;
+        }
+        fn neverTouchesEmptyRecipient(_: R) bool {
+            return false;
+        }
+        fn allAvailableChildGas(_: R, input: types.ChildGasInput) types.ChildGas {
+            return .{ .gas = @min(input.requested, input.available) };
+        }
     };
 }
 
@@ -194,18 +354,55 @@ pub fn CreateConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        createCodeSizeLimit: ?*const fn (R) ?usize = null,
-        rejectsCreateCode: ?*const fn (R, []const u8) bool = null,
-        createDepositRegularGas: ?*const fn (R, i64) ?i64 = null,
-        createDepositStateGas: ?*const fn (R, i64) ?i64 = null,
-        createDepositRegularGasOogCommits: ?*const fn (R) bool = null,
-        createAccountStateGasRefund: ?*const fn (R, bool) i64 = null,
-        createTransactionRollbackStateGasRefund: ?*const fn (R) i64 = null,
-        createWarmsCreatedAddress: ?*const fn (R) bool = null,
-        createInitialNonce: ?*const fn (R) u64 = null,
-        createInitCodeSizeLimit: ?*const fn (R) ?usize = null,
-        createInitCodeWordGas: ?*const fn (R, bool) i64 = null,
-        createAccountStateGas: ?*const fn (R) i64 = null,
+        /// Maximum deployed runtime-code bytes, or null when unbounded.
+        createCodeSizeLimit: *const fn (R) ?usize = noSizeLimit,
+        /// Whether the deployed runtime bytes are rejected by code-prefix rules.
+        rejectsCreateCode: *const fn (R, []const u8) bool = neverRejectsCode,
+        /// Regular gas charged to deposit `runtime_size` bytes.
+        createDepositRegularGas: *const fn (R, i64) ?i64 = noDepositGas,
+        /// State gas charged to deposit `runtime_size` bytes.
+        createDepositStateGas: *const fn (R, i64) ?i64 = noDepositGas,
+        /// Whether regular deposit OOG still commits the successful child call.
+        createDepositRegularGasOogCommits: *const fn (R) bool = falseForRevision,
+        /// State-gas refund when creation reuses an existing account.
+        createAccountStateGasRefund: *const fn (R, bool) i64 = noAccountStateGasRefund,
+        /// State-gas refund when a create transaction rolls back.
+        createTransactionRollbackStateGasRefund: *const fn (R) i64 = noRevisionGas,
+        /// Whether CREATE immediately warms the derived address.
+        createWarmsCreatedAddress: *const fn (R) bool = falseForRevision,
+        /// Initial nonce assigned to a newly created account.
+        createInitialNonce: *const fn (R) u64 = zeroNonce,
+        /// Maximum CREATE/CREATE2 initcode bytes, or null when unbounded.
+        createInitCodeSizeLimit: *const fn (R) ?usize = noSizeLimit,
+        /// Per-word initcode/hash gas for CREATE or CREATE2.
+        createInitCodeWordGas: *const fn (R, bool) i64 = noInitCodeWordGas,
+        /// State gas charged to materialize a newly created account.
+        createAccountStateGas: *const fn (R) i64 = noRevisionGas,
+
+        fn noSizeLimit(_: R) ?usize {
+            return null;
+        }
+        fn neverRejectsCode(_: R, _: []const u8) bool {
+            return false;
+        }
+        fn noDepositGas(_: R, _: i64) ?i64 {
+            return 0;
+        }
+        fn falseForRevision(_: R) bool {
+            return false;
+        }
+        fn noAccountStateGasRefund(_: R, _: bool) i64 {
+            return 0;
+        }
+        fn noRevisionGas(_: R) i64 {
+            return 0;
+        }
+        fn zeroNonce(_: R) u64 {
+            return 0;
+        }
+        fn noInitCodeWordGas(_: R, _: bool) i64 {
+            return 0;
+        }
     };
 }
 
@@ -215,11 +412,29 @@ pub fn StorageConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        sloadColdStorageAccessGas: ?*const fn (R) ?i64 = null,
-        sstoreMinimumGas: ?*const fn (R) ?i64 = null,
-        sstoreStorageAccessGas: ?*const fn (R, interface.AccountAccessStatus) ?i64 = null,
-        sstoreGas: ?*const fn (R, interface.StorageStatus) interface.StorageGas = null,
-        sstoreStateGas: ?*const fn (R, interface.StorageStatus) interface.StorageStateGas = null,
+        /// Additional SLOAD gas for a cold storage key.
+        sloadColdStorageAccessGas: *const fn (R) ?i64 = noOptionalRevisionGas,
+        /// Minimum gas required before SSTORE may execute.
+        sstoreMinimumGas: *const fn (R) ?i64 = noOptionalRevisionGas,
+        /// SSTORE account/key access gas for the supplied warm status.
+        sstoreStorageAccessGas: *const fn (R, types.AccountAccessStatus) ?i64 = noStorageAccessGas,
+        /// Regular SSTORE cost/refund for the storage transition.
+        sstoreGas: *const fn (R, types.StorageStatus) types.StorageGas = noStorageGas,
+        /// State-gas SSTORE charge/refund for the storage transition.
+        sstoreStateGas: *const fn (R, types.StorageStatus) types.StorageStateGas = noStorageStateGas,
+
+        fn noOptionalRevisionGas(_: R) ?i64 {
+            return null;
+        }
+        fn noStorageAccessGas(_: R, _: types.AccountAccessStatus) ?i64 {
+            return null;
+        }
+        fn noStorageGas(_: R, _: types.StorageStatus) types.StorageGas {
+            return .{};
+        }
+        fn noStorageStateGas(_: R, _: types.StorageStatus) types.StorageStateGas {
+            return .{};
+        }
     };
 }
 
@@ -229,11 +444,32 @@ pub fn SelfDestructConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        selfDestructPolicy: ?*const fn (R, bool, bool) interface.SelfDestructPolicy = null,
-        selfDestructFinalization: ?*const fn (R, bool) interface.SelfDestructFinalization = null,
-        selfDestructNewAccountGas: ?*const fn (R, bool, bool, bool) interface.CallNewAccountGas = null,
-        selfDestructColdAccountAccessGas: ?*const fn (R) ?i64 = null,
-        selfDestructRefundGas: ?*const fn (R) i64 = null,
+        /// Immediate balance/nonce/self-destruct marker policy.
+        selfDestructPolicy: *const fn (R, types.SelfDestructPolicyInput) types.SelfDestructPolicy = noPolicy,
+        /// Transaction-end account/storage deletion policy.
+        selfDestructFinalization: *const fn (R, bool) types.SelfDestructFinalization = noFinalization,
+        /// Regular/state gas charged when the beneficiary account is created.
+        selfDestructNewAccountGas: *const fn (R, types.SelfDestructNewAccountInput) types.CallNewAccountGas = noNewAccountGas,
+        /// Additional gas for a cold beneficiary account.
+        selfDestructColdAccountAccessGas: *const fn (R) ?i64 = noOptionalRevisionGas,
+        /// Legacy SELFDESTRUCT refund credited to the frame.
+        selfDestructRefundGas: *const fn (R) i64 = noRevisionGas,
+
+        fn noPolicy(_: R, _: types.SelfDestructPolicyInput) types.SelfDestructPolicy {
+            return .{ .clear_balance = false, .reset_nonce = false, .mark_selfdestructed = false };
+        }
+        fn noFinalization(_: R, _: bool) types.SelfDestructFinalization {
+            return .{};
+        }
+        fn noNewAccountGas(_: R, _: types.SelfDestructNewAccountInput) types.CallNewAccountGas {
+            return .{};
+        }
+        fn noOptionalRevisionGas(_: R) ?i64 {
+            return null;
+        }
+        fn noRevisionGas(_: R) i64 {
+            return 0;
+        }
     };
 }
 
@@ -260,48 +496,14 @@ pub fn Bound(comptime definition: anytype) type {
     const InstructionSource = definition.instruction;
     const InstructionBase = instructionDomain(InstructionSource);
     const InstructionDomain = BoundInstruction(InstructionSource, InstructionBase, revision_model.Availability);
+    const transaction_config: TransactionConfig(R) = definition.transaction;
+    const settlement_config: SettlementConfig(R) = definition.settlement;
+    const authorization_config: AuthorizationConfig(R) = definition.authorization;
     const block_config: BlockConfig(R) = definition.block;
-    assertRequiredConfig("Definition.transaction", TransactionConfig(R), definition.transaction, &.{
-        "blobSchedule",
-        "blobVersionedHashActive",
-        "isDelegationCode",
-    });
-    assertRequiredConfig("Definition.settlement", SettlementConfig(R), definition.settlement, &.{
-        "baseFeeActive",
-        "usesStateGasAccounting",
-    });
-    assertRequiredConfig("Definition.authorization", AuthorizationConfig(R), definition.authorization, &.{
-        "active",
-        "warmsDelegatedTarget",
-        "successGasAdjustment",
-        "invalidGasAdjustment",
-        "malformedGasAdjustment",
-    });
-    assertRequiredConfig("Definition.call", CallConfig(R), definition.call, &.{
-        "callColdAccountAccessGas",
-        "topFrameValueTransferStateGas",
-        "topLevelDelegatedAccountAccess",
-    });
-    assertRequiredConfig("Definition.create", CreateConfig(R), definition.create, &.{
-        "createCodeSizeLimit",
-        "rejectsCreateCode",
-        "createDepositStateGas",
-        "createDepositRegularGasOogCommits",
-        "createAccountStateGasRefund",
-        "createTransactionRollbackStateGasRefund",
-        "createWarmsCreatedAddress",
-        "createInitCodeSizeLimit",
-        "createAccountStateGas",
-    });
-    assertRequiredConfig("Definition.storage", StorageConfig(R), definition.storage, &.{
-        "sloadColdStorageAccessGas",
-        "sstoreMinimumGas",
-        "sstoreStorageAccessGas",
-        "sstoreStateGas",
-    });
-    assertRequiredConfig("Definition.self_destruct", SelfDestructConfig(R), definition.self_destruct, &.{
-        "selfDestructColdAccountAccessGas",
-    });
+    const call_config: CallConfig(R) = definition.call;
+    const create_config: CreateConfig(R) = definition.create;
+    const storage_config: StorageConfig(R) = definition.storage;
+    const self_destruct_config: SelfDestructConfig(R) = definition.self_destruct;
 
     return struct {
         pub const name = definition.name;
@@ -309,21 +511,25 @@ pub fn Bound(comptime definition: anytype) type {
         pub const revisions = revision_model.revisions;
         pub const latest = revision_model.latest;
         pub const stable = revision_model.stable;
+        pub const order = revision_model.order;
         pub const isImpl = revision_model.isImpl;
+        pub const RevisionSemantics = revision_model.RevisionSemantics;
+        pub const BaseRevision = revision_model.BaseRevision;
+        pub const baseRevision = revision_model.baseRevision;
         pub const Availability = revision_model.Availability;
         pub const Support = revision_model.Support;
         pub const resolveAvailability = revision_model.resolveAvailability;
         pub const StaticGasSource = InstructionSource;
 
         pub const Instruction = InstructionDomain;
-        pub const Transaction = BoundTransaction(R, definition.transaction);
-        pub const Settlement = BoundSettlement(R, definition.settlement);
-        pub const Authorization = BoundAuthorization(R, definition.authorization);
+        pub const transaction = transaction_config;
+        pub const settlement = settlement_config;
+        pub const authorization = authorization_config;
         pub const block = block_config;
-        pub const Call = BoundCall(R, definition.call);
-        pub const Create = BoundCreate(R, definition.create);
-        pub const Storage = BoundStorage(R, definition.storage);
-        pub const SelfDestruct = BoundSelfDestruct(R, definition.self_destruct);
+        pub const call = call_config;
+        pub const create = create_config;
+        pub const storage = storage_config;
+        pub const self_destruct = self_destruct_config;
         pub const Precompile = definition.precompile;
 
         pub fn opcodeInfoByte(comptime opcode_byte: u8) opcode_info.OpInfo {
@@ -380,332 +586,6 @@ fn instructionDomain(comptime InstructionSource: type) type {
     @compileError("Definition.instruction must expose Value or nested Instruction");
 }
 
-fn assertRequiredConfig(comptime label: []const u8, comptime T: type, comptime cfg: T, comptime optional_fields: []const []const u8) void {
-    @setEvalBranchQuota(10_000);
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (@field(cfg, field.name) == null and !containsName(optional_fields, field.name)) {
-            @compileError(label ++ "." ++ field.name ++ " required");
-        }
-    }
-}
-
-fn containsName(comptime names: []const []const u8, comptime needle: []const u8) bool {
-    inline for (names) |name| {
-        if (std.mem.eql(u8, name, needle)) return true;
-    }
-    return false;
-}
-
-fn BoundTransaction(comptime R: type, comptime cfg: TransactionConfig(R)) type {
-    return struct {
-        pub const ValidationError = cfg.ValidationError.?;
-
-        pub fn prepare(comptime Protocol: type, input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
-            const Preparation = cfg.Preparation.?;
-            return Preparation.For(Protocol).prepare(input);
-        }
-
-        pub fn kindActive(revision_value: R, kind: tx.TxKind) bool {
-            return cfg.kindActive.?(revision_value, kind);
-        }
-
-        pub fn allowsContractCreation(revision_value: R, kind: tx.TxKind) bool {
-            return cfg.allowsContractCreation.?(revision_value, kind);
-        }
-
-        pub fn requiresAuthorizationList(revision_value: R, kind: tx.TxKind) bool {
-            return cfg.requiresAuthorizationList.?(revision_value, kind);
-        }
-
-        pub fn rejectsNonDelegatingSenderCode(revision_value: R, kind: tx.TxKind) bool {
-            return cfg.rejectsNonDelegatingSenderCode.?(revision_value, kind);
-        }
-
-        pub fn isDelegationCode(revision_value: R, code: []const u8) bool {
-            return if (cfg.isDelegationCode) |classify| classify(revision_value, code) else false;
-        }
-
-        pub fn blobSchedule(revision_value: R) ?tx_blob.BlobSchedule {
-            return if (cfg.blobSchedule) |blob_schedule| blob_schedule(revision_value) else null;
-        }
-
-        pub fn blobVersionedHashActive(revision_value: R, version: u8) bool {
-            return if (cfg.blobVersionedHashActive) |active| active(revision_value, version) else false;
-        }
-
-        pub fn maxInitcodeSize(revision_value: R) usize {
-            return cfg.maxInitcodeSize.?(revision_value);
-        }
-
-        pub fn intrinsicBaseGas(revision_value: R, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return cfg.intrinsicBaseGas.?(revision_value, options);
-        }
-
-        pub fn createIntrinsicGas(revision_value: R) ?u64 {
-            return cfg.createIntrinsicGas.?(revision_value);
-        }
-
-        pub fn dataByteGas(revision_value: R, byte: u8) u64 {
-            return cfg.dataByteGas.?(revision_value, byte);
-        }
-
-        pub fn accessListAddressGas(revision_value: R) u64 {
-            return cfg.accessListAddressGas.?(revision_value);
-        }
-
-        pub fn storageKeyGas(revision_value: R) u64 {
-            return cfg.storageKeyGas.?(revision_value);
-        }
-
-        pub fn accessListDataGas(revision_value: R, counts: tx_gas.AccessListCounts) ?u64 {
-            return cfg.accessListDataGas.?(revision_value, counts);
-        }
-
-        pub fn initCodeWordGas(revision_value: R) u64 {
-            return cfg.initCodeWordGas.?(revision_value);
-        }
-
-        pub fn authorizationIntrinsicGas(revision_value: R) u64 {
-            return cfg.authorizationIntrinsicGas.?(revision_value);
-        }
-
-        pub fn intrinsicStateGas(revision_value: R, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return cfg.intrinsicStateGas.?(revision_value, options);
-        }
-
-        pub fn floorGas(revision_value: R, input: []const u8, options: tx_gas.IntrinsicGasOptions) ?u64 {
-            return cfg.floorGas.?(revision_value, input, options);
-        }
-
-        pub fn regularGasLimit(revision_value: R, gas_limit: u64) u64 {
-            return cfg.regularGasLimit.?(revision_value, gas_limit);
-        }
-
-        pub fn intrinsicRegularGasLimit(revision_value: R) ?u64 {
-            return cfg.intrinsicRegularGasLimit.?(revision_value);
-        }
-
-        pub fn totalGasLimit(revision_value: R) ?u64 {
-            return cfg.totalGasLimit.?(revision_value);
-        }
-    };
-}
-
-fn BoundSettlement(comptime R: type, comptime cfg: SettlementConfig(R)) type {
-    return struct {
-        pub const Plan = tx_settlement.Plan;
-
-        pub fn revisionId(plan: Plan) support.RevisionId {
-            return plan.revision_id;
-        }
-
-        pub fn precharge(plan: Plan) tx_settlement.Precharge {
-            return .{
-                .payer = plan.payer,
-                .upfront_debit = plan.upfront_debit,
-                .minimum_balance = plan.minimum_balance,
-            };
-        }
-
-        pub fn feeRecipient(plan: Plan) ?Address {
-            return plan.coinbase;
-        }
-
-        pub fn costs(comptime Protocol: type, plan: Plan, result: tx_settlement.ExecutionGasResult) !tx_settlement.SettlementCosts {
-            return tx_settlement.For(Protocol).settlementCosts(plan, result);
-        }
-
-        pub fn baseFeeActive(revision_value: R) bool {
-            return if (cfg.baseFeeActive) |active| active(revision_value) else false;
-        }
-
-        pub fn gasRefundCapDivisor(revision_value: R) u64 {
-            return cfg.gasRefundCapDivisor.?(revision_value);
-        }
-
-        pub fn usesStateGasAccounting(revision_value: R) bool {
-            return if (cfg.usesStateGasAccounting) |uses| uses(revision_value) else false;
-        }
-    };
-}
-
-fn BoundAuthorization(comptime R: type, comptime cfg: AuthorizationConfig(R)) type {
-    return struct {
-        pub fn active(revision_value: R) bool {
-            return if (cfg.active) |active_fn| active_fn(revision_value) else false;
-        }
-
-        pub fn warmsDelegatedTarget(revision_value: R) bool {
-            return if (cfg.warmsDelegatedTarget) |warms| warms(revision_value) else false;
-        }
-
-        pub fn successGasAdjustment(
-            revision_value: R,
-            account_exists: bool,
-            clears_delegation: bool,
-            cur_delegated: bool,
-            pre_delegated: bool,
-        ) interface.AuthorizationGasAdjustment {
-            return if (cfg.successGasAdjustment) |adjust|
-                adjust(revision_value, account_exists, clears_delegation, cur_delegated, pre_delegated)
-            else
-                .{};
-        }
-
-        pub fn invalidGasAdjustment(revision_value: R) interface.AuthorizationGasAdjustment {
-            return if (cfg.invalidGasAdjustment) |adjust| adjust(revision_value) else .{};
-        }
-
-        pub fn malformedGasAdjustment(revision_value: R, missing_count: usize) interface.AuthorizationGasAdjustment {
-            return if (cfg.malformedGasAdjustment) |adjust| adjust(revision_value, missing_count) else .{};
-        }
-    };
-}
-
-fn BoundCall(comptime R: type, comptime cfg: CallConfig(R)) type {
-    return struct {
-        pub fn callBaseGas(revision_value: R) i64 {
-            return cfg.callBaseGas.?(revision_value);
-        }
-
-        pub fn callColdAccountAccessGas(revision_value: R) ?i64 {
-            return if (cfg.callColdAccountAccessGas) |gas| gas(revision_value) else null;
-        }
-
-        pub fn callValueTransferGas(revision_value: R) i64 {
-            return cfg.callValueTransferGas.?(revision_value);
-        }
-
-        pub fn callValueStipend(revision_value: R) i64 {
-            return cfg.callValueStipend.?(revision_value);
-        }
-
-        pub fn callNewAccountGas(revision_value: R, value: u256, account_exists: bool) interface.CallNewAccountGas {
-            return cfg.callNewAccountGas.?(revision_value, value, account_exists);
-        }
-
-        pub fn topFrameValueTransferStateGas(revision_value: R, value: u256, same_address: bool, account_exists: bool) i64 {
-            return if (cfg.topFrameValueTransferStateGas) |gas| gas(revision_value, value, same_address, account_exists) else 0;
-        }
-
-        pub fn delegatedAccountAccessGas(revision_value: R, cold: bool) i64 {
-            return cfg.delegatedAccountAccessGas.?(revision_value, cold);
-        }
-
-        pub fn topLevelDelegatedAccountAccess(revision_value: R, target_is_precompile: bool, already_warm: bool) ?interface.DelegatedAccountAccess {
-            return if (cfg.topLevelDelegatedAccountAccess) |access| access(revision_value, target_is_precompile, already_warm) else null;
-        }
-
-        pub fn touchesEmptyCallRecipient(revision_value: R) bool {
-            return cfg.touchesEmptyCallRecipient.?(revision_value);
-        }
-
-        pub fn childGas(revision_value: R, requested: i64, available: i64) interface.ChildGas {
-            return cfg.childGas.?(revision_value, requested, available);
-        }
-    };
-}
-
-fn BoundCreate(comptime R: type, comptime cfg: CreateConfig(R)) type {
-    return struct {
-        pub fn createCodeSizeLimit(revision_value: R) ?usize {
-            return if (cfg.createCodeSizeLimit) |limit| limit(revision_value) else null;
-        }
-
-        pub fn rejectsCreateCode(revision_value: R, code: []const u8) bool {
-            return if (cfg.rejectsCreateCode) |rejects| rejects(revision_value, code) else false;
-        }
-
-        pub fn createDepositRegularGas(revision_value: R, runtime_size: i64) ?i64 {
-            return cfg.createDepositRegularGas.?(revision_value, runtime_size);
-        }
-
-        pub fn createDepositStateGas(revision_value: R, runtime_size: i64) ?i64 {
-            return if (cfg.createDepositStateGas) |gas| gas(revision_value, runtime_size) else 0;
-        }
-
-        pub fn createDepositRegularGasOogCommits(revision_value: R) bool {
-            return if (cfg.createDepositRegularGasOogCommits) |commits| commits(revision_value) else false;
-        }
-
-        pub fn createAccountStateGasRefund(revision_value: R, account_pre_existing: bool) i64 {
-            return if (cfg.createAccountStateGasRefund) |refund| refund(revision_value, account_pre_existing) else 0;
-        }
-
-        pub fn createTransactionRollbackStateGasRefund(revision_value: R) i64 {
-            return if (cfg.createTransactionRollbackStateGasRefund) |refund| refund(revision_value) else 0;
-        }
-
-        pub fn createWarmsCreatedAddress(revision_value: R) bool {
-            return if (cfg.createWarmsCreatedAddress) |warms| warms(revision_value) else false;
-        }
-
-        pub fn createInitialNonce(revision_value: R) u64 {
-            return cfg.createInitialNonce.?(revision_value);
-        }
-
-        pub fn createInitCodeSizeLimit(revision_value: R) ?usize {
-            return if (cfg.createInitCodeSizeLimit) |limit| limit(revision_value) else null;
-        }
-
-        pub fn createInitCodeWordGas(revision_value: R, is_create2: bool) i64 {
-            return cfg.createInitCodeWordGas.?(revision_value, is_create2);
-        }
-
-        pub fn createAccountStateGas(revision_value: R) i64 {
-            return if (cfg.createAccountStateGas) |gas| gas(revision_value) else 0;
-        }
-    };
-}
-
-fn BoundStorage(comptime R: type, comptime cfg: StorageConfig(R)) type {
-    return struct {
-        pub fn sloadColdStorageAccessGas(revision_value: R) ?i64 {
-            return if (cfg.sloadColdStorageAccessGas) |gas| gas(revision_value) else null;
-        }
-
-        pub fn sstoreMinimumGas(revision_value: R) ?i64 {
-            return if (cfg.sstoreMinimumGas) |gas| gas(revision_value) else null;
-        }
-
-        pub fn sstoreStorageAccessGas(revision_value: R, status: interface.AccountAccessStatus) ?i64 {
-            return if (cfg.sstoreStorageAccessGas) |gas| gas(revision_value, status) else null;
-        }
-
-        pub fn sstoreGas(revision_value: R, status: interface.StorageStatus) interface.StorageGas {
-            return cfg.sstoreGas.?(revision_value, status);
-        }
-
-        pub fn sstoreStateGas(revision_value: R, status: interface.StorageStatus) interface.StorageStateGas {
-            return if (cfg.sstoreStateGas) |gas| gas(revision_value, status) else .{};
-        }
-    };
-}
-
-fn BoundSelfDestruct(comptime R: type, comptime cfg: SelfDestructConfig(R)) type {
-    return struct {
-        pub fn selfDestructPolicy(revision_value: R, same_address: bool, created_in_transaction: bool) interface.SelfDestructPolicy {
-            return cfg.selfDestructPolicy.?(revision_value, same_address, created_in_transaction);
-        }
-
-        pub fn selfDestructFinalization(revision_value: R, created_in_transaction: bool) interface.SelfDestructFinalization {
-            return cfg.selfDestructFinalization.?(revision_value, created_in_transaction);
-        }
-
-        pub fn selfDestructNewAccountGas(revision_value: R, same_address: bool, transfers_balance: bool, account_exists: bool) interface.CallNewAccountGas {
-            return cfg.selfDestructNewAccountGas.?(revision_value, same_address, transfers_balance, account_exists);
-        }
-
-        pub fn selfDestructColdAccountAccessGas(revision_value: R) ?i64 {
-            return if (cfg.selfDestructColdAccountAccessGas) |gas| gas(revision_value) else null;
-        }
-
-        pub fn selfDestructRefundGas(revision_value: R) i64 {
-            return cfg.selfDestructRefundGas.?(revision_value);
-        }
-    };
-}
-
 fn BoundInstruction(comptime InstructionSource: type, comptime Base: type, comptime Availability: type) type {
     _ = InstructionSource;
 
@@ -744,7 +624,7 @@ fn BoundInstruction(comptime InstructionSource: type, comptime Base: type, compt
             return Base.accountReadColdAccessGas(revision);
         }
 
-        pub fn codeAccountAccessGas(revision: anytype, status: @import("protocol/interface.zig").AccountAccessStatus) ?i64 {
+        pub fn codeAccountAccessGas(revision: anytype, status: types.AccountAccessStatus) ?i64 {
             return Base.codeAccountAccessGas(revision, status);
         }
     };
@@ -755,6 +635,7 @@ fn coerceAvailability(comptime Availability: type, comptime value: anytype) Avai
         .never => .never,
         .always => .always,
         .since => |revision| .{ .since = revision },
+        .gate => |active| .{ .gate = active },
     };
 }
 
@@ -764,18 +645,18 @@ test "revision model accepts custom ordering function" {
         beta = 5,
     };
     const reverse = struct {
-        fn isImpl(current: R, fork: R) bool {
-            return @intFromEnum(current) <= @intFromEnum(fork);
+        fn order(a: R, b: R) std.math.Order {
+            return std.math.order(@intFromEnum(b), @intFromEnum(a));
         }
     };
     const model = RevisionModel(R, .{
         .revisions = &.{ .alpha, .beta },
         .latest = .beta,
-        .isImpl = reverse.isImpl,
+        .order = reverse.order,
     });
 
     comptime {
-        if (!reverse.isImpl(.beta, .alpha)) @compileError("reverse isImpl check is broken");
+        if (reverse.order(.beta, .alpha) != .gt) @compileError("reverse order check is broken");
         if (!model.isImpl(.beta, .alpha)) @compileError("custom isImpl override was not applied");
     }
 
@@ -794,10 +675,33 @@ test "block config carries complete neutral policy" {
     const block = BlockConfig(R).default;
     const zero_address = std.mem.zeroes(Address);
 
-    try std.testing.expectEqual(@as(?interface.ValueTransferLog, null), block.valueTransferLog(.one, zero_address, zero_address, 0));
-    try std.testing.expectEqual(@as(usize, 0), block.blockStartSystemCalls(.one, .{
+    try std.testing.expectEqual(@as(?types.ValueTransferLog, null), block.valueTransferLog(.one, .{
+        .from = zero_address,
+        .to = zero_address,
+        .amount = 0,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), block.beforeBlock(.one, .{
         .number = 0,
         .timestamp = 0,
     }).slice().len);
+    try std.testing.expectEqual(@as(usize, 0), block.beforeTransaction(.one, .{
+        .number = 0,
+        .timestamp = 0,
+        .transaction_index = 0,
+    }).slice().len);
     try std.testing.expect(!block.transactionWarmsCoinbase(.one));
+}
+
+test "definition value domains default to complete neutral configs" {
+    const R = enum { one };
+    const value: Definition(R) = .{
+        .instruction = void,
+        .precompile = void,
+    };
+
+    try std.testing.expect(!value.transaction.kindActive(.one, .legacy));
+    try std.testing.expect(!value.authorization.active(.one));
+    try std.testing.expectEqual(@as(i64, 0), value.call.callBaseGas(.one));
+    try std.testing.expectEqual(@as(?usize, null), value.create.createCodeSizeLimit(.one));
+    try std.testing.expectEqual(@as(?i64, null), value.storage.sstoreMinimumGas(.one));
 }

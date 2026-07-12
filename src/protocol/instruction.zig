@@ -1,9 +1,9 @@
 const execution = @import("execution.zig");
-const interface = @import("interface.zig");
+const types = @import("types.zig");
 const opcode_info = @import("../opcode.zig");
 const support = @import("support.zig");
 
-pub const AccountAccessStatus = interface.AccountAccessStatus;
+pub const AccountAccessStatus = types.AccountAccessStatus;
 
 pub const Context = union(enum) {
     byte: u8,

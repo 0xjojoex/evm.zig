@@ -5,7 +5,7 @@
 evm.zig is the execution engine as a library: hand it state and a transaction,
 get back the result and a changeset. The engine is generic over a chain
 definition — Ethereum's forks, gas tables, and precompiles ship as one preset,
-and a custom EVM-family chain is just another Zig type. It passes all `66,668`
+and a custom EVM-family chain is another typed Definition value. It passes all `66,668`
 locked Ethereum Execution Spec state tests and benchmarks head-to-head with
 evmone and revm.
 
@@ -17,7 +17,7 @@ witness-in, roots-out state-transition function that runs as a zkVM guest.
 - **Embeddable** — pure Zig API, plus an EVMC-compatible C ABI
   (`evmc_create_evmz`).
 - **Programmable** — swap forks, gas tables, opcodes, and precompiles by
-  writing a definition type, not by forking the interpreter.
+  composing a definition value, not by forking the interpreter.
 - **Fast** — tail-call fast lane plus pooled executor; competitive on ERC20
   across arm64 and x86-64, leading SSTORE and snailtracer rows while publishing
   the losing rows against evmone/revm.
@@ -115,7 +115,9 @@ const MyVM = evmz.Vm(MyRevision, MyChainDefinition, .{});
 
 The returned type carries its matching `Protocol`, `Executor`, `Interpreter`,
 `Transaction`, `TxResult`, and `TxStatus` types. Lowercase modules such as
-`evmz.executor` remain available for low-level generic work.
+`evmz.execution` and `evmz.executor` remain available for low-level work.
+Representation-changing families can build a typed facade over those APIs;
+[`examples/op-deposit.zig`](examples/op-deposit.zig) is a compact example.
 
 `evmz.protocol.assertValidDefinition` reports exactly what a definition must
 provide, and `examples/custom-fork/` is a working downstream-style template.

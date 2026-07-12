@@ -18,8 +18,8 @@ const EthereumFinalizer = struct {
     pub fn selfDestructFinalization(
         self: @This(),
         created_in_transaction: bool,
-    ) evmz.protocol.interface.SelfDestructFinalization {
-        return evmz.Evm.Protocol.SelfDestruct.selfDestructFinalization(self.revision, created_in_transaction);
+    ) evmz.protocol.SelfDestructFinalization {
+        return evmz.Evm.Protocol.self_destruct.selfDestructFinalization(self.revision, created_in_transaction);
     }
 };
 
@@ -672,7 +672,7 @@ test "bounded state resources report deleted account capacity exhaustion" {
     _ = try overlay.getOrCreateAccount(address);
     try overlay.markSelfdestructed(address);
     const Finalizer = struct {
-        pub fn selfDestructFinalization(_: @This(), created_in_transaction: bool) evmz.protocol.interface.SelfDestructFinalization {
+        pub fn selfDestructFinalization(_: @This(), created_in_transaction: bool) evmz.protocol.SelfDestructFinalization {
             return evmz.eth.system.SelfDestruct.selfDestructFinalization(.london, created_in_transaction);
         }
     };
@@ -775,6 +775,17 @@ test "journal checkpoint removes newly created account and markers" {
     try std.testing.expect(!overlay.selfdestructed_accounts.contains(address));
 }
 
+test "balance credit rejects overflow without changing state" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xcafe);
+    try overlay.setBalance(address, std.math.maxInt(u256));
+
+    try std.testing.expectError(error.BalanceOverflow, overlay.addBalance(address, 1));
+    try std.testing.expectEqual(std.math.maxInt(u256), try overlay.getBalance(address));
+}
+
 test "journal checkpoint restores deleted-account marker on revived account" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -858,7 +869,7 @@ test "selfdestruct finalization policy comes from comptime protocol" {
         pub fn selfDestructFinalization(
             self: @This(),
             created_in_transaction: bool,
-        ) evmz.protocol.interface.SelfDestructFinalization {
+        ) evmz.protocol.SelfDestructFinalization {
             _ = self;
             _ = created_in_transaction;
             return .{

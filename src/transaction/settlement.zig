@@ -14,7 +14,10 @@ pub const FeeInput = struct {
     max_priority_fee_per_gas: ?u256 = null,
 };
 
-pub const Settlement = struct {
+/// Engine-owned Ethereum-style settlement plan used by Definition-backed VMs.
+/// Representation-changing families keep distinct fee plans in their STF and
+/// compose executor lifecycle/state primitives directly.
+pub const DefaultPlan = struct {
     revision_id: definition_support.RevisionId,
     payer: ?Address = null,
     gas_limit: u64,
@@ -23,17 +26,15 @@ pub const Settlement = struct {
     floor_gas: u64,
     gas_price: u256,
     priority_fee: u256,
-    coinbase: Address,
+    fee_recipient: Address,
     upfront_debit: u256 = 0,
     minimum_balance: u256 = 0,
 };
 
-pub const Plan = Settlement;
-
-pub const SettlementFees = struct {
+pub const DefaultFees = struct {
     gas_price: u256,
     priority_fee: u256,
-    coinbase: Address,
+    fee_recipient: Address,
     payer: ?Address = null,
     value: u256 = 0,
     blob_base_fee: u256 = 0,
@@ -106,13 +107,13 @@ pub const ResultGas = struct {
     block: BlockGas = .{},
 };
 
-/// Settlement output after execution gas, refund, and fee policy are applied.
-pub const SettlementCosts = struct {
+/// Engine-owned settlement costs for the Definition-backed transaction shell.
+pub const DefaultCosts = struct {
     gas: ResultGas,
     /// Amount returned to the payer for unused gas.
-    sender_refund: u256,
-    /// Priority-fee payment to the fee recipient.
-    coinbase_payment: u256,
+    payer_refund: u256,
+    /// Priority-fee payment routed by the default plan.
+    fee_payment: u256,
 };
 
 pub const Precharge = struct {
@@ -121,10 +122,17 @@ pub const Precharge = struct {
     minimum_balance: u256 = 0,
 };
 
+/// Type-bearing settlement values for the Definition-backed transaction shell.
+/// Definition value hooks live separately on `Protocol.settlement`.
+pub const Default = struct {
+    pub const Plan = DefaultPlan;
+    pub const Costs = DefaultCosts;
+};
+
 const EthereumSettlementProtocol = struct {
     pub const Revision = EthRevision;
 
-    pub const Settlement = struct {
+    pub const settlement = struct {
         pub fn baseFeeActive(revision: Revision) bool {
             return revision.isImpl(.london);
         }
@@ -145,7 +153,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         pub fn effectivePriorityFee(revision: Protocol.Revision, input: FeeInput) u256 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            if (!Protocol.Settlement.baseFeeActive(revision)) return input.gas_price;
+            if (!Protocol.settlement.baseFeeActive(revision)) return input.gas_price;
             if (input.max_fee_per_gas) |max_fee| {
                 const max_priority_fee = input.max_priority_fee_per_gas orelse 0;
                 if (max_fee <= input.base_fee) return 0;
@@ -155,7 +163,7 @@ pub fn For(comptime ProtocolType: type) type {
             return input.gas_price - input.base_fee;
         }
 
-        pub fn settlementFromGasPlan(revision: Protocol.Revision, gas_limit: u64, plan: tx_gas.GasPlan, fees: SettlementFees) Settlement {
+        pub fn defaultPlanFromGasPlan(revision: Protocol.Revision, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
             const upfront_debit = prechargeCost(Protocol, revision, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
             return .{
                 .revision_id = definition_support.revisionIdForProtocol(Protocol, revision),
@@ -166,51 +174,35 @@ pub fn For(comptime ProtocolType: type) type {
                 .floor_gas = plan.floor_gas,
                 .gas_price = fees.gas_price,
                 .priority_fee = fees.priority_fee,
-                .coinbase = fees.coinbase,
+                .fee_recipient = fees.fee_recipient,
                 .upfront_debit = upfront_debit,
                 .minimum_balance = std.math.add(u256, upfront_debit, fees.value) catch std.math.maxInt(u256),
             };
         }
 
-        pub fn planRevisionId(plan: Protocol.Settlement.Plan) ?definition_support.RevisionId {
-            if (comptime std.meta.hasFn(Protocol.Settlement, "revisionId")) {
-                return Protocol.Settlement.revisionId(plan);
-            }
-            if (comptime Protocol.Settlement.Plan == Settlement) return plan.revision_id;
-            return null;
+        pub fn planRevisionId(plan: DefaultPlan) definition_support.RevisionId {
+            return plan.revision_id;
         }
 
-        pub fn planPrecharge(plan: Protocol.Settlement.Plan) Precharge {
-            if (comptime std.meta.hasFn(Protocol.Settlement, "precharge")) {
-                return Protocol.Settlement.precharge(plan);
-            }
-            if (comptime Protocol.Settlement.Plan == Settlement) return .{
+        pub fn planPrecharge(plan: DefaultPlan) Precharge {
+            return .{
                 .payer = plan.payer,
                 .upfront_debit = plan.upfront_debit,
                 .minimum_balance = plan.minimum_balance,
             };
-            return .{};
         }
 
-        pub fn planFeeRecipient(plan: Protocol.Settlement.Plan) ?Address {
-            if (comptime std.meta.hasFn(Protocol.Settlement, "feeRecipient")) {
-                return Protocol.Settlement.feeRecipient(plan);
-            }
-            if (comptime Protocol.Settlement.Plan == Settlement) return plan.coinbase;
-            return null;
+        pub fn planCosts(plan: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
+            return defaultCosts(plan, result);
         }
 
-        pub fn planCosts(plan: Protocol.Settlement.Plan, result: ExecutionGasResult) !SettlementCosts {
-            if (comptime std.meta.hasFn(Protocol.Settlement, "costs")) {
-                return Protocol.Settlement.costs(Protocol, plan, result);
-            }
-            if (comptime Protocol.Settlement.Plan == Settlement) return settlementCosts(plan, result);
-            @compileError("Protocol.Settlement must provide costs(comptime Protocol, plan, result)");
+        pub fn planGas(costs: DefaultCosts) ResultGas {
+            return costs.gas;
         }
 
-        pub fn settlementCosts(settlement: Settlement, result: ExecutionGasResult) !SettlementCosts {
+        pub fn defaultCosts(settlement: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
             const revision = definition_support.decodeRevisionForProtocol(Protocol, settlement.revision_id);
-            const uses_state_gas_accounting = Protocol.Settlement.usesStateGasAccounting(revision);
+            const uses_state_gas_accounting = Protocol.settlement.usesStateGasAccounting(revision);
             const gas_left = positiveGas(result.gas_left);
             const gas_reservoir = if (uses_state_gas_accounting) positiveGas(result.gas_reservoir) else 0;
             // EIP-8037: `gas_left` is regular gas only; unused state reservoir is also
@@ -219,7 +211,7 @@ pub fn For(comptime ProtocolType: type) type {
                 settlement.gas_limit - @min(settlement.gas_limit, gas_left +| gas_reservoir)
             else
                 settlement.gas_limit - @min(settlement.gas_limit, gas_left);
-            const refund_cap_divisor = Protocol.Settlement.gasRefundCapDivisor(revision);
+            const refund_cap_divisor = Protocol.settlement.gasRefundCapDivisor(revision);
             const refund_cap = pre_refund_gas_used / refund_cap_divisor;
             const raw_refund = if (result.gas_refund > 0)
                 std.math.cast(u64, result.gas_refund) orelse std.math.maxInt(u64)
@@ -249,8 +241,8 @@ pub fn For(comptime ProtocolType: type) type {
                     .refunded = sender_refunded_gas,
                     .block = block_gas,
                 },
-                .sender_refund = try checkedGasCost(sender_refunded_gas, settlement.gas_price),
-                .coinbase_payment = try checkedGasCost(gas_used, settlement.priority_fee),
+                .payer_refund = try checkedGasCost(sender_refunded_gas, settlement.gas_price),
+                .fee_payment = try checkedGasCost(gas_used, settlement.priority_fee),
             };
         }
     };
@@ -265,7 +257,7 @@ fn prechargeCost(comptime Protocol: type, revision: Protocol.Revision, gas_limit
 
 fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = blob_schedule orelse Protocol.Transaction.blobSchedule(revision) orelse return null;
+    const schedule = blob_schedule orelse Protocol.transaction.blobSchedule(revision) orelse return null;
     return tx_blob.blobGasForSchedule(schedule, blob_count);
 }
 
@@ -316,7 +308,7 @@ test "effective priority fee uses comptime base fee policy" {
     const LegacyFeeProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Settlement = struct {
+        pub const settlement = struct {
             pub fn baseFeeActive(revision: Revision) bool {
                 _ = revision;
                 return false;
@@ -326,7 +318,7 @@ test "effective priority fee uses comptime base fee policy" {
     const BaseFeeProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Settlement = struct {
+        pub const settlement = struct {
             pub fn baseFeeActive(revision: Revision) bool {
                 _ = revision;
                 return true;
@@ -346,7 +338,7 @@ test "effective priority fee uses comptime base fee policy" {
 
 test "settlement costs cap gas refund by fork" {
     const coinbase = address.addr(0xbeef);
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.london),
         .gas_limit = 100,
         .intrinsic_gas = 20,
@@ -354,9 +346,9 @@ test "settlement costs cap gas refund by fork" {
         .floor_gas = 0,
         .gas_price = 5,
         .priority_fee = 2,
-        .coinbase = coinbase,
+        .fee_recipient = coinbase,
     };
-    const costs = try For(EthereumSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 40,
         .gas_refund = 100,
         .gas_reservoir = 0,
@@ -366,8 +358,8 @@ test "settlement costs cap gas refund by fork" {
     try std.testing.expectEqual(@as(u64, 48), costs.gas.used);
     try std.testing.expectEqual(@as(u64, 48), costs.gas.block.total);
     try std.testing.expectEqual(@as(u64, 52), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 260), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, 96), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, 260), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
 }
 
 test "settlement costs use comptime gas accounting policy" {
@@ -375,7 +367,7 @@ test "settlement costs use comptime gas accounting policy" {
     const CustomSettlementProtocol = struct {
         pub const Revision = CustomRevision;
 
-        pub const Settlement = struct {
+        pub const settlement = struct {
             pub fn gasRefundCapDivisor(revision: Revision) u64 {
                 _ = revision;
                 return 4;
@@ -387,7 +379,7 @@ test "settlement costs use comptime gas accounting policy" {
             }
         };
     };
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(CustomRevision.custom),
         .gas_limit = 100,
         .intrinsic_gas = 20,
@@ -395,9 +387,9 @@ test "settlement costs use comptime gas accounting policy" {
         .floor_gas = 30,
         .gas_price = 5,
         .priority_fee = 2,
-        .coinbase = address.addr(0xbeef),
+        .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(CustomSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(CustomSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 20,
         .gas_refund = 100,
         .gas_reservoir = 30,
@@ -409,14 +401,14 @@ test "settlement costs use comptime gas accounting policy" {
     try std.testing.expectEqual(@as(u64, 33), costs.gas.block.regular);
     try std.testing.expectEqual(@as(u64, 17), costs.gas.block.state);
     try std.testing.expectEqual(@as(u64, 62), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 310), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, 76), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, 310), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, 76), costs.fee_payment);
 }
 
 test "settlement costs enforce Prague calldata floor after refunds" {
     // EIP-7623 charges the calldata floor after execution gas refunds.
     const coinbase = address.addr(0xbeef);
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.prague),
         .gas_limit = 21_100,
         .intrinsic_gas = 21_016,
@@ -424,9 +416,9 @@ test "settlement costs enforce Prague calldata floor after refunds" {
         .floor_gas = 21_040,
         .gas_price = 7,
         .priority_fee = 0,
-        .coinbase = coinbase,
+        .fee_recipient = coinbase,
     };
-    const costs = try For(EthereumSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 84,
         .gas_refund = 0,
         .gas_reservoir = 0,
@@ -436,12 +428,12 @@ test "settlement costs enforce Prague calldata floor after refunds" {
     try std.testing.expectEqual(@as(u64, 21_040), costs.gas.used);
     try std.testing.expectEqual(@as(u64, 21_040), costs.gas.block.total);
     try std.testing.expectEqual(@as(u64, 60), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 420), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, 0), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, 420), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, 0), costs.fee_payment);
 }
 
 test "Amsterdam block gas accounting excludes refunds" {
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 100,
         .intrinsic_gas = 20,
@@ -449,9 +441,9 @@ test "Amsterdam block gas accounting excludes refunds" {
         .floor_gas = 0,
         .gas_price = 5,
         .priority_fee = 2,
-        .coinbase = address.addr(0xbeef),
+        .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 40,
         .gas_refund = 100,
         .gas_reservoir = 0,
@@ -461,13 +453,13 @@ test "Amsterdam block gas accounting excludes refunds" {
     try std.testing.expectEqual(@as(u64, 48), costs.gas.used);
     try std.testing.expectEqual(@as(u64, 60), costs.gas.block.total);
     try std.testing.expectEqual(@as(u64, 52), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 260), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, 96), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, 260), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
 }
 
 test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
     const eth_tx = @import("../eth/transaction.zig");
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 120_000_000,
         .intrinsic_gas = 21_000,
@@ -475,9 +467,9 @@ test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
         .floor_gas = 21_000,
         .gas_price = 10,
         .priority_fee = 3,
-        .coinbase = address.addr(0xbeef),
+        .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 0,
         .gas_refund = 0,
         .gas_reservoir = 120_000_000 - eth_tx.max_transaction_gas_limit,
@@ -487,13 +479,13 @@ test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
     try std.testing.expectEqual(eth_tx.max_transaction_gas_limit, costs.gas.used);
     try std.testing.expectEqual(eth_tx.max_transaction_gas_limit, costs.gas.block.total);
     try std.testing.expectEqual(@as(u64, 120_000_000 - eth_tx.max_transaction_gas_limit), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, (120_000_000 - eth_tx.max_transaction_gas_limit) * 10), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, eth_tx.max_transaction_gas_limit * 3), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, (120_000_000 - eth_tx.max_transaction_gas_limit) * 10), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, eth_tx.max_transaction_gas_limit * 3), costs.fee_payment);
 }
 
 test "Amsterdam failed create refills state gas before floor charge" {
     const eth_tx = @import("../eth/transaction.zig");
-    const settlement = Settlement{
+    const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 271_798,
         .intrinsic_gas = 271_798,
@@ -501,9 +493,9 @@ test "Amsterdam failed create refills state gas before floor charge" {
         .floor_gas = 271_776,
         .gas_price = 10,
         .priority_fee = 3,
-        .coinbase = address.addr(0xbeef),
+        .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).settlementCosts(settlement, .{
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
         .gas_left = 0,
         .gas_refund = 0,
         .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
@@ -513,6 +505,6 @@ test "Amsterdam failed create refills state gas before floor charge" {
     try std.testing.expectEqual(@as(u64, 271_776), costs.gas.used);
     try std.testing.expectEqual(@as(u64, 271_776), costs.gas.block.total);
     try std.testing.expectEqual(@as(u64, 22), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 220), costs.sender_refund);
-    try std.testing.expectEqual(@as(u256, 815_328), costs.coinbase_payment);
+    try std.testing.expectEqual(@as(u256, 220), costs.payer_refund);
+    try std.testing.expectEqual(@as(u256, 815_328), costs.fee_payment);
 }

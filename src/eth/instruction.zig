@@ -2,7 +2,7 @@ const std = @import("std");
 const opcode_info = @import("../opcode.zig");
 const tx = @import("transaction.zig");
 const execution = @import("../protocol/execution.zig");
-const interface = @import("../protocol/interface.zig");
+const types = @import("../protocol/types.zig");
 const instruction_mod = @import("../protocol/instruction.zig");
 const support = @import("../protocol/support.zig");
 const revision_mod = @import("revision.zig");
@@ -146,7 +146,7 @@ pub const Instruction = struct {
         return cold_account_access_gas;
     }
 
-    pub fn codeAccountAccessGas(revision: Revision, status: interface.AccountAccessStatus) ?i64 {
+    pub fn codeAccountAccessGas(revision: Revision, status: types.AccountAccessStatus) ?i64 {
         if (!revision.isImpl(.berlin)) return null;
         return switch (status) {
             .cold => if (revision.isImpl(.amsterdam))

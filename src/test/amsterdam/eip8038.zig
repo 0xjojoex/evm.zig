@@ -108,7 +108,7 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
     const scope = Executor.transactionScope(tx_context, .{});
     try executor.beginTransactionScope(scope, root);
     defer executor.closeTransaction();
-    const result = try executor.executeTransactionMessage(root, .legacy(100_000));
+    const result = try executor.executeTransactionRequest(transaction.executionRequest(scope.context, root, .legacy(100_000)));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
@@ -140,10 +140,10 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     try executor.beginTransactionScope(scope, root);
     const result = try executor.runTopLevelTransaction(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = 0,
             .priority_fee = 0,
-            .coinbase = tx_context.coinbase,
+            .fee_recipient = tx_context.coinbase,
             .payer = sender,
             .value = root.value(),
         }),
@@ -197,11 +197,15 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
         fn execute(
             ptr: ?*anyopaque,
             inner: *Executor,
-            engine_root: RootFrame,
-            gas: transaction.ExecutionGas,
+            request: evmz.execution.EvmExecutionRequest,
         ) !Interpreter.Result {
             _ = ptr;
-            _ = engine_root;
+            const gas = switch (request.message) {
+                inline else => |message| transaction.ExecutionGas{
+                    .regular_left = message.gas,
+                    .reservoir = message.gas_reservoir,
+                },
+            };
             try std.testing.expect(!inner.state.warm_accounts.contains(expected_target));
             return .{
                 .status = .success,
@@ -216,10 +220,10 @@ test "Amsterdam keeps delegated top-level transaction target cold" {
     try executor.beginTransactionScope(scope, root);
     const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
         .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.settlementFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
+        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
             .gas_price = tx_context.gas_price,
             .priority_fee = 0,
-            .coinbase = tx_context.coinbase,
+            .fee_recipient = tx_context.coinbase,
             .payer = sender,
             .value = root.value(),
         }),

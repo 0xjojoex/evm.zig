@@ -33,8 +33,12 @@ pub const Revision = enum(u8) {
 
     const Self = @This();
 
+    pub fn order(self: Self, other: Self) std.math.Order {
+        return std.math.order(@intFromEnum(self), @intFromEnum(other));
+    }
+
     pub fn isImpl(self: Self, revision: Self) bool {
-        return @intFromEnum(self) >= @intFromEnum(revision);
+        return self.order(revision) != .lt;
     }
 };
 
@@ -44,7 +48,8 @@ pub fn Patch(comptime R: type) type {
         revisions: ??[]const R = null,
         latest: ??R = null,
         stable: ??R = null,
-        isImpl: ?*const fn (R, R) bool = null,
+        order: ?*const fn (R, R) std.math.Order = null,
+        semantics: ?type = null,
     };
     definition.assertPatchMirrors(definition.RevisionConfig(R), PatchType);
     return PatchType;
@@ -58,6 +63,7 @@ pub const resolveAvailability = model.resolveAvailability;
 test "linear fork checks" {
     try std.testing.expectEqual(Revision.amsterdam, Revision.latest);
     try std.testing.expectEqual(Revision.osaka, Revision.stable);
+    try std.testing.expectEqual(std.math.Order.lt, Revision.cancun.order(.prague));
     try std.testing.expect(Revision.amsterdam.isImpl(.osaka));
     try std.testing.expect(Revision.osaka.isImpl(.prague));
     try std.testing.expect(Revision.prague.isImpl(.cancun));

@@ -5,29 +5,40 @@ const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 
-/// Header fields needed by block-start system contract hooks.
-pub const BlockHeader = evmz.protocol.interface.BlockStartContext;
-pub const BlockEndContext = evmz.protocol.interface.BlockEndContext;
+pub const BeforeBlockContext = evmz.protocol.BeforeBlockContext;
+pub const BeforeTransactionContext = evmz.protocol.BeforeTransactionContext;
+pub const AfterTransactionContext = evmz.protocol.AfterTransactionContext;
+pub const FinalizeBlockContext = evmz.protocol.FinalizeBlockContext;
 
-/// Applies block-start system contract calls:
+/// Applies before-block system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
 /// - EIP-2935 stores the previous block hash from Prague onward.
-pub fn applyBlockStart(executor: anytype, tx_context: Host.TxContext, header: BlockHeader) !void {
+pub fn applyBeforeBlock(executor: anytype, tx_context: Host.TxContext, context: BeforeBlockContext) !void {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.blockStartSystemCalls(executor.revision(), header);
-    for (calls.slice()) |call| {
-        try callSystemContract(executor, tx_context, call.sender, call.recipient, &call.input, call.gas);
-    }
+    const calls = Protocol.block.beforeBlock(executor.revision(), context);
+    try applySystemCalls(executor, tx_context, &calls);
 }
 
-pub fn applyBlockEnd(
+pub fn applyBeforeTransaction(executor: anytype, tx_context: Host.TxContext, context: BeforeTransactionContext) !void {
+    const Protocol = @TypeOf(executor.*).Protocol;
+    const calls = Protocol.block.beforeTransaction(executor.revision(), context);
+    try applySystemCalls(executor, tx_context, &calls);
+}
+
+pub fn applyAfterTransaction(executor: anytype, tx_context: Host.TxContext, context: AfterTransactionContext) !void {
+    const Protocol = @TypeOf(executor.*).Protocol;
+    const calls = Protocol.block.afterTransaction(executor.revision(), context);
+    try applySystemCalls(executor, tx_context, &calls);
+}
+
+pub fn applyFinalizeBlock(
     executor: anytype,
     tx_context: Host.TxContext,
     allocator: std.mem.Allocator,
-    context: BlockEndContext,
+    context: FinalizeBlockContext,
 ) ![]const []const u8 {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.blockEndSystemCalls(executor.revision(), context);
+    const calls = Protocol.block.finalizeBlock(executor.revision(), context);
 
     var out: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -35,23 +46,65 @@ pub fn applyBlockEnd(
         out.deinit(allocator);
     }
     try out.ensureTotalCapacity(allocator, calls.slice().len);
+    if (calls.slice().len == 0) return try out.toOwnedSlice(allocator);
 
-    for (calls.slice()) |call| {
+    var phase_start = try executor.snapshot();
+    defer phase_start.deinit(executor.allocator);
+    executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
+    var phase_open = true;
+    errdefer if (phase_open) {
+        executor.traceSnapshotLifecycle(.revert, &phase_start);
+        executor.restore(&phase_start) catch {};
+    };
+
+    for (calls.slice()) |*finalize_call| {
+        const call = &finalize_call.call;
         const request = try callRequestSystemContract(
             executor,
             tx_context,
             allocator,
             call.sender,
             call.recipient,
-            call.input,
+            call.input.slice(),
             call.gas,
-            call.request_type,
+            finalize_call.output_prefix,
             call.require_code,
         );
         if (request) |typed_request| out.appendAssumeCapacity(typed_request);
     }
 
-    return try out.toOwnedSlice(allocator);
+    const owned = try out.toOwnedSlice(allocator);
+    executor.traceSnapshotLifecycle(.commit, &phase_start);
+    phase_open = false;
+    return owned;
+}
+
+fn applySystemCalls(executor: anytype, tx_context: Host.TxContext, calls: *const evmz.protocol.BlockSystemCalls) !void {
+    if (calls.slice().len == 0) return;
+
+    var phase_start = try executor.snapshot();
+    defer phase_start.deinit(executor.allocator);
+    executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
+    var phase_open = true;
+    errdefer if (phase_open) {
+        executor.traceSnapshotLifecycle(.revert, &phase_start);
+        executor.restore(&phase_start) catch {};
+    };
+
+    for (calls.slice()) |*call| {
+        try callSystemContract(
+            executor,
+            tx_context,
+            call.sender,
+            call.recipient,
+            call.input.slice(),
+            call.gas,
+            call.require_code,
+        );
+    }
+
+    executor.traceSnapshotLifecycle(.commit, &phase_start);
+    phase_open = false;
 }
 
 fn callSystemContract(
@@ -61,8 +114,10 @@ fn callSystemContract(
     recipient: Address,
     input: []const u8,
     gas: u64,
+    require_code: bool,
 ) !void {
     const has_code = (try executor.getCode(recipient)).len != 0;
+    if (!has_code and require_code) return error.SystemCallFailed;
     const result = try executor.executeSystemCall(tx_context, sender, recipient, input, gas);
     if (has_code and result.status != .success) return error.SystemCallFailed;
 }
@@ -91,7 +146,7 @@ fn callRequestSystemContract(
     return request;
 }
 
-test "block start calls Prague and Cancun system contracts" {
+test "before block calls Prague and Cancun system contracts" {
     const ethereum = evmz.eth;
 
     const Executor = evmz.Executor;
@@ -120,7 +175,7 @@ test "block start calls Prague and Cancun system contracts" {
     beacon_root[31] = 0xbb;
 
     const tx_context = testTxContext();
-    const calls = evmz.Evm.Protocol.block.blockStartSystemCalls(.prague, .{
+    const calls = evmz.Evm.Protocol.block.beforeBlock(.prague, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,
@@ -130,7 +185,7 @@ test "block start calls Prague and Cancun system contracts" {
         try std.testing.expectEqualSlices(u8, &ethereum.system_address, &call.sender);
     }
 
-    try applyBlockStart(&executor, tx_context, .{
+    try applyBeforeBlock(&executor, tx_context, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,
@@ -150,20 +205,22 @@ test "block start calls Prague and Cancun system contracts" {
     )).status);
 }
 
-test "block end copies successful system contract output into typed requests" {
+test "finalize block copies successful system contract output into typed requests" {
     const ethereum = evmz.eth;
 
     const RequestBlock = struct {
         const recipient = evmz.addr(0x7002);
 
-        pub fn blockEndSystemCalls(revision: ethereum.Revision, _: BlockEndContext) evmz.protocol.interface.BlockEndSystemCalls {
-            var calls = evmz.protocol.interface.BlockEndSystemCalls{};
+        pub fn finalizeBlock(revision: ethereum.Revision, _: FinalizeBlockContext) evmz.protocol.FinalizeSystemCalls {
+            var calls = evmz.protocol.FinalizeSystemCalls{};
             if (revision.isImpl(.prague)) {
                 calls.append(.{
-                    .sender = ethereum.system_address,
-                    .recipient = recipient,
-                    .gas = ethereum.system_call_gas,
-                    .request_type = 0x01,
+                    .call = .{
+                        .sender = ethereum.system_address,
+                        .recipient = recipient,
+                        .gas = ethereum.system_call_gas,
+                    },
+                    .output_prefix = 0x01,
                 });
             }
             return calls;
@@ -171,7 +228,7 @@ test "block end copies successful system contract output into typed requests" {
     };
 
     const RequestProtocol = evmz.protocol.Protocol(evmz.eth.define(.{
-        .block = .{ .blockEndSystemCalls = RequestBlock.blockEndSystemCalls },
+        .block = .{ .finalizeBlock = RequestBlock.finalizeBlock },
     }), .all);
     const Executor = evmz.executor.Executor(RequestProtocol);
     var executor = Executor.init(std.testing.allocator, .{
@@ -189,9 +246,13 @@ test "block end copies successful system contract output into typed requests" {
     };
     try executor.state.setCode(RequestBlock.recipient, &request_code);
 
-    const requests = try applyBlockEnd(&executor, testTxContext(), std.testing.allocator, .{
+    const requests = try applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
     });
     defer {
         for (requests) |request| std.testing.allocator.free(request);
@@ -202,19 +263,21 @@ test "block end copies successful system contract output into typed requests" {
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0xaa, 0xbb }, requests[0]);
 }
 
-test "block end rejects missing required system contract code" {
+test "finalize block rejects missing required system contract code" {
     const ethereum = evmz.eth;
 
     const RequiredBlock = struct {
-        pub fn blockEndSystemCalls(revision: ethereum.Revision, _: BlockEndContext) evmz.protocol.interface.BlockEndSystemCalls {
-            var calls = evmz.protocol.interface.BlockEndSystemCalls{};
+        pub fn finalizeBlock(revision: ethereum.Revision, _: FinalizeBlockContext) evmz.protocol.FinalizeSystemCalls {
+            var calls = evmz.protocol.FinalizeSystemCalls{};
             if (revision.isImpl(.prague)) {
                 calls.append(.{
-                    .sender = ethereum.system_address,
-                    .recipient = evmz.addr(0x7002),
-                    .gas = ethereum.system_call_gas,
-                    .request_type = 0x01,
-                    .require_code = true,
+                    .call = .{
+                        .sender = ethereum.system_address,
+                        .recipient = evmz.addr(0x7002),
+                        .gas = ethereum.system_call_gas,
+                        .require_code = true,
+                    },
+                    .output_prefix = 0x01,
                 });
             }
             return calls;
@@ -222,7 +285,7 @@ test "block end rejects missing required system contract code" {
     };
 
     const RequiredProtocol = evmz.protocol.Protocol(evmz.eth.define(.{
-        .block = .{ .blockEndSystemCalls = RequiredBlock.blockEndSystemCalls },
+        .block = .{ .finalizeBlock = RequiredBlock.finalizeBlock },
     }), .all);
     const Executor = evmz.executor.Executor(RequiredProtocol);
     var executor = Executor.init(std.testing.allocator, .{
@@ -230,9 +293,13 @@ test "block end rejects missing required system contract code" {
     });
     defer executor.deinit();
 
-    try std.testing.expectError(error.SystemCallFailed, applyBlockEnd(&executor, testTxContext(), std.testing.allocator, .{
+    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
     }));
 }
 

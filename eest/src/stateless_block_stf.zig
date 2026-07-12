@@ -438,7 +438,7 @@ fn blobBaseFee(
     excess_blob_gas: ?u256,
 ) !u256 {
     if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse evmz.eth.Protocol.Transaction.blobSchedule(revision) orelse return 0;
+    const schedule = blob_schedule orelse evmz.eth.Protocol.transaction.blobSchedule(revision) orelse return 0;
     return evmz.transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas orelse 0) orelse error.BlobGasOverflow;
 }
 

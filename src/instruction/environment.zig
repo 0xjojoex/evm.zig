@@ -3,7 +3,7 @@ const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
 const CallFrame = Interpreter.CallFrame;
 const Host = evmz.Host;
-const AccountAccessStatus = evmz.protocol.interface.AccountAccessStatus;
+const AccountAccessStatus = evmz.protocol.AccountAccessStatus;
 
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {

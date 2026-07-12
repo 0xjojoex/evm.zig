@@ -5,8 +5,8 @@ const Host = evmz.Host;
 const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
-const AccountAccessStatus = evmz.protocol.interface.AccountAccessStatus;
-const DefinitionStorageStatus = evmz.protocol.interface.StorageStatus;
+const AccountAccessStatus = evmz.protocol.AccountAccessStatus;
+const DefinitionStorageStatus = evmz.protocol.StorageStatus;
 
 fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
     return switch (status) {
@@ -31,16 +31,16 @@ fn storageStatus(status: Host.StorageStatus) DefinitionStorageStatus {
 
 test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
     const storage = evmz.eth.system.Storage;
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 200, .refund = 4800 }, storage.sstoreGas(.constantinople, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 5000, .refund = 0 }, storage.sstoreGas(.petersburg, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 800, .refund = 4200 }, storage.sstoreGas(.istanbul, .modified_restored));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 200, .refund = 4800 }, storage.sstoreGas(.constantinople, .modified_restored));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 5000, .refund = 0 }, storage.sstoreGas(.petersburg, .modified_restored));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 800, .refund = 4200 }, storage.sstoreGas(.istanbul, .modified_restored));
 }
 
 test "Amsterdam SSTORE separates access and write gas from state gas" {
     const storage = evmz.eth.system.Storage;
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.amsterdam, .added));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.amsterdam, .added_deleted));
-    try std.testing.expectEqual(evmz.protocol.interface.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.amsterdam, .deleted_restored));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.amsterdam, .added));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.amsterdam, .added_deleted));
+    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.amsterdam, .deleted_restored));
 }
 
 pub fn For(comptime ProtocolType: type) type {
@@ -67,29 +67,29 @@ pub fn For(comptime ProtocolType: type) type {
             const host = frame.host;
             const revision = Self.frameRevision(frame);
 
-            if (Protocol.Storage.sstoreMinimumGas(revision)) |minimum_gas| {
+            if (Protocol.storage.sstoreMinimumGas(revision)) |minimum_gas| {
                 if (frame.gas_left <= minimum_gas) {
                     frame.failWithStatus(.out_of_gas);
                     return;
                 }
             }
 
-            if (Protocol.Storage.sstoreStorageAccessGas(revision, .warm) != null) {
+            if (Protocol.storage.sstoreStorageAccessGas(revision, .warm) != null) {
                 const access_status = accountAccessStatus(try host.accessStorage(recipient, key));
-                const access_gas = Protocol.Storage.sstoreStorageAccessGas(revision, access_status) orelse 0;
+                const access_gas = Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0;
                 frame.trackGas(access_gas);
                 if (frame.status != .running) return;
             }
 
             const status = storageStatus(try host.setStorage(recipient, key, value));
 
-            const cost = Protocol.Storage.sstoreGas(revision, status);
+            const cost = Protocol.storage.sstoreGas(revision, status);
 
             frame.trackGas(cost.cost);
             if (frame.status != .running) return;
             frame.gas_refund += cost.refund;
 
-            const state_gas = Protocol.Storage.sstoreStateGas(revision, status);
+            const state_gas = Protocol.storage.sstoreStateGas(revision, status);
             frame.trackStateGas(state_gas.charge);
             frame.refillStateGas(state_gas.refund);
         }
@@ -105,7 +105,7 @@ pub fn For(comptime ProtocolType: type) type {
             const recipient = frame.msg.recipient;
             const revision = Self.frameRevision(frame);
 
-            if (Protocol.Storage.sloadColdStorageAccessGas(revision)) |cold_storage_access_gas| {
+            if (Protocol.storage.sloadColdStorageAccessGas(revision)) |cold_storage_access_gas| {
                 if (try host.accessStorage(recipient, key) == .cold) {
                     frame.trackGas(cold_storage_access_gas);
                     if (frame.status != .running) return null;
@@ -145,7 +145,7 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
     const CustomProtocol = struct {
         pub const Revision = evmz.eth.Revision;
 
-        pub const Storage = struct {
+        pub const storage = struct {
             pub fn sloadColdStorageAccessGas(revision: evmz.eth.Revision) ?i64 {
                 _ = revision;
                 return 11;
@@ -181,7 +181,7 @@ test "SSTORE gas and state gas come from comptime protocol" {
     const CustomProtocol = struct {
         pub const Revision = evmz.eth.Revision;
 
-        pub const Storage = struct {
+        pub const storage = struct {
             pub fn sstoreMinimumGas(revision: evmz.eth.Revision) ?i64 {
                 _ = revision;
                 return null;
@@ -193,13 +193,13 @@ test "SSTORE gas and state gas come from comptime protocol" {
                 return null;
             }
 
-            pub fn sstoreGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.interface.StorageGas {
+            pub fn sstoreGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.StorageGas {
                 _ = revision;
                 _ = status;
                 return .{ .cost = 7, .refund = 3 };
             }
 
-            pub fn sstoreStateGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.interface.StorageStateGas {
+            pub fn sstoreStateGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.StorageStateGas {
                 _ = revision;
                 _ = status;
                 return .{ .charge = 5 };
