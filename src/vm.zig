@@ -921,6 +921,57 @@ test "Vm initializes and exposes empty changeset" {
     try std.testing.expectEqual(@as(usize, 0), diff.account_updates.items.len);
 }
 
+test "Vm account code remains overlay-owned and traced with a prepared cache entry" {
+    const contract = addr(0xc0de);
+    const code = [_]u8{ 0x60, 0x00 };
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var account = try memory.getOrCreateAccount(contract);
+    try account.setCode(&code);
+
+    const Recorder = struct {
+        reads: usize = 0,
+        last: evmz.trace.CodeRead = undefined,
+
+        fn sink(self: *@This()) evmz.trace.Sink {
+            return evmz.trace.Sink.init(self, .{
+                .state_read = evmz.trace.StateReadKinds.initMany(&.{.code}),
+            }, &.{ .stateRead = stateRead });
+        }
+
+        fn stateRead(ptr: *anyopaque, event: evmz.trace.StateRead) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.last = switch (event) {
+                .code => |payload| payload,
+                else => unreachable,
+            };
+            self.reads += 1;
+        }
+    };
+    var recorder = Recorder{};
+    var sink = recorder.sink();
+    var vm = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+        .state_reader = memory.reader(),
+        .trace_sink = &sink,
+    });
+    defer vm.deinit();
+
+    const code_hash = evmz.mpt.codeHash(&code);
+    const prepared = try vm.executor.prepared_code_cache.getOrPrepare(code_hash, &code);
+    const view = (try vm.getAccount(contract)).?;
+
+    try std.testing.expect(view.code.ptr != prepared.bytes.ptr);
+    try std.testing.expectEqualSlices(u8, &code, view.code);
+    try std.testing.expectEqual(@as(usize, 1), recorder.reads);
+    try std.testing.expectEqualSlices(u8, &contract, &recorder.last.address);
+    try std.testing.expectEqual(code.len, recorder.last.size);
+
+    try vm.executor.prepared_code_cache.clearRetainingCapacity(vm.executor.config);
+    try std.testing.expectEqualSlices(u8, &code, view.code);
+}
+
 test "Vm executor runs low-level standalone call" {
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);

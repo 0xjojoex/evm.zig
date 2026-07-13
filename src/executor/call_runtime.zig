@@ -107,7 +107,8 @@ pub fn For(comptime Executor: type) type {
             }
 
             fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, code_address: Address) !void {
-                if (try self.executor.preparedCode(code_address)) |bytecode| {
+                const execution_code = try resolveExecutionCode(self.executor, code_address);
+                if (execution_code.prepared) |bytecode| {
                     var frame = try acquireRawFrame(
                         self.executor,
                         self.executor.allocator,
@@ -128,7 +129,7 @@ pub fn For(comptime Executor: type) type {
                 var scratch = try callScratch(self.executor, msg.depth);
                 errdefer scratch.deinit();
 
-                const source = try self.executor.getCode(code_address);
+                const source = execution_code.bytes;
                 const needs_action_loop = Bytecode.needsActionLoop(source);
                 const use_zero_padded_raw = !needs_action_loop and
                     self.executor.trace_sink == null and
@@ -432,7 +433,8 @@ pub fn For(comptime Executor: type) type {
                 execution_gas.regular_left -= access_cost;
             }
 
-            var result = if (try self.preparedCode(resolved.address)) |bytecode|
+            const execution_code = try resolveExecutionCode(self, resolved.address);
+            var result = if (execution_code.prepared) |bytecode|
                 try executePreparedCallTransaction(self, .{
                     .bytecode = bytecode,
                     .sender = sender,
@@ -445,7 +447,7 @@ pub fn For(comptime Executor: type) type {
             else blk: {
                 var scratch = try callScratch(self, 0);
                 defer scratch.deinit();
-                const code = try dupeCodeAlloc(self, scratch.allocator, resolved.address);
+                const code = try scratch.allocator.dupe(u8, execution_code.bytes);
                 var bytecode = try prepareBytecodeAlloc(self, scratch.allocator, code);
                 break :blk try executePreparedCallTransaction(self, .{
                     .bytecode = &bytecode,
@@ -579,6 +581,9 @@ pub fn For(comptime Executor: type) type {
             self: *Executor,
             options: executor_module.PreparedCallTransaction,
         ) !Interpreter.Result {
+            self.prepared_code_cache.beginExecution();
+            defer self.prepared_code_cache.endExecution();
+
             self.clearLastOutput();
             _ = try currentTxContext(self);
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
@@ -635,6 +640,9 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeCreate(self: *Executor, options: executor_module.Create) !executor_module.EvmResult {
+            self.prepared_code_cache.beginExecution();
+            defer self.prepared_code_cache.endExecution();
+
             self.clearLastOutput();
             _ = try currentTxContext(self);
             return executeCreateMessage(self, .{
@@ -653,6 +661,32 @@ pub fn For(comptime Executor: type) type {
             return Bytecode.initWithConfig(allocator, code, self.config);
         }
 
+        pub const ExecutionCode = struct {
+            bytes: []const u8,
+            prepared: ?*Bytecode,
+        };
+
+        /// Resolve canonical code first, then consult the executor-owned derived
+        /// cache. Materializing through Overlay on every lookup preserves witness
+        /// validation, borrowed-code ownership, and code-read tracing.
+        pub fn resolveExecutionCode(self: *Executor, address: Address) !ExecutionCode {
+            const code = try self.state.getCodeView(address);
+            if (code.bytes.len == 0) return .{ .bytes = code.bytes, .prepared = null };
+            if (self.prepared_code_cache.get(code.code_hash)) |bytecode| {
+                return .{ .bytes = code.bytes, .prepared = bytecode };
+            }
+            if (!self.prepared_code_admission) {
+                return .{ .bytes = code.bytes, .prepared = null };
+            }
+            const bytecode = self.prepared_code_cache.getOrPrepare(code.code_hash, code.bytes) catch |err| switch (err) {
+                // Cache admission is an optimization. If persistent allocation
+                // cannot grow, retain the existing transient preparation path.
+                error.OutOfMemory => return .{ .bytes = code.bytes, .prepared = null },
+                else => return err,
+            };
+            return .{ .bytes = code.bytes, .prepared = bytecode };
+        }
+
         pub fn dupeExecutionCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {
             const code = try self.getCode(address);
             if (eip7702.delegationTarget(code)) |target| {
@@ -666,6 +700,9 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeInterpreter(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.Result {
+            self.prepared_code_cache.beginExecution();
+            defer self.prepared_code_cache.endExecution();
+
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = depth;
             defer self.state.trace_depth = previous_depth;
@@ -673,6 +710,9 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeInterpreterUntilAction(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.RunResult {
+            self.prepared_code_cache.beginExecution();
+            defer self.prepared_code_cache.endExecution();
+
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = depth;
             defer self.state.trace_depth = previous_depth;
@@ -941,7 +981,7 @@ pub fn For(comptime Executor: type) type {
             _ = try self.getOrCreateAccount(msg.recipient);
         }
 
-        fn resolvedCodeAddress(self: *Executor, address: Address) !struct { address: Address, delegated: bool } {
+        pub fn resolvedCodeAddress(self: *Executor, address: Address) !struct { address: Address, delegated: bool } {
             const code = try self.getCode(address);
             if (eip7702.delegationTarget(code)) |target| {
                 return .{ .address = target, .delegated = true };
@@ -957,6 +997,9 @@ pub fn For(comptime Executor: type) type {
         /// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
         /// and create transactions enter `CallRuntime` through their executor entrypoints.
         pub fn resolveHostCall(self: *Executor, msg: Host.Message) !Host.Result {
+            self.prepared_code_cache.beginExecution();
+            defer self.prepared_code_cache.endExecution();
+
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = msg.depth;
             defer self.state.trace_depth = previous_depth;
@@ -976,21 +1019,39 @@ pub fn For(comptime Executor: type) type {
                         if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
                     }
 
+                    const execution_code = try resolveExecutionCode(self, child.code_address);
                     var host_iface = self.host();
-                    var scratch = try callScratch(self, msg.depth);
-                    defer scratch.deinit();
-                    const code = try dupeCodeAlloc(self, scratch.allocator, child.code_address);
-                    var frame = try acquireRawFrame(self, scratch.allocator, &host_iface, &msg, code, null);
-                    defer frame.deinit();
-                    var interpreter = frame.interpreter(Protocol);
-                    const result = try executeInterpreter(self, &interpreter, msg.depth);
+                    const result = if (execution_code.prepared) |bytecode| prepared: {
+                        var frame = try acquireRawFrame(
+                            self,
+                            self.allocator,
+                            &host_iface,
+                            &msg,
+                            bytecode.bytes,
+                            bytecode,
+                        );
+                        defer frame.deinit();
+                        var interpreter = frame.interpreter(Protocol);
+                        var stable = try executeInterpreter(self, &interpreter, msg.depth);
+                        stable.output_data = try self.setLastOutput(stable.output_data);
+                        break :prepared stable;
+                    } else raw: {
+                        var scratch = try callScratch(self, msg.depth);
+                        defer scratch.deinit();
+                        const code = try scratch.allocator.dupe(u8, execution_code.bytes);
+                        var frame = try acquireRawFrame(self, scratch.allocator, &host_iface, &msg, code, null);
+                        defer frame.deinit();
+                        var interpreter = frame.interpreter(Protocol);
+                        var stable = try executeInterpreter(self, &interpreter, msg.depth);
+                        stable.output_data = try self.setLastOutput(stable.output_data);
+                        break :raw stable;
+                    };
 
-                    const output = try self.setLastOutput(result.output_data);
                     try finishCallCheckpoint(self, child.checkpoint_state, result.status);
                     checkpoint_open = false;
                     break :blk Host.Result.fromCall(.{
                         .status = result.status,
-                        .output_data = output,
+                        .output_data = result.output_data,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
                         .gas_reservoir = result.gas_reservoir,
