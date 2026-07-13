@@ -7,7 +7,6 @@ const Bytecode = evmz.Bytecode;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const Journal = @import("../state/Journal.zig");
-const Opcode = evmz.Opcode;
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
@@ -103,16 +102,34 @@ pub fn For(comptime Executor: type) type {
                 try self.appendFrame(.{
                     .kind = .root_call,
                     .frame = frame,
-                    .needs_action_loop = codeNeedsActionLoop(bytecode.bytes),
+                    .needs_action_loop = bytecode.needs_action_loop,
                 });
             }
 
             fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, code_address: Address) !void {
+                if (try self.executor.preparedCode(code_address)) |bytecode| {
+                    var frame = try acquireRawFrame(
+                        self.executor,
+                        self.executor.allocator,
+                        &self.host_iface,
+                        &msg,
+                        bytecode.bytes,
+                        bytecode,
+                    );
+                    errdefer frame.deinit();
+                    try self.appendFrame(.{
+                        .kind = .{ .call = checkpoint_state },
+                        .frame = frame,
+                        .needs_action_loop = bytecode.needs_action_loop,
+                    });
+                    return;
+                }
+
                 var scratch = try callScratch(self.executor, msg.depth);
                 errdefer scratch.deinit();
 
                 const source = try self.executor.getCode(code_address);
-                const needs_action_loop = codeNeedsActionLoop(source);
+                const needs_action_loop = Bytecode.needsActionLoop(source);
                 const use_zero_padded_raw = !needs_action_loop and
                     self.executor.trace_sink == null and
                     scratch.allowsReadPadding();
@@ -173,7 +190,7 @@ pub fn For(comptime Executor: type) type {
                     .kind = .{ .create = child },
                     .frame = frame,
                     .scratch_depth = scratch.depth,
-                    .needs_action_loop = codeNeedsActionLoop(child.init_code),
+                    .needs_action_loop = Bytecode.needsActionLoop(child.init_code),
                 });
             }
 
@@ -415,20 +432,31 @@ pub fn For(comptime Executor: type) type {
                 execution_gas.regular_left -= access_cost;
             }
 
-            var scratch = try callScratch(self, 0);
-            defer scratch.deinit();
-            const code = try dupeCodeAlloc(self, scratch.allocator, resolved.address);
-            var bytecode = try prepareBytecodeAlloc(self, scratch.allocator, code);
-
-            var result = try executePreparedCallTransaction(self, .{
-                .bytecode = &bytecode,
-                .sender = sender,
-                .recipient = recipient,
-                .input = input,
-                .gas = execution_gas.regular_left,
-                .gas_reservoir = execution_gas.reservoir,
-                .value = value,
-            });
+            var result = if (try self.preparedCode(resolved.address)) |bytecode|
+                try executePreparedCallTransaction(self, .{
+                    .bytecode = bytecode,
+                    .sender = sender,
+                    .recipient = recipient,
+                    .input = input,
+                    .gas = execution_gas.regular_left,
+                    .gas_reservoir = execution_gas.reservoir,
+                    .value = value,
+                })
+            else blk: {
+                var scratch = try callScratch(self, 0);
+                defer scratch.deinit();
+                const code = try dupeCodeAlloc(self, scratch.allocator, resolved.address);
+                var bytecode = try prepareBytecodeAlloc(self, scratch.allocator, code);
+                break :blk try executePreparedCallTransaction(self, .{
+                    .bytecode = &bytecode,
+                    .sender = sender,
+                    .recipient = recipient,
+                    .input = input,
+                    .gas = execution_gas.regular_left,
+                    .gas_reservoir = execution_gas.reservoir,
+                    .value = value,
+                });
+            };
             finishTopFrameStateGas(&result, top_frame_state_gas);
             return result;
         }
@@ -768,28 +796,6 @@ pub fn For(comptime Executor: type) type {
             if (output_data.len != last.len) return false;
             if (output_data.len == 0) return true;
             return output_data.ptr == last.ptr;
-        }
-
-        fn codeNeedsActionLoop(code: []const u8) bool {
-            var pc: usize = 0;
-            while (pc < code.len) {
-                const opcode_byte = code[pc];
-                pc += 1;
-                if (isActionBoundaryOpcode(opcode_byte)) return true;
-                pc += @min(pushDataLen(opcode_byte), code.len - pc);
-            }
-            return false;
-        }
-
-        inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
-            const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
-            return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
-                opcode_byte == @intFromEnum(Opcode.STATICCALL);
-        }
-
-        inline fn pushDataLen(opcode_byte: u8) usize {
-            if (opcode_byte < @intFromEnum(Opcode.PUSH1) or opcode_byte > @intFromEnum(Opcode.PUSH32)) return 0;
-            return @as(usize, opcode_byte - @intFromEnum(Opcode.PUSH1)) + 1;
         }
 
         fn beginCall(self: *Executor, msg: Host.Message) !StartedCall {

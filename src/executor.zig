@@ -306,6 +306,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         precompile_runtime: ?execution_values.PrecompileRuntime = null,
         revision_id: RevisionId,
         config: evmz.ExecutionConfig,
+        prepared_code_provider: ?PreparedCodeProvider = null,
         trace_sink: ?*TraceSink = null,
         last_call_output: frame_io.ByteSlot,
 
@@ -368,6 +369,17 @@ pub fn Executor(comptime ProtocolType: type) type {
                 executor: *Self,
                 request: execution_values.EvmExecutionRequest,
             ) anyerror!Interpreter.Result,
+        };
+
+        /// Borrowed content-addressed cache of bytecode prepared outside
+        /// transaction execution.
+        ///
+        /// The provider owns every returned `Bytecode`, whose bytes must match
+        /// the requested code hash, and must outlive its executor use. Execution
+        /// falls back to the state reader when absent.
+        pub const PreparedCodeProvider = struct {
+            ptr: *anyopaque,
+            get: *const fn (ptr: *anyopaque, code_hash: [32]u8) ?*Bytecode,
         };
 
         /// Build a `TransactionScope` from a host tx-context plus optional access
@@ -476,6 +488,19 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.state.trace_sink = trace_sink;
         }
 
+        /// Install or remove a borrowed prepared-code cache.
+        pub fn setPreparedCodeProvider(self: *Self, provider: ?PreparedCodeProvider) void {
+            if (self.runtime_frames.items.len != 0) @panic("cannot replace prepared code provider with active frames");
+            if (self.checkpoint_top != 0) @panic("cannot replace prepared code provider while a checkpoint is open");
+            self.prepared_code_provider = provider;
+        }
+
+        pub fn preparedCode(self: *Self, address: Address) !?*Bytecode {
+            const provider = self.prepared_code_provider orelse return null;
+            const account = try self.state.getAccountOrLoad(address) orelse return null;
+            return provider.get(provider.ptr, account.code_hash);
+        }
+
         pub fn traceAccountAccess(self: *Self, account_address: Address, depth: u16) void {
             const sink = self.trace_sink orelse return;
             if (!sink.wantsAccountAccess()) return;
@@ -503,6 +528,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.precompile_runtime = options.precompile_runtime;
             self.revision_id = next_revision_id;
             self.config = options.config;
+            self.prepared_code_provider = null;
             self.setTraceSink(options.trace_sink);
             self.clearLastOutput();
         }
@@ -875,6 +901,7 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Read account code through the overlay/state-reader view.
         pub fn getCode(self: *Self, address: Address) ![]const u8 {
+            if (try self.preparedCode(address)) |bytecode| return bytecode.bytes;
             return self.state.getCode(address);
         }
 
@@ -1476,6 +1503,123 @@ test "executor executes prepared bytecode call transaction" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
+}
+
+test "executor reuses borrowed prepared code for root and child calls" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const target = evmz.addr(0xbeef);
+    const tx_context = testTxContext(sender, 100_000);
+    const contract_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH2, 0xbe,   0xef,   .GAS,   .CALL,
+        .STOP,
+    });
+    const target_code = evmz.t.bytecode(.{
+        .PUSH1, 0x2a,
+        .PUSH0, .SSTORE,
+        .STOP,
+    });
+
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+    });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.seedAccount(sender, sender_account);
+
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&contract_code);
+    try executor.state.seedAccount(contract, contract_account);
+
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&target_code);
+    try executor.state.seedAccount(target, target_account);
+
+    var contract_bytecode = try executor.prepareBytecode(&contract_code);
+    defer contract_bytecode.deinit(std.testing.allocator);
+    var target_bytecode = try executor.prepareBytecode(&target_code);
+    defer target_bytecode.deinit(std.testing.allocator);
+
+    const PreparedCodeCache = struct {
+        contract_hash: [32]u8,
+        contract_bytecode: *Bytecode,
+        target_hash: [32]u8,
+        target_bytecode: *Bytecode,
+        contract_hits: usize = 0,
+        target_hits: usize = 0,
+
+        fn get(ptr: *anyopaque, code_hash: [32]u8) ?*Bytecode {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (std.mem.eql(u8, &code_hash, &self.contract_hash)) {
+                self.contract_hits += 1;
+                return self.contract_bytecode;
+            }
+            if (std.mem.eql(u8, &code_hash, &self.target_hash)) {
+                self.target_hits += 1;
+                return self.target_bytecode;
+            }
+            return null;
+        }
+    };
+    var cache = PreparedCodeCache{
+        .contract_hash = evmz.crypto.keccak256(&contract_code),
+        .contract_bytecode = &contract_bytecode,
+        .target_hash = evmz.crypto.keccak256(&target_code),
+        .target_bytecode = &target_bytecode,
+    };
+    executor.setPreparedCodeProvider(.{ .ptr = &cache, .get = PreparedCodeCache.get });
+    defer executor.setPreparedCodeProvider(null);
+
+    try executor.beginTransaction(tx_context, sender, contract);
+    const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expect(cache.contract_hits > 0);
+    try std.testing.expect(cache.target_hits > 0);
+    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(target, 0));
+}
+
+test "prepared code lookup follows the current account code hash" {
+    const contract = evmz.addr(0xc0de);
+    const original_code = evmz.t.bytecode(.{ .PUSH0, .STOP });
+    const replacement_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .STOP });
+
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+    });
+    defer executor.deinit();
+
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&original_code);
+    try executor.state.seedAccount(contract, account);
+
+    var bytecode = try executor.prepareBytecode(&original_code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    const PreparedCodeCache = struct {
+        code_hash: [32]u8,
+        bytecode: *Bytecode,
+
+        fn get(ptr: *anyopaque, code_hash: [32]u8) ?*Bytecode {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (!std.mem.eql(u8, &code_hash, &self.code_hash)) return null;
+            return self.bytecode;
+        }
+    };
+    var cache = PreparedCodeCache{
+        .code_hash = evmz.crypto.keccak256(&original_code),
+        .bytecode = &bytecode,
+    };
+    executor.setPreparedCodeProvider(.{ .ptr = &cache, .get = PreparedCodeCache.get });
+    defer executor.setPreparedCodeProvider(null);
+
+    try std.testing.expect((try executor.preparedCode(contract)) != null);
+    try executor.state.setCode(contract, &replacement_code);
+    try std.testing.expect((try executor.preparedCode(contract)) == null);
+    try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
 }
 
 test "executor BLOCKHASH reads configured block hash source" {

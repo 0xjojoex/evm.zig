@@ -1,6 +1,7 @@
 const std = @import("std");
 const ExecutionConfig = @import("../ExecutionConfig.zig");
 const JumpDestMap = @import("JumpDestMap.zig");
+const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
 
 const Bytecode = @This();
@@ -31,11 +32,13 @@ pub const ZeroPaddedCode = struct {
 bytes: []u8,
 read_bytes: []u8,
 jumpdests: JumpDestMap,
+needs_action_loop: bool,
 
 pub const empty = Bytecode{
     .bytes = &.{},
     .read_bytes = &.{},
     .jumpdests = .empty,
+    .needs_action_loop = false,
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
@@ -50,11 +53,34 @@ pub fn initWithConfig(allocator: std.mem.Allocator, bytes: []const u8, config: E
     self.bytes = padded.bytes;
     self.read_bytes = padded.read_bytes;
     self.jumpdests = JumpDestMap.initWithStrategy(config.jumpDestStrategy());
+    self.needs_action_loop = needsActionLoop(self.bytes);
     if (config.buildsJumpDestMap()) {
         try self.jumpdests.analyze(allocator, self.bytes);
     }
 
     return self;
+}
+
+pub fn needsActionLoop(code: []const u8) bool {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_byte = code[pc];
+        pc += 1;
+        if (isActionBoundaryOpcode(opcode_byte)) return true;
+        pc += @min(pushDataLen(opcode_byte), code.len - pc);
+    }
+    return false;
+}
+
+inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
+    const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
+    return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
+        opcode_byte == @intFromEnum(Opcode.STATICCALL);
+}
+
+inline fn pushDataLen(opcode_byte: u8) usize {
+    if (opcode_byte < @intFromEnum(Opcode.PUSH1) or opcode_byte > @intFromEnum(Opcode.PUSH32)) return 0;
+    return @as(usize, opcode_byte - @intFromEnum(Opcode.PUSH1)) + 1;
 }
 
 pub fn deinit(self: *Bytecode, allocator: std.mem.Allocator) void {
@@ -75,6 +101,18 @@ test "bytecode can precompute jumpdest map" {
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expect(!try bytecode.isValidJumpDest(std.testing.allocator, 1));
     try std.testing.expect(try bytecode.isValidJumpDest(std.testing.allocator, 2));
+}
+
+test "bytecode caches action-loop classification while ignoring push data" {
+    const action_code = [_]u8{ @intFromEnum(Opcode.PUSH1), @intFromEnum(Opcode.CALL), @intFromEnum(Opcode.STATICCALL) };
+    var bytecode = try Bytecode.init(std.testing.allocator, &action_code);
+    defer bytecode.deinit(std.testing.allocator);
+    try std.testing.expect(bytecode.needs_action_loop);
+
+    const push_only = [_]u8{ @intFromEnum(Opcode.PUSH1), @intFromEnum(Opcode.CALL), @intFromEnum(Opcode.STOP) };
+    var data_bytecode = try Bytecode.init(std.testing.allocator, &push_only);
+    defer data_bytecode.deinit(std.testing.allocator);
+    try std.testing.expect(!data_bytecode.needs_action_loop);
 }
 
 test "bytecode can opt into SIMD jumpdest map" {
