@@ -4,6 +4,7 @@ This package owns the Ethereum Execution Spec Tests runners for `evmz`.
 
 ```sh
 scripts/fetch-eest-fixtures.sh
+EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
 zig build eest-scope
 zig build eest
 zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/path/to/test.json
@@ -15,6 +16,17 @@ The default state-test corpus comes from `eest.lock`, currently
 `tests-glamsterdam-devnet@v6.1.0` from `ethereum/execution-specs` for Amsterdam
 work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
 `fixtures/state_tests`.
+
+`EEST_TRACKS` limits extraction to named fixture directories. CI restores the
+pinned compressed archive from cache, verifies its lockfile SHA-256, and only
+materializes `state_tests` plus `blockchain_tests_sync`. Extracted fixtures are
+not cached because the state tree alone is roughly 1.5 GB.
+
+The `Execution spec tests` workflow has independent execution-fixture and
+consensus-SSZ jobs. The execution job runs the full sidecar tests, state corpus,
+and regular BlockSTF corpus with four workers. The SSZ job uses its separately
+pinned consensus-spec archives. zkEVM remains a separate future CI lane until
+its full-corpus baseline is a green required check.
 
 ## Consensus SSZ Fixtures
 
@@ -136,7 +148,7 @@ are diagnostic evidence, not a proof that either the fixture label or the
 normalized decoding is correct.
 
 ```sh
-EEST_PRUNE_OUT_OF_SCOPE=0 scripts/fetch-eest-fixtures.sh
+EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
 zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/blockchain_tests_sync
 
 scripts/fetch-eest-zkevm-fixtures.sh
@@ -144,11 +156,11 @@ zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.5.0/fixtu
 ```
 
 The broader Glamsterdam block corpus is still the golden regular source. In the
-locked fixture cache it is currently under `fixtures/blockchain_tests_sync`, and
-the default fetch prunes it. Preserve it for inspection with:
+locked fixture cache it is currently under `fixtures/blockchain_tests_sync`.
+Extract it alone with:
 
 ```sh
-EEST_PRUNE_OUT_OF_SCOPE=0 scripts/fetch-eest-fixtures.sh
+EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
 ```
 
 Those non-zkEVM fixtures do not carry `executionWitness`, so the stateless

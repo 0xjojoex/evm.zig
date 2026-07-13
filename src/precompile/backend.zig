@@ -105,6 +105,7 @@ const NativeBackend = struct {
     });
 
     var kzg_settings: ckzg.Settings = .{};
+    var kzg_settings_mutex: std.atomic.Mutex = .unlocked;
 
     fn ripemd160(input: []const u8, output: *[32]u8) Status {
         const digest = ripemd160Digest(input);
@@ -224,6 +225,10 @@ const NativeBackend = struct {
     }
 
     fn kzgSettings() !*const ckzg.Settings {
+        while (!kzg_settings_mutex.tryLock()) {
+            std.Thread.yield() catch std.atomic.spinLoopHint();
+        }
+        defer kzg_settings_mutex.unlock();
         if (!kzg_settings.loaded) {
             kzg_settings = try ckzg.Settings.loadTrustedSetup(
                 kzg_trusted_setup.g1_monomial_bytes,
@@ -250,6 +255,26 @@ const NativeBackend = struct {
         return std.crypto.ecc.P256.scalar.Scalar.fromBytes64(expanded, .big);
     }
 };
+
+test "native KZG settings initialize safely under contention" {
+    if (comptime !std.mem.eql(u8, backend_name, "native")) return error.SkipZigTest;
+
+    const Loader = struct {
+        fn run(failed: *std.atomic.Value(bool)) std.Io.Cancelable!void {
+            _ = NativeBackend.kzgSettings() catch {
+                failed.store(true, .release);
+                return;
+            };
+        }
+    };
+
+    var failed: std.atomic.Value(bool) = .init(false);
+    var group: std.Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    for (0..8) |_| try group.concurrent(std.testing.io, Loader.run, .{&failed});
+    try group.await(std.testing.io);
+    try std.testing.expect(!failed.load(.acquire));
+}
 
 const ZkvmBackend = struct {
     fn ripemd160(input: []const u8, output: *[32]u8) Status {

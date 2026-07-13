@@ -1,0 +1,124 @@
+name: Execution spec tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  execution-fixtures:
+    name: State tests and regular BlockSTF
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run EEST sidecar tests
+        run: zig build eest-test --summary all
+
+      - name: Restore execution fixture archive
+        uses: actions/cache@v6
+        with:
+          path: .eest/cache
+          key: eest-execution-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
+      - name: Fetch execution fixtures
+        working-directory: eest
+        env:
+          EEST_TRACKS: state_tests blockchain_tests_sync
+        run: scripts/fetch-eest-fixtures.sh
+
+      - name: Run state-test corpus
+        id: state_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          zig build -Doptimize=ReleaseFast eest --summary all -- --jobs 4 2>&1 | tee eest-state.log
+
+      - name: Run regular BlockSTF corpus
+        id: block_stf
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          zig build -Doptimize=ReleaseFast eest-block-stf --summary all -- --jobs 4 2>&1 | tee eest-block-stf.log
+
+      - name: Require execution fixture lanes
+        if: always()
+        env:
+          STATE_TESTS_OUTCOME: ${{ steps.state_tests.outcome }}
+          BLOCK_STF_OUTCOME: ${{ steps.block_stf.outcome }}
+        run: |
+          test "${STATE_TESTS_OUTCOME}" = success
+          test "${BLOCK_STF_OUTCOME}" = success
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eest-execution-logs
+          path: |
+            eest-state.log
+            eest-block-stf.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  consensus-ssz:
+    name: Consensus SSZ conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EVMZ_EEST_ROOT: ${{ github.workspace }}/.eest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Restore consensus fixture archives
+        uses: actions/cache@v6
+        with:
+          path: .eest/cache
+          key: eest-consensus-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
+      - name: Fetch consensus SSZ fixtures
+        working-directory: eest
+        run: scripts/fetch-consensus-ssz-fixtures.sh
+
+      - name: Run consensus SSZ corpus
+        run: |
+          set -o pipefail
+          zig build -Doptimize=ReleaseFast ssz-conformance --summary all -- --jobs 4 2>&1 | tee eest-ssz.log
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eest-ssz-log
+          path: eest-ssz.log
+          if-no-files-found: ignore
+          retention-days: 7
