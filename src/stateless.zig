@@ -10,7 +10,6 @@ pub const validate = validator.validate;
 pub const validateWithTrace = validator.validateWithTrace;
 pub const wire = @import("./stateless/wire.zig");
 pub const ere = @import("./stateless/ere.zig");
-pub const ssz = @import("./stateless/ssz.zig");
 pub const tx = @import("./stateless/tx.zig");
 
 test {
@@ -18,6 +17,5 @@ test {
     _ = validator;
     _ = wire;
     _ = ere;
-    _ = ssz;
     _ = tx;
 }

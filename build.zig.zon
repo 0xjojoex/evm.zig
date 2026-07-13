@@ -27,6 +27,7 @@
         "guest",
         "include",
         "LICENSE",
+        "pkg",
         "README.md",
         "src",
     },

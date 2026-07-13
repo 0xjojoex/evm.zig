@@ -4,13 +4,13 @@
 //! The two-byte schema id gates decoding; unknown ids are rejected.
 
 const std = @import("std");
-
+const ssz = @import("ssz");
+const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
 const EthTransaction = @import("../../eth/transaction.zig").Transaction;
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
 const mpt = @import("../../mpt.zig");
-const ssz = @import("../ssz.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const transaction = @import("../../transaction.zig");
@@ -38,6 +38,9 @@ const max_bytes_per_code = 1 << 16;
 const max_bytes_per_header = 1 << 10;
 
 pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Error || error{
+    InvalidBool,
+    InvalidListLength,
+    OffsetsAreNotMonotonic,
     MissingSchemaId,
     UnsupportedSchemaId,
     UnsupportedFork,
@@ -109,45 +112,16 @@ pub const ForkActivation = struct {
     block_number: ?u64 = null,
     timestamp: ?u64 = null,
 
-    pub fn encode(self: ForkActivation, allocator: std.mem.Allocator) Error![]u8 {
-        const block_number = try encodeOptionalU64List(allocator, self.block_number);
-        defer allocator.free(block_number);
-        const timestamp = try encodeOptionalU64List(allocator, self.timestamp);
-        defer allocator.free(timestamp);
-        return ssz.encodeContainer(allocator, 2, .{
-            .{ .variable = block_number },
-            .{ .variable = timestamp },
-        });
-    }
-
-    pub fn decode(bytes: []const u8) Error!ForkActivation {
-        const fields = try ssz.splitVariableFields(2, bytes);
-        return .{
-            .block_number = try decodeOptionalU64List(fields[0]),
-            .timestamp = try decodeOptionalU64List(fields[1]),
-        };
-    }
+    pub const Ssz = ssz.Container(@This(), .{
+        .block_number = ssz.OptionalList(u64),
+        .timestamp = ssz.OptionalList(u64),
+    });
 };
 
 pub const BlobSchedule = struct {
     target: u64,
     max: u64,
     base_fee_update_fraction: u64,
-
-    fn encodeInto(self: BlobSchedule, out: *[24]u8) void {
-        std.mem.writeInt(u64, out[0..8], self.target, .little);
-        std.mem.writeInt(u64, out[8..16], self.max, .little);
-        std.mem.writeInt(u64, out[16..24], self.base_fee_update_fraction, .little);
-    }
-
-    fn decode(bytes: []const u8) Error!BlobSchedule {
-        if (bytes.len != 24) return error.InvalidByteLength;
-        return .{
-            .target = try ssz.readU64(bytes[0..8]),
-            .max = try ssz.readU64(bytes[8..16]),
-            .base_fee_update_fraction = try ssz.readU64(bytes[16..24]),
-        };
-    }
 };
 
 pub const ForkConfig = struct {
@@ -155,60 +129,16 @@ pub const ForkConfig = struct {
     activation: ForkActivation,
     blob_schedule: ?BlobSchedule = null,
 
-    pub fn encode(self: ForkConfig, allocator: std.mem.Allocator) Error![]u8 {
-        var fork_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &fork_bytes, @intFromEnum(self.fork), .little);
-        const activation = try self.activation.encode(allocator);
-        defer allocator.free(activation);
-        const blob_schedule = try encodeBlobScheduleList(allocator, self.blob_schedule);
-        defer allocator.free(blob_schedule);
-        return ssz.encodeContainer(allocator, 3, .{
-            .{ .fixed = &fork_bytes },
-            .{ .variable = activation },
-            .{ .variable = blob_schedule },
-        });
-    }
-
-    pub fn decode(bytes: []const u8) Error!ForkConfig {
-        if (bytes.len < 16) return error.InvalidByteLength;
-        const activation_offset = readOffset(bytes[8..12]);
-        const blob_schedule_offset = readOffset(bytes[12..16]);
-        if (activation_offset != 16) return error.InvalidFirstOffset;
-        if (blob_schedule_offset < activation_offset) return error.OffsetsAreNotMonotonic;
-        if (blob_schedule_offset > bytes.len) return error.OffsetOutOfBounds;
-        return .{
-            .fork = try ProtocolFork.fromInt(try ssz.readU64(bytes[0..8])),
-            .activation = try ForkActivation.decode(bytes[activation_offset..blob_schedule_offset]),
-            .blob_schedule = try decodeBlobScheduleList(bytes[blob_schedule_offset..]),
-        };
-    }
+    pub const Ssz = ssz.Container(@This(), .{
+        .blob_schedule = ssz.OptionalList(BlobSchedule),
+    });
 };
 
 pub const ChainConfig = struct {
     chain_id: u64,
     active_fork: ForkConfig,
 
-    pub fn encode(self: ChainConfig, allocator: std.mem.Allocator) Error![]u8 {
-        var chain_id_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &chain_id_bytes, self.chain_id, .little);
-        const active_fork = try self.active_fork.encode(allocator);
-        defer allocator.free(active_fork);
-        return ssz.encodeContainer(allocator, 2, .{
-            .{ .fixed = &chain_id_bytes },
-            .{ .variable = active_fork },
-        });
-    }
-
-    pub fn decode(bytes: []const u8) Error!ChainConfig {
-        if (bytes.len < 12) return error.InvalidByteLength;
-        const active_fork_offset = readOffset(bytes[8..12]);
-        if (active_fork_offset != 12) return error.InvalidFirstOffset;
-        if (active_fork_offset > bytes.len) return error.OffsetOutOfBounds;
-        return .{
-            .chain_id = try ssz.readU64(bytes[0..8]),
-            .active_fork = try ForkConfig.decode(bytes[active_fork_offset..]),
-        };
-    }
+    pub const Ssz = ssz.Container(@This(), .{});
 };
 
 pub const ExecutionWitness = struct {
@@ -216,27 +146,22 @@ pub const ExecutionWitness = struct {
     codes: []const []const u8 = &.{},
     headers: []const []const u8 = &.{},
 
+    pub const Ssz = ssz.Container(@This(), .{
+        .state = ssz.ListOf(ssz.ByteList(max_bytes_per_witness_node), max_witness_nodes),
+        .codes = ssz.ListOf(ssz.ByteList(max_bytes_per_code), max_witness_codes),
+        .headers = ssz.ListOf(ssz.ByteList(max_bytes_per_header), max_witness_headers),
+    });
+
     pub fn encode(self: ExecutionWitness, allocator: std.mem.Allocator) Error![]u8 {
-        const state = try encodeBoundedByteListList(allocator, self.state, max_witness_nodes, max_bytes_per_witness_node);
-        defer allocator.free(state);
-        const codes = try encodeBoundedByteListList(allocator, self.codes, max_witness_codes, max_bytes_per_code);
-        defer allocator.free(codes);
-        const headers = try encodeBoundedByteListList(allocator, self.headers, max_witness_headers, max_bytes_per_header);
-        defer allocator.free(headers);
-        return ssz.encodeContainer(allocator, 3, .{
-            .{ .variable = state },
-            .{ .variable = codes },
-            .{ .variable = headers },
-        });
+        return encodeWire(Ssz, allocator, self);
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionWitness {
-        const fields = try ssz.splitVariableFields(3, bytes);
-        return .{
-            .state = try decodeBoundedByteListList(allocator, fields[0], max_witness_nodes, max_bytes_per_witness_node),
-            .codes = try decodeBoundedByteListList(allocator, fields[1], max_witness_codes, max_bytes_per_code),
-            .headers = try decodeBoundedByteListList(allocator, fields[2], max_witness_headers, max_bytes_per_header),
-        };
+        return decodeWire(Ssz, allocator, bytes);
+    }
+
+    pub fn deinit(self: *ExecutionWitness, allocator: std.mem.Allocator) void {
+        Ssz.deinit(allocator, self);
     }
 };
 
@@ -245,35 +170,6 @@ pub const Withdrawal = struct {
     validator_index: u64,
     address: address.Address,
     amount: u64,
-
-    const fixed_len = 44;
-
-    fn encodeInto(self: Withdrawal, out: *[fixed_len]u8) void {
-        std.mem.writeInt(u64, out[0..8], self.index, .little);
-        std.mem.writeInt(u64, out[8..16], self.validator_index, .little);
-        @memcpy(out[16..36], &self.address);
-        std.mem.writeInt(u64, out[36..44], self.amount, .little);
-    }
-
-    fn decode(bytes: []const u8) Error!Withdrawal {
-        if (bytes.len != fixed_len) return error.InvalidByteLength;
-        return .{
-            .index = try ssz.readU64(bytes[0..8]),
-            .validator_index = try ssz.readU64(bytes[8..16]),
-            .address = bytes[16..36].*,
-            .amount = try ssz.readU64(bytes[36..44]),
-        };
-    }
-
-    fn hashTreeRoot(self: Withdrawal, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            ssz.uint64Root(self.index),
-            ssz.uint64Root(self.validator_index),
-            ssz.fixedBytesRoot(&self.address),
-            ssz.uint64Root(self.amount),
-        };
-        return ssz.containerRoot(allocator, &roots);
-    }
 
     fn toMpt(self: Withdrawal) mpt.Withdrawal {
         return .{
@@ -290,39 +186,27 @@ pub const ExecutionRequests = struct {
     withdrawals: []const WithdrawalRequest = &.{},
     consolidations: []const ConsolidationRequest = &.{},
 
+    pub const Ssz = ssz.Container(@This(), .{
+        .deposits = ssz.List(DepositRequest, max_deposit_requests_per_payload),
+        .withdrawals = ssz.List(WithdrawalRequest, max_withdrawal_requests_per_payload),
+        .consolidations = ssz.List(ConsolidationRequest, max_consolidation_requests_per_payload),
+    });
+
     pub fn encode(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]u8 {
-        const deposits = try encodeFixedStructList(allocator, DepositRequest, DepositRequest.fixed_len, self.deposits);
-        defer allocator.free(deposits);
-        const withdrawals = try encodeFixedStructList(allocator, WithdrawalRequest, WithdrawalRequest.fixed_len, self.withdrawals);
-        defer allocator.free(withdrawals);
-        const consolidations = try encodeFixedStructList(allocator, ConsolidationRequest, ConsolidationRequest.fixed_len, self.consolidations);
-        defer allocator.free(consolidations);
-        return ssz.encodeContainer(allocator, 3, .{
-            .{ .variable = deposits },
-            .{ .variable = withdrawals },
-            .{ .variable = consolidations },
-        });
+        return encodeWire(Ssz, allocator, self);
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionRequests {
-        const fields = try ssz.splitVariableFields(3, bytes);
-        try validateBoundedFixedStructList(DepositRequest.fixed_len, fields[0], max_deposit_requests_per_payload);
-        try validateBoundedFixedStructList(WithdrawalRequest.fixed_len, fields[1], max_withdrawal_requests_per_payload);
-        try validateBoundedFixedStructList(ConsolidationRequest.fixed_len, fields[2], max_consolidation_requests_per_payload);
-        return .{
-            .deposits = try decodeBoundedFixedStructList(allocator, DepositRequest, DepositRequest.fixed_len, fields[0], max_deposit_requests_per_payload),
-            .withdrawals = try decodeBoundedFixedStructList(allocator, WithdrawalRequest, WithdrawalRequest.fixed_len, fields[1], max_withdrawal_requests_per_payload),
-            .consolidations = try decodeBoundedFixedStructList(allocator, ConsolidationRequest, ConsolidationRequest.fixed_len, fields[2], max_consolidation_requests_per_payload),
-        };
+        return decodeWire(Ssz, allocator, bytes);
+    }
+
+    pub fn deinit(self: *ExecutionRequests, allocator: std.mem.Allocator) void {
+        Ssz.deinit(allocator, self);
     }
 
     pub fn hashTreeRoot(self: ExecutionRequests, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            try fixedStructListRoot(allocator, DepositRequest, self.deposits, max_deposit_requests_per_payload),
-            try fixedStructListRoot(allocator, WithdrawalRequest, self.withdrawals, max_withdrawal_requests_per_payload),
-            try fixedStructListRoot(allocator, ConsolidationRequest, self.consolidations, max_consolidation_requests_per_payload),
-        };
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(Ssz, self);
     }
 
     fn typedOpaqueRequests(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]const []const u8 {
@@ -332,9 +216,9 @@ pub const ExecutionRequests = struct {
             for (out.items) |request| allocator.free(request);
             out.deinit(allocator);
         }
-        if (self.deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x00, DepositRequest, DepositRequest.fixed_len, self.deposits));
-        if (self.withdrawals.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x01, WithdrawalRequest, WithdrawalRequest.fixed_len, self.withdrawals));
-        if (self.consolidations.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x02, ConsolidationRequest, ConsolidationRequest.fixed_len, self.consolidations));
+        if (self.deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x00, DepositRequest, self.deposits));
+        if (self.withdrawals.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x01, WithdrawalRequest, self.withdrawals));
+        if (self.consolidations.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x02, ConsolidationRequest, self.consolidations));
         return out.toOwnedSlice(allocator);
     }
 };
@@ -345,102 +229,18 @@ pub const DepositRequest = struct {
     amount: u64,
     signature: [96]u8,
     index: u64,
-
-    const fixed_len = 192;
-
-    fn encodeInto(self: DepositRequest, out: *[fixed_len]u8) void {
-        @memcpy(out[0..48], &self.pubkey);
-        @memcpy(out[48..80], &self.withdrawal_credentials);
-        std.mem.writeInt(u64, out[80..88], self.amount, .little);
-        @memcpy(out[88..184], &self.signature);
-        std.mem.writeInt(u64, out[184..192], self.index, .little);
-    }
-
-    fn decode(bytes: []const u8) Error!DepositRequest {
-        if (bytes.len != fixed_len) return error.InvalidByteLength;
-        return .{
-            .pubkey = bytes[0..48].*,
-            .withdrawal_credentials = bytes[48..80].*,
-            .amount = try ssz.readU64(bytes[80..88]),
-            .signature = bytes[88..184].*,
-            .index = try ssz.readU64(bytes[184..192]),
-        };
-    }
-
-    fn hashTreeRoot(self: DepositRequest, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            try ssz.bytesVectorRoot(allocator, &self.pubkey),
-            self.withdrawal_credentials,
-            ssz.uint64Root(self.amount),
-            try ssz.bytesVectorRoot(allocator, &self.signature),
-            ssz.uint64Root(self.index),
-        };
-        return ssz.containerRoot(allocator, &roots);
-    }
 };
 
 pub const WithdrawalRequest = struct {
     source_address: address.Address,
     validator_pubkey: [48]u8,
     amount: u64,
-
-    const fixed_len = 76;
-
-    fn encodeInto(self: WithdrawalRequest, out: *[fixed_len]u8) void {
-        @memcpy(out[0..20], &self.source_address);
-        @memcpy(out[20..68], &self.validator_pubkey);
-        std.mem.writeInt(u64, out[68..76], self.amount, .little);
-    }
-
-    fn decode(bytes: []const u8) Error!WithdrawalRequest {
-        if (bytes.len != fixed_len) return error.InvalidByteLength;
-        return .{
-            .source_address = bytes[0..20].*,
-            .validator_pubkey = bytes[20..68].*,
-            .amount = try ssz.readU64(bytes[68..76]),
-        };
-    }
-
-    fn hashTreeRoot(self: WithdrawalRequest, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            ssz.fixedBytesRoot(&self.source_address),
-            try ssz.bytesVectorRoot(allocator, &self.validator_pubkey),
-            ssz.uint64Root(self.amount),
-        };
-        return ssz.containerRoot(allocator, &roots);
-    }
 };
 
 pub const ConsolidationRequest = struct {
     source_address: address.Address,
     source_pubkey: [48]u8,
     target_pubkey: [48]u8,
-
-    const fixed_len = 116;
-
-    fn encodeInto(self: ConsolidationRequest, out: *[fixed_len]u8) void {
-        @memcpy(out[0..20], &self.source_address);
-        @memcpy(out[20..68], &self.source_pubkey);
-        @memcpy(out[68..116], &self.target_pubkey);
-    }
-
-    fn decode(bytes: []const u8) Error!ConsolidationRequest {
-        if (bytes.len != fixed_len) return error.InvalidByteLength;
-        return .{
-            .source_address = bytes[0..20].*,
-            .source_pubkey = bytes[20..68].*,
-            .target_pubkey = bytes[68..116].*,
-        };
-    }
-
-    fn hashTreeRoot(self: ConsolidationRequest, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            ssz.fixedBytesRoot(&self.source_address),
-            try ssz.bytesVectorRoot(allocator, &self.source_pubkey),
-            try ssz.bytesVectorRoot(allocator, &self.target_pubkey),
-        };
-        return ssz.containerRoot(allocator, &roots);
-    }
 };
 
 const PayloadView = struct {
@@ -481,88 +281,27 @@ pub const ExecutionPayloadV1 = struct {
     block_hash: [32]u8,
     transactions: []const []const u8 = &.{},
 
-    const fixed_len = 508;
+    pub const Ssz = ssz.Container(@This(), .{
+        .extra_data = ssz.ByteList(max_extra_data_bytes),
+        .transactions = TransactionsSsz,
+    });
 
     pub fn encode(self: ExecutionPayloadV1, allocator: std.mem.Allocator) Error![]u8 {
         if (self.extra_data.len > 32) return error.ExtraDataTooLong;
-        var block_number: [8]u8 = undefined;
-        var gas_limit: [8]u8 = undefined;
-        var gas_used: [8]u8 = undefined;
-        var timestamp: [8]u8 = undefined;
-        std.mem.writeInt(u64, &block_number, self.block_number, .little);
-        std.mem.writeInt(u64, &gas_limit, self.gas_limit, .little);
-        std.mem.writeInt(u64, &gas_used, self.gas_used, .little);
-        std.mem.writeInt(u64, &timestamp, self.timestamp, .little);
-
-        const transactions = try encodeBoundedByteListList(allocator, self.transactions, max_transactions_per_payload, max_bytes_per_transaction);
-        defer allocator.free(transactions);
-        return ssz.encodeContainer(allocator, 14, .{
-            .{ .fixed = &self.parent_hash },
-            .{ .fixed = &self.fee_recipient },
-            .{ .fixed = &self.state_root },
-            .{ .fixed = &self.receipts_root },
-            .{ .fixed = &self.logs_bloom },
-            .{ .fixed = &self.prev_randao },
-            .{ .fixed = &block_number },
-            .{ .fixed = &gas_limit },
-            .{ .fixed = &gas_used },
-            .{ .fixed = &timestamp },
-            .{ .variable = self.extra_data },
-            .{ .fixed = &self.base_fee_per_gas },
-            .{ .fixed = &self.block_hash },
-            .{ .variable = transactions },
-        });
+        return encodeWire(Ssz, allocator, self);
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionPayloadV1 {
-        if (bytes.len < fixed_len) return error.InvalidByteLength;
-        const extra_data_offset = readOffset(bytes[436..440]);
-        const transactions_offset = readOffset(bytes[504..508]);
-        if (extra_data_offset != fixed_len) return error.InvalidFirstOffset;
-        if (transactions_offset < extra_data_offset) return error.OffsetsAreNotMonotonic;
-        if (transactions_offset > bytes.len) return error.OffsetOutOfBounds;
-        const extra_data = bytes[extra_data_offset..transactions_offset];
-        if (extra_data.len > 32) return error.ExtraDataTooLong;
+        return decodeWire(Ssz, allocator, bytes);
+    }
 
-        return .{
-            .parent_hash = bytes[0..32].*,
-            .fee_recipient = bytes[32..52].*,
-            .state_root = bytes[52..84].*,
-            .receipts_root = bytes[84..116].*,
-            .logs_bloom = bytes[116..372].*,
-            .prev_randao = bytes[372..404].*,
-            .block_number = try ssz.readU64(bytes[404..412]),
-            .gas_limit = try ssz.readU64(bytes[412..420]),
-            .gas_used = try ssz.readU64(bytes[420..428]),
-            .timestamp = try ssz.readU64(bytes[428..436]),
-            .extra_data = extra_data,
-            .base_fee_per_gas = bytes[440..472].*,
-            .block_hash = bytes[472..504].*,
-            .transactions = try decodeBoundedByteListList(allocator, bytes[transactions_offset..], max_transactions_per_payload, max_bytes_per_transaction),
-        };
+    pub fn deinit(self: *ExecutionPayloadV1, allocator: std.mem.Allocator) void {
+        Ssz.deinit(allocator, self);
     }
 
     pub fn hashTreeRoot(self: ExecutionPayloadV1, allocator: std.mem.Allocator) Error![32]u8 {
-        var field_roots: [13][32]u8 = undefined;
-        field_roots[0] = self.parent_hash;
-        field_roots[1] = ssz.fixedBytesRoot(&self.fee_recipient);
-        field_roots[2] = self.state_root;
-        field_roots[3] = self.receipts_root;
-        field_roots[4] = try ssz.bytesVectorRoot(allocator, &self.logs_bloom);
-        field_roots[5] = self.prev_randao;
-        field_roots[6] = ssz.uint64Root(self.block_number);
-        field_roots[7] = ssz.uint64Root(self.gas_limit);
-        field_roots[8] = ssz.uint64Root(self.gas_used);
-        field_roots[9] = ssz.uint64Root(self.timestamp);
-        field_roots[10] = try ssz.bytesListRootLimit(allocator, self.extra_data, max_extra_data_bytes);
-        field_roots[11] = self.base_fee_per_gas;
-        field_roots[12] = self.block_hash;
-
-        var roots = try allocator.alloc([32]u8, field_roots.len + 1);
-        defer allocator.free(roots);
-        @memcpy(roots[0..field_roots.len], &field_roots);
-        roots[13] = try byteListListRoot(allocator, self.transactions);
-        return ssz.containerRoot(allocator, roots);
+        _ = allocator;
+        return hashWire(Ssz, self);
     }
 
     fn view(self: ExecutionPayloadV1) PayloadView {
@@ -589,43 +328,23 @@ pub const ExecutionPayloadV2 = struct {
     v1: ExecutionPayloadV1,
     withdrawals: []const Withdrawal = &.{},
 
-    const fixed_len = 512;
-
     pub fn encode(self: ExecutionPayloadV2, allocator: std.mem.Allocator) Error![]u8 {
-        const transactions = try encodeBoundedByteListList(allocator, self.v1.transactions, max_transactions_per_payload, max_bytes_per_transaction);
-        defer allocator.free(transactions);
-        const withdrawals = try encodeFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, self.withdrawals);
-        defer allocator.free(withdrawals);
-        return encodePayloadContainer(allocator, self.v1, 15, .{
-            .{ .variable = self.v1.extra_data },
-            .{ .fixed = &self.v1.base_fee_per_gas },
-            .{ .fixed = &self.v1.block_hash },
-            .{ .variable = transactions },
-            .{ .variable = withdrawals },
-        });
+        if (self.v1.extra_data.len > 32) return error.ExtraDataTooLong;
+        return encodeWire(ExecutionPayloadV2Wire.Ssz, allocator, payloadV2Wire(self));
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionPayloadV2 {
-        if (bytes.len < fixed_len) return error.InvalidByteLength;
-        const extra_data_offset = readOffset(bytes[436..440]);
-        const transactions_offset = readOffset(bytes[504..508]);
-        const withdrawals_offset = readOffset(bytes[508..512]);
-        try validatePayloadOffsets(bytes.len, fixed_len, &.{ extra_data_offset, transactions_offset, withdrawals_offset });
-        try validateBoundedFixedStructList(Withdrawal.fixed_len, bytes[withdrawals_offset..], max_withdrawals_per_payload);
-        return .{
-            .v1 = try decodePayloadV1Fields(allocator, bytes, extra_data_offset, transactions_offset, withdrawals_offset),
-            .withdrawals = try decodeBoundedFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, bytes[withdrawals_offset..], max_withdrawals_per_payload),
-        };
+        return payloadV2FromWire(try decodeWire(ExecutionPayloadV2Wire.Ssz, allocator, bytes));
+    }
+
+    pub fn deinit(self: *ExecutionPayloadV2, allocator: std.mem.Allocator) void {
+        self.v1.deinit(allocator);
+        WithdrawalsSsz.deinit(allocator, &self.withdrawals);
     }
 
     pub fn hashTreeRoot(self: ExecutionPayloadV2, allocator: std.mem.Allocator) Error![32]u8 {
-        var roots = try payloadV1FieldRoots(allocator, self.v1);
-        roots[13] = try byteListListRoot(allocator, self.v1.transactions);
-        const all_roots = try allocator.alloc([32]u8, 15);
-        defer allocator.free(all_roots);
-        @memcpy(all_roots[0..14], &roots);
-        all_roots[14] = try fixedStructListRoot(allocator, Withdrawal, self.withdrawals, max_withdrawals_per_payload);
-        return ssz.containerRoot(allocator, all_roots);
+        _ = allocator;
+        return hashWire(ExecutionPayloadV2Wire.Ssz, payloadV2Wire(self));
     }
 
     fn view(self: ExecutionPayloadV2) PayloadView {
@@ -640,55 +359,22 @@ pub const ExecutionPayloadV3 = struct {
     blob_gas_used: u64,
     excess_blob_gas: u64,
 
-    const fixed_len = 528;
-
     pub fn encode(self: ExecutionPayloadV3, allocator: std.mem.Allocator) Error![]u8 {
-        var blob_gas_used: [8]u8 = undefined;
-        var excess_blob_gas: [8]u8 = undefined;
-        std.mem.writeInt(u64, &blob_gas_used, self.blob_gas_used, .little);
-        std.mem.writeInt(u64, &excess_blob_gas, self.excess_blob_gas, .little);
-        const transactions = try encodeBoundedByteListList(allocator, self.v2.v1.transactions, max_transactions_per_payload, max_bytes_per_transaction);
-        defer allocator.free(transactions);
-        const withdrawals = try encodeFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, self.v2.withdrawals);
-        defer allocator.free(withdrawals);
-        return encodePayloadContainer(allocator, self.v2.v1, 17, .{
-            .{ .variable = self.v2.v1.extra_data },
-            .{ .fixed = &self.v2.v1.base_fee_per_gas },
-            .{ .fixed = &self.v2.v1.block_hash },
-            .{ .variable = transactions },
-            .{ .variable = withdrawals },
-            .{ .fixed = &blob_gas_used },
-            .{ .fixed = &excess_blob_gas },
-        });
+        if (self.v2.v1.extra_data.len > 32) return error.ExtraDataTooLong;
+        return encodeWire(ExecutionPayloadV3Wire.Ssz, allocator, payloadV3Wire(self));
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionPayloadV3 {
-        if (bytes.len < fixed_len) return error.InvalidByteLength;
-        const extra_data_offset = readOffset(bytes[436..440]);
-        const transactions_offset = readOffset(bytes[504..508]);
-        const withdrawals_offset = readOffset(bytes[508..512]);
-        try validatePayloadOffsets(bytes.len, fixed_len, &.{ extra_data_offset, transactions_offset, withdrawals_offset });
-        try validateBoundedFixedStructList(Withdrawal.fixed_len, bytes[withdrawals_offset..], max_withdrawals_per_payload);
-        return .{
-            .v2 = .{
-                .v1 = try decodePayloadV1Fields(allocator, bytes, extra_data_offset, transactions_offset, withdrawals_offset),
-                .withdrawals = try decodeBoundedFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, bytes[withdrawals_offset..], max_withdrawals_per_payload),
-            },
-            .blob_gas_used = try ssz.readU64(bytes[512..520]),
-            .excess_blob_gas = try ssz.readU64(bytes[520..528]),
-        };
+        return payloadV3FromWire(try decodeWire(ExecutionPayloadV3Wire.Ssz, allocator, bytes));
+    }
+
+    pub fn deinit(self: *ExecutionPayloadV3, allocator: std.mem.Allocator) void {
+        self.v2.deinit(allocator);
     }
 
     pub fn hashTreeRoot(self: ExecutionPayloadV3, allocator: std.mem.Allocator) Error![32]u8 {
-        var v1_roots = try payloadV1FieldRoots(allocator, self.v2.v1);
-        v1_roots[13] = try byteListListRoot(allocator, self.v2.v1.transactions);
-        const roots = try allocator.alloc([32]u8, 17);
-        defer allocator.free(roots);
-        @memcpy(roots[0..14], &v1_roots);
-        roots[14] = try fixedStructListRoot(allocator, Withdrawal, self.v2.withdrawals, max_withdrawals_per_payload);
-        roots[15] = ssz.uint64Root(self.blob_gas_used);
-        roots[16] = ssz.uint64Root(self.excess_blob_gas);
-        return ssz.containerRoot(allocator, roots);
+        _ = allocator;
+        return hashWire(ExecutionPayloadV3Wire.Ssz, payloadV3Wire(self));
     }
 
     fn view(self: ExecutionPayloadV3) PayloadView {
@@ -704,66 +390,23 @@ pub const ExecutionPayloadV4 = struct {
     block_access_list: []const u8 = &.{},
     slot_number: u64,
 
-    const fixed_len = 540;
-
     pub fn encode(self: ExecutionPayloadV4, allocator: std.mem.Allocator) Error![]u8 {
-        var blob_gas_used: [8]u8 = undefined;
-        var excess_blob_gas: [8]u8 = undefined;
-        var slot_number: [8]u8 = undefined;
-        std.mem.writeInt(u64, &blob_gas_used, self.v3.blob_gas_used, .little);
-        std.mem.writeInt(u64, &excess_blob_gas, self.v3.excess_blob_gas, .little);
-        std.mem.writeInt(u64, &slot_number, self.slot_number, .little);
-        const transactions = try encodeBoundedByteListList(allocator, self.v3.v2.v1.transactions, max_transactions_per_payload, max_bytes_per_transaction);
-        defer allocator.free(transactions);
-        const withdrawals = try encodeFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, self.v3.v2.withdrawals);
-        defer allocator.free(withdrawals);
-        return encodePayloadContainer(allocator, self.v3.v2.v1, 19, .{
-            .{ .variable = self.v3.v2.v1.extra_data },
-            .{ .fixed = &self.v3.v2.v1.base_fee_per_gas },
-            .{ .fixed = &self.v3.v2.v1.block_hash },
-            .{ .variable = transactions },
-            .{ .variable = withdrawals },
-            .{ .fixed = &blob_gas_used },
-            .{ .fixed = &excess_blob_gas },
-            .{ .variable = self.block_access_list },
-            .{ .fixed = &slot_number },
-        });
+        if (self.v3.v2.v1.extra_data.len > 32) return error.ExtraDataTooLong;
+        return encodeWire(ExecutionPayloadV4Wire.Ssz, allocator, payloadV4Wire(self));
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!ExecutionPayloadV4 {
-        if (bytes.len < fixed_len) return error.InvalidByteLength;
-        const extra_data_offset = readOffset(bytes[436..440]);
-        const transactions_offset = readOffset(bytes[504..508]);
-        const withdrawals_offset = readOffset(bytes[508..512]);
-        const block_access_list_offset = readOffset(bytes[528..532]);
-        try validatePayloadOffsets(bytes.len, fixed_len, &.{ extra_data_offset, transactions_offset, withdrawals_offset, block_access_list_offset });
-        try validateBoundedFixedStructList(Withdrawal.fixed_len, bytes[withdrawals_offset..block_access_list_offset], max_withdrawals_per_payload);
-        return .{
-            .v3 = .{
-                .v2 = .{
-                    .v1 = try decodePayloadV1Fields(allocator, bytes, extra_data_offset, transactions_offset, withdrawals_offset),
-                    .withdrawals = try decodeBoundedFixedStructList(allocator, Withdrawal, Withdrawal.fixed_len, bytes[withdrawals_offset..block_access_list_offset], max_withdrawals_per_payload),
-                },
-                .blob_gas_used = try ssz.readU64(bytes[512..520]),
-                .excess_blob_gas = try ssz.readU64(bytes[520..528]),
-            },
-            .block_access_list = bytes[block_access_list_offset..],
-            .slot_number = try ssz.readU64(bytes[532..540]),
-        };
+        return payloadV4FromWire(try decodeWire(ExecutionPayloadV4Wire.Ssz, allocator, bytes));
+    }
+
+    pub fn deinit(self: *ExecutionPayloadV4, allocator: std.mem.Allocator) void {
+        self.v3.deinit(allocator);
+        BlockAccessListSsz.deinit(allocator, &self.block_access_list);
     }
 
     pub fn hashTreeRoot(self: ExecutionPayloadV4, allocator: std.mem.Allocator) Error![32]u8 {
-        var v1_roots = try payloadV1FieldRoots(allocator, self.v3.v2.v1);
-        v1_roots[13] = try byteListListRoot(allocator, self.v3.v2.v1.transactions);
-        const roots = try allocator.alloc([32]u8, 19);
-        defer allocator.free(roots);
-        @memcpy(roots[0..14], &v1_roots);
-        roots[14] = try fixedStructListRoot(allocator, Withdrawal, self.v3.v2.withdrawals, max_withdrawals_per_payload);
-        roots[15] = ssz.uint64Root(self.v3.blob_gas_used);
-        roots[16] = ssz.uint64Root(self.v3.excess_blob_gas);
-        roots[17] = try ssz.bytesListRootLimit(allocator, self.block_access_list, max_block_access_list_bytes);
-        roots[18] = ssz.uint64Root(self.slot_number);
-        return ssz.containerRoot(allocator, roots);
+        _ = allocator;
+        return hashWire(ExecutionPayloadV4Wire.Ssz, payloadV4Wire(self));
     }
 
     fn view(self: ExecutionPayloadV4) PayloadView {
@@ -778,20 +421,25 @@ pub const NewPayloadRequestBellatrix = struct {
     execution_payload: ExecutionPayloadV1,
 
     pub fn encode(self: NewPayloadRequestBellatrix, allocator: std.mem.Allocator) Error![]u8 {
-        const payload = try self.execution_payload.encode(allocator);
-        defer allocator.free(payload);
-        return ssz.encodeContainer(allocator, 1, .{.{ .variable = payload }});
+        return encodeWire(NewPayloadRequestBellatrixWire.Ssz, allocator, .{
+            .execution_payload = self.execution_payload,
+        });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestBellatrix {
-        const fields = try ssz.splitVariableFields(1, bytes);
-        return .{ .execution_payload = try ExecutionPayloadV1.decode(allocator, fields[0]) };
+        const value = try decodeWire(NewPayloadRequestBellatrixWire.Ssz, allocator, bytes);
+        return .{ .execution_payload = value.execution_payload };
+    }
+
+    pub fn deinit(self: *NewPayloadRequestBellatrix, allocator: std.mem.Allocator) void {
+        self.execution_payload.deinit(allocator);
     }
 
     pub fn hashTreeRoot(self: NewPayloadRequestBellatrix, allocator: std.mem.Allocator) Error![32]u8 {
-        const payload_root = try self.execution_payload.hashTreeRoot(allocator);
-        const roots = [_][32]u8{payload_root};
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(NewPayloadRequestBellatrixWire.Ssz, .{
+            .execution_payload = self.execution_payload,
+        });
     }
 };
 
@@ -799,20 +447,25 @@ pub const NewPayloadRequestCapella = struct {
     execution_payload: ExecutionPayloadV2,
 
     pub fn encode(self: NewPayloadRequestCapella, allocator: std.mem.Allocator) Error![]u8 {
-        const payload = try self.execution_payload.encode(allocator);
-        defer allocator.free(payload);
-        return ssz.encodeContainer(allocator, 1, .{.{ .variable = payload }});
+        return encodeWire(NewPayloadRequestCapellaWire.Ssz, allocator, .{
+            .execution_payload = payloadV2Wire(self.execution_payload),
+        });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestCapella {
-        const fields = try ssz.splitVariableFields(1, bytes);
-        return .{ .execution_payload = try ExecutionPayloadV2.decode(allocator, fields[0]) };
+        const value = try decodeWire(NewPayloadRequestCapellaWire.Ssz, allocator, bytes);
+        return .{ .execution_payload = payloadV2FromWire(value.execution_payload) };
+    }
+
+    pub fn deinit(self: *NewPayloadRequestCapella, allocator: std.mem.Allocator) void {
+        self.execution_payload.deinit(allocator);
     }
 
     pub fn hashTreeRoot(self: NewPayloadRequestCapella, allocator: std.mem.Allocator) Error![32]u8 {
-        const payload_root = try self.execution_payload.hashTreeRoot(allocator);
-        const roots = [_][32]u8{payload_root};
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(NewPayloadRequestCapellaWire.Ssz, .{
+            .execution_payload = payloadV2Wire(self.execution_payload),
+        });
     }
 };
 
@@ -822,38 +475,34 @@ pub const NewPayloadRequestDeneb = struct {
     parent_beacon_block_root: [32]u8,
 
     pub fn encode(self: NewPayloadRequestDeneb, allocator: std.mem.Allocator) Error![]u8 {
-        const payload = try self.execution_payload.encode(allocator);
-        defer allocator.free(payload);
-        const versioned_hashes = try ssz.encodeFixedList(allocator, 32, self.versioned_hashes);
-        defer allocator.free(versioned_hashes);
-        return ssz.encodeContainer(allocator, 3, .{
-            .{ .variable = payload },
-            .{ .variable = versioned_hashes },
-            .{ .fixed = &self.parent_beacon_block_root },
+        return encodeWire(NewPayloadRequestDenebWire.Ssz, allocator, .{
+            .execution_payload = payloadV3Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
         });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestDeneb {
-        if (bytes.len < 40) return error.InvalidByteLength;
-        const payload_offset = readOffset(bytes[0..4]);
-        const versioned_hashes_offset = readOffset(bytes[4..8]);
-        if (payload_offset != 40) return error.InvalidFirstOffset;
-        if (versioned_hashes_offset < payload_offset) return error.OffsetsAreNotMonotonic;
-        if (versioned_hashes_offset > bytes.len) return error.OffsetOutOfBounds;
+        const value = try decodeWire(NewPayloadRequestDenebWire.Ssz, allocator, bytes);
         return .{
-            .execution_payload = try ExecutionPayloadV3.decode(allocator, bytes[payload_offset..versioned_hashes_offset]),
-            .versioned_hashes = try decodeHashList(allocator, bytes[versioned_hashes_offset..]),
-            .parent_beacon_block_root = bytes[8..40].*,
+            .execution_payload = payloadV3FromWire(value.execution_payload),
+            .versioned_hashes = value.versioned_hashes,
+            .parent_beacon_block_root = value.parent_beacon_block_root,
         };
     }
 
+    pub fn deinit(self: *NewPayloadRequestDeneb, allocator: std.mem.Allocator) void {
+        self.execution_payload.deinit(allocator);
+        VersionedHashesSsz.deinit(allocator, &self.versioned_hashes);
+    }
+
     pub fn hashTreeRoot(self: NewPayloadRequestDeneb, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            try self.execution_payload.hashTreeRoot(allocator),
-            try hashListRoot(allocator, self.versioned_hashes),
-            self.parent_beacon_block_root,
-        };
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(NewPayloadRequestDenebWire.Ssz, .{
+            .execution_payload = payloadV3Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+        });
     }
 };
 
@@ -864,42 +513,38 @@ pub const NewPayloadRequestElectraFulu = struct {
     execution_requests: ExecutionRequests = .{},
 
     pub fn encode(self: NewPayloadRequestElectraFulu, allocator: std.mem.Allocator) Error![]u8 {
-        const payload = try self.execution_payload.encode(allocator);
-        defer allocator.free(payload);
-        const versioned_hashes = try ssz.encodeFixedList(allocator, 32, self.versioned_hashes);
-        defer allocator.free(versioned_hashes);
-        const execution_requests = try self.execution_requests.encode(allocator);
-        defer allocator.free(execution_requests);
-        return ssz.encodeContainer(allocator, 4, .{
-            .{ .variable = payload },
-            .{ .variable = versioned_hashes },
-            .{ .fixed = &self.parent_beacon_block_root },
-            .{ .variable = execution_requests },
+        return encodeWire(NewPayloadRequestElectraFuluWire.Ssz, allocator, .{
+            .execution_payload = payloadV3Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+            .execution_requests = self.execution_requests,
         });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestElectraFulu {
-        if (bytes.len < 44) return error.InvalidByteLength;
-        const payload_offset = readOffset(bytes[0..4]);
-        const versioned_hashes_offset = readOffset(bytes[4..8]);
-        const execution_requests_offset = readOffset(bytes[40..44]);
-        try validatePayloadOffsets(bytes.len, 44, &.{ payload_offset, versioned_hashes_offset, execution_requests_offset });
+        const value = try decodeWire(NewPayloadRequestElectraFuluWire.Ssz, allocator, bytes);
         return .{
-            .execution_payload = try ExecutionPayloadV3.decode(allocator, bytes[payload_offset..versioned_hashes_offset]),
-            .versioned_hashes = try decodeHashList(allocator, bytes[versioned_hashes_offset..execution_requests_offset]),
-            .parent_beacon_block_root = bytes[8..40].*,
-            .execution_requests = try ExecutionRequests.decode(allocator, bytes[execution_requests_offset..]),
+            .execution_payload = payloadV3FromWire(value.execution_payload),
+            .versioned_hashes = value.versioned_hashes,
+            .parent_beacon_block_root = value.parent_beacon_block_root,
+            .execution_requests = value.execution_requests,
         };
     }
 
+    pub fn deinit(self: *NewPayloadRequestElectraFulu, allocator: std.mem.Allocator) void {
+        self.execution_payload.deinit(allocator);
+        VersionedHashesSsz.deinit(allocator, &self.versioned_hashes);
+        self.execution_requests.deinit(allocator);
+    }
+
     pub fn hashTreeRoot(self: NewPayloadRequestElectraFulu, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            try self.execution_payload.hashTreeRoot(allocator),
-            try hashListRoot(allocator, self.versioned_hashes),
-            self.parent_beacon_block_root,
-            try self.execution_requests.hashTreeRoot(allocator),
-        };
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(NewPayloadRequestElectraFuluWire.Ssz, .{
+            .execution_payload = payloadV3Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+            .execution_requests = self.execution_requests,
+        });
     }
 };
 
@@ -910,42 +555,38 @@ pub const NewPayloadRequestAmsterdam = struct {
     execution_requests: ExecutionRequests = .{},
 
     pub fn encode(self: NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) Error![]u8 {
-        const payload = try self.execution_payload.encode(allocator);
-        defer allocator.free(payload);
-        const versioned_hashes = try ssz.encodeFixedList(allocator, 32, self.versioned_hashes);
-        defer allocator.free(versioned_hashes);
-        const execution_requests = try self.execution_requests.encode(allocator);
-        defer allocator.free(execution_requests);
-        return ssz.encodeContainer(allocator, 4, .{
-            .{ .variable = payload },
-            .{ .variable = versioned_hashes },
-            .{ .fixed = &self.parent_beacon_block_root },
-            .{ .variable = execution_requests },
+        return encodeWire(NewPayloadRequestAmsterdamWire.Ssz, allocator, .{
+            .execution_payload = payloadV4Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+            .execution_requests = self.execution_requests,
         });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestAmsterdam {
-        if (bytes.len < 44) return error.InvalidByteLength;
-        const payload_offset = readOffset(bytes[0..4]);
-        const versioned_hashes_offset = readOffset(bytes[4..8]);
-        const execution_requests_offset = readOffset(bytes[40..44]);
-        try validatePayloadOffsets(bytes.len, 44, &.{ payload_offset, versioned_hashes_offset, execution_requests_offset });
+        const value = try decodeWire(NewPayloadRequestAmsterdamWire.Ssz, allocator, bytes);
         return .{
-            .execution_payload = try ExecutionPayloadV4.decode(allocator, bytes[payload_offset..versioned_hashes_offset]),
-            .versioned_hashes = try decodeHashList(allocator, bytes[versioned_hashes_offset..execution_requests_offset]),
-            .parent_beacon_block_root = bytes[8..40].*,
-            .execution_requests = try ExecutionRequests.decode(allocator, bytes[execution_requests_offset..]),
+            .execution_payload = payloadV4FromWire(value.execution_payload),
+            .versioned_hashes = value.versioned_hashes,
+            .parent_beacon_block_root = value.parent_beacon_block_root,
+            .execution_requests = value.execution_requests,
         };
     }
 
+    pub fn deinit(self: *NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) void {
+        self.execution_payload.deinit(allocator);
+        VersionedHashesSsz.deinit(allocator, &self.versioned_hashes);
+        self.execution_requests.deinit(allocator);
+    }
+
     pub fn hashTreeRoot(self: NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) Error![32]u8 {
-        const roots = [_][32]u8{
-            try self.execution_payload.hashTreeRoot(allocator),
-            try hashListRoot(allocator, self.versioned_hashes),
-            self.parent_beacon_block_root,
-            try self.execution_requests.hashTreeRoot(allocator),
-        };
-        return ssz.containerRoot(allocator, &roots);
+        _ = allocator;
+        return hashWire(NewPayloadRequestAmsterdamWire.Ssz, .{
+            .execution_payload = payloadV4Wire(self.execution_payload),
+            .versioned_hashes = self.versioned_hashes,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+            .execution_requests = self.execution_requests,
+        });
     }
 };
 
@@ -973,10 +614,16 @@ pub const NewPayloadRequest = union(enum) {
             .cancun => .{ .deneb = try NewPayloadRequestDeneb.decode(allocator, bytes) },
             .prague, .osaka => .{ .electra_fulu = try NewPayloadRequestElectraFulu.decode(allocator, bytes) },
             .amsterdam => .{ .amsterdam = try NewPayloadRequestAmsterdam.decode(allocator, bytes) },
-            // BPO placeholders have no local Revision mapping yet.
+            // BPO placeholders have no local Revision mapping.
             .bpo1, .bpo2 => error.UnsupportedFork,
             else => error.UnsupportedFork,
         };
+    }
+
+    pub fn deinit(self: *NewPayloadRequest, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            inline else => |*request| request.deinit(allocator),
+        }
     }
 
     pub fn hashTreeRoot(self: NewPayloadRequest, allocator: std.mem.Allocator) Error![32]u8 {
@@ -1035,18 +682,12 @@ pub const StatelessInput = struct {
     pub fn encode(self: StatelessInput, allocator: std.mem.Allocator) Error![]u8 {
         const request = try self.new_payload_request.encode(allocator);
         defer allocator.free(request);
-        const witness = try self.witness.encode(allocator);
-        defer allocator.free(witness);
-        const chain_config = try self.chain_config.encode(allocator);
-        defer allocator.free(chain_config);
         if (self.public_keys.len > max_public_keys) return error.InvalidListLength;
-        const public_keys = try ssz.encodeFixedList(allocator, public_key_bytes, self.public_keys);
-        defer allocator.free(public_keys);
-        return ssz.encodeContainer(allocator, 4, .{
-            .{ .variable = request },
-            .{ .variable = witness },
-            .{ .variable = chain_config },
-            .{ .variable = public_keys },
+        return encodeWire(StatelessInputWire.Ssz, allocator, .{
+            .new_payload_request = request,
+            .witness = self.witness,
+            .chain_config = self.chain_config,
+            .public_keys = self.public_keys,
         });
     }
 
@@ -1067,28 +708,28 @@ pub const StatelessInput = struct {
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
-        const fields = try ssz.splitVariableFields(4, bytes);
-        return decodeFields(allocator, fields[0], fields[1], fields[2], fields[3]);
-    }
+        var value = try decodeWire(StatelessInputWire.Ssz, allocator, bytes);
+        var owns_value = true;
+        errdefer if (owns_value) StatelessInputWire.Ssz.deinit(allocator, &value);
 
-    fn decodeFields(
-        allocator: std.mem.Allocator,
-        request_bytes: []const u8,
-        witness_bytes: []const u8,
-        chain_config_bytes: []const u8,
-        public_keys_bytes: []const u8,
-    ) Error!StatelessInput {
-        const chain_config = try ChainConfig.decode(chain_config_bytes);
-        const new_payload_request = try NewPayloadRequest.decode(allocator, chain_config.active_fork.fork, request_bytes);
-        const witness = try ExecutionWitness.decode(allocator, witness_bytes);
-        const public_keys = try decodePublicKeys(allocator, public_keys_bytes);
+        const chain_config = value.chain_config;
+        var new_payload_request = try NewPayloadRequest.decode(allocator, chain_config.active_fork.fork, value.new_payload_request);
+        errdefer new_payload_request.deinit(allocator);
         try validateChainConfig(chain_config, new_payload_request);
+        NewPayloadRequestBytesSsz.deinit(allocator, &value.new_payload_request);
+        owns_value = false;
         return .{
             .new_payload_request = new_payload_request,
-            .witness = witness,
+            .witness = value.witness,
             .chain_config = chain_config,
-            .public_keys = public_keys,
+            .public_keys = value.public_keys,
         };
+    }
+
+    pub fn deinit(self: *StatelessInput, allocator: std.mem.Allocator) void {
+        self.new_payload_request.deinit(allocator);
+        self.witness.deinit(allocator);
+        PublicKeysSsz.deinit(allocator, &self.public_keys);
     }
 };
 
@@ -1098,30 +739,342 @@ pub const StatelessValidationResult = struct {
     chain_config: ChainConfig,
 
     pub fn encode(self: StatelessValidationResult, allocator: std.mem.Allocator) Error![]u8 {
-        var success: [1]u8 = undefined;
-        ssz.writeBool(&success, self.successful_validation);
-        const chain_config = try self.chain_config.encode(allocator);
-        defer allocator.free(chain_config);
-        return ssz.encodeContainer(allocator, 3, .{
-            .{ .fixed = &self.new_payload_request_root },
-            .{ .fixed = &success },
-            .{ .variable = chain_config },
+        return encodeWire(StatelessValidationResultWire.Ssz, allocator, .{
+            .new_payload_request_root = self.new_payload_request_root,
+            .successful_validation = self.successful_validation,
+            .chain_config = self.chain_config,
         });
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessValidationResult {
-        _ = allocator;
-        if (bytes.len < 37) return error.InvalidByteLength;
-        const chain_config_offset = readOffset(bytes[33..37]);
-        if (chain_config_offset != 37) return error.InvalidFirstOffset;
-        if (chain_config_offset > bytes.len) return error.OffsetOutOfBounds;
+        const value = try decodeWire(StatelessValidationResultWire.Ssz, allocator, bytes);
         return .{
-            .new_payload_request_root = bytes[0..32].*,
-            .successful_validation = try ssz.readBool(bytes[32..33]),
-            .chain_config = try ChainConfig.decode(bytes[chain_config_offset..]),
+            .new_payload_request_root = value.new_payload_request_root,
+            .successful_validation = value.successful_validation,
+            .chain_config = value.chain_config,
         };
     }
 };
+
+// Shared across multiple wire containers.
+const WithdrawalsSsz = ssz.List(Withdrawal, max_withdrawals_per_payload);
+const TransactionsSsz = ssz.ListOf(ssz.ByteList(max_bytes_per_transaction), max_transactions_per_payload);
+const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
+const NewPayloadRequestBytesSsz = ssz.ByteList(std.math.maxInt(u32));
+const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
+const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
+
+const ExecutionPayloadV2Wire = struct {
+    parent_hash: [32]u8,
+    fee_recipient: address.Address,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: [32]u8,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+    withdrawals: []const Withdrawal,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .extra_data = ssz.ByteList(max_extra_data_bytes),
+        .transactions = TransactionsSsz,
+        .withdrawals = WithdrawalsSsz,
+    });
+};
+
+const ExecutionPayloadV3Wire = struct {
+    parent_hash: [32]u8,
+    fee_recipient: address.Address,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: [32]u8,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+    withdrawals: []const Withdrawal,
+    blob_gas_used: u64,
+    excess_blob_gas: u64,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .extra_data = ssz.ByteList(max_extra_data_bytes),
+        .transactions = TransactionsSsz,
+        .withdrawals = WithdrawalsSsz,
+    });
+};
+
+const ExecutionPayloadV4Wire = struct {
+    parent_hash: [32]u8,
+    fee_recipient: address.Address,
+    state_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    prev_randao: [32]u8,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: [32]u8,
+    block_hash: [32]u8,
+    transactions: []const []const u8,
+    withdrawals: []const Withdrawal,
+    blob_gas_used: u64,
+    excess_blob_gas: u64,
+    block_access_list: []const u8,
+    slot_number: u64,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .extra_data = ssz.ByteList(max_extra_data_bytes),
+        .transactions = TransactionsSsz,
+        .withdrawals = WithdrawalsSsz,
+        .block_access_list = BlockAccessListSsz,
+    });
+};
+
+const NewPayloadRequestBellatrixWire = struct {
+    execution_payload: ExecutionPayloadV1,
+
+    pub const Ssz = ssz.Container(@This(), .{});
+};
+const NewPayloadRequestCapellaWire = struct {
+    execution_payload: ExecutionPayloadV2Wire,
+
+    pub const Ssz = ssz.Container(@This(), .{});
+};
+const NewPayloadRequestDenebWire = struct {
+    execution_payload: ExecutionPayloadV3Wire,
+    versioned_hashes: []const [32]u8,
+    parent_beacon_block_root: [32]u8,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .versioned_hashes = VersionedHashesSsz,
+    });
+};
+const NewPayloadRequestElectraFuluWire = struct {
+    execution_payload: ExecutionPayloadV3Wire,
+    versioned_hashes: []const [32]u8,
+    parent_beacon_block_root: [32]u8,
+    execution_requests: ExecutionRequests,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .versioned_hashes = VersionedHashesSsz,
+    });
+};
+const NewPayloadRequestAmsterdamWire = struct {
+    execution_payload: ExecutionPayloadV4Wire,
+    versioned_hashes: []const [32]u8,
+    parent_beacon_block_root: [32]u8,
+    execution_requests: ExecutionRequests,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .versioned_hashes = VersionedHashesSsz,
+    });
+};
+
+const StatelessInputWire = struct {
+    new_payload_request: []const u8,
+    witness: ExecutionWitness,
+    chain_config: ChainConfig,
+    public_keys: []const [public_key_bytes]u8,
+
+    pub const Ssz = ssz.Container(@This(), .{
+        .new_payload_request = NewPayloadRequestBytesSsz,
+        .public_keys = PublicKeysSsz,
+    });
+};
+
+const StatelessValidationResultWire = struct {
+    new_payload_request_root: [32]u8,
+    successful_validation: bool,
+    chain_config: ChainConfig,
+
+    pub const Ssz = ssz.Container(@This(), .{});
+};
+
+fn encodeWire(comptime Codec: type, allocator: std.mem.Allocator, value: Codec.Value) Error![]u8 {
+    return ssz.encodeAlloc(Codec, allocator, value) catch |err| return mapSszError(err);
+}
+
+fn decodeWire(comptime Codec: type, allocator: std.mem.Allocator, bytes: []const u8) Error!Codec.Value {
+    // Wire v1 preflights all nested limits before allocating so malformed late
+    // fields cannot force partial materialization or change error precedence.
+    Codec.validate(bytes) catch |err| return mapSszError(err);
+    return ssz.decodeOwned(Codec, allocator, bytes) catch |err| return mapSszError(err);
+}
+
+const Sha256Context = struct {
+    pub fn hash64(_: @This(), input: *const [64]u8) [32]u8 {
+        return crypto.sha256(input);
+    }
+};
+
+fn hashWire(comptime Codec: type, value: Codec.Value) Error![32]u8 {
+    const merkleizer = ssz.Merkleizer(Sha256Context).init(.{});
+    return merkleizer.hashTreeRoot(Codec, value) catch |err| return mapSszError(err);
+}
+
+fn mapSszError(err: (ssz.Error || std.mem.Allocator.Error)) Error {
+    return switch (err) {
+        error.InvalidBoolean => error.InvalidBool,
+        error.InvalidEnumValue => error.UnsupportedFork,
+        error.ListLimitExceeded => error.InvalidListLength,
+        error.OffsetsNotMonotonic => error.OffsetsAreNotMonotonic,
+        else => err,
+    };
+}
+
+fn payloadV2Wire(value: ExecutionPayloadV2) ExecutionPayloadV2Wire {
+    const v1 = value.v1;
+    return .{
+        .parent_hash = v1.parent_hash,
+        .fee_recipient = v1.fee_recipient,
+        .state_root = v1.state_root,
+        .receipts_root = v1.receipts_root,
+        .logs_bloom = v1.logs_bloom,
+        .prev_randao = v1.prev_randao,
+        .block_number = v1.block_number,
+        .gas_limit = v1.gas_limit,
+        .gas_used = v1.gas_used,
+        .timestamp = v1.timestamp,
+        .extra_data = v1.extra_data,
+        .base_fee_per_gas = v1.base_fee_per_gas,
+        .block_hash = v1.block_hash,
+        .transactions = v1.transactions,
+        .withdrawals = value.withdrawals,
+    };
+}
+
+fn payloadV2FromWire(value: ExecutionPayloadV2Wire) ExecutionPayloadV2 {
+    return .{
+        .v1 = .{
+            .parent_hash = value.parent_hash,
+            .fee_recipient = value.fee_recipient,
+            .state_root = value.state_root,
+            .receipts_root = value.receipts_root,
+            .logs_bloom = value.logs_bloom,
+            .prev_randao = value.prev_randao,
+            .block_number = value.block_number,
+            .gas_limit = value.gas_limit,
+            .gas_used = value.gas_used,
+            .timestamp = value.timestamp,
+            .extra_data = value.extra_data,
+            .base_fee_per_gas = value.base_fee_per_gas,
+            .block_hash = value.block_hash,
+            .transactions = value.transactions,
+        },
+        .withdrawals = value.withdrawals,
+    };
+}
+
+fn payloadV3Wire(value: ExecutionPayloadV3) ExecutionPayloadV3Wire {
+    const v2 = payloadV2Wire(value.v2);
+    return .{
+        .parent_hash = v2.parent_hash,
+        .fee_recipient = v2.fee_recipient,
+        .state_root = v2.state_root,
+        .receipts_root = v2.receipts_root,
+        .logs_bloom = v2.logs_bloom,
+        .prev_randao = v2.prev_randao,
+        .block_number = v2.block_number,
+        .gas_limit = v2.gas_limit,
+        .gas_used = v2.gas_used,
+        .timestamp = v2.timestamp,
+        .extra_data = v2.extra_data,
+        .base_fee_per_gas = v2.base_fee_per_gas,
+        .block_hash = v2.block_hash,
+        .transactions = v2.transactions,
+        .withdrawals = v2.withdrawals,
+        .blob_gas_used = value.blob_gas_used,
+        .excess_blob_gas = value.excess_blob_gas,
+    };
+}
+
+fn payloadV3FromWire(value: ExecutionPayloadV3Wire) ExecutionPayloadV3 {
+    return .{
+        .v2 = payloadV2FromWire(.{
+            .parent_hash = value.parent_hash,
+            .fee_recipient = value.fee_recipient,
+            .state_root = value.state_root,
+            .receipts_root = value.receipts_root,
+            .logs_bloom = value.logs_bloom,
+            .prev_randao = value.prev_randao,
+            .block_number = value.block_number,
+            .gas_limit = value.gas_limit,
+            .gas_used = value.gas_used,
+            .timestamp = value.timestamp,
+            .extra_data = value.extra_data,
+            .base_fee_per_gas = value.base_fee_per_gas,
+            .block_hash = value.block_hash,
+            .transactions = value.transactions,
+            .withdrawals = value.withdrawals,
+        }),
+        .blob_gas_used = value.blob_gas_used,
+        .excess_blob_gas = value.excess_blob_gas,
+    };
+}
+
+fn payloadV4Wire(value: ExecutionPayloadV4) ExecutionPayloadV4Wire {
+    const v3 = payloadV3Wire(value.v3);
+    return .{
+        .parent_hash = v3.parent_hash,
+        .fee_recipient = v3.fee_recipient,
+        .state_root = v3.state_root,
+        .receipts_root = v3.receipts_root,
+        .logs_bloom = v3.logs_bloom,
+        .prev_randao = v3.prev_randao,
+        .block_number = v3.block_number,
+        .gas_limit = v3.gas_limit,
+        .gas_used = v3.gas_used,
+        .timestamp = v3.timestamp,
+        .extra_data = v3.extra_data,
+        .base_fee_per_gas = v3.base_fee_per_gas,
+        .block_hash = v3.block_hash,
+        .transactions = v3.transactions,
+        .withdrawals = v3.withdrawals,
+        .blob_gas_used = v3.blob_gas_used,
+        .excess_blob_gas = v3.excess_blob_gas,
+        .block_access_list = value.block_access_list,
+        .slot_number = value.slot_number,
+    };
+}
+
+fn payloadV4FromWire(value: ExecutionPayloadV4Wire) ExecutionPayloadV4 {
+    return .{
+        .v3 = payloadV3FromWire(.{
+            .parent_hash = value.parent_hash,
+            .fee_recipient = value.fee_recipient,
+            .state_root = value.state_root,
+            .receipts_root = value.receipts_root,
+            .logs_bloom = value.logs_bloom,
+            .prev_randao = value.prev_randao,
+            .block_number = value.block_number,
+            .gas_limit = value.gas_limit,
+            .gas_used = value.gas_used,
+            .timestamp = value.timestamp,
+            .extra_data = value.extra_data,
+            .base_fee_per_gas = value.base_fee_per_gas,
+            .block_hash = value.block_hash,
+            .transactions = value.transactions,
+            .withdrawals = value.withdrawals,
+            .blob_gas_used = value.blob_gas_used,
+            .excess_blob_gas = value.excess_blob_gas,
+        }),
+        .block_access_list = value.block_access_list,
+        .slot_number = value.slot_number,
+    };
+}
 
 fn defaultChainConfig() ChainConfig {
     return .{
@@ -1350,243 +1303,21 @@ fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withd
     return out;
 }
 
-fn byteListListRoot(allocator: std.mem.Allocator, items: []const []const u8) Error![32]u8 {
-    const roots = try allocator.alloc([32]u8, items.len);
-    defer allocator.free(roots);
-    for (roots, items) |*root, item| {
-        root.* = try ssz.bytesListRootLimit(allocator, item, max_bytes_per_transaction);
-    }
-    return ssz.listRootLimit(allocator, roots, max_transactions_per_payload);
-}
-
-fn payloadV1FieldRoots(allocator: std.mem.Allocator, payload: ExecutionPayloadV1) Error![14][32]u8 {
-    var roots: [14][32]u8 = undefined;
-    roots[0] = payload.parent_hash;
-    roots[1] = ssz.fixedBytesRoot(&payload.fee_recipient);
-    roots[2] = payload.state_root;
-    roots[3] = payload.receipts_root;
-    roots[4] = try ssz.bytesVectorRoot(allocator, &payload.logs_bloom);
-    roots[5] = payload.prev_randao;
-    roots[6] = ssz.uint64Root(payload.block_number);
-    roots[7] = ssz.uint64Root(payload.gas_limit);
-    roots[8] = ssz.uint64Root(payload.gas_used);
-    roots[9] = ssz.uint64Root(payload.timestamp);
-    roots[10] = try ssz.bytesListRootLimit(allocator, payload.extra_data, max_extra_data_bytes);
-    roots[11] = payload.base_fee_per_gas;
-    roots[12] = payload.block_hash;
-    roots[13] = try byteListListRoot(allocator, payload.transactions);
-    return roots;
-}
-
-fn encodePayloadContainer(
-    allocator: std.mem.Allocator,
-    payload: ExecutionPayloadV1,
-    comptime field_count: usize,
-    tail: [field_count - 10]ssz.Field,
-) Error![]u8 {
-    if (payload.extra_data.len > 32) return error.ExtraDataTooLong;
-    var block_number: [8]u8 = undefined;
-    var gas_limit: [8]u8 = undefined;
-    var gas_used: [8]u8 = undefined;
-    var timestamp: [8]u8 = undefined;
-    std.mem.writeInt(u64, &block_number, payload.block_number, .little);
-    std.mem.writeInt(u64, &gas_limit, payload.gas_limit, .little);
-    std.mem.writeInt(u64, &gas_used, payload.gas_used, .little);
-    std.mem.writeInt(u64, &timestamp, payload.timestamp, .little);
-
-    var fields: [field_count]ssz.Field = undefined;
-    fields[0] = .{ .fixed = &payload.parent_hash };
-    fields[1] = .{ .fixed = &payload.fee_recipient };
-    fields[2] = .{ .fixed = &payload.state_root };
-    fields[3] = .{ .fixed = &payload.receipts_root };
-    fields[4] = .{ .fixed = &payload.logs_bloom };
-    fields[5] = .{ .fixed = &payload.prev_randao };
-    fields[6] = .{ .fixed = &block_number };
-    fields[7] = .{ .fixed = &gas_limit };
-    fields[8] = .{ .fixed = &gas_used };
-    fields[9] = .{ .fixed = &timestamp };
-    inline for (tail, 0..) |field, i| fields[10 + i] = field;
-    return ssz.encodeContainer(allocator, field_count, fields);
-}
-
-fn decodePayloadV1Fields(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    extra_data_offset: usize,
-    transactions_offset: usize,
-    transactions_end: usize,
-) Error!ExecutionPayloadV1 {
-    if (extra_data_offset > transactions_offset or transactions_offset > transactions_end or transactions_end > bytes.len) {
-        return error.OffsetsAreNotMonotonic;
-    }
-    const extra_data = bytes[extra_data_offset..transactions_offset];
-    if (extra_data.len > 32) return error.ExtraDataTooLong;
-    return .{
-        .parent_hash = bytes[0..32].*,
-        .fee_recipient = bytes[32..52].*,
-        .state_root = bytes[52..84].*,
-        .receipts_root = bytes[84..116].*,
-        .logs_bloom = bytes[116..372].*,
-        .prev_randao = bytes[372..404].*,
-        .block_number = try ssz.readU64(bytes[404..412]),
-        .gas_limit = try ssz.readU64(bytes[412..420]),
-        .gas_used = try ssz.readU64(bytes[420..428]),
-        .timestamp = try ssz.readU64(bytes[428..436]),
-        .extra_data = extra_data,
-        .base_fee_per_gas = bytes[440..472].*,
-        .block_hash = bytes[472..504].*,
-        .transactions = try decodeBoundedByteListList(allocator, bytes[transactions_offset..transactions_end], max_transactions_per_payload, max_bytes_per_transaction),
-    };
-}
-
-fn validatePayloadOffsets(bytes_len: usize, fixed_len: usize, offsets: []const usize) Error!void {
-    var previous = fixed_len;
-    for (offsets, 0..) |offset, index| {
-        if (index == 0 and offset != fixed_len) return error.InvalidFirstOffset;
-        if (offset < previous) return error.OffsetsAreNotMonotonic;
-        if (offset > bytes_len) return error.OffsetOutOfBounds;
-        previous = offset;
-    }
-}
-
-fn encodeFixedStructList(
-    allocator: std.mem.Allocator,
-    comptime T: type,
-    comptime item_len: usize,
-    items: []const T,
-) std.mem.Allocator.Error![]u8 {
-    const out = try allocator.alloc(u8, item_len * items.len);
-    errdefer allocator.free(out);
-    for (items, 0..) |item, i| item.encodeInto(out[i * item_len ..][0..item_len]);
-    return out;
-}
-
 fn prefixedFixedStructListBytes(
     allocator: std.mem.Allocator,
     prefix: u8,
     comptime T: type,
-    comptime item_len: usize,
     items: []const T,
 ) Error![]u8 {
+    const item_len = comptime ssz.encodedSize(T);
+    const ItemSsz = ssz.Fixed(T);
     const out = try allocator.alloc(u8, 1 + item_len * items.len);
     errdefer allocator.free(out);
     out[0] = prefix;
-    for (items, 0..) |item, i| item.encodeInto(out[1 + i * item_len ..][0..item_len]);
-    return out;
-}
-
-fn decodeBoundedFixedStructList(
-    allocator: std.mem.Allocator,
-    comptime T: type,
-    comptime item_len: usize,
-    bytes: []const u8,
-    max_items: usize,
-) Error![]const T {
-    try validateBoundedFixedStructList(item_len, bytes, max_items);
-    const count = bytes.len / item_len;
-    const out = try allocator.alloc(T, count);
-    for (out, 0..) |*item, i| item.* = try T.decode(bytes[i * item_len ..][0..item_len]);
-    return out;
-}
-
-fn validateBoundedFixedStructList(comptime item_len: usize, bytes: []const u8, max_items: usize) Error!void {
-    if (bytes.len % item_len != 0) return error.InvalidListLength;
-    if (bytes.len / item_len > max_items) return error.InvalidListLength;
-}
-
-fn fixedStructListRoot(allocator: std.mem.Allocator, comptime T: type, items: []const T, max_items: usize) Error![32]u8 {
-    if (items.len > max_items) return error.InvalidListLength;
-    const roots = try allocator.alloc([32]u8, items.len);
-    defer allocator.free(roots);
-    for (roots, items) |*root, item| root.* = try item.hashTreeRoot(allocator);
-    return ssz.listRootLimit(allocator, roots, max_items);
-}
-
-fn decodeHashList(allocator: std.mem.Allocator, bytes: []const u8) Error![]const [32]u8 {
-    if (bytes.len % 32 != 0) return error.InvalidListLength;
-    const out = try allocator.alloc([32]u8, bytes.len / 32);
-    for (out, 0..) |*item, i| item.* = bytes[i * 32 ..][0..32].*;
-    return out;
-}
-
-fn decodePublicKeys(allocator: std.mem.Allocator, bytes: []const u8) Error![]const [public_key_bytes]u8 {
-    try ssz.validateFixedList(bytes, public_key_bytes);
-    const count = bytes.len / public_key_bytes;
-    if (count > max_public_keys) return error.InvalidListLength;
-    const out = try allocator.alloc([public_key_bytes]u8, count);
-    for (out, 0..) |*item, index| {
-        item.* = bytes[index * public_key_bytes ..][0..public_key_bytes].*;
+    for (items, 0..) |item, i| {
+        _ = try ItemSsz.encode(out[1 + i * item_len ..][0..item_len], item);
     }
     return out;
-}
-
-fn encodeBoundedByteListList(
-    allocator: std.mem.Allocator,
-    items: []const []const u8,
-    max_items: usize,
-    max_item_bytes: usize,
-) Error![]u8 {
-    if (items.len > max_items) return error.InvalidListLength;
-    for (items) |item| {
-        if (item.len > max_item_bytes) return error.InvalidListLength;
-    }
-    return ssz.encodeByteListList(allocator, items);
-}
-
-fn decodeBoundedByteListList(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    max_items: usize,
-    max_item_bytes: usize,
-) Error![]const []const u8 {
-    if (bytes.len == 0) return allocator.alloc([]const u8, 0);
-    if (bytes.len < ssz.bytes_per_length_offset) return error.InvalidByteLength;
-    const first_offset = readOffset(bytes[0..ssz.bytes_per_length_offset]);
-    if (first_offset == 0 or first_offset % ssz.bytes_per_length_offset != 0) return error.InvalidFirstOffset;
-    const count = first_offset / ssz.bytes_per_length_offset;
-    if (count > max_items) return error.InvalidListLength;
-
-    const items = try ssz.decodeByteListList(allocator, bytes);
-    for (items) |item| {
-        if (item.len > max_item_bytes) return error.InvalidListLength;
-    }
-    return items;
-}
-
-fn hashListRoot(allocator: std.mem.Allocator, hashes: []const [32]u8) Error![32]u8 {
-    return ssz.listRootLimit(allocator, hashes, max_blob_commitments_per_block);
-}
-
-fn encodeOptionalU64List(allocator: std.mem.Allocator, value: ?u64) std.mem.Allocator.Error![]u8 {
-    const out = try allocator.alloc(u8, if (value == null) 0 else 8);
-    if (value) |actual| std.mem.writeInt(u64, out[0..8], actual, .little);
-    return out;
-}
-
-fn decodeOptionalU64List(bytes: []const u8) Error!?u64 {
-    return switch (bytes.len) {
-        0 => null,
-        8 => try ssz.readU64(bytes),
-        else => error.InvalidListLength,
-    };
-}
-
-fn encodeBlobScheduleList(allocator: std.mem.Allocator, value: ?BlobSchedule) std.mem.Allocator.Error![]u8 {
-    const out = try allocator.alloc(u8, if (value == null) 0 else 24);
-    if (value) |actual| actual.encodeInto(out[0..24]);
-    return out;
-}
-
-fn decodeBlobScheduleList(bytes: []const u8) Error!?BlobSchedule {
-    return switch (bytes.len) {
-        0 => null,
-        24 => try BlobSchedule.decode(bytes),
-        else => error.InvalidListLength,
-    };
-}
-
-fn readOffset(bytes: []const u8) usize {
-    return std.mem.readInt(u32, bytes[0..4], .little);
 }
 
 fn sszUint256FromBytes(bytes: [32]u8) u256 {

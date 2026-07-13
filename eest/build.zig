@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) void {
         .profile = profile,
     });
     const evmz_mod = evmz_dep.module("evmz");
+    const ssz_mod = evmz_dep.module("ssz");
+    const snappy_mod = b.dependency("snappy", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("snappyz");
 
     const bench_evmz_dep = b.dependency("evmz", .{
         .target = target,
@@ -50,6 +55,12 @@ pub fn build(b: *std.Build) void {
         const stateless_block_stf_tests = b.addTest(.{
             .root_module = eestModule(b, "src/stateless_block_stf.zig", target, optimize, evmz_mod),
         });
+        const ssz_conformance_tests = b.addTest(.{
+            .root_module = sszConformanceModule(b, "src/ssz_conformance.zig", target, optimize, ssz_mod, snappy_mod),
+        });
+        const ssz_conformance_cli_tests = b.addTest(.{
+            .root_module = sszConformanceModule(b, "src/ssz_conformance_cli.zig", target, optimize, ssz_mod, snappy_mod),
+        });
 
         const test_step = b.step("test", "Run EEST runner tests");
         test_step.dependOn(&b.addRunArtifact(state_tests).step);
@@ -60,6 +71,27 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(stateless_ere_bench_tests).step);
         test_step.dependOn(&b.addRunArtifact(block_stf_tests).step);
         test_step.dependOn(&b.addRunArtifact(stateless_block_stf_tests).step);
+        test_step.dependOn(&b.addRunArtifact(ssz_conformance_tests).step);
+        test_step.dependOn(&b.addRunArtifact(ssz_conformance_cli_tests).step);
+    }
+
+    {
+        const ssz_conformance_exe = b.addExecutable(.{
+            .name = "evmz-ssz-conformance",
+            .root_module = sszConformanceModule(
+                b,
+                "src/ssz_conformance_cli.zig",
+                target,
+                optimize,
+                ssz_mod,
+                snappy_mod,
+            ),
+        });
+        b.installArtifact(ssz_conformance_exe);
+
+        const run_ssz_conformance = b.addRunArtifact(ssz_conformance_exe);
+        if (b.args) |args| run_ssz_conformance.addArgs(args);
+        b.step("ssz-conformance", "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures").dependOn(&run_ssz_conformance.step);
     }
 
     {
@@ -167,6 +199,25 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_stateless_block_stf.addArgs(args);
         b.step("eest-stateless-block-stf", "Run witness-backed zkEVM blockchain fixtures through stateless BlockSTF").dependOn(&run_stateless_block_stf.step);
     }
+}
+
+fn sszConformanceModule(
+    b: *std.Build,
+    root: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    ssz_mod: *std.Build.Module,
+    snappy_mod: *std.Build.Module,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path(root),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ssz", .module = ssz_mod },
+            .{ .name = "snappyz", .module = snappy_mod },
+        },
+    });
 }
 
 fn buildProfileOption(b: *std.Build) []const u8 {

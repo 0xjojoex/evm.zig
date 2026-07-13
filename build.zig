@@ -44,6 +44,13 @@ pub fn build(b: *std.Build) void {
         addPrecompileNative(b, evmz_mod, deps, evmone_dep);
     }
 
+    const ssz_mod = b.addModule("ssz", .{
+        .root_source_file = b.path("pkg/ssz/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    evmz_mod.addImport("ssz", ssz_mod);
+
     const static_c_lib = if (is_native_profile) static_c_lib: {
         const c_lib_mod = b.createModule(.{
             .root_source_file = b.path("src/evmc.zig"),
@@ -53,6 +60,7 @@ pub fn build(b: *std.Build) void {
             .link_libcpp = true,
         });
         c_lib_mod.addOptions("build_options", build_options);
+        c_lib_mod.addImport("ssz", ssz_mod);
         c_lib_mod.addIncludePath(b.path("include"));
         c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
         addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
@@ -95,6 +103,7 @@ pub fn build(b: *std.Build) void {
             .link_libcpp = is_native_profile,
         });
         lib_unit_tests_mod.addOptions("build_options", build_options);
+        lib_unit_tests_mod.addImport("ssz", ssz_mod);
         lib_unit_tests_mod.addIncludePath(b.path("include"));
         lib_unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
         if (native_precompile_deps) |deps| {
@@ -110,8 +119,18 @@ pub fn build(b: *std.Build) void {
 
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
+        const ssz_unit_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("pkg/ssz/src/test.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = b.args orelse &.{},
+        });
+
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_lib_unit_tests.step);
+        test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
         if (is_native_profile) {
             const c_api_tests_mod = b.createModule(.{
                 .root_source_file = b.path("src/evmc.zig"),
@@ -121,6 +140,7 @@ pub fn build(b: *std.Build) void {
                 .link_libcpp = true,
             });
             c_api_tests_mod.addOptions("build_options", build_options);
+            c_api_tests_mod.addImport("ssz", ssz_mod);
             c_api_tests_mod.addIncludePath(b.path("include"));
             c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
             addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
@@ -169,6 +189,7 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, profile);
         addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, profile);
         addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, profile);
+        addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, profile);
     }
     if (pathExists(b, "bench/build.zig")) {
         addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, profile);
@@ -184,6 +205,9 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, profile);
         addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, profile);
         addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, profile);
+    }
+    if (pathExists(b, "pkg/ssz/build.zig")) {
+        addSszBenchDelegate(b, bench_optimize_name);
     }
 
     if (is_native_profile) {
@@ -520,6 +544,12 @@ fn addGuestZisk(
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
     evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
+    const ssz_mod = b.createModule(.{
+        .root_source_file = b.path("pkg/ssz/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    evmz_mod.addImport("ssz", ssz_mod);
 
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -698,6 +728,23 @@ fn addBenchDelegate(
     run.setCwd(b.path("bench"));
 
     const step = b.step(step_name, description);
+    step.dependOn(&run.step);
+}
+
+fn addSszBenchDelegate(b: *std.Build, optimize_name: []const u8) void {
+    const run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        b.fmt("-Doptimize={s}", .{optimize_name}),
+        "bench",
+    });
+    if (b.args) |args| {
+        run.addArg("--");
+        run.addArgs(args);
+    }
+    run.setCwd(b.path("pkg/ssz"));
+
+    const step = b.step("ssz-bench", "Run standalone SSZ codec benchmarks");
     step.dependOn(&run.step);
 }
 

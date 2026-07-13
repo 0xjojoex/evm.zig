@@ -1,0 +1,20 @@
+.{
+    .name = .ssz_bench,
+    .version = "0.0.0",
+    .fingerprint = 0x18c25cb240364b46,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .ssz = .{
+            .path = "..",
+        },
+        .zbench = .{
+            .url = "https://github.com/hendriknielaender/zBench/archive/refs/tags/v0.13.0.tar.gz",
+            .hash = "zbench-0.13.0-YTdc7xVBAQCCMC-IdLLuotBeiNNNm8k9Pi2V4VYqrwfI",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -144,12 +144,6 @@ lower is better):
 
 `for _ in 1 2 3; do zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -- --spec osaka --num-runs 100 --warmup-ms 100; done`
 
-`base/evmz` and `revm/evmz` divide competitor time by evmz time: above `1×`
-means evmz is faster. Raw milliseconds are comparable only within the same
-platform. Storage rows use a fresh mock host per call with value and warmth
-tracked independently: the first slot access is cold and the next 7,999 are
-warm. They measure VM plus each engine's native mock host, not pure opcode cost.
-
 ### Apple M1 Max / macOS arm64
 
 | VM-loop fixture | evmz | evmone-base | evmone-adv | revm-int | base/evmz | revm/evmz |

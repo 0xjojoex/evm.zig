@@ -97,141 +97,182 @@ test "micro/code/jumpdest-map" {
 }
 
 fn benchSdivSmallMixed(_: std.mem.Allocator) void {
+    var negative_base: u256 = @bitCast(@as(i256, -987_654_321));
+    var divisor: u256 = 3;
+    std.mem.doNotOptimizeAway(&negative_base);
+    std.mem.doNotOptimizeAway(&divisor);
+
     var acc: u256 = 0;
-    const negative_base: u256 = @bitCast(@as(i256, -987_654_321));
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.sdiv(negative_base -% lane, 3 + lane);
+        acc +%= uint256.sdiv(negative_base -% lane, divisor + lane);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchSdivWideMixed(_: std.mem.Allocator) void {
+    var high_negative: u256 = @bitCast(@as(i256, std.math.minInt(i256) + 0x1234));
+    var divisor: u256 = @bitCast(@as(i256, -0x1_0000_0000));
+    std.mem.doNotOptimizeAway(&high_negative);
+    std.mem.doNotOptimizeAway(&divisor);
+
     var acc: u256 = 0;
-    const high_negative: u256 = @bitCast(@as(i256, std.math.minInt(i256) + 0x1234));
-    const divisor: u256 = @bitCast(@as(i256, -0x1_0000_0000));
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
         acc +%= uint256.sdiv(high_negative +% lane, divisor -% lane);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchSdivMinOverflow(_: std.mem.Allocator) void {
+    var min_word: u256 = @bitCast(@as(i256, std.math.minInt(i256)));
+    var neg_one: u256 = @bitCast(@as(i256, -1));
+    std.mem.doNotOptimizeAway(&min_word);
+    std.mem.doNotOptimizeAway(&neg_one);
+
     var acc: u256 = 0;
-    const min_word: u256 = @bitCast(@as(i256, std.math.minInt(i256)));
-    const neg_one: u256 = @bitCast(@as(i256, -1));
-    for (0..ops_per_run) |i| {
-        std.mem.doNotOptimizeAway(i);
+    for (0..ops_per_run) |_| {
         acc +%= uint256.sdiv(min_word, neg_one);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchSmodSmallMixed(_: std.mem.Allocator) void {
+    var negative_base: u256 = @bitCast(@as(i256, -123_456_789));
+    var divisor: u256 = 97;
+    std.mem.doNotOptimizeAway(&negative_base);
+    std.mem.doNotOptimizeAway(&divisor);
+
     var acc: u256 = 0;
-    const negative_base: u256 = @bitCast(@as(i256, -123_456_789));
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.smod(negative_base -% lane, 97 + lane);
+        acc +%= uint256.smod(negative_base -% lane, divisor + lane);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchSmodWideMixed(_: std.mem.Allocator) void {
+    var high_negative: u256 = @bitCast(@as(i256, std.math.minInt(i256) + 0x4567));
+    var divisor: u256 = @bitCast(@as(i256, -0x1_0000_0000_0000));
+    std.mem.doNotOptimizeAway(&high_negative);
+    std.mem.doNotOptimizeAway(&divisor);
+
     var acc: u256 = 0;
-    const high_negative: u256 = @bitCast(@as(i256, std.math.minInt(i256) + 0x4567));
-    const divisor: u256 = @bitCast(@as(i256, -0x1_0000_0000_0000));
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
         acc +%= uint256.smod(high_negative +% lane, divisor -% lane);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchMulmodSmall(_: std.mem.Allocator) void {
+    var lhs: u256 = 3;
+    var rhs: u256 = 5;
+    var modulus: u256 = 97;
+    std.mem.doNotOptimizeAway(&lhs);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.mulMod(3 + lane, 5 + lane, 97);
+        acc +%= uint256.mulMod(lhs + lane, rhs + lane, modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchMulmodWide(_: std.mem.Allocator) void {
+    var max: u256 = std.math.maxInt(u256);
+    var rhs: u256 = 0x1_0000_0000_0000;
+    var modulus: u256 = max - 58;
+    std.mem.doNotOptimizeAway(&max);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
-    const max = std.math.maxInt(u256);
-    const modulus = max - 58;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.mulMod(max -% lane, 0x1_0000_0000_0000 + lane, modulus);
+        acc +%= uint256.mulMod(max -% lane, rhs + lane, modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchMulmodLargeModulus(_: std.mem.Allocator) void {
+    var lhs: u256 = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef;
+    var rhs: u256 = 0x123456789abcdef0fedcba9876543210123456789abcdef0fedcba9876543210;
+    var modulus: u256 = 0x8123456789abcdef00112233445566778899aabbccddeeff1020304050607080;
+    std.mem.doNotOptimizeAway(&lhs);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
-    const lhs = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef;
-    const rhs = 0x123456789abcdef0fedcba9876543210123456789abcdef0fedcba9876543210;
-    const modulus = 0x8123456789abcdef00112233445566778899aabbccddeeff1020304050607080;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
         acc +%= uint256.mulMod(lhs -% lane, rhs +% lane, modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchMulmodLargeU512Oracle(_: std.mem.Allocator) void {
+    var lhs: u256 = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef;
+    var rhs: u256 = 0x123456789abcdef0fedcba9876543210123456789abcdef0fedcba9876543210;
+    var modulus: u256 = 0x8123456789abcdef00112233445566778899aabbccddeeff1020304050607080;
+    std.mem.doNotOptimizeAway(&lhs);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
-    const lhs = 0xfedcba98765432100123456789abcdeffedcba98765432100123456789abcdef;
-    const rhs = 0x123456789abcdef0fedcba9876543210123456789abcdef0fedcba9876543210;
-    const modulus = 0x8123456789abcdef00112233445566778899aabbccddeeff1020304050607080;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
         acc +%= @intCast((@as(u512, lhs -% lane) * (rhs +% lane)) % modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchMulmodMaxModulus(_: std.mem.Allocator) void {
+    var max: u256 = std.math.maxInt(u256);
+    var odd_mask: u256 = 1;
+    std.mem.doNotOptimizeAway(&max);
+    std.mem.doNotOptimizeAway(&odd_mask);
+
     var acc: u256 = 0;
-    const max = std.math.maxInt(u256);
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.mulMod(max -% lane, lane | 1, max);
+        acc +%= uint256.mulMod(max -% lane, lane | odd_mask, max);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchAddmodSmall(_: std.mem.Allocator) void {
+    var lhs: u256 = 3;
+    var rhs: u256 = 5;
+    var modulus: u256 = 97;
+    std.mem.doNotOptimizeAway(&lhs);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.addMod(3 + lane, 5 + lane, 97);
+        acc +%= uint256.addMod(lhs + lane, rhs + lane, modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn benchAddmodWide(_: std.mem.Allocator) void {
+    var max: u256 = std.math.maxInt(u256);
+    var rhs: u256 = 0x1_0000_0000_0000;
+    var modulus: u256 = max - 58;
+    std.mem.doNotOptimizeAway(&max);
+    std.mem.doNotOptimizeAway(&rhs);
+    std.mem.doNotOptimizeAway(&modulus);
+
     var acc: u256 = 0;
-    const max = std.math.maxInt(u256);
-    const modulus = max - 58;
     for (0..ops_per_run) |i| {
         const lane: u256 = @intCast(i + 1);
-        std.mem.doNotOptimizeAway(lane);
-        acc +%= uint256.addMod(max -% lane, 0x1_0000_0000_0000 + lane, modulus);
+        acc +%= uint256.addMod(max -% lane, rhs + lane, modulus);
     }
-    std.mem.doNotOptimizeAway(acc);
+    std.mem.doNotOptimizeAway(&acc);
 }
 
 fn initRawMaskInput() void {

@@ -4,7 +4,7 @@ const EthTransaction = @import("../../eth/transaction.zig").Transaction;
 const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const smoke = @import("./v1_smoke.zig");
-const ssz = @import("../ssz.zig");
+const ssz = @import("ssz");
 const wire = @import("./v1.zig");
 
 test "stateless wire v1 smoke validates and returns SSZ output" {
@@ -102,6 +102,30 @@ test "stateless wire v1 rejects a payload shape from another fork" {
     try std.testing.expectError(error.InvalidPayloadForFork, wire.normalize(scratch, input));
 }
 
+test "stateless wire v1 releases decoded ownership when chain validation fails" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var input = try smoke.smokeInput(arena.allocator());
+    input.chain_config.active_fork.activation.timestamp = std.math.maxInt(u64);
+    const encoded = try input.encodeSchemaPrefixed(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+
+    try std.testing.expectError(
+        error.InactiveForkConfig,
+        wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded),
+    );
+}
+
+test "stateless wire v1 exposes successful decode ownership cleanup" {
+    const encoded = try smoke.smokeInputBytes(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
+    defer decoded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(wire.ProtocolFork.paris, decoded.chain_config.active_fork.fork);
+}
+
 test "stateless wire v1 rejects unknown schema ids" {
     var input_bytes = try smoke.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input_bytes);
@@ -115,12 +139,21 @@ test "stateless wire v1 enforces witness resource bounds before execution" {
     const witness = wire.ExecutionWitness{ .codes = &codes };
     try std.testing.expectError(error.InvalidListLength, witness.encode(std.testing.allocator));
 
-    var oversized_headers = [_]u8{0} ** ((256 + 1) * ssz.bytes_per_length_offset);
-    std.mem.writeInt(u32, oversized_headers[0..ssz.bytes_per_length_offset], @intCast(oversized_headers.len), .little);
-    const encoded = try ssz.encodeContainer(std.testing.allocator, 3, .{
-        .{ .variable = &.{} },
-        .{ .variable = &.{} },
-        .{ .variable = &oversized_headers },
+    const TestWitness = struct {
+        state: []const []const u8,
+        codes: []const []const u8,
+        headers: []const []const u8,
+    };
+    const TestWitnessSsz = ssz.Container(TestWitness, .{
+        .state = ssz.ListOf(ssz.ByteList(1 << 10), 1 << 22),
+        .codes = ssz.ListOf(ssz.ByteList(1 << 16), 1 << 18),
+        .headers = ssz.ListOf(ssz.ByteList(1 << 10), 257),
+    });
+    const headers = [_][]const u8{&.{}} ** 257;
+    const encoded = try ssz.encodeAlloc(TestWitnessSsz, std.testing.allocator, .{
+        .state = &.{},
+        .codes = &.{},
+        .headers = &headers,
     });
     defer std.testing.allocator.free(encoded);
     try std.testing.expectError(error.InvalidListLength, wire.ExecutionWitness.decode(std.testing.allocator, encoded));
@@ -135,12 +168,13 @@ test "stateless wire v1 rejects oversized withdrawals before allocation" {
         .electra_fulu => |request| request.execution_payload,
         else => unreachable,
     };
-    const withdrawals = try arena.allocator().alloc(wire.Withdrawal, 17);
-    @memset(withdrawals, std.mem.zeroes(wire.Withdrawal));
-    payload.v2.withdrawals = withdrawals;
-
-    const encoded = try payload.encode(std.testing.allocator);
+    payload.v2.withdrawals = &.{};
+    const valid = try payload.encode(std.testing.allocator);
+    defer std.testing.allocator.free(valid);
+    const encoded = try std.testing.allocator.alloc(u8, valid.len + 17 * ssz.encodedSize(wire.Withdrawal));
     defer std.testing.allocator.free(encoded);
+    @memcpy(encoded[0..valid.len], valid);
+    @memset(encoded[valid.len..], 0);
 
     var no_memory: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
@@ -288,8 +322,51 @@ test "stateless wire v1 protocol fork values match tests-zkevm v0.5" {
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(24));
 }
 
+test "stateless wire v1 ChainConfig owns its enum and optional-list schema" {
+    const configs = [_]wire.ChainConfig{
+        .{
+            .chain_id = 1,
+            .active_fork = .{
+                .fork = .paris,
+                .activation = .{},
+            },
+        },
+        .{
+            .chain_id = 2,
+            .active_fork = .{
+                .fork = .amsterdam,
+                .activation = .{
+                    .block_number = 42,
+                    .timestamp = 1_234,
+                },
+                .blob_schedule = .{
+                    .target = 6,
+                    .max = 9,
+                    .base_fee_update_fraction = 500_771,
+                },
+            },
+        },
+    };
+
+    for (configs) |config| {
+        const encoded = try ssz.encodeAlloc(wire.ChainConfig.Ssz, std.testing.allocator, config);
+        defer std.testing.allocator.free(encoded);
+        try std.testing.expectEqualDeep(config, try wire.ChainConfig.Ssz.decode(encoded));
+    }
+
+    const encoded = try ssz.encodeAlloc(wire.ChainConfig.Ssz, std.testing.allocator, configs[0]);
+    defer std.testing.allocator.free(encoded);
+    std.mem.writeInt(u64, encoded[12..20], 24, .little);
+    try std.testing.expectError(error.InvalidEnumValue, wire.ChainConfig.Ssz.decode(encoded));
+}
+
 fn expectOversizedExecutionRequestsRejected(requests: wire.ExecutionRequests) !void {
-    const encoded = try requests.encode(std.testing.allocator);
+    const TestRequestsSsz = ssz.Container(wire.ExecutionRequests, .{
+        .deposits = ssz.List(wire.DepositRequest, 8193),
+        .withdrawals = ssz.List(wire.WithdrawalRequest, 17),
+        .consolidations = ssz.List(wire.ConsolidationRequest, 3),
+    });
+    const encoded = try ssz.encodeAlloc(TestRequestsSsz, std.testing.allocator, requests);
     defer std.testing.allocator.free(encoded);
 
     var no_memory: [0]u8 = .{};

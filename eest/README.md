@@ -16,6 +16,55 @@ The default state-test corpus comes from `eest.lock`, currently
 work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
 `fixtures/state_tests`.
 
+## Consensus SSZ Fixtures
+
+The sidecar also hosts consensus-spec SSZ conformance while keeping that fixture
+track separate from execution-spec EEST releases:
+
+```sh
+scripts/fetch-consensus-ssz-fixtures.sh
+zig build ssz-conformance
+```
+
+The fetch script finds the `main` worktree by default and extracts only the SSZ
+subtrees from the pinned, checksum-verified General, Mainnet, and Minimal
+release archives. The runner resolves that same main-worktree cache by default;
+`EVMZ_EEST_ROOT` can override it. A bare `ssz-conformance` run covers all three
+lanes and fails if no cases run or any case is skipped:
+
+- General: every generic serialization family, including progressive types and
+  compatible unions. Valid fixtures must decode, re-encode byte-for-byte, and
+  match `meta.yaml`; invalid fixtures must reject.
+- Mainnet and Minimal: typed consensus objects from Phase0 through Heze. Each
+  canonical static fixture must decode, re-encode byte-for-byte, and match
+  `roots.yaml`.
+
+The pinned corpus currently contains 5,145 General cases, 2,275 Mainnet cases,
+and 55,965 Minimal cases. Preset/fork schemas are checked-in Zig declarations
+under `src/ssz_static/`; fixture YAML is not interpreted as a runtime schema.
+The generator fingerprints named schemas recursively, including collection
+limits and progressive active fields, and emits each historical shape once in
+the first fork that requires it. Later preset/fork handlers only reference that
+registry. The authoring script regenerates the declarations from the matching
+resolved consensus-spec pyspec when the pin changes. Canonical `value.yaml`
+mapping remains separate from binary and hash-tree-root conformance.
+
+Regeneration uses the Python environment from the exact pinned consensus-specs
+checkout. With `EVMZ` set to this repository and `FIXTURES` set to the extracted
+`consensus_dest` directory from `eest.lock`:
+
+```sh
+git clone --depth 1 --branch v1.7.0-alpha.12 \
+  https://github.com/ethereum/consensus-specs.git /tmp/evmz-consensus-specs
+(cd /tmp/evmz-consensus-specs && make _pyspec)
+(cd /tmp/evmz-consensus-specs && uv run python \
+  "$EVMZ/eest/scripts/generate-consensus-ssz-schemas.py" \
+  --pyspec-root tests/core/pyspec \
+  --fixtures-root "$FIXTURES" \
+  --version v1.7.0-alpha.12 \
+  --output "$EVMZ/eest/src/ssz_static")
+```
+
 Benchmark fixtures are a separate EEST release track and can be cached for
 future adapter work:
 

@@ -234,14 +234,14 @@ test "micro/state/sparse-hash-map/account-get-ptr" {
     var std_maps: [cases.len]StdAddressMap = undefined;
     for (&sparse_maps) |*map| map.* = SparseAddressMap.init(std.testing.allocator);
     for (&std_maps) |*map| map.* = StdAddressMap.init(std.testing.allocator);
-    defer for (&sparse_maps) |*map| deinitAccountMap(map, std.testing.allocator);
-    defer for (&std_maps) |*map| deinitAccountMap(map, std.testing.allocator);
+    defer for (&sparse_maps) |*map| map.deinit();
+    defer for (&std_maps) |*map| map.deinit();
 
     for (cases, 0..) |case, index| {
         try sparse_maps[index].ensureTotalCapacity(@intCast(case.reserve));
         try std_maps[index].ensureTotalCapacity(@intCast(case.reserve));
-        fillAddressMap(&sparse_maps[index], std.testing.allocator, keys[0..case.live]);
-        fillAddressMap(&std_maps[index], std.testing.allocator, keys[0..case.live]);
+        fillAddressMap(&sparse_maps[index], keys[0..case.live]);
+        fillAddressMap(&std_maps[index], keys[0..case.live]);
         try expectAddressMapParity(&sparse_maps[index], &std_maps[index], keys[0..case.live], &misses);
     }
 
@@ -543,18 +543,10 @@ fn fillStorageMap(map: anytype, keys: []const StorageKey) void {
     for (keys, 0..) |key, index| map.putAssumeCapacityNoClobber(key, mixedWord(@intCast(index + 42)));
 }
 
-fn fillAddressMap(map: anytype, allocator: std.mem.Allocator, keys: []const Address) void {
+fn fillAddressMap(map: anytype, keys: []const Address) void {
     for (keys, 0..) |key, index| {
-        var account = AccountState.init(allocator);
-        account.nonce = @intCast(index + 1);
-        map.putAssumeCapacityNoClobber(key, account);
+        map.putAssumeCapacityNoClobber(key, .{ .nonce = @intCast(index + 1) });
     }
-}
-
-fn deinitAccountMap(map: anytype, allocator: std.mem.Allocator) void {
-    var values = map.valueIterator();
-    while (values.next()) |account| account.deinit(allocator);
-    map.deinit();
 }
 
 fn expectStorageSetParity(

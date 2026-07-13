@@ -1,0 +1,13 @@
+.{
+    .name = .ssz,
+    .version = "0.0.0",
+    .fingerprint = 0x1d34bd0ca5f09fcb,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "bench",
+        "src",
+    },
+}

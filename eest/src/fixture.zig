@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const evmz = @import("evmz");
+const lock = @import("lock.zig");
 
 pub const JsonValue = std.json.Value;
 const Address = evmz.Address;
@@ -46,6 +47,7 @@ pub fn lockedFixturePath(
     track: []const u8,
 ) ![]u8 {
     const dest = try lockedPathValue(io, allocator, "dest");
+    defer allocator.free(dest);
     return if (track.len == 0)
         try std.fs.path.join(allocator, &.{ dest, "fixtures" })
     else
@@ -54,58 +56,17 @@ pub fn lockedFixturePath(
 
 pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     const dest = try lockedPathValue(io, allocator, "zkevm_dest");
+    defer allocator.free(dest);
     return try std.fs.path.join(allocator, &.{ dest, "fixtures" });
 }
 
-fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]const u8 {
-    const locations = [_]struct {
-        lock_path: []const u8,
-        relative_prefix: []const u8,
-    }{
-        .{ .lock_path = "../eest.lock", .relative_prefix = ".." },
-        .{ .lock_path = "eest.lock", .relative_prefix = "" },
-    };
-
-    for (locations) |location| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, location.lock_path, allocator, .limited(64 * 1024)) catch |err| {
-            if (err == error.FileNotFound) continue;
-            return err;
-        };
-        const raw_value = parseLockValue(bytes, key) orelse return error.MissingEestLockKey;
-        if (std.fs.path.isAbsolute(raw_value)) return raw_value;
-        if (location.relative_prefix.len == 0) return raw_value;
-        return std.fs.path.join(allocator, &.{ location.relative_prefix, raw_value });
+fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]u8 {
+    var value = try lock.readValue(io, allocator, key);
+    defer value.deinit(allocator);
+    if (std.fs.path.isAbsolute(value.bytes) or value.relative_prefix.len == 0) {
+        return allocator.dupe(u8, value.bytes);
     }
-
-    return error.MissingEestLock;
-}
-
-fn parseLockValue(bytes: []const u8, key: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const line_key = std.mem.trim(u8, line[0..equals], " \t");
-        if (!std.mem.eql(u8, line_key, key)) continue;
-        return std.mem.trim(u8, line[equals + 1 ..], " \t");
-    }
-    return null;
-}
-
-test "EEST lock parser trims comments and values" {
-    const bytes =
-        \\# comment
-        \\ repo = ethereum/execution-specs
-        \\version=tests-glamsterdam-devnet@v6.1.0
-        \\artifact = fixtures_glamsterdam-devnet.tar.gz
-        \\
-    ;
-
-    try std.testing.expectEqualStrings("ethereum/execution-specs", parseLockValue(bytes, "repo").?);
-    try std.testing.expectEqualStrings("tests-glamsterdam-devnet@v6.1.0", parseLockValue(bytes, "version").?);
-    try std.testing.expectEqualStrings("fixtures_glamsterdam-devnet.tar.gz", parseLockValue(bytes, "artifact").?);
-    try std.testing.expectEqual(@as(?[]const u8, null), parseLockValue(bytes, "missing"));
+    return std.fs.path.join(allocator, &.{ value.relative_prefix, value.bytes });
 }
 
 pub fn asObject(value: JsonValue) ?std.json.ObjectMap {
