@@ -413,9 +413,10 @@ fn Typed(
         ///
         /// It executes session for multiple txs under one env, Not a Ethereum block processor.
         /// Feed transactions through `transact` to accumulate block-level gas
-        /// and the transaction count. Preparation receives current gas progress;
-        /// each executable call then snapshots before execution so the final fold
-        /// can still roll back without tearing down the block.
+        /// and the transaction count. Preparation receives current gas progress.
+        /// Definitions with before-transaction calls retain a full snapshot so
+        /// the hook and payload remain one block candidate; empty hooks use only
+        /// the pending transaction's journal checkpoint.
         pub const BlockSession = struct {
             const AcceptedTransaction = struct {
                 index: u64,
@@ -456,6 +457,18 @@ fn Typed(
                 switch (prepared) {
                     .rejected => |err| return .{ .rejected = err },
                     .executable => |executable| {
+                        const before_transaction_calls = executor_module.system_contracts.beforeTransactionCalls(
+                            &self.vm.executor,
+                            .{
+                                .number = self.vm.runtimeEnv().number,
+                                .timestamp = self.vm.runtimeEnv().timestamp,
+                                .transaction_index = self.tx_count,
+                            },
+                        );
+                        if (before_transaction_calls.slice().len == 0) {
+                            return .{ .executed = try self.resolvePreparedTransaction(executable) };
+                        }
+
                         var pre_tx = try self.vm.executor.snapshot();
                         defer pre_tx.deinit(self.vm.executor.allocator);
                         self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_tx);
@@ -465,43 +478,15 @@ fn Typed(
                             self.vm.executor.restore(&pre_tx) catch {};
                         };
 
-                        try executor_module.system_contracts.applyBeforeTransaction(
+                        try executor_module.system_contracts.applyBeforeTransactionCalls(
                             &self.vm.executor,
                             self.lifecycleTxContext(),
-                            .{
-                                .number = self.vm.runtimeEnv().number,
-                                .timestamp = self.vm.runtimeEnv().timestamp,
-                                .transaction_index = self.tx_count,
-                            },
+                            &before_transaction_calls,
                         );
-                        var pending = try self.vm.executePreparedTransaction(executable);
-                        defer pending.deinit();
-                        const candidate = pending.result();
-                        const next_gas_used = std.math.add(u64, self.gas_used, candidate.gas.used) catch {
-                            pending.reject() catch |err| @panic(@errorName(err));
+                        const result = self.resolvePreparedTransaction(executable) catch |err| {
+                            if (err != error.BlockGasExceeded) return err;
                             trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
-                        };
-                        const next_block_gas = self.block_gas.add(candidate.gas.block) catch {
-                            pending.reject() catch |err| @panic(@errorName(err));
-                            trace_checkpoint_open = false;
-                            return self.drop(&pre_tx);
-                        };
-                        if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
-                            pending.reject() catch |err| @panic(@errorName(err));
-                            trace_checkpoint_open = false;
-                            return self.drop(&pre_tx);
-                        }
-
-                        const result = pending.accept() catch |err| @panic(@errorName(err));
-
-                        self.gas_used = next_gas_used;
-                        self.block_gas = next_block_gas;
-                        self.tx_count += 1;
-                        self.accepted_for_after_hook = .{
-                            .index = self.tx_count - 1,
-                            .status = result.status,
-                            .gas_used = result.gas.used,
                         };
                         self.vm.executor.traceSnapshotLifecycle(.commit, &pre_tx);
                         trace_checkpoint_open = false;
@@ -615,6 +600,38 @@ fn Typed(
                     .block_gas = self.block_gas,
                     .tx_count = self.tx_count,
                 };
+            }
+
+            fn resolvePreparedTransaction(
+                self: *BlockSession,
+                executable: Self.PreparedTransaction,
+            ) !TxExecutionResult {
+                var pending = try self.vm.executePreparedTransaction(executable);
+                defer pending.deinit();
+                const candidate = pending.result();
+                const next_gas_used = std.math.add(u64, self.gas_used, candidate.gas.used) catch {
+                    pending.reject() catch |err| @panic(@errorName(err));
+                    return error.BlockGasExceeded;
+                };
+                const next_block_gas = self.block_gas.add(candidate.gas.block) catch {
+                    pending.reject() catch |err| @panic(@errorName(err));
+                    return error.BlockGasExceeded;
+                };
+                if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
+                    pending.reject() catch |err| @panic(@errorName(err));
+                    return error.BlockGasExceeded;
+                }
+
+                const result = pending.accept() catch |err| @panic(@errorName(err));
+                self.gas_used = next_gas_used;
+                self.block_gas = next_block_gas;
+                self.tx_count += 1;
+                self.accepted_for_after_hook = .{
+                    .index = self.tx_count - 1,
+                    .status = result.status,
+                    .gas_used = result.gas.used,
+                };
+                return result;
             }
 
             fn drop(self: *BlockSession, pre_tx: *Executor.Snapshot) !Self.TxResult {
