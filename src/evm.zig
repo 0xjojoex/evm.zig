@@ -56,6 +56,8 @@ pub const RevisionConfig = definition.RevisionConfig;
 pub const RevisionModel = definition.RevisionModel;
 pub const StateReader = vm.StateReader;
 pub const Transaction = Evm.Transaction;
+pub const PendingTransaction = Evm.PendingTransaction;
+pub const TransactResult = Evm.TransactResult;
 pub const TxResult = Evm.TxResult;
 pub const TxStatus = Evm.TxStatus;
 

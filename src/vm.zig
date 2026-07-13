@@ -92,7 +92,8 @@ pub const TxExecutionResult = struct {
     created_address: ?Address = null,
 };
 
-/// Result of `Vm.transact`.
+/// Result of an accepted transaction, used by `BlockSession` and
+/// `Vm.transactCommit` after an explicit pending transaction is accepted.
 ///
 /// Validation rejection is tx/protocol state, not execution. `BlockSession`
 /// reports block inclusion failures, such as block gas exhaustion, through
@@ -326,6 +327,54 @@ fn Typed(
         pub const Executor = ExecutorType;
         pub const Interpreter = InterpreterType;
 
+        /// A fully executed transaction whose journaled state is still pending
+        /// caller acceptance or rejection.
+        ///
+        /// Treat this token as move-only. `deinit` rejects it when unresolved.
+        /// Until it is resolved, use only `result`, `logs`, `accept`, or `reject`;
+        /// other operations on the owning VM return `PendingTransactionActive`
+        /// or enforce the same ownership contract with a panic.
+        pub const PendingTransaction = struct {
+            executor_pending: Executor.PendingTopLevelTransaction,
+            created_address: ?Address,
+
+            pub fn result(self: *const PendingTransaction) TxExecutionResult {
+                const pending_result = self.executor_pending.result();
+                return .{
+                    .status = txStatus(pending_result.status),
+                    .gas = pending_result.gas,
+                    .output = pending_result.output_data,
+                    .created_address = self.created_address,
+                };
+            }
+
+            pub fn logs(self: *const PendingTransaction) []const Log {
+                return self.executor_pending.logs();
+            }
+
+            /// Retain this transaction in the cumulative VM overlay.
+            pub fn accept(self: *PendingTransaction) !TxExecutionResult {
+                const execution_result = self.result();
+                _ = try self.executor_pending.accept();
+                return execution_result;
+            }
+
+            /// Restore the VM overlay to its pre-transaction state.
+            pub fn reject(self: *PendingTransaction) !void {
+                try self.executor_pending.reject();
+            }
+
+            pub fn deinit(self: *PendingTransaction) void {
+                self.executor_pending.deinit();
+                self.* = undefined;
+            }
+        };
+
+        pub const TransactResult = union(enum) {
+            pending: PendingTransaction,
+            rejected: ValidationErrorType,
+        };
+
         pub fn baseRevision(revision: Revision) BaseRevision {
             if (comptime @hasDecl(Protocol, "baseRevision")) {
                 return Protocol.baseRevision(revision);
@@ -380,7 +429,7 @@ fn Typed(
             /// Cumulative block/header gas for accepted transactions.
             block_gas: transaction.BlockGas = .{},
             tx_count: u64 = 0,
-            pending_after: ?AcceptedTransaction = null,
+            accepted_for_after_hook: ?AcceptedTransaction = null,
 
             /// Run definition-owned work before payload execution begins.
             /// Family-owned actions can be applied before or after this call.
@@ -425,24 +474,31 @@ fn Typed(
                                 .transaction_index = self.tx_count,
                             },
                         );
-                        const result = try self.vm.executePreparedTransaction(executable);
-                        const next_gas_used = std.math.add(u64, self.gas_used, result.gas.used) catch {
+                        var pending = try self.vm.executePreparedTransaction(executable);
+                        defer pending.deinit();
+                        const candidate = pending.result();
+                        const next_gas_used = std.math.add(u64, self.gas_used, candidate.gas.used) catch {
+                            pending.reject() catch |err| @panic(@errorName(err));
                             trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         };
-                        const next_block_gas = self.block_gas.add(result.gas.block) catch {
+                        const next_block_gas = self.block_gas.add(candidate.gas.block) catch {
+                            pending.reject() catch |err| @panic(@errorName(err));
                             trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         };
                         if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
+                            pending.reject() catch |err| @panic(@errorName(err));
                             trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         }
 
+                        const result = pending.accept() catch |err| @panic(@errorName(err));
+
                         self.gas_used = next_gas_used;
                         self.block_gas = next_block_gas;
                         self.tx_count += 1;
-                        self.pending_after = .{
+                        self.accepted_for_after_hook = .{
                             .index = self.tx_count - 1,
                             .status = result.status,
                             .gas_used = result.gas.used,
@@ -468,12 +524,12 @@ fn Typed(
             /// the accepted transaction's logs. Lifecycle system calls replace
             /// the VM's borrowed log view just like any other execution scope.
             pub fn afterTransaction(self: *BlockSession) !void {
-                if (self.pending_after == null) return error.NoPendingTransaction;
+                if (self.accepted_for_after_hook == null) return error.NoPendingTransaction;
                 try self.flushAfterTransaction();
             }
 
             fn flushAfterTransaction(self: *BlockSession) !void {
-                const accepted = self.pending_after orelse return;
+                const accepted = self.accepted_for_after_hook orelse return;
                 try executor_module.system_contracts.applyAfterTransaction(
                     &self.vm.executor,
                     self.lifecycleTxContext(),
@@ -488,7 +544,7 @@ fn Typed(
                         .cumulative_state_gas = self.block_gas.state,
                     },
                 );
-                self.pending_after = null;
+                self.accepted_for_after_hook = null;
             }
 
             /// Run definition-owned finalization calls and return their owned,
@@ -649,6 +705,7 @@ fn Typed(
         }
 
         pub fn beginBlock(self: *Self, env: Env) !BlockSession {
+            try self.requireNoPendingTransaction();
             if (self.block_bound) |bound| {
                 if (env.gas_limit == 0) return error.InvalidBlockGasLimit;
                 if (env.gas_limit > bound.max_block_gas) return error.BlockGasLimitExceedsBound;
@@ -662,6 +719,7 @@ fn Typed(
         }
 
         pub fn getAccount(self: *Self, address_value: Address) !?AccountView {
+            try self.requireNoPendingTransaction();
             const account = try self.executor.getAccountOrLoad(address_value) orelse return null;
             const code = try self.executor.getCode(address_value);
             return .{
@@ -672,6 +730,7 @@ fn Typed(
         }
 
         pub fn getStorage(self: *Self, address_value: Address, key: u256) !u256 {
+            try self.requireNoPendingTransaction();
             return self.executor.getStorage(address_value, key);
         }
 
@@ -680,6 +739,7 @@ fn Typed(
         /// Block-level callers use this for execution-derived writes such as
         /// withdrawal credits while keeping `BlockSession` limited to tx folding.
         pub fn creditBalance(self: *Self, address_value: Address, amount: u256) !void {
+            try self.requireNoPendingTransaction();
             try self.executor.addBalance(address_value, amount);
         }
 
@@ -694,6 +754,7 @@ fn Typed(
         /// Execute an explicit non-transaction system call.
         pub fn systemCall(self: *Self, call: SystemCall) !EvmResult {
             try self.requireDirectExecution();
+            try self.requireNoPendingTransaction();
             return self.executeSystemCall(call);
         }
 
@@ -716,13 +777,14 @@ fn Typed(
             });
         }
 
-        /// Execute one protocol transaction into the VM overlay.
-        pub fn transact(self: *Self, tx: Self.Transaction) !Self.TxResult {
+        /// Execute one protocol transaction under an unresolved journal checkpoint.
+        pub fn transact(self: *Self, tx: Self.Transaction) !Self.TransactResult {
             try self.requireDirectExecution();
+            try self.requireNoPendingTransaction();
             const prepared = try self.prepareTransaction(tx, .{});
             return switch (prepared) {
                 .rejected => |err| .{ .rejected = err },
-                .executable => |executable| .{ .executed = try self.executePreparedTransaction(executable) },
+                .executable => |executable| .{ .pending = try self.executePreparedTransaction(executable) },
             };
         }
 
@@ -739,7 +801,7 @@ fn Typed(
             return Protocol.Transaction.prepare(Protocol, input);
         }
 
-        fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !TxExecutionResult {
+        fn executePreparedTransaction(self: *Self, prepared: Self.PreparedTransaction) !PendingTransaction {
             // Scope opening consumes context plus root identity. The Ethereum
             // shell rebuilds the final request after authorization adjusts gas.
             const scope_request = transaction.executionRequest(
@@ -749,33 +811,37 @@ fn Typed(
             );
             try self.executor.beginMessageScope(scope_request, .{});
             errdefer self.executor.closeTransaction();
-            const result = try self.executor.runTopLevelTransaction(prepared.scope, prepared.root, .{
+            const pending = try self.executor.runTopLevelTransactionPending(prepared.scope, prepared.root, .{
                 .execution = prepared.execution_gas,
                 .settlement = prepared.settlement,
             });
 
             return .{
-                .status = txStatus(result.status),
-                .gas = result.gas,
-                .output = result.output_data,
-                .created_address = if (result.status == .success) prepared.created_address else null,
+                .executor_pending = pending,
+                .created_address = if (pending.result().status == .success) prepared.created_address else null,
             };
         }
 
         /// Convenience for one-off callers. Block executors should usually call
         /// `transact` many times, then one `commit`.
         pub fn transactCommit(self: *Self, tx: Self.Transaction) !Self.TxResult {
-            const result = try self.transact(tx);
-            switch (result) {
-                .rejected => return result,
-                .executed => {},
-            }
+            const outcome = try self.transact(tx);
+            var pending = switch (outcome) {
+                .rejected => |err| return .{ .rejected = err },
+                .pending => |pending| pending,
+            };
+            defer pending.deinit();
+            const result = try pending.accept();
             try self.commit();
-            return result;
+            return .{ .executed = result };
         }
 
         fn requireDirectExecution(self: *const Self) !void {
             if (self.block_bound != null) return error.BlockSessionRequired;
+        }
+
+        fn requireNoPendingTransaction(self: *const Self) !void {
+            if (self.executor.hasPendingTransaction()) return error.PendingTransactionActive;
         }
 
         fn preparationStateAccess(self: *Self) transaction.PreparationStateAccess {
@@ -848,6 +914,7 @@ fn Typed(
         }
 
         /// Drop pending overlay changes without writing them to the commit sink.
+        /// The caller must resolve any `PendingTransaction` first.
         pub fn discard(self: *Self) void {
             self.executor.discardChanges();
         }
@@ -858,6 +925,7 @@ fn Typed(
         /// the reader. After a successful commit, the in-memory overlay is cleared so
         /// the same VM can process the next block.
         pub fn commit(self: *Self) !void {
+            try self.requireNoPendingTransaction();
             const committer = self.committer orelse return error.ReadOnly;
             var diff = try self.executor.changeset();
             defer diff.deinit(self.executor.allocator);
@@ -874,18 +942,44 @@ fn Typed(
 const Default = evmz.Evm;
 const EthValidationError = evmz.Evm.Protocol.Transaction.ValidationError;
 
-fn expectExecuted(result: Default.TxResult) !TxExecutionResult {
-    return switch (result) {
-        .executed => |executed| executed,
-        .rejected => error.UnexpectedRejection,
-    };
+fn expectExecuted(result: anytype) !TxExecutionResult {
+    if (comptime @TypeOf(result) == Default.TransactResult) {
+        return switch (result) {
+            .pending => |value| blk: {
+                var pending = value;
+                defer pending.deinit();
+                break :blk try pending.accept();
+            },
+            .rejected => error.UnexpectedRejection,
+        };
+    }
+    if (comptime @TypeOf(result) == Default.TxResult) {
+        return switch (result) {
+            .executed => |executed| executed,
+            .rejected => error.UnexpectedRejection,
+        };
+    }
+    @compileError("unsupported transaction result type");
 }
 
-fn expectRejected(result: Default.TxResult) !EthValidationError {
-    return switch (result) {
-        .executed => error.UnexpectedExecution,
-        .rejected => |err| err,
-    };
+fn expectRejected(result: anytype) !EthValidationError {
+    if (comptime @TypeOf(result) == Default.TransactResult) {
+        return switch (result) {
+            .pending => |value| blk: {
+                var pending = value;
+                defer pending.deinit();
+                break :blk error.UnexpectedExecution;
+            },
+            .rejected => |err| err,
+        };
+    }
+    if (comptime @TypeOf(result) == Default.TxResult) {
+        return switch (result) {
+            .executed => error.UnexpectedExecution,
+            .rejected => |err| err,
+        };
+    }
+    @compileError("unsupported transaction result type");
 }
 
 test "Env execution context derives opcode-visible gas limit from the environment" {
@@ -1072,11 +1166,20 @@ test "Vm transact validates and executes call transaction" {
     });
     defer vm.deinit();
 
-    const result = try expectExecuted(try vm.transact(.{
+    const outcome = try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    }));
+    });
+    var pending = switch (outcome) {
+        .pending => |value| value,
+        .rejected => return error.UnexpectedRejection,
+    };
+    defer pending.deinit();
+    try std.testing.expectEqual(TxStatus.success, pending.result().status);
+    try std.testing.expectError(error.PendingTransactionActive, vm.changeset());
+
+    const result = try pending.accept();
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expect(result.gas.used > 21_000);
     try std.testing.expectEqual(result.gas.used, result.gas.block.total);
@@ -1090,6 +1193,60 @@ test "Vm transact validates and executes call transaction" {
     try std.testing.expectEqual(@as(usize, 1), diff.storage_writes.items.len);
     try std.testing.expectEqual(contract, diff.storage_writes.items[0].address);
     try std.testing.expectEqual(@as(u256, 0x2a), diff.storage_writes.items[0].value);
+}
+
+test "Vm pending transaction rejects without allocating" {
+    const sender = addr(0xaaaa);
+    const contract = addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 1_000_000;
+    var contract_account = try memory.getOrCreateAccount(contract);
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var vm = Default.init(failing_allocator.allocator(), .{
+        .revision = .amsterdam,
+        .state_reader = memory.reader(),
+        .env = .{ .gas_limit = 1_000_000 },
+    });
+    defer vm.deinit();
+
+    const outcome = try vm.transact(.{
+        .sender = sender,
+        .to = contract,
+        .gas_limit = 300_000,
+        .value = 7,
+    });
+    var pending = switch (outcome) {
+        .pending => |value| value,
+        .rejected => return error.UnexpectedRejection,
+    };
+    defer pending.deinit();
+
+    try std.testing.expectEqual(TxStatus.success, pending.result().status);
+    try std.testing.expectEqual(@as(usize, 1), pending.logs().len);
+    try std.testing.expectError(error.PendingTransactionActive, vm.getStorage(contract, 0));
+    try std.testing.expectError(error.PendingTransactionActive, vm.commit());
+    try std.testing.expectError(error.PendingTransactionActive, vm.transact(.{
+        .sender = sender,
+        .to = contract,
+        .gas_limit = 300_000,
+    }));
+
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    try pending.reject();
+    try std.testing.expect(!failing_allocator.has_induced_failure);
+    failing_allocator.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(contract, 0));
+    try std.testing.expectEqual(@as(usize, 0), vm.logs().len);
+    var diff = try vm.changeset();
+    defer diff.deinit(failing_allocator.allocator());
+    try std.testing.expectEqual(@as(usize, 0), diff.account_updates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), diff.storage_writes.items.len);
 }
 
 test "Vm transact forwards BLOCKHASH to configured block hash source" {
@@ -1234,11 +1391,11 @@ test "Vm rejected transaction preserves pending overlay" {
     });
     defer vm.deinit();
 
-    _ = try vm.transact(.{
+    _ = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     const rejected = try vm.transact(.{
         .sender = sender,
         .nonce = 99,
@@ -1274,11 +1431,11 @@ test "Vm commit applies changeset and rebases overlay" {
     });
     defer vm.deinit();
 
-    _ = try vm.transact(.{
+    _ = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     try vm.commit();
 
     var diff = try vm.changeset();
@@ -1306,11 +1463,11 @@ test "Vm discard drops pending overlay without touching state reader" {
     });
     defer vm.deinit();
 
-    _ = try vm.transact(.{
+    _ = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     vm.discard();
 
     var diff = try vm.changeset();
@@ -1338,11 +1495,11 @@ test "Vm read-only commit leaves pending overlay intact" {
     });
     defer vm.deinit();
 
-    _ = try vm.transact(.{
+    _ = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 300_000,
-    });
+    }));
     try std.testing.expectError(error.ReadOnly, vm.commit());
 
     var diff = try vm.changeset();
@@ -1370,11 +1527,11 @@ test "Vm transactCommit skips commit for rejected transaction" {
     });
     defer vm.deinit();
 
-    _ = try vm.transact(.{
+    _ = try expectExecuted(try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = 100_000,
-    });
+    }));
     const rejected = try vm.transactCommit(.{
         .sender = sender,
         .nonce = 99,

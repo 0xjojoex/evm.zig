@@ -89,6 +89,7 @@ bounded_log_topics: std.ArrayList([4]u256),
 bounded_log_data: std.ArrayList(u8),
 log_resources: ?LogResources,
 journal: Journal,
+transaction_open: bool,
 trace_sink: ?*trace.Sink,
 trace_depth: u16,
 
@@ -118,6 +119,7 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .bounded_log_data = .empty,
         .log_resources = null,
         .journal = Journal.init(),
+        .transaction_open = false,
         .trace_sink = null,
         .trace_depth = 0,
     };
@@ -280,6 +282,10 @@ pub fn getAccountOrLoad(self: *Overlay, address: Address) !?*Account {
     if (self.accounts.getPtr(address)) |account| return account;
     const state_reader = self.state_reader orelse return null;
     if (try state_reader.loadAccount(address)) |account| {
+        if (self.transaction_open) {
+            try self.journal.append(self.allocator, .{ .account_loaded = address });
+            errdefer self.discardLastJournalEntry();
+        }
         try self.putAccount(address, account);
         return self.accounts.getPtr(address).?;
     }
@@ -757,6 +763,7 @@ fn accountHasStorageInner(self: *Overlay, address: Address) !bool {
 pub fn beginTransaction(self: *Overlay) void {
     self.clearLogsRetainingCapacity();
     self.closeTransaction();
+    self.transaction_open = true;
 }
 
 pub fn closeTransaction(self: *Overlay) void {
@@ -765,6 +772,7 @@ pub fn closeTransaction(self: *Overlay) void {
     self.transient_storage.clearRetainingCapacity();
     self.original_storage.clearRetainingCapacity();
     self.journal.clearRetainingCapacity(self.allocator);
+    self.transaction_open = false;
 }
 
 pub fn discardChanges(self: *Overlay) void {
@@ -967,7 +975,7 @@ pub fn revertToCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) 
     while (self.journal.len() > checkpoint_state.journal_len) {
         var entry = self.journal.pop().?;
         defer entry.deinit(self.allocator);
-        try self.revertJournalEntry(&entry);
+        self.revertJournalEntry(&entry);
     }
     self.truncateLogs(checkpoint_state.logs_len);
     self.traceCheckpoint(.revert, checkpoint_state);
@@ -977,19 +985,22 @@ fn rollbackInternalCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoi
     while (self.journal.len() > checkpoint_state.journal_len) {
         var entry = self.journal.pop().?;
         defer entry.deinit(self.allocator);
-        self.revertJournalEntry(&entry) catch unreachable;
+        self.revertJournalEntry(&entry);
     }
     self.truncateLogs(checkpoint_state.logs_len);
 }
 
-fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) !void {
+fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
     switch (entry.*) {
+        .account_loaded => |address| {
+            _ = self.accounts.remove(address);
+        },
         .account_created => |address| {
             _ = self.accounts.remove(address);
         },
         .deleted_account_revived => |address| {
             _ = self.accounts.remove(address);
-            try self.putDeletedAccount(address);
+            restoreMapValueAssumeCapacity(&self.deleted_accounts, address, {});
         },
         .dirty_account => |address| {
             _ = self.dirty_accounts.remove(address);
@@ -1011,14 +1022,14 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) !void {
         },
         .account_removed => |*removed| {
             if (removed.prev) |account| {
-                try self.putAccount(removed.address, account);
+                restoreMapValueAssumeCapacity(&self.accounts, removed.address, account);
                 removed.prev = null;
             }
         },
         .storage => |storage_entry| {
             const storage_key = StorageKey{ .address = storage_entry.address, .key = storage_entry.key };
             if (storage_entry.overlay_had) {
-                try self.putStorageOverlay(storage_key, storage_entry.overlay_prev);
+                restoreMapValueAssumeCapacity(&self.storage_overlay, storage_key, storage_entry.overlay_prev);
             } else {
                 _ = self.storage_overlay.remove(storage_key);
             }
@@ -1047,15 +1058,24 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) !void {
             _ = self.deleted_accounts.remove(address);
         },
         .created_contract_cleared => |address| {
-            try self.putCreatedContract(address);
+            restoreMapValueAssumeCapacity(&self.created_contracts, address, {});
         },
         .selfdestruct_cleared => |address| {
-            try self.putSelfdestructedAccount(address);
+            restoreMapValueAssumeCapacity(&self.selfdestructed_accounts, address, {});
         },
         .storage_overlay_removed => |removed| {
-            try self.putStorageOverlay(removed.key, removed.prev);
+            restoreMapValueAssumeCapacity(&self.storage_overlay, removed.key, removed.prev);
         },
     }
+}
+
+/// Journal rollback walks mutations in reverse order. Every removed entry left
+/// its map allocation behind, while entries inserted after the checkpoint are
+/// removed before an older value is restored. Rollback can therefore reinsert
+/// without growing any map.
+fn restoreMapValueAssumeCapacity(map: anytype, key: anytype, value: anytype) void {
+    if (!map.contains(key)) std.debug.assert(map.count() < map.capacity());
+    map.putAssumeCapacity(key, value);
 }
 
 fn markAccountDirty(self: *Overlay, address: Address) !bool {
@@ -1365,8 +1385,8 @@ pub fn finalizeTransaction(self: *Overlay, finalizer: anytype) !void {
     var removed_storage_keys: std.ArrayList(StorageKey) = .empty;
     defer removed_storage_keys.deinit(self.allocator);
 
-    const journal_len = self.journal.len();
-    errdefer self.journal.truncate(self.allocator, journal_len);
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
 
     var it = self.selfdestructed_accounts.keyIterator();
     while (it.next()) |address| {

@@ -52,17 +52,24 @@ var vm = evmz.Evm.init(allocator, .{
 });
 defer vm.deinit();
 
-const executed = switch (try vm.transact(.{
+var pending = switch (try vm.transact(.{
     .sender = evmz.addr(0xaaaa),
     .to = evmz.addr(0xbbbb),
     .gas_limit = 100_000,
 })) {
-    .executed => |value| value,
+    .pending => |value| value,
     .rejected => return error.TransactionRejected,
 };
+defer pending.deinit(); // Rejects automatically if still unresolved.
+
+// Inspect pending.result() and pending.logs(), then decide explicitly.
+const executed = try pending.accept();
 // executed.status, executed.gas.used, executed.output
 // vm.changeset() gives you the state diff to commit or discard.
 ```
+
+Use `vm.transactCommit(tx)` when the VM has a committer and the transaction
+should be accepted and persisted in one call.
 
 A complete runnable version — deploy code, transact, read storage back — lives
 in `examples/basic.zig`:
@@ -114,7 +121,8 @@ const MyVM = evmz.Vm(MyRevision, MyChainDefinition, .{});
 ```
 
 The returned type carries its matching `Protocol`, `Executor`, `Interpreter`,
-`Transaction`, `TxResult`, and `TxStatus` types. Lowercase modules such as
+`Transaction`, `TransactResult`, `PendingTransaction`, `TxResult`, and
+`TxStatus` types. Lowercase modules such as
 `evmz.execution` and `evmz.executor` remain available for low-level work.
 Representation-changing families can build a typed facade over those APIs;
 [`examples/op-deposit.zig`](examples/op-deposit.zig) is a compact example.

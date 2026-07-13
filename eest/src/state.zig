@@ -732,7 +732,13 @@ const FixtureHost = struct {
     }
 
     fn transact(self: *Self, tx: evmz.Transaction) !evmz.TxResult {
-        return self.vm.transact(tx);
+        const outcome = try self.vm.transact(tx);
+        var pending = switch (outcome) {
+            .pending => |value| value,
+            .rejected => |err| return .{ .rejected = err },
+        };
+        defer pending.deinit();
+        return .{ .executed = try pending.accept() };
     }
 };
 

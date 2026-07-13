@@ -181,7 +181,7 @@ pub const Vm = struct {
 
     /// Ordinary Ethereum envelopes retain the default concrete API and run on
     /// the same overlay as family deposits.
-    pub fn transactEthereum(self: *Self, tx: evmz.Evm.Transaction) !evmz.Evm.TxResult {
+    pub fn transactEthereum(self: *Self, tx: evmz.Evm.Transaction) !evmz.Evm.TransactResult {
         return self.engine.transact(tx);
     }
 
@@ -191,11 +191,12 @@ pub const Vm = struct {
     /// errors restore the full transition, including mint. Included EVM
     /// failures preserve mint and one sender-nonce increment.
     pub fn transact(self: *Self, tx: Transaction, block: Block) !TxResult {
+        const executor = &self.engine.executor;
+        if (executor.hasPendingTransaction()) return error.PendingTransactionActive;
         if (tx.is_system_transaction) {
             return .{ .rejected = .system_transaction_after_regolith };
         }
 
-        const executor = &self.engine.executor;
         var outer = try executor.snapshot();
         defer outer.deinit(executor.allocator);
         executor.traceSnapshotLifecycle(.checkpoint, &outer);
@@ -362,9 +363,13 @@ fn executionRequest(
     };
 }
 
-fn expectEthereumExecuted(result: evmz.Evm.TxResult) !evmz.vm.TxExecutionResult {
+fn expectEthereumExecuted(result: evmz.Evm.TransactResult) !evmz.vm.TxExecutionResult {
     return switch (result) {
-        .executed => |executed| executed,
+        .pending => |value| blk: {
+            var pending = value;
+            defer pending.deinit();
+            break :blk try pending.accept();
+        },
         .rejected => error.UnexpectedEthereumRejection,
     };
 }
@@ -549,6 +554,45 @@ test "family facade does not widen the concrete Ethereum transaction API" {
     try std.testing.expect(!@hasDecl(evmz, "DepositTransaction"));
     try std.testing.expect(Vm.Transaction == DepositTransaction);
     try std.testing.expect(Vm.TxResult == Result);
+}
+
+test "deposit cannot mutate an unresolved Ethereum transaction" {
+    const sender = address.addr(0xaaaa);
+    const ethereum_recipient = address.addr(0xbbbb);
+    const deposit_recipient = address.addr(0xcccc);
+    const block = evmz.execution.BlockEnvironment{ .gas_limit = 30_000_000 };
+
+    var vm = Vm.init(std.testing.allocator, .{ .revision = .cancun, .chain_id = 10 });
+    defer vm.deinit();
+    vm.engine.env.gas_limit = block.gas_limit;
+    try vm.engine.creditBalance(sender, 100);
+
+    const outcome = try vm.transactEthereum(.{
+        .sender = sender,
+        .nonce = 0,
+        .gas_limit = 100_000,
+        .to = ethereum_recipient,
+        .value = 10,
+    });
+    var pending = switch (outcome) {
+        .pending => |value| value,
+        .rejected => return error.UnexpectedEthereumRejection,
+    };
+    defer pending.deinit();
+
+    try std.testing.expectError(error.PendingTransactionActive, vm.transact(.{
+        .source_hash = [_]u8{0x66} ** 32,
+        .from = sender,
+        .to = deposit_recipient,
+        .mint = 7,
+        .value = 3,
+        .gas_limit = 100_000,
+    }, block));
+
+    _ = try pending.accept();
+    try std.testing.expectEqual(@as(u256, 90), (try vm.engine.getAccount(sender)).?.balance);
+    try std.testing.expectEqual(@as(u256, 10), (try vm.engine.getAccount(ethereum_recipient)).?.balance);
+    try std.testing.expect((try vm.engine.getAccount(deposit_recipient)) == null);
 }
 
 test "one concrete Evm alternates Ethereum and deposit flows on one overlay" {

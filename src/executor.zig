@@ -301,6 +301,8 @@ pub fn Executor(comptime ProtocolType: type) type {
         runtime_resources_locked: bool = false,
         execution_context: ?execution_values.ExecutionContext = null,
         scope_root: ?ScopeRoot = null,
+        active_transaction_checkpoint_id: usize = 0,
+        next_transaction_checkpoint_id: usize = 0,
         checkpoint_top: usize = 0,
         next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
@@ -348,6 +350,45 @@ pub fn Executor(comptime ProtocolType: type) type {
                     .output_data = result.output_data,
                     .gas = gas,
                 };
+            }
+        };
+
+        /// A fully executed, finalized, and settled transaction whose outer
+        /// journal checkpoint is still unresolved.
+        ///
+        /// Treat this token as move-only. `deinit` rejects an unresolved
+        /// transaction so callers can use the normal `defer pending.deinit()`
+        /// pattern safely.
+        pub const PendingTopLevelTransaction = struct {
+            checkpoint: TransactionCheckpoint,
+            result_value: TopLevelTransactionResult,
+
+            pub fn result(self: *const PendingTopLevelTransaction) TopLevelTransactionResult {
+                return self.result_value;
+            }
+
+            pub fn logs(self: *const PendingTopLevelTransaction) []const Host.Log {
+                return self.checkpoint.executor.logs();
+            }
+
+            pub fn accept(self: *PendingTopLevelTransaction) !TopLevelTransactionResult {
+                const result_value = self.result_value;
+                try self.checkpoint.commit();
+                self.checkpoint.executor.closeTransaction();
+                return result_value;
+            }
+
+            pub fn reject(self: *PendingTopLevelTransaction) !void {
+                try self.checkpoint.restore();
+                self.checkpoint.executor.clearLastOutput();
+                self.checkpoint.executor.closeTransaction();
+            }
+
+            pub fn deinit(self: *PendingTopLevelTransaction) void {
+                if (self.checkpoint.open) {
+                    self.reject() catch |err| @panic(@errorName(err));
+                }
+                self.* = undefined;
             }
         };
 
@@ -440,6 +481,40 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
         };
 
+        /// The one outer journal checkpoint spanning transaction charging,
+        /// execution finalization, and settlement.
+        const TransactionCheckpoint = struct {
+            executor: *Self,
+            journal_checkpoint: JournalCheckpoint,
+            id: usize,
+            open: bool = true,
+
+            fn commit(self: *TransactionCheckpoint) !void {
+                try self.validateClose();
+                self.executor.state.commitCheckpoint(self.journal_checkpoint);
+                self.finishClose();
+            }
+
+            fn restore(self: *TransactionCheckpoint) !void {
+                try self.validateClose();
+                try self.executor.state.revertToCheckpoint(self.journal_checkpoint);
+                self.finishClose();
+            }
+
+            fn validateClose(self: *const TransactionCheckpoint) !void {
+                if (!self.open) return error.TransactionCheckpointClosed;
+                if (self.executor.active_transaction_checkpoint_id != self.id) {
+                    return error.TransactionCheckpointOrderViolation;
+                }
+                if (self.executor.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            }
+
+            fn finishClose(self: *TransactionCheckpoint) void {
+                self.open = false;
+                self.executor.active_transaction_checkpoint_id = 0;
+            }
+        };
+
         /// Initialize an executor with an empty mutable overlay.
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
             const state = if (options.state_reader) |state_reader|
@@ -476,6 +551,7 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         pub fn setTraceSink(self: *Self, trace_sink: ?*TraceSink) void {
             if (self.checkpoint_top != 0) @panic("cannot replace trace sink while a checkpoint is open");
+            if (self.active_transaction_checkpoint_id != 0) @panic("cannot replace trace sink while a transaction is pending");
             self.trace_sink = trace_sink;
             self.state.trace_sink = trace_sink;
         }
@@ -494,6 +570,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub fn reset(self: *Self, options: Init) !void {
             if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
             if (self.checkpoint_top != 0) return error.ActiveCheckpoints;
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             if (self.prepared_code_cache.hasActiveExecution()) return error.ActivePreparedCodeExecution;
 
             const next_revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision);
@@ -609,6 +686,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub fn deinit(self: *Self) void {
             std.debug.assert(self.runtime_frames.items.len == 0);
             std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.active_transaction_checkpoint_id == 0);
             self.prepared_code_cache.deinit();
             self.state.deinit();
             self.runtime_frames.deinit(self.allocator);
@@ -640,6 +718,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         fn openTransactionScope(self: *Self, context: execution_values.ExecutionContext) !void {
             if (self.execution_context != null) return error.ActiveTransactionScope;
             if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             self.execution_context = context;
             self.scope_root = null;
             self.state.beginTransaction();
@@ -843,6 +922,24 @@ pub fn Executor(comptime ProtocolType: type) type {
             };
         }
 
+        fn transactionCheckpoint(self: *Self) !TransactionCheckpoint {
+            try self.requireTransactionScope();
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
+            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            const id = std.math.add(usize, self.next_transaction_checkpoint_id, 1) catch return error.CheckpointIdExhausted;
+            self.next_transaction_checkpoint_id = id;
+            self.active_transaction_checkpoint_id = id;
+            return .{
+                .executor = self,
+                .journal_checkpoint = self.state.checkpoint(),
+                .id = id,
+            };
+        }
+
+        pub fn hasPendingTransaction(self: *const Self) bool {
+            return self.active_transaction_checkpoint_id != 0;
+        }
+
         /// Restore the overlay to a previous full snapshot.
         pub fn restore(self: *Self, snapshot_state: *Self.Snapshot) !void {
             try self.state.restore(snapshot_state);
@@ -851,6 +948,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// Finalize state changes for the current transaction and close its context.
         pub fn commitTransaction(self: *Self) !void {
             if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             try self.finalizeTransactionState();
             self.closeTransaction();
         }
@@ -864,6 +962,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// Restore from a snapshot and close the current transaction context.
         pub fn rollbackTransaction(self: *Self, snapshot_state: *Self.Snapshot) !void {
             if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             try self.restore(snapshot_state);
             self.closeTransaction();
         }
@@ -871,6 +970,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// Close the current transaction context without restoring overlay changes.
         pub fn closeTransaction(self: *Self) void {
             if (self.checkpoint_top != 0) @panic("cannot close a transaction scope while an execution checkpoint is open");
+            if (self.active_transaction_checkpoint_id != 0) @panic("cannot close a transaction scope while its transaction checkpoint is open");
             if (self.execution_context == null) return;
             self.state.closeTransaction();
             self.execution_context = null;
@@ -879,12 +979,14 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Return the pending overlay changes without committing them.
         pub fn changeset(self: *Self) !Changeset {
+            if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             return self.state.changeset();
         }
 
         /// Drop all pending overlay changes and clear any open transaction context.
         pub fn discardChanges(self: *Self) void {
             if (self.checkpoint_top != 0) @panic("cannot discard changes while an execution checkpoint is open");
+            if (self.active_transaction_checkpoint_id != 0) @panic("cannot discard changes while a transaction is pending");
             self.state.discardChanges();
             self.execution_context = null;
             self.scope_root = null;
@@ -1051,7 +1153,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             };
         }
 
-        /// Run the normal top-level transaction accounting shell.
+        /// Run and immediately accept the normal top-level transaction shell.
         ///
         /// Callers must first open a matching scope with `beginMessageScope` or the
         /// Ethereum `beginTransactionScope` adapter. This method charges upfront gas,
@@ -1064,6 +1166,19 @@ pub fn Executor(comptime ProtocolType: type) type {
             root: Self.RootFrame,
             run: TopLevelTransactionRun,
         ) !Self.TopLevelTransactionResult {
+            var pending = try self.runTopLevelTransactionPending(scope, root, run);
+            defer pending.deinit();
+            return pending.accept();
+        }
+
+        /// Run the normal top-level transaction accounting shell while retaining
+        /// its outer journal checkpoint for explicit acceptance or rejection.
+        pub fn runTopLevelTransactionPending(
+            self: *Self,
+            scope: Self.TransactionScope,
+            root: Self.RootFrame,
+            run: TopLevelTransactionRun,
+        ) !Self.PendingTopLevelTransaction {
             const Engine = struct {
                 fn execute(
                     ptr: ?*anyopaque,
@@ -1075,7 +1190,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 }
             };
 
-            return self.runTopLevelTransactionWithEngine(scope, root, run, .{
+            return self.runTopLevelTransactionPendingWithEngine(scope, root, run, .{
                 .execute = Engine.execute,
             });
         }
@@ -1091,17 +1206,26 @@ pub fn Executor(comptime ProtocolType: type) type {
             run: TopLevelTransactionRun,
             engine: TransactionEngine,
         ) !Self.TopLevelTransactionResult {
+            var pending = try self.runTopLevelTransactionPendingWithEngine(scope, root, run, engine);
+            defer pending.deinit();
+            return pending.accept();
+        }
+
+        /// Pending-result variant with an injectable execution engine.
+        pub fn runTopLevelTransactionPendingWithEngine(
+            self: *Self,
+            scope: Self.TransactionScope,
+            root: Self.RootFrame,
+            run: TopLevelTransactionRun,
+            engine: TransactionEngine,
+        ) !Self.PendingTopLevelTransaction {
             try self.validateScopeContext(scope.context);
             try self.validateScopeRoot(.fromTransactionRoot(root));
             try self.validateSettlementRevision(run.settlement);
 
-            var shell_start_state = try self.snapshot();
-            defer shell_start_state.deinit(self.allocator);
-            self.traceSnapshotLifecycle(.checkpoint, &shell_start_state);
-            var shell_trace_checkpoint_open = true;
+            var shell_checkpoint = try self.transactionCheckpoint();
             errdefer {
-                if (shell_trace_checkpoint_open) self.traceSnapshotLifecycle(.revert, &shell_start_state);
-                self.restore(&shell_start_state) catch {};
+                shell_checkpoint.restore() catch |err| @panic(@errorName(err));
                 self.closeTransaction();
             }
 
@@ -1163,10 +1287,9 @@ pub fn Executor(comptime ProtocolType: type) type {
                 if (root.isCreate() and transaction_charged) {
                     try self.incrementNonce(sender);
                 }
-                self.closeTransaction();
             } else {
                 try execution_checkpoint.commit();
-                try self.commitTransaction();
+                try self.finalizeTransactionState();
             }
             const result_gas = if (transaction_charged)
                 try self.settleTransactionCosts(sender, run.settlement, result)
@@ -1178,9 +1301,10 @@ pub fn Executor(comptime ProtocolType: type) type {
                     .state_gas_spent = result.state_gas_spent,
                 }));
 
-            self.traceSnapshotLifecycle(.commit, &shell_start_state);
-            shell_trace_checkpoint_open = false;
-            return TopLevelTransactionResult.init(result, result_gas);
+            return .{
+                .checkpoint = shell_checkpoint,
+                .result_value = TopLevelTransactionResult.init(result, result_gas),
+            };
         }
 
         /// Execute a system call as its own transaction-like scope.
