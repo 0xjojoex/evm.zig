@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const zkvm = @import("../crypto/zkvm_accelerators.zig");
+const modexp_impl = @import("modexp.zig");
 
 pub const backend_name = build_options.profile;
 pub const Status = enum { ok, invalid, oom };
@@ -121,7 +122,7 @@ const NativeBackend = struct {
         exponent: []const u8,
         modulus: []const u8,
     ) std.mem.Allocator.Error!Status {
-        try modexpInto(allocator, output, base, exponent, modulus);
+        try modexp_impl.into(allocator, output, base, exponent, modulus);
         return .ok;
     }
 
@@ -515,72 +516,6 @@ const ZkvmBackend = struct {
         @memcpy(out[16..64], input);
     }
 };
-
-fn modexpInto(allocator: std.mem.Allocator, output: []u8, base_bytes: []const u8, exponent_bytes: []const u8, modulus_bytes: []const u8) std.mem.Allocator.Error!void {
-    const BigInt = std.math.big.int.Managed;
-    var modulus = try managedFromBytes(allocator, modulus_bytes);
-    defer modulus.deinit();
-
-    var base = try managedFromBytes(allocator, base_bytes);
-    defer base.deinit();
-    try reduceManaged(&base, &modulus);
-
-    var result = try BigInt.initSet(allocator, 1);
-    defer result.deinit();
-    try reduceManaged(&result, &modulus);
-
-    var product = try BigInt.init(allocator);
-    defer product.deinit();
-    var quotient = try BigInt.init(allocator);
-    defer quotient.deinit();
-    var remainder = try BigInt.init(allocator);
-    defer remainder.deinit();
-
-    for (exponent_bytes) |byte| {
-        var mask: u8 = 0x80;
-        while (mask != 0) : (mask >>= 1) {
-            try mulMod(&result, &result, &result, &modulus, &product, &quotient, &remainder);
-            if (byte & mask != 0) {
-                try mulMod(&result, &result, &base, &modulus, &product, &quotient, &remainder);
-            }
-        }
-    }
-
-    result.toConst().writeTwosComplement(output, .big);
-}
-
-fn managedFromBytes(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!std.math.big.int.Managed {
-    var value = try std.math.big.int.Managed.init(allocator);
-    errdefer value.deinit();
-    try value.ensureTwosCompCapacity(8 * bytes.len);
-    var mutable = value.toMutable();
-    mutable.readTwosComplement(bytes, 8 * bytes.len, .big, .unsigned);
-    value.setMetadata(mutable.positive, mutable.len);
-    return value;
-}
-
-fn reduceManaged(value: *std.math.big.int.Managed, modulus: *const std.math.big.int.Managed) std.mem.Allocator.Error!void {
-    var quotient = try std.math.big.int.Managed.init(value.allocator);
-    defer quotient.deinit();
-    var remainder = try std.math.big.int.Managed.init(value.allocator);
-    defer remainder.deinit();
-    try std.math.big.int.Managed.divTrunc(&quotient, &remainder, value, modulus);
-    value.swap(&remainder);
-}
-
-fn mulMod(
-    target: *std.math.big.int.Managed,
-    a: *const std.math.big.int.Managed,
-    b: *const std.math.big.int.Managed,
-    modulus: *const std.math.big.int.Managed,
-    product: *std.math.big.int.Managed,
-    quotient: *std.math.big.int.Managed,
-    remainder: *std.math.big.int.Managed,
-) std.mem.Allocator.Error!void {
-    try std.math.big.int.Managed.mul(product, a, b);
-    try std.math.big.int.Managed.divTrunc(quotient, remainder, product, modulus);
-    target.swap(remainder);
-}
 
 const blake2b_iv = [8]u64{
     0x6a09e667f3bcc908,

@@ -224,11 +224,27 @@ pub fn build(b: *std.Build) void {
         });
         const run_uint256_fuzz_tests = b.addRunArtifact(uint256_fuzz_tests);
 
+        const modexp_fuzz_mod = b.createModule(.{
+            .root_source_file = b.path("src/precompile/modexp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+        });
+        const modexp_fuzz_tests = b.addTest(.{
+            .name = "modexp-fuzz",
+            .root_module = modexp_fuzz_mod,
+        });
+        const run_modexp_fuzz_tests = b.addRunArtifact(modexp_fuzz_tests);
+
         const fuzz_step = b.step("fuzz", "Run fuzzable pure-Zig unit tests");
         fuzz_step.dependOn(&run_uint256_fuzz_tests.step);
+        fuzz_step.dependOn(&run_modexp_fuzz_tests.step);
 
         const uint256_fuzz_step = b.step("fuzz-uint256", "Run uint256 fuzz tests");
         uint256_fuzz_step.dependOn(&run_uint256_fuzz_tests.step);
+
+        const modexp_fuzz_step = b.step("fuzz-modexp", "Run modexp fuzz tests");
+        modexp_fuzz_step.dependOn(&run_modexp_fuzz_tests.step);
     }
 
     const optimize_name = @tagName(optimize);

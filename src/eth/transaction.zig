@@ -229,13 +229,15 @@ pub const Transaction = struct {
     }
 };
 
+/// Compute EIP-7623 calldata `token` total
 pub fn calldataTokenCount(input: []const u8) ?u64 {
-    var tokens: u64 = 0;
-    for (input) |byte| {
-        const byte_tokens: u64 = if (byte == 0) 1 else 4;
-        tokens = std.math.add(u64, tokens, byte_tokens) catch return null;
-    }
-    return tokens;
+    // Tokens are 1 per zero byte and 4 per non-zero byte, so a single
+    // vectorizable zero count replaces per-byte checked accumulation.
+    // z + 4(n - z)
+    const zero_count = tx_gas.countZeroBytes(input);
+    const total = std.math.cast(u64, input.len) orelse return null;
+    const nonzero_tokens = std.math.mul(u64, total - zero_count, 4) catch return null;
+    return std.math.add(u64, zero_count, nonzero_tokens) catch null;
 }
 
 pub fn accessListDataCost(counts: tx.AccessListCounts) ?u64 {
