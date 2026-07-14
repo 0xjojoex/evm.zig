@@ -1,13 +1,18 @@
 //! Hashing and signature primitives (keccak256, ecrecover).
 //!
 //! The backing provider is selected at build time by the crypto profile
-//! (`native` or `zkvm`), so callers get the same API regardless of target.
+//! (`native` or `zkvm`). Native builds can select the `std` or `xkcp` Keccak
+//! backend while zkVM builds stay on their custom accelerator provider.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const zkvm = @import("./crypto/zkvm_accelerators.zig");
 
 pub const provider_name = build_options.profile;
+pub const keccak_provider_name = if (std.mem.eql(u8, provider_name, "native"))
+    build_options.native_keccak
+else
+    "zkvm";
 
 /// Keccak-256 digest of the empty byte string.
 pub const keccak256_empty = [_]u8{
@@ -23,6 +28,13 @@ else if (std.mem.eql(u8, provider_name, "zkvm"))
     ZkvmProvider
 else
     @compileError("unsupported profile '" ++ provider_name ++ "'");
+
+const NativeKeccakProvider = if (std.mem.eql(u8, build_options.native_keccak, "std"))
+    StdKeccakProvider
+else if (std.mem.eql(u8, build_options.native_keccak, "xkcp"))
+    XkcpKeccakProvider
+else
+    @compileError("unsupported native Keccak backend '" ++ build_options.native_keccak ++ "'");
 
 pub fn keccak256(input: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
@@ -47,7 +59,7 @@ pub fn ecrecoverPublicKey(
 
 const NativeProvider = struct {
     fn keccak256(input: []const u8, out: *[32]u8) void {
-        std.crypto.hash.sha3.Keccak256.hash(input, out, .{});
+        NativeKeccakProvider.keccak256(input, out);
     }
 
     fn sha256(input: []const u8, out: *[32]u8) void {
@@ -84,6 +96,25 @@ const NativeProvider = struct {
     }
 };
 
+const StdKeccakProvider = struct {
+    fn keccak256(input: []const u8, out: *[32]u8) void {
+        std.crypto.hash.sha3.Keccak256.hash(input, out, .{});
+    }
+};
+
+const XkcpKeccakProvider = struct {
+    extern fn evmz_xkcp_keccak256(
+        input: [*]const u8,
+        input_len: usize,
+        output: [*]u8,
+    ) c_int;
+
+    fn keccak256(input: []const u8, out: *[32]u8) void {
+        const rc = evmz_xkcp_keccak256(input.ptr, input.len, out);
+        if (rc != 0) unreachable;
+    }
+};
+
 const ZkvmProvider = struct {
     fn keccak256(input: []const u8, out: *[32]u8) void {
         var digest: zkvm.Keccak256Hash = undefined;
@@ -115,6 +146,19 @@ const ZkvmProvider = struct {
 
 test keccak256 {
     try std.testing.expectEqualSlices(u8, &keccak256_empty, &keccak256(""));
+}
+
+test "native Keccak backend matches std across rate boundaries" {
+    if (!std.mem.eql(u8, provider_name, "native")) return;
+
+    var storage: [1025]u8 align(8) = undefined;
+    const input = storage[1..];
+    for (input, 0..) |*byte, i| byte.* = @truncate(i *% 17 +% 3);
+    inline for (.{ 0, 1, 32, 135, 136, 137, 1024 }) |len| {
+        var expected: [32]u8 = undefined;
+        std.crypto.hash.sha3.Keccak256.hash(input[0..len], &expected, .{});
+        try std.testing.expectEqualSlices(u8, &expected, &keccak256(input[0..len]));
+    }
 }
 
 test sha256 {

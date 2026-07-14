@@ -15,11 +15,13 @@ pub fn build(b: *std.Build) void {
         "Only run micro benchmark tests whose names contain this filter",
     );
     const profile = buildProfileOption(b);
+    const native_keccak = nativeKeccakOption(b, profile);
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
         .profile = profile,
+        .@"native-keccak" = native_keccak,
     });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
@@ -194,6 +196,8 @@ pub fn build(b: *std.Build) void {
             @tagName(compare_optimize),
             "--profile",
             profile,
+            "--native-keccak",
+            native_keccak,
             "--support-min",
             vm_loop_support_min,
             "--support-max",
@@ -211,6 +215,8 @@ pub fn build(b: *std.Build) void {
             b.graph.zig_exe,
             "--profile",
             profile,
+            "--native-keccak",
+            native_keccak,
         });
         run_report.setCwd(b.path("."));
         if (b.args) |args| run_report.addArgs(args);
@@ -222,6 +228,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = micro_optimize,
             .profile = profile,
+            .@"native-keccak" = native_keccak,
         });
         const micro_evmz_mod = micro_evmz_dep.module("evmz");
         micro_evmz_mod.omit_frame_pointer = true;
@@ -297,6 +304,14 @@ fn buildProfileOption(b: *std.Build) []const u8 {
         std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
     }
     return profile;
+}
+
+fn nativeKeccakOption(b: *std.Build, profile: []const u8) []const u8 {
+    const backend = b.option([]const u8, "native-keccak", "Native Keccak backend: std or xkcp") orelse "std";
+    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "xkcp")) {
+        std.debug.panic("unsupported native Keccak backend '{s}' (expected std or xkcp)", .{backend});
+    }
+    return if (std.mem.eql(u8, profile, "native")) backend else "std";
 }
 
 fn addRevmNativeRustFlags(run: *std.Build.Step.Run) void {

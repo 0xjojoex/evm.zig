@@ -9,11 +9,13 @@ pub fn build(b: *std.Build) void {
         "Optimization mode for EEST benchmark-style runners",
     ) orelse .ReleaseFast;
     const profile = buildProfileOption(b);
+    const native_keccak = nativeKeccakOption(b, profile);
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
         .profile = profile,
+        .@"native-keccak" = native_keccak,
     });
     const evmz_mod = evmz_dep.module("evmz");
     const ssz_mod = evmz_dep.module("ssz");
@@ -26,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = bench_optimize,
         .profile = profile,
+        .@"native-keccak" = native_keccak,
     });
     const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
@@ -238,6 +241,14 @@ fn buildProfileOption(b: *std.Build) []const u8 {
         std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
     }
     return profile;
+}
+
+fn nativeKeccakOption(b: *std.Build, profile: []const u8) []const u8 {
+    const backend = b.option([]const u8, "native-keccak", "Native Keccak backend: std or xkcp") orelse "std";
+    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "xkcp")) {
+        std.debug.panic("unsupported native Keccak backend '{s}' (expected std or xkcp)", .{backend});
+    }
+    return if (std.mem.eql(u8, profile, "native")) backend else "std";
 }
 
 fn eestModule(
