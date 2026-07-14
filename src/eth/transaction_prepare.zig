@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
+const crypto = @import("../crypto.zig");
 const gas = @import("../transaction/gas.zig");
 const settlement = @import("../transaction/settlement.zig");
 const tx = @import("../transaction/types.zig");
@@ -55,15 +56,22 @@ pub fn For(comptime Protocol: type) type {
 
             if (sender_account) |account| {
                 if (transaction.rejectsNonDelegatingSenderCode(input.revision, view.kind)) {
-                    const code = try input.state.code(view.sender, account.code_hash);
-                    // The transaction policy must revision-gate EIP-7702's
-                    // exception so pre-Prague EIP-3607 still rejects all code.
-                    validation_input.sender_code_kind = if (code.len == 0)
+                    // The empty code hash already proves the sender has no
+                    // code; skip the code read (and its hash validation) on
+                    // the dominant EOA path.
+                    validation_input.sender_code_kind = if (std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty))
                         .empty
-                    else if (isDelegationCode(input.revision, code))
-                        .delegation
-                    else
-                        .non_delegating;
+                    else code_kind: {
+                        const code = try input.state.code(view.sender, account.code_hash);
+                        // The transaction policy must revision-gate EIP-7702's
+                        // exception so pre-Prague EIP-3607 still rejects all code.
+                        break :code_kind if (code.len == 0)
+                            .empty
+                        else if (isDelegationCode(input.revision, code))
+                            .delegation
+                        else
+                            .non_delegating;
+                    };
                 }
             }
             if (validation_protocol.validateSenderCode(validation_input)) |err| {
