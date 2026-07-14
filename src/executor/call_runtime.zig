@@ -7,6 +7,7 @@ const Bytecode = evmz.Bytecode;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const Journal = @import("../state/Journal.zig");
+const Overlay = @import("../state/Overlay.zig");
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
@@ -47,7 +48,7 @@ pub fn For(comptime Executor: type) type {
 
         const ChildCall = struct {
             checkpoint_state: Journal.Checkpoint,
-            code_address: Address,
+            execution_code: ExecutionCode,
         };
 
         const StartedCreate = union(enum) {
@@ -106,8 +107,7 @@ pub fn For(comptime Executor: type) type {
                 });
             }
 
-            fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, code_address: Address) !void {
-                const execution_code = try resolveExecutionCode(self.executor, code_address);
+            fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, execution_code: ExecutionCode) !void {
                 if (execution_code.prepared) |bytecode| {
                     var frame = try acquireRawFrame(
                         self.executor,
@@ -295,7 +295,7 @@ pub fn For(comptime Executor: type) type {
                             if (checkpoint_open) self.executor.state.revertToCheckpoint(child.checkpoint_state) catch {};
                         }
 
-                        try self.pushChildCall(msg, child.checkpoint_state, child.code_address);
+                        try self.pushChildCall(msg, child.checkpoint_state, child.execution_code);
                         checkpoint_open = false;
                         return null;
                     },
@@ -407,7 +407,7 @@ pub fn For(comptime Executor: type) type {
                 };
             }
 
-            const resolved = try resolvedCodeAddress(self, recipient);
+            const resolved = try resolveCode(self, recipient);
             if (!resolved.delegated and Protocol.Precompile.active(self.revision(), recipient)) {
                 var result = try runPrecompileCallTransaction(self, sender, recipient, input, execution_gas, value);
                 finishTopFrameStateGas(&result, top_frame_state_gas);
@@ -433,7 +433,7 @@ pub fn For(comptime Executor: type) type {
                 execution_gas.regular_left -= access_cost;
             }
 
-            const execution_code = try resolveExecutionCode(self, resolved.address);
+            const execution_code = try resolveExecutionCodeView(self, try resolvedCodeView(self, resolved));
             var result = if (execution_code.prepared) |bytecode|
                 try executePreparedCallTransaction(self, .{
                     .bytecode = bytecode,
@@ -666,11 +666,20 @@ pub fn For(comptime Executor: type) type {
             prepared: ?*Bytecode,
         };
 
+        pub const ResolvedCode = struct {
+            address: Address,
+            delegated: bool,
+            original_view: Overlay.CodeView,
+        };
+
         /// Resolve canonical code first, then consult the executor-owned derived
-        /// cache. Materializing through Overlay on every lookup preserves witness
-        /// validation, borrowed-code ownership, and code-read tracing.
+        /// cache. Address-based callers materialize through Overlay for witness
+        /// validation and code-read tracing; CALL paths can reuse that traced view.
         pub fn resolveExecutionCode(self: *Executor, address: Address) !ExecutionCode {
-            const code = try self.state.getCodeView(address);
+            return resolveExecutionCodeView(self, try self.state.getCodeView(address));
+        }
+
+        pub fn resolveExecutionCodeView(self: *Executor, code: Overlay.CodeView) !ExecutionCode {
             if (code.bytes.len == 0) return .{ .bytes = code.bytes, .prepared = null };
             if (self.prepared_code_cache.get(code.code_hash)) |bytecode| {
                 return .{ .bytes = code.bytes, .prepared = bytecode };
@@ -873,7 +882,7 @@ pub fn For(comptime Executor: type) type {
                 }
             }
 
-            const resolved = try resolvedCodeAddress(self, msg.code_address);
+            const resolved = try resolveCode(self, msg.code_address);
             if (!resolved.delegated and Protocol.Precompile.active(self.revision(), msg.code_address)) {
                 if (try runPrecompileCall(self, &msg)) |result| {
                     if (result.status() == .success) {
@@ -885,7 +894,8 @@ pub fn For(comptime Executor: type) type {
                 }
             }
 
-            if ((try self.getCode(resolved.address)).len == 0) {
+            const code = try resolvedCodeView(self, resolved);
+            if (code.bytes.len == 0) {
                 try touchEmptyCallRecipient(self, msg);
                 self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
@@ -898,10 +908,11 @@ pub fn For(comptime Executor: type) type {
                 }) };
             }
 
+            const execution_code = try resolveExecutionCodeView(self, code);
             checkpoint_open = false;
             return .{ .child = .{
                 .checkpoint_state = checkpoint_state,
-                .code_address = resolved.address,
+                .execution_code = execution_code,
             } };
         }
 
@@ -981,12 +992,25 @@ pub fn For(comptime Executor: type) type {
             _ = try self.getOrCreateAccount(msg.recipient);
         }
 
-        pub fn resolvedCodeAddress(self: *Executor, address: Address) !struct { address: Address, delegated: bool } {
-            const code = try self.getCode(address);
-            if (eip7702.delegationTarget(code)) |target| {
-                return .{ .address = target, .delegated = true };
+        pub fn resolveCode(self: *Executor, address: Address) !ResolvedCode {
+            const original = try self.state.getCodeView(address);
+            if (eip7702.delegationTarget(original.bytes)) |target| {
+                return .{
+                    .address = target,
+                    .delegated = true,
+                    .original_view = original,
+                };
             }
-            return .{ .address = address, .delegated = false };
+            return .{
+                .address = address,
+                .delegated = false,
+                .original_view = original,
+            };
+        }
+
+        pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !Overlay.CodeView {
+            if (resolved.delegated) return self.state.getCodeView(resolved.address);
+            return resolved.original_view;
         }
 
         fn hasBalance(self: *Executor, address: Address, value: u256) !bool {
@@ -1019,7 +1043,7 @@ pub fn For(comptime Executor: type) type {
                         if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
                     }
 
-                    const execution_code = try resolveExecutionCode(self, child.code_address);
+                    const execution_code = child.execution_code;
                     var host_iface = self.host();
                     const result = if (execution_code.prepared) |bytecode| prepared: {
                         var frame = try acquireRawFrame(

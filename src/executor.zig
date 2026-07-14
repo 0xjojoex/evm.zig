@@ -1332,8 +1332,8 @@ pub fn Executor(comptime ProtocolType: type) type {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
             }
 
-            const resolved = try runtime.resolvedCodeAddress(self, recipient);
-            const execution_code = try runtime.resolveExecutionCode(self, resolved.address);
+            const resolved = try runtime.resolveCode(self, recipient);
+            const execution_code = try runtime.resolveExecutionCodeView(self, try runtime.resolvedCodeView(self, resolved));
             var host_iface = self.host();
             self.traceAccountAccess(recipient, 0);
             const message = Host.Message{
@@ -2090,6 +2090,81 @@ test "protocol definition drives top-level delegated account access" {
     try std.testing.expectEqual(default_gas_left - 7, custom_gas_left);
 }
 
+test "top-level call code resolution reuses one traced view" {
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    var recorder = CodeReadRecorder{};
+    var sink = recorder.sink();
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .prague,
+        .trace_sink = &sink,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var recipient_account = MemoryAccount.init(std.testing.allocator);
+    try recipient_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(recipient, recipient_account);
+
+    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+        .sender = sender,
+        .recipient = recipient,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expectEqualSlices(u8, &recipient, &recorder.last_address.?);
+}
+
+test "top-level delegated access failure does not read target code" {
+    const overrides = struct {
+        fn topLevelDelegatedAccountAccess(
+            revision_value: evmz.eth.Revision,
+            input: evmz.protocol.TopLevelDelegatedAccountAccessInput,
+        ) ?evmz.protocol.DelegatedAccountAccess {
+            _ = revision_value;
+            _ = input;
+            return .{ .status = .cold, .gas = 100_001 };
+        }
+    };
+    const ExpensiveTopLevelDelegatedAccessProtocol = ethereumProtocolWith("delegated-access-exceeds-call-gas", .{
+        .call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
+    });
+    const ExpensiveExecutor = Executor(ExpensiveTopLevelDelegatedAccessProtocol);
+    const sender = evmz.addr(0x1111);
+    const authority = evmz.addr(0x2222);
+    const target = evmz.addr(0x3333);
+    var recorder = CodeReadRecorder{};
+    var sink = recorder.sink();
+    var executor = ExpensiveExecutor.init(std.testing.allocator, .{
+        .revision = .prague,
+        .trace_sink = &sink,
+    });
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&delegation_code, target);
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    try authority_account.setCode(&delegation_code);
+    try executor.state.seedAccount(authority, authority_account);
+
+    var target_account = MemoryAccount.init(std.testing.allocator);
+    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
+    try executor.state.seedAccount(target, target_account);
+
+    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+        .sender = sender,
+        .recipient = authority,
+        .gas = 100_000,
+    } })).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expectEqualSlices(u8, &authority, &recorder.last_address.?);
+}
+
 test "protocol definition drives top-frame value transfer state gas" {
     const overrides = struct {
         fn topFrameValueTransferStateGas(
@@ -2253,6 +2328,28 @@ fn executeTopLevelDelegatedCall(comptime Protocol: type) !i64 {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return result.gas_left;
 }
+
+const CodeReadRecorder = struct {
+    count: usize = 0,
+    last_address: ?Address = null,
+
+    fn sink(self: *CodeReadRecorder) trace.Sink {
+        return trace.Sink.init(self, .{
+            .state_read = trace.StateReadKinds.initMany(&.{.code}),
+        }, &.{ .stateRead = stateRead });
+    }
+
+    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+        const self: *CodeReadRecorder = @ptrCast(@alignCast(ptr));
+        switch (event) {
+            .code => |read| {
+                self.count += 1;
+                self.last_address = read.address;
+            },
+            else => {},
+        }
+    }
+};
 
 const TopFrameValueTransferResult = struct {
     gas_left: i64,
