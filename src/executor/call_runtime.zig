@@ -11,7 +11,6 @@ const Overlay = @import("../state/Overlay.zig");
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
-const tail_dispatch = @import("../interpreter/tail_dispatch.zig");
 const runtime_frames = @import("./runtime_frames.zig");
 const transaction = @import("../transaction.zig");
 const call_scratch_storage = @import("./call_scratch.zig");
@@ -26,12 +25,6 @@ pub fn For(comptime Executor: type) type {
             executor: *Executor,
             depth: u16,
             allocator: std.mem.Allocator,
-
-            fn allowsReadPadding(self: *const ScratchScope) bool {
-                // Optimization-only bytes must not enlarge a bounded resource envelope.
-                const index: usize = self.depth;
-                return !self.executor.call_scratch_slots.items[index].isBounded();
-            }
 
             pub fn deinit(self: *ScratchScope) void {
                 endCallScratch(self.executor, self.depth);
@@ -48,7 +41,7 @@ pub fn For(comptime Executor: type) type {
 
         const ChildCall = struct {
             checkpoint_state: Journal.Checkpoint,
-            execution_code: ExecutionCode,
+            bytecode: *const Bytecode,
         };
 
         const StartedCreate = union(enum) {
@@ -63,11 +56,6 @@ pub fn For(comptime Executor: type) type {
             executor: *Executor,
             host_iface: Host,
             frames: *std.ArrayList(RuntimeFrame),
-
-            const PreparedChildCallFrame = struct {
-                frame: FrameLease,
-                zero_padded_raw: bool,
-            };
 
             fn init(executor: *Executor) CallRuntime {
                 return .{
@@ -90,108 +78,54 @@ pub fn For(comptime Executor: type) type {
                 }
             }
 
-            fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: *Bytecode) !void {
-                var frame = try acquireRawFrame(
+            fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: *const Bytecode) !void {
+                var frame = try acquireBytecodeFrame(
                     self.executor,
                     self.executor.allocator,
                     &self.host_iface,
                     &msg,
-                    bytecode.bytes,
                     bytecode,
                 );
                 errdefer frame.deinit();
                 try self.appendFrame(.{
                     .kind = .root_call,
                     .frame = frame,
-                    .needs_action_loop = bytecode.needs_action_loop,
                 });
             }
 
-            fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, execution_code: ExecutionCode) !void {
-                if (execution_code.prepared) |bytecode| {
-                    var frame = try acquireRawFrame(
-                        self.executor,
-                        self.executor.allocator,
-                        &self.host_iface,
-                        &msg,
-                        bytecode.bytes,
-                        bytecode,
-                    );
-                    errdefer frame.deinit();
-                    try self.appendFrame(.{
-                        .kind = .{ .call = checkpoint_state },
-                        .frame = frame,
-                        .needs_action_loop = bytecode.needs_action_loop,
-                    });
-                    return;
-                }
-
-                var scratch = try callScratch(self.executor, msg.depth);
-                errdefer scratch.deinit();
-
-                const source = execution_code.bytes;
-                const needs_action_loop = Bytecode.needsActionLoop(source);
-                const use_zero_padded_raw = !needs_action_loop and
-                    self.executor.trace_sink == null and
-                    scratch.allowsReadPadding();
-                const prepared: PreparedChildCallFrame = if (!use_zero_padded_raw) blk: {
-                    const code = try scratch.allocator.dupe(u8, source);
-                    break :blk .{
-                        .frame = try acquireRawFrame(
-                            self.executor,
-                            scratch.allocator,
-                            &self.host_iface,
-                            &msg,
-                            code,
-                            null,
-                        ),
-                        .zero_padded_raw = false,
-                    };
-                } else blk: {
-                    const code = try Bytecode.ZeroPaddedCode.init(scratch.allocator, source);
-                    break :blk .{
-                        .frame = try acquireRawFrame(
-                            self.executor,
-                            scratch.allocator,
-                            &self.host_iface,
-                            &msg,
-                            code.bytes,
-                            null,
-                        ),
-                        .zero_padded_raw = true,
-                    };
-                };
-                var frame = prepared.frame;
+            fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, bytecode: *const Bytecode) !void {
+                var frame = try acquireBytecodeFrame(
+                    self.executor,
+                    self.executor.allocator,
+                    &self.host_iface,
+                    &msg,
+                    bytecode,
+                );
                 errdefer frame.deinit();
-
                 try self.appendFrame(.{
                     .kind = .{ .call = checkpoint_state },
                     .frame = frame,
-                    .scratch_depth = scratch.depth,
-                    .needs_action_loop = needs_action_loop,
-                    .zero_padded_raw = prepared.zero_padded_raw,
                 });
             }
 
             fn pushChildCreate(self: *CallRuntime, child: ChildCreate) !void {
-                var scratch = try callScratch(self.executor, child.msg.depth);
-                errdefer scratch.deinit();
-
-                var frame = try acquireRawFrame(
+                const execution = if (self.executor.prepared_code_execution) |*active|
+                    active
+                else
+                    return error.MissingPreparedCodeExecution;
+                const bytecode = try execution.prepareTransient(child.init_code);
+                var frame = try acquireBytecodeFrame(
                     self.executor,
-                    scratch.allocator,
+                    self.executor.allocator,
                     &self.host_iface,
                     &child.msg,
-                    child.init_code,
-                    null,
+                    bytecode,
                 );
                 errdefer frame.deinit();
 
                 try self.appendFrame(.{
                     .kind = .{ .create = child },
                     .frame = frame,
-                    .scratch_depth = scratch.depth,
-                    .needs_action_loop = Bytecode.needsActionLoop(child.init_code),
                 });
             }
 
@@ -207,7 +141,7 @@ pub fn For(comptime Executor: type) type {
 
             fn popFrame(self: *CallRuntime) void {
                 const index = self.frames.items.len - 1;
-                deinitRuntimeFrame(&self.frames.items[index], self.executor);
+                deinitRuntimeFrame(&self.frames.items[index]);
                 self.frames.items.len = index;
             }
 
@@ -217,10 +151,8 @@ pub fn For(comptime Executor: type) type {
                     const runtime_frame = &self.frames.items[index];
                     var interpreter = runtime_frame.frame.interpreter(Protocol);
                     const depth = runtime_frame.frame.callFrame().msg.depth;
-                    const run_result: Interpreter.RunResult = if (runtime_frame.needs_action_loop)
+                    const run_result: Interpreter.RunResult = if (runtime_frame.frame.callFrame().bytecode.needs_action_loop)
                         try executeInterpreterUntilAction(self.executor, &interpreter, depth)
-                    else if (runtime_frame.zero_padded_raw)
-                        .{ .finished = try executeZeroPaddedRawFrame(self.executor, &interpreter, depth) }
                     else
                         .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
                     switch (run_result) {
@@ -295,7 +227,7 @@ pub fn For(comptime Executor: type) type {
                             if (checkpoint_open) self.executor.state.revertToCheckpoint(child.checkpoint_state) catch {};
                         }
 
-                        try self.pushChildCall(msg, child.checkpoint_state, child.execution_code);
+                        try self.pushChildCall(msg, child.checkpoint_state, child.bytecode);
                         checkpoint_open = false;
                         return null;
                     },
@@ -355,11 +287,8 @@ pub fn For(comptime Executor: type) type {
             }
         };
 
-        fn deinitRuntimeFrame(frame: *RuntimeFrame, executor: *Executor) void {
+        fn deinitRuntimeFrame(frame: *RuntimeFrame) void {
             frame.frame.deinit();
-            if (frame.scratch_depth) |depth| {
-                endCallScratch(executor, depth);
-            }
             frame.* = undefined;
         }
 
@@ -394,6 +323,9 @@ pub fn For(comptime Executor: type) type {
             gas: transaction.ExecutionGas,
             value: u256,
         ) !Interpreter.Result {
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
+
             _ = try currentTxContext(self);
             var execution_gas = gas;
             const top_frame_state_gas = try chargeTopFrameValueTransferStateGas(self, sender, recipient, value, &execution_gas);
@@ -433,32 +365,16 @@ pub fn For(comptime Executor: type) type {
                 execution_gas.regular_left -= access_cost;
             }
 
-            const execution_code = try resolveExecutionCodeView(self, try resolvedCodeView(self, resolved));
-            var result = if (execution_code.prepared) |bytecode|
-                try executePreparedCallTransaction(self, .{
-                    .bytecode = bytecode,
-                    .sender = sender,
-                    .recipient = recipient,
-                    .input = input,
-                    .gas = execution_gas.regular_left,
-                    .gas_reservoir = execution_gas.reservoir,
-                    .value = value,
-                })
-            else blk: {
-                var scratch = try callScratch(self, 0);
-                defer scratch.deinit();
-                const code = try scratch.allocator.dupe(u8, execution_code.bytes);
-                var bytecode = try prepareBytecodeAlloc(self, scratch.allocator, code);
-                break :blk try executePreparedCallTransaction(self, .{
-                    .bytecode = &bytecode,
-                    .sender = sender,
-                    .recipient = recipient,
-                    .input = input,
-                    .gas = execution_gas.regular_left,
-                    .gas_reservoir = execution_gas.reservoir,
-                    .value = value,
-                });
-            };
+            const bytecode = try resolveExecutionCodeView(self, try resolvedCodeView(self, resolved));
+            var result = try executePreparedCallTransaction(self, .{
+                .bytecode = bytecode,
+                .sender = sender,
+                .recipient = recipient,
+                .input = input,
+                .gas = execution_gas.regular_left,
+                .gas_reservoir = execution_gas.reservoir,
+                .value = value,
+            });
             finishTopFrameStateGas(&result, top_frame_state_gas);
             return result;
         }
@@ -581,8 +497,8 @@ pub fn For(comptime Executor: type) type {
             self: *Executor,
             options: executor_module.PreparedCallTransaction,
         ) !Interpreter.Result {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
             _ = try currentTxContext(self);
@@ -640,8 +556,8 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeCreate(self: *Executor, options: executor_module.Create) !executor_module.EvmResult {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
             _ = try currentTxContext(self);
@@ -658,13 +574,8 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn prepareBytecodeAlloc(self: *const Executor, allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-            return Bytecode.initWithConfig(allocator, code, self.config);
+            return Bytecode.prepare(allocator, code, self.config);
         }
-
-        pub const ExecutionCode = struct {
-            bytes: []const u8,
-            prepared: ?*Bytecode,
-        };
 
         pub const ResolvedCode = struct {
             address: Address,
@@ -675,25 +586,18 @@ pub fn For(comptime Executor: type) type {
         /// Resolve canonical code first, then consult the executor-owned derived
         /// cache. Address-based callers materialize through Overlay for witness
         /// validation and code-read tracing; CALL paths can reuse that traced view.
-        pub fn resolveExecutionCode(self: *Executor, address: Address) !ExecutionCode {
+        pub fn resolveExecutionCode(self: *Executor, address: Address) !*const Bytecode {
             return resolveExecutionCodeView(self, try self.state.getCodeView(address));
         }
 
-        pub fn resolveExecutionCodeView(self: *Executor, code: Overlay.CodeView) !ExecutionCode {
-            if (code.bytes.len == 0) return .{ .bytes = code.bytes, .prepared = null };
-            if (self.prepared_code_cache.get(code.code_hash)) |bytecode| {
-                return .{ .bytes = code.bytes, .prepared = bytecode };
-            }
-            if (!self.prepared_code_admission) {
-                return .{ .bytes = code.bytes, .prepared = null };
-            }
-            const bytecode = self.prepared_code_cache.getOrPrepare(code.code_hash, code.bytes) catch |err| switch (err) {
-                // Cache admission is an optimization. If persistent allocation
-                // cannot grow, retain the existing transient preparation path.
-                error.OutOfMemory => return .{ .bytes = code.bytes, .prepared = null },
-                else => return err,
-            };
-            return .{ .bytes = code.bytes, .prepared = bytecode };
+        pub fn resolveExecutionCodeView(self: *Executor, code: Overlay.CodeView) !*const Bytecode {
+            const execution = if (self.prepared_code_execution) |*active|
+                active
+            else
+                return error.MissingPreparedCodeExecution;
+            return execution.resolve(code.code_hash, code.bytes, .{
+                .admit = self.prepared_code_admission,
+            });
         }
 
         pub fn dupeExecutionCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {
@@ -709,8 +613,8 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeInterpreter(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.Result {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = depth;
@@ -719,25 +623,13 @@ pub fn For(comptime Executor: type) type {
         }
 
         pub fn executeInterpreterUntilAction(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.RunResult {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = depth;
             defer self.state.trace_depth = previous_depth;
             return interpreter.executeUntilAction();
-        }
-
-        fn executeZeroPaddedRawFrame(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.Result {
-            const previous_depth = self.state.trace_depth;
-            self.state.trace_depth = depth;
-            defer self.state.trace_depth = previous_depth;
-
-            var frame = interpreter.call_frame;
-            if (self.trace_sink != null) return interpreter.execute();
-            try tail_dispatch.For(Protocol).executeZeroPaddedRaw(frame);
-            if (frame.status == .running) frame.status = .success;
-            return frame.getResult();
         }
 
         pub fn currentTxContext(self: *const Executor) !Host.TxContext {
@@ -755,23 +647,11 @@ pub fn For(comptime Executor: type) type {
             frame_allocator: std.mem.Allocator,
             host_iface: *Host,
             msg: *const Host.Message,
-            bytecode: *Bytecode,
-        ) !FrameLease {
-            return acquireRawFrame(self, frame_allocator, host_iface, msg, bytecode.bytes, bytecode);
-        }
-
-        pub fn acquireRawFrame(
-            self: *Executor,
-            frame_allocator: std.mem.Allocator,
-            host_iface: *Host,
-            msg: *const Host.Message,
-            code: []const u8,
-            bytecode: ?*Bytecode,
+            bytecode: *const Bytecode,
         ) !FrameLease {
             return try self.frame_store.acquire(Protocol, self.allocator, frame_allocator, .{
                 .host = host_iface,
                 .msg = msg,
-                .code = code,
                 .bytecode = bytecode,
                 .revision = self.revision(),
                 .trace_sink = self.trace_sink,
@@ -908,11 +788,11 @@ pub fn For(comptime Executor: type) type {
                 }) };
             }
 
-            const execution_code = try resolveExecutionCodeView(self, code);
+            const bytecode = try resolveExecutionCodeView(self, code);
             checkpoint_open = false;
             return .{ .child = .{
                 .checkpoint_state = checkpoint_state,
-                .execution_code = execution_code,
+                .bytecode = bytecode,
             } };
         }
 
@@ -1021,8 +901,8 @@ pub fn For(comptime Executor: type) type {
         /// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
         /// and create transactions enter `CallRuntime` through their executor entrypoints.
         pub fn resolveHostCall(self: *Executor, msg: Host.Message) !Host.Result {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = msg.depth;
@@ -1043,33 +923,12 @@ pub fn For(comptime Executor: type) type {
                         if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
                     }
 
-                    const execution_code = child.execution_code;
                     var host_iface = self.host();
-                    const result = if (execution_code.prepared) |bytecode| prepared: {
-                        var frame = try acquireRawFrame(
-                            self,
-                            self.allocator,
-                            &host_iface,
-                            &msg,
-                            bytecode.bytes,
-                            bytecode,
-                        );
-                        defer frame.deinit();
-                        var interpreter = frame.interpreter(Protocol);
-                        var stable = try executeInterpreter(self, &interpreter, msg.depth);
-                        stable.output_data = try self.setLastOutput(stable.output_data);
-                        break :prepared stable;
-                    } else raw: {
-                        var scratch = try callScratch(self, msg.depth);
-                        defer scratch.deinit();
-                        const code = try scratch.allocator.dupe(u8, execution_code.bytes);
-                        var frame = try acquireRawFrame(self, scratch.allocator, &host_iface, &msg, code, null);
-                        defer frame.deinit();
-                        var interpreter = frame.interpreter(Protocol);
-                        var stable = try executeInterpreter(self, &interpreter, msg.depth);
-                        stable.output_data = try self.setLastOutput(stable.output_data);
-                        break :raw stable;
-                    };
+                    var frame = try acquireBytecodeFrame(self, self.allocator, &host_iface, &msg, child.bytecode);
+                    defer frame.deinit();
+                    var interpreter = frame.interpreter(Protocol);
+                    var result = try executeInterpreter(self, &interpreter, msg.depth);
+                    result.output_data = try self.setLastOutput(result.output_data);
 
                     try finishCallCheckpoint(self, child.checkpoint_state, result.status);
                     checkpoint_open = false;

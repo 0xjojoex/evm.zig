@@ -30,7 +30,7 @@ const AccountState = evmz.state.Account;
 const MemoryAccount = evmz.state.MemoryAccount;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
-const PreparedCodeCache = @import("./code/PreparedCodeCache.zig");
+const prepared_code = evmz.prepared_code;
 const Changeset = evmz.state.Changeset;
 const execution_values = @import("./execution.zig");
 const Host = evmz.Host;
@@ -109,6 +109,9 @@ fn InitFor(comptime Protocol: type) type {
     return struct {
         revision: Protocol.Revision,
         state_reader: ?evmz.state.Reader = null,
+        /// Caller-owned derived-artifact service. Its allocation, I/O,
+        /// synchronization, and capacity policy are outside executor bounds.
+        prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
         precompile_runtime: ?execution_values.PrecompileRuntime = null,
         config: evmz.ExecutionConfig = .base,
@@ -122,12 +125,18 @@ pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
 ///
 /// These are caller-supplied runtime policy knobs. Growable remains the
 /// default; each configured field means "reserve this backing storage and fail
-/// instead of growing it."
+/// instead of growing it." Caller-owned services such as `state_reader`,
+/// `prepared_code_backend`, tracing, and precompile runtimes are outside this
+/// VM-owned resource envelope and must enforce their own operational policy.
 pub const BoundedRuntimeResources = struct {
     max_live_frames: usize = default_max_live_frames,
     memory_bytes_per_frame: ?usize = null,
     io_bytes_per_frame: ?usize = null,
     scratch_bytes_per_frame: ?usize = null,
+    /// Transaction-scoped storage for transient prepared bytecode and metadata.
+    /// `null` leaves this resource growable; a value reserves exactly that many
+    /// bytes and reports `PreparedCodeCapacityExceeded` instead of growing.
+    prepared_code_bytes_per_execution: ?usize = null,
     logs: ?StateOverlay.LogResources = null,
     journal_entries: ?usize = null,
     access: ?StateOverlay.AccessResources = null,
@@ -240,7 +249,7 @@ test "resource bound envelope maps executor resources by lifetime" {
 /// control bytecode preprocessing explicitly; otherwise prefer `executeCall` or
 /// `runStandalone`.
 pub const PreparedCallTransaction = struct {
-    bytecode: *Bytecode,
+    bytecode: *const Bytecode,
     sender: Address,
     recipient: Address,
     input: []const u8 = &.{},
@@ -297,6 +306,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         frame_store: FrameStore,
         runtime_frames: RuntimeFrameStack,
         call_scratch_slots: CallScratchSlots,
+        prepared_code_scratch: call_scratch_storage.Slot,
         runtime_resources: RuntimeResourcesType = .growable,
         runtime_resources_locked: bool = false,
         execution_context: ?execution_values.ExecutionContext = null,
@@ -309,7 +319,9 @@ pub fn Executor(comptime ProtocolType: type) type {
         precompile_runtime: ?execution_values.PrecompileRuntime = null,
         revision_id: RevisionId,
         config: evmz.ExecutionConfig,
-        prepared_code_cache: PreparedCodeCache,
+        prepared_code_backend: ?prepared_code.Backend,
+        prepared_code_execution: ?prepared_code.Execution = null,
+        prepared_code_execution_depth: usize = 0,
         prepared_code_admission: bool = true,
         trace_sink: ?*TraceSink = null,
         last_call_output: frame_io.ByteSlot,
@@ -528,12 +540,13 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .frame_store = .{},
                 .runtime_frames = .empty,
                 .call_scratch_slots = .empty,
+                .prepared_code_scratch = call_scratch_storage.Slot.initGrowable(allocator),
                 .runtime_resources = .growable,
                 .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
                 .block_hash_source = options.block_hash_source,
                 .precompile_runtime = options.precompile_runtime,
                 .config = options.config,
-                .prepared_code_cache = PreparedCodeCache.init(allocator, options.config),
+                .prepared_code_backend = options.prepared_code_backend,
                 .trace_sink = null,
                 .last_call_output = frame_io.ByteSlot.initGrowable(allocator),
             };
@@ -571,15 +584,12 @@ pub fn Executor(comptime ProtocolType: type) type {
             if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
             if (self.checkpoint_top != 0) return error.ActiveCheckpoints;
             if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
-            if (self.prepared_code_cache.hasActiveExecution()) return error.ActivePreparedCodeExecution;
+            if (self.prepared_code_execution_depth != 0) return error.ActivePreparedCodeExecution;
 
             const next_revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision);
             if (self.runtime_resources_locked and self.revision_id != next_revision_id) {
                 return error.RuntimeResourcesLocked;
             }
-            const prepared_code_compatible = self.revision_id == next_revision_id and
-                std.meta.eql(self.config, options.config);
-
             self.state.reset(options.state_reader, options.trace_sink);
             self.execution_context = null;
             self.scope_root = null;
@@ -587,9 +597,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.precompile_runtime = options.precompile_runtime;
             self.revision_id = next_revision_id;
             self.config = options.config;
-            if (!prepared_code_compatible) {
-                try self.prepared_code_cache.clearRetainingCapacity(options.config);
-            }
+            self.prepared_code_backend = options.prepared_code_backend;
             self.setTraceSink(options.trace_sink);
             self.clearLastOutput();
         }
@@ -608,6 +616,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .growable => {
                     try self.frame_store.setGrowable(self.allocator);
                     try self.setGrowableCallScratchSlots();
+                    self.prepared_code_scratch.setGrowable(self.allocator);
                     try self.state.configureLogResources(null);
                     try self.state.configureJournalEntries(null);
                     try self.state.configureAccessResources(null);
@@ -627,6 +636,11 @@ pub fn Executor(comptime ProtocolType: type) type {
                     );
                     try self.reserveRuntimeFrames(bounded.max_live_frames);
                     try self.reserveCallScratchSlots(bounded.max_live_frames, bounded.scratch_bytes_per_frame);
+                    if (bounded.prepared_code_bytes_per_execution) |capacity| {
+                        try self.prepared_code_scratch.setBounded(self.allocator, capacity);
+                    } else {
+                        self.prepared_code_scratch.setGrowable(self.allocator);
+                    }
                     try self.state.configureLogResources(bounded.logs);
                     try self.state.configureJournalEntries(bounded.journal_entries);
                     try self.state.configureAccessResources(bounded.access);
@@ -682,15 +696,48 @@ pub fn Executor(comptime ProtocolType: type) type {
             return evmz.protocol.decodeRevisionForProtocol(Protocol, self.revision_id);
         }
 
+        pub fn beginPreparedCodeExecution(self: *Self) void {
+            if (self.prepared_code_execution_depth == 0) {
+                std.debug.assert(self.prepared_code_execution == null);
+                self.prepared_code_scratch.reset();
+                self.prepared_code_execution = prepared_code.Execution.init(
+                    self.prepared_code_scratch.allocator(),
+                    self.prepared_code_backend,
+                    self.preparedCodeKey(),
+                );
+            }
+            self.prepared_code_execution_depth = std.math.add(
+                usize,
+                self.prepared_code_execution_depth,
+                1,
+            ) catch @panic("prepared-code execution depth overflow");
+        }
+
+        pub fn endPreparedCodeExecution(self: *Self) void {
+            std.debug.assert(self.prepared_code_execution_depth > 0);
+            self.prepared_code_execution_depth -= 1;
+            if (self.prepared_code_execution_depth != 0) return;
+
+            self.prepared_code_execution.?.deinit();
+            self.prepared_code_execution = null;
+            self.prepared_code_scratch.reset();
+        }
+
+        pub fn preparedCodeKey(self: *const Self) prepared_code.PreparationKey {
+            return .{ .revision_id = self.revision_id, .config = self.config };
+        }
+
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
         pub fn deinit(self: *Self) void {
             std.debug.assert(self.runtime_frames.items.len == 0);
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.active_transaction_checkpoint_id == 0);
-            self.prepared_code_cache.deinit();
+            std.debug.assert(self.prepared_code_execution_depth == 0);
+            std.debug.assert(self.prepared_code_execution == null);
             self.state.deinit();
             self.runtime_frames.deinit(self.allocator);
             self.frame_store.deinit(self.allocator);
+            self.prepared_code_scratch.deinit(self.allocator);
             for (self.call_scratch_slots.items) |slot| {
                 slot.deinit(self.allocator);
                 self.allocator.destroy(slot);
@@ -775,7 +822,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
         }
 
-        /// Open a raw execution scope from its authoritative context and message.
+        /// Open a direct message-execution scope from its authoritative context.
         ///
         /// This is open-only: callers own checkpoint placement, execution, and
         /// the eventual commit, restore, or close. Mandatory sender/recipient/
@@ -1065,7 +1112,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             };
         }
 
-        /// Compatibility adapter for one raw call/create message and flat host context.
+        /// Compatibility adapter for one call/create message and flat host context.
         ///
         /// New integrations should prefer `runStandaloneRequest`, whose context is
         /// the authoritative concrete execution value.
@@ -1073,7 +1120,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             return self.runStandaloneContext(context_adapter.fromHost(tx_context), message, .{});
         }
 
-        /// Run one raw execution request as a complete transaction scope.
+        /// Run one direct execution request as a complete transaction scope.
         ///
         /// Lifecycle: open scope -> checkpoint -> execute -> finalize+commit on
         /// success, or restore on revert/invalid/out-of-gas -> close. Family
@@ -1319,8 +1366,8 @@ pub fn Executor(comptime ProtocolType: type) type {
             input: []const u8,
             gas: u64,
         ) !Interpreter.Result {
-            self.prepared_code_cache.beginExecution();
-            defer self.prepared_code_cache.endExecution();
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
 
             try self.beginSystemCall(tx_context);
             errdefer self.closeTransaction();
@@ -1333,7 +1380,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
 
             const resolved = try runtime.resolveCode(self, recipient);
-            const execution_code = try runtime.resolveExecutionCodeView(self, try runtime.resolvedCodeView(self, resolved));
+            const bytecode = try runtime.resolveExecutionCodeView(self, try runtime.resolvedCodeView(self, resolved));
             var host_iface = self.host();
             self.traceAccountAccess(recipient, 0);
             const message = Host.Message{
@@ -1347,25 +1394,11 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .code_address = recipient,
             };
 
-            const result = if (execution_code.prepared) |bytecode| prepared: {
-                var frame = try runtime.acquireBytecodeFrame(self, self.allocator, &host_iface, &message, bytecode);
-                defer frame.deinit();
-                var interpreter = frame.interpreter(Protocol);
-                var stable = try runtime.executeInterpreter(self, &interpreter, message.depth);
-                stable.output_data = try self.setLastOutput(stable.output_data);
-                break :prepared stable;
-            } else raw: {
-                var scratch = try runtime.callScratch(self, 0);
-                defer scratch.deinit();
-                const code = try scratch.allocator.dupe(u8, execution_code.bytes);
-                var bytecode = try runtime.prepareBytecodeAlloc(self, scratch.allocator, code);
-                var frame = try runtime.acquireBytecodeFrame(self, scratch.allocator, &host_iface, &message, &bytecode);
-                defer frame.deinit();
-                var interpreter = frame.interpreter(Protocol);
-                var stable = try runtime.executeInterpreter(self, &interpreter, message.depth);
-                stable.output_data = try self.setLastOutput(stable.output_data);
-                break :raw stable;
-            };
+            var frame = try runtime.acquireBytecodeFrame(self, self.allocator, &host_iface, &message, bytecode);
+            defer frame.deinit();
+            var interpreter = frame.interpreter(Protocol);
+            var result = try runtime.executeInterpreter(self, &interpreter, message.depth);
+            result.output_data = try self.setLastOutput(result.output_data);
 
             if (executionRolledBack(result.status)) {
                 try self.state.revertToCheckpoint(checkpoint_state);
@@ -1633,7 +1666,7 @@ test "executor executes prepared bytecode call transaction" {
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
-test "normal call transactions retain executor-owned prepared code" {
+test "normal call transactions retain caller-owned prepared code" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const target = evmz.addr(0xbeef);
@@ -1649,8 +1682,11 @@ test "normal call transactions retain executor-owned prepared code" {
         .STOP,
     });
 
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .osaka,
+        .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
 
@@ -1671,7 +1707,7 @@ test "normal call transactions retain executor-owned prepared code" {
     executor.closeTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, first.status);
-    try std.testing.expectEqual(@as(usize, 2), executor.prepared_code_cache.count());
+    try std.testing.expectEqual(@as(usize, 2), pool.count());
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(target, 0));
 
     try executor.beginTransaction(tx_context, sender, contract);
@@ -1679,11 +1715,39 @@ test "normal call transactions retain executor-owned prepared code" {
     executor.closeTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, second.status);
-    try std.testing.expectEqual(@as(usize, 2), executor.prepared_code_cache.count());
+    try std.testing.expectEqual(@as(usize, 2), pool.count());
+}
+
+test "CREATE initcode preparation remains execution-local" {
+    const sender = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(sender, 100_000);
+
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+        .prepared_code_backend = pool.backend(),
+    });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.seedAccount(sender, sender_account);
+
+    try executor.beginCreateTransaction(tx_context, sender);
+    const result = (try executor.executeCreate(.{
+        .sender = sender,
+        .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
+        .gas = 100_000,
+    })).expectCreate();
+    executor.closeTransaction();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
 const CacheInvalidatingTrace = struct {
-    executor: *Default,
+    pool: *evmz.prepared_code.InMemoryPreparedPool,
     invalidation_rejected: bool = false,
 
     fn sink(self: *@This()) trace.Sink {
@@ -1696,7 +1760,7 @@ const CacheInvalidatingTrace = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         _ = event;
         if (self.invalidation_rejected) return;
-        self.executor.prepared_code_cache.clearRetainingCapacity(self.executor.config) catch |err| {
+        self.pool.clearRetainingCapacity() catch |err| {
             std.debug.assert(err == error.ActivePreparedCodeExecution);
             self.invalidation_rejected = true;
             return;
@@ -1710,7 +1774,12 @@ test "trace reentrancy cannot invalidate prepared code used by a live frame" {
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{.STOP});
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .osaka });
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .osaka,
+        .prepared_code_backend = pool.backend(),
+    });
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -1722,9 +1791,9 @@ test "trace reentrancy cannot invalidate prepared code used by a live frame" {
     try executor.state.seedAccount(contract, contract_account);
 
     const code_view = try executor.state.getCodeView(contract);
-    _ = try executor.prepared_code_cache.getOrPrepare(code_view.code_hash, code_view.bytes);
+    _ = try pool.getOrPrepare(executor.preparedCodeKey(), code_view.code_hash, code_view.bytes);
 
-    var recorder = CacheInvalidatingTrace{ .executor = &executor };
+    var recorder = CacheInvalidatingTrace{ .pool = &pool };
     var sink = recorder.sink();
     executor.setTraceSink(&sink);
 
@@ -1734,28 +1803,41 @@ test "trace reentrancy cannot invalidate prepared code used by a live frame" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expect(recorder.invalidation_rejected);
-    try std.testing.expectEqual(@as(usize, 1), executor.prepared_code_cache.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
-test "compatible reset retains prepared code and config change invalidates it" {
+test "reset retains caller backend and isolates preparation configurations" {
     const code = evmz.t.bytecode(.{.STOP});
     const code_hash = evmz.crypto.keccak256(&code);
 
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .osaka,
         .config = .base,
+        .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
 
-    const prepared = try executor.prepared_code_cache.getOrPrepare(code_hash, &code);
-    try executor.reset(.{ .revision = .osaka, .config = .base });
-    try std.testing.expectEqual(prepared, executor.prepared_code_cache.get(code_hash).?);
+    const prepared = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
+    try executor.reset(.{
+        .revision = .osaka,
+        .config = .base,
+        .prepared_code_backend = pool.backend(),
+    });
+    try std.testing.expectEqual(prepared, pool.get(executor.preparedCodeKey(), code_hash).?);
 
-    try executor.reset(.{ .revision = .osaka, .config = .advanced });
-    try std.testing.expectEqual(@as(usize, 0), executor.prepared_code_cache.count());
+    try executor.reset(.{
+        .revision = .osaka,
+        .config = .advanced,
+        .prepared_code_backend = pool.backend(),
+    });
+    const advanced = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
+    try std.testing.expect(advanced != prepared);
+    try std.testing.expectEqual(@as(usize, 2), pool.count());
 }
 
-test "bounded cached jump executes without lazy persistent allocation" {
+test "bounded cached jump executes without persistent allocation" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{
@@ -1765,9 +1847,11 @@ test "bounded cached jump executes without lazy persistent allocation" {
     });
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(failing_allocator.allocator());
+    defer pool.deinit();
     var executor = try Default.initWithRuntimeResources(failing_allocator.allocator(), .{
         .revision = .osaka,
-        .config = .{ .preprocessing = .none },
+        .prepared_code_backend = pool.backend(),
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 0,
@@ -1786,7 +1870,7 @@ test "bounded cached jump executes without lazy persistent allocation" {
     try executor.state.seedAccount(contract, contract_account);
 
     const code_view = try executor.state.getCodeView(contract);
-    const prepared = try executor.prepared_code_cache.getOrPrepare(code_view.code_hash, code_view.bytes);
+    const prepared = try pool.getOrPrepare(executor.preparedCodeKey(), code_view.code_hash, code_view.bytes);
     try std.testing.expect(prepared.jumpdests.analyzed);
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
@@ -1803,7 +1887,7 @@ test "bounded cached jump executes without lazy persistent allocation" {
     try std.testing.expect(!failing_allocator.has_induced_failure);
 }
 
-test "cached child execution succeeds without raw preparation scratch" {
+test "cached child execution succeeds without transient preparation capacity" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const target = evmz.addr(0xbeef);
@@ -1820,13 +1904,17 @@ test "cached child execution succeeds without raw preparation scratch" {
         .SSTORE, .STOP,
     });
 
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
     var executor = try Default.initWithRuntimeResources(std.testing.allocator, .{
         .revision = .osaka,
+        .prepared_code_backend = pool.backend(),
     }, .{ .bounded = .{
         .max_live_frames = 2,
         .memory_bytes_per_frame = 0,
         .io_bytes_per_frame = 0,
         .scratch_bytes_per_frame = 0,
+        .prepared_code_bytes_per_execution = 0,
         .result_bytes = 0,
     } });
     defer executor.deinit();
@@ -1846,10 +1934,10 @@ test "cached child execution succeeds without raw preparation scratch" {
     var root_bytecode = try executor.prepareBytecode(&contract_code);
     defer root_bytecode.deinit(std.testing.allocator);
 
-    // Negative control: preflight can resolve the target, but an uncached child
-    // frame cannot copy non-empty raw code into zero bytes of scratch.
+    // Negative control: an uncached child must prepare an immutable artifact,
+    // but this execution reserves no transient preparation storage.
     try executor.beginTransaction(tx_context, sender, contract);
-    try std.testing.expectError(error.OutOfMemory, executor.executePreparedCallTransaction(.{
+    try std.testing.expectError(error.PreparedCodeCapacityExceeded, executor.executePreparedCallTransaction(.{
         .bytecode = &root_bytecode,
         .sender = sender,
         .recipient = contract,
@@ -1860,7 +1948,7 @@ test "cached child execution succeeds without raw preparation scratch" {
     // Explicit setup admission is allowed outside execution even though lazy
     // admission is disabled for the bounded runtime envelope.
     const target_view = try executor.state.getCodeView(target);
-    _ = try executor.prepared_code_cache.getOrPrepare(target_view.code_hash, target_view.bytes);
+    _ = try pool.getOrPrepare(executor.preparedCodeKey(), target_view.code_hash, target_view.bytes);
 
     for (0..2) |_| {
         try executor.beginTransaction(tx_context, sender, contract);
@@ -1881,8 +1969,11 @@ test "prepared execution follows current code hash without owning public code re
     const original_code = evmz.t.bytecode(.{ .PUSH0, .STOP });
     const replacement_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .STOP });
 
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .osaka,
+        .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
 
@@ -1890,20 +1981,25 @@ test "prepared execution follows current code hash without owning public code re
     try account.setCode(&original_code);
     try executor.state.seedAccount(contract, account);
 
+    executor.beginPreparedCodeExecution();
+    var prepared_execution_open = true;
+    errdefer if (prepared_execution_open) executor.endPreparedCodeExecution();
     const original_execution = try call_runtime.For(Default).resolveExecutionCode(&executor, contract);
-    const original_prepared = original_execution.prepared.?;
+    const original_prepared = original_execution;
     const public_original = try executor.getCode(contract);
     try std.testing.expect(original_prepared.bytes.ptr != public_original.ptr);
     try std.testing.expectEqualSlices(u8, &original_code, public_original);
 
     try executor.state.setCode(contract, &replacement_code);
     const replacement_execution = try call_runtime.For(Default).resolveExecutionCode(&executor, contract);
-    try std.testing.expect(replacement_execution.prepared.? != original_prepared);
-    try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.prepared.?.bytes);
+    try std.testing.expect(replacement_execution != original_prepared);
+    try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
     const public_replacement = try executor.getCode(contract);
     try std.testing.expectEqualSlices(u8, &replacement_code, public_replacement);
 
-    try executor.prepared_code_cache.clearRetainingCapacity(executor.config);
+    executor.endPreparedCodeExecution();
+    prepared_execution_open = false;
+    try pool.clearRetainingCapacity();
     try std.testing.expectEqualSlices(u8, &replacement_code, public_replacement);
     try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
 }
@@ -1943,14 +2039,17 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
     const nodes = [_][]const u8{state_node};
     var witness = evmz.state.WitnessStateReader.init(state_root, &nodes, &.{});
 
+    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .osaka,
         .state_reader = witness.reader(),
+        .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
 
-    _ = try executor.prepared_code_cache.getOrPrepare(code_hash, &code);
-    try std.testing.expect(executor.prepared_code_cache.get(code_hash) != null);
+    _ = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
+    try std.testing.expect(pool.get(executor.preparedCodeKey(), code_hash) != null);
     try std.testing.expectError(
         error.InvalidWitness,
         call_runtime.For(Default).resolveExecutionCode(&executor, target),

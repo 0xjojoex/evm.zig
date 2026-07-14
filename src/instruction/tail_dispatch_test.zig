@@ -14,7 +14,7 @@ const Case = struct {
     expected_status: Interpreter.Status,
 };
 
-test "prepared copy, terminal, and log handlers match raw execution" {
+test "copy, terminal, and log handlers match owned and borrowed preparation" {
     const huge = std.math.maxInt(u256);
     const cases = [_]Case{
         .{
@@ -101,75 +101,75 @@ test "prepared copy, terminal, and log handlers match raw execution" {
     };
 
     for (cases) |case| {
-        try expectRawPreparedEquivalent(case);
+        try expectOwnedBorrowedEquivalent(case);
     }
 }
 
-fn expectRawPreparedEquivalent(case: Case) !void {
+fn expectOwnedBorrowedEquivalent(case: Case) !void {
     const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var raw_host_state = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer raw_host_state.deinit();
-    var raw_host = raw_host_state.host();
-    var prepared_host_state = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer prepared_host_state.deinit();
-    var prepared_host = prepared_host_state.host();
+    var owned_host_state = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer owned_host_state.deinit();
+    var owned_host = owned_host_state.host();
+    var borrowed_host_state = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer borrowed_host_state.deinit();
+    var borrowed_host = borrowed_host_state.host();
 
-    var raw_msg = evmz.t.defaultMessage();
-    raw_msg.gas = case.gas;
-    raw_msg.input_data = case.input_data;
-    raw_msg.is_static = case.is_static;
-    var prepared_msg = raw_msg;
+    var owned_msg = evmz.t.defaultMessage();
+    owned_msg.gas = case.gas;
+    owned_msg.input_data = case.input_data;
+    owned_msg.is_static = case.is_static;
+    var borrowed_msg = owned_msg;
 
-    var raw_frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
-        .host = &raw_host,
-        .msg = &raw_msg,
+    var owned_frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &owned_host,
+        .msg = &owned_msg,
         .code = &code,
         .revision = .latest,
     });
-    defer raw_frame.deinit();
-    var prepared_frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
-        .host = &prepared_host,
-        .msg = &prepared_msg,
+    defer owned_frame.deinit();
+    var borrowed_frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &borrowed_host,
+        .msg = &borrowed_msg,
         .bytecode = &bytecode,
         .revision = .latest,
     });
-    defer prepared_frame.deinit();
+    defer borrowed_frame.deinit();
 
-    try seedFrame(raw_frame.frame, case);
-    try seedFrame(prepared_frame.frame, case);
+    try seedFrame(owned_frame.frame, case);
+    try seedFrame(borrowed_frame.frame, case);
 
-    var raw_interpreter = raw_frame.interpreter();
-    const raw_result = try raw_interpreter.execute();
-    var prepared_interpreter = prepared_frame.interpreter();
-    const prepared_result = try prepared_interpreter.execute();
+    var owned_interpreter = owned_frame.interpreter();
+    const owned_result = try owned_interpreter.execute();
+    var borrowed_interpreter = borrowed_frame.interpreter();
+    const borrowed_result = try borrowed_interpreter.execute();
 
-    try std.testing.expectEqual(case.expected_status, raw_result.status);
-    try std.testing.expectEqual(raw_result.status, prepared_result.status);
-    try std.testing.expectEqual(raw_result.gas_left, prepared_result.gas_left);
-    try std.testing.expectEqual(raw_result.gas_refund, prepared_result.gas_refund);
-    try std.testing.expectEqual(raw_result.gas_reservoir, prepared_result.gas_reservoir);
-    try std.testing.expectEqual(raw_result.state_gas_spent, prepared_result.state_gas_spent);
-    try std.testing.expectEqual(raw_result.state_gas_from_gas_left, prepared_result.state_gas_from_gas_left);
-    try std.testing.expectEqualSlices(u8, raw_result.output_data, prepared_result.output_data);
+    try std.testing.expectEqual(case.expected_status, owned_result.status);
+    try std.testing.expectEqual(owned_result.status, borrowed_result.status);
+    try std.testing.expectEqual(owned_result.gas_left, borrowed_result.gas_left);
+    try std.testing.expectEqual(owned_result.gas_refund, borrowed_result.gas_refund);
+    try std.testing.expectEqual(owned_result.gas_reservoir, borrowed_result.gas_reservoir);
+    try std.testing.expectEqual(owned_result.state_gas_spent, borrowed_result.state_gas_spent);
+    try std.testing.expectEqual(owned_result.state_gas_from_gas_left, borrowed_result.state_gas_from_gas_left);
+    try std.testing.expectEqualSlices(u8, owned_result.output_data, borrowed_result.output_data);
 
-    const raw_call_frame = raw_interpreter.call_frame;
-    const prepared_call_frame = prepared_interpreter.call_frame;
-    try std.testing.expectEqual(raw_call_frame.stack.len, prepared_call_frame.stack.len);
+    const owned_call_frame = owned_interpreter.call_frame;
+    const borrowed_call_frame = borrowed_interpreter.call_frame;
+    try std.testing.expectEqual(owned_call_frame.stack.len, borrowed_call_frame.stack.len);
     try std.testing.expectEqualSlices(
         u256,
-        raw_call_frame.stack.slots[0..raw_call_frame.stack.len],
-        prepared_call_frame.stack.slots[0..prepared_call_frame.stack.len],
+        owned_call_frame.stack.slots[0..owned_call_frame.stack.len],
+        borrowed_call_frame.stack.slots[0..borrowed_call_frame.stack.len],
     );
-    try std.testing.expectEqual(raw_call_frame.memory.len(), prepared_call_frame.memory.len());
+    try std.testing.expectEqual(owned_call_frame.memory.len(), borrowed_call_frame.memory.len());
     try std.testing.expectEqualSlices(
         u8,
-        raw_call_frame.memory.readBytes(0, raw_call_frame.memory.len()),
-        prepared_call_frame.memory.readBytes(0, prepared_call_frame.memory.len()),
+        owned_call_frame.memory.readBytes(0, owned_call_frame.memory.len()),
+        borrowed_call_frame.memory.readBytes(0, borrowed_call_frame.memory.len()),
     );
-    try expectLogsEqual(raw_host_state.logs.items, prepared_host_state.logs.items);
+    try expectLogsEqual(owned_host_state.logs.items, borrowed_host_state.logs.items);
 }
 
 fn seedFrame(frame: *Interpreter.CallFrame, case: Case) !void {

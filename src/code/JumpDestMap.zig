@@ -17,6 +17,12 @@ pub const empty = JumpDestMap{
     .strategy = .scalar_bitmask,
 };
 
+pub const prepared_empty = JumpDestMap{
+    .bits = .{},
+    .analyzed = true,
+    .strategy = .scalar_bitmask,
+};
+
 pub fn init() JumpDestMap {
     return empty;
 }
@@ -39,6 +45,14 @@ pub fn isValid(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const 
     if (opcode != .JUMPDEST) return false;
 
     try self.ensureValidBytes(allocator, bytes);
+    return self.bits.isSet(target);
+}
+
+/// Query an eagerly analyzed map without mutation or allocation.
+pub fn isValidPrepared(self: *const JumpDestMap, bytes: []const u8, target: usize) bool {
+    std.debug.assert(self.analyzed);
+    if (target >= bytes.len) return false;
+    if (bytes[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
     return self.bits.isSet(target);
 }
 

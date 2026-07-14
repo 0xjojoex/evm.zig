@@ -3,7 +3,7 @@
 //! `Vm` is the object an integration holds across blocks. It owns the low-level
 //! `executor`, current environment, and optional commit sink. Protocol
 //! transactions go through `transact`; diagnostics, benchmarks, and fixtures can
-//! drive `executor` directly when they need raw execution control.
+//! drive `executor` directly when they need message-level execution control.
 
 const std = @import("std");
 
@@ -395,7 +395,11 @@ fn Typed(
 
         pub const Init = struct {
             revision: RevisionType,
+            /// Read-only canonical state authority.
             state_reader: ?StateReader = null,
+            /// Optional caller-owned read/write service for immutable prepared
+            /// code. `null` retains nothing across top-level executions.
+            prepared_code_backend: ?evmz.prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
             precompile_runtime: ?evmz.execution.PrecompileRuntime = null,
             committer: ?Committer = null,
@@ -651,6 +655,7 @@ fn Typed(
                 .executor = Executor.init(allocator, .{
                     .revision = options.revision,
                     .state_reader = options.state_reader,
+                    .prepared_code_backend = options.prepared_code_backend,
                     .block_hash_source = options.block_hash_source,
                     .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
@@ -682,6 +687,7 @@ fn Typed(
                 .executor = try Executor.initWithRuntimeResources(allocator, .{
                     .revision = options.revision,
                     .state_reader = options.state_reader,
+                    .prepared_code_backend = options.prepared_code_backend,
                     .block_hash_source = options.block_hash_source,
                     .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
@@ -712,6 +718,7 @@ fn Typed(
             try self.executor.reset(.{
                 .revision = options.revision,
                 .state_reader = options.state_reader,
+                .prepared_code_backend = options.prepared_code_backend,
                 .block_hash_source = options.block_hash_source,
                 .precompile_runtime = options.precompile_runtime,
                 .config = options.config,
@@ -733,6 +740,11 @@ fn Typed(
 
         pub fn envContext(self: *const Self) Env {
             return self.runtimeEnv();
+        }
+
+        /// Preparation identity used by the configured prepared-code backend.
+        pub fn preparedCodeKey(self: *const Self) evmz.prepared_code.PreparationKey {
+            return self.executor.preparedCodeKey();
         }
 
         pub fn getAccount(self: *Self, address_value: Address) !?AccountView {
@@ -1032,7 +1044,7 @@ test "Vm initializes and exposes empty changeset" {
     try std.testing.expectEqual(@as(usize, 0), diff.account_updates.items.len);
 }
 
-test "Vm account code remains overlay-owned and traced with a prepared cache entry" {
+test "Vm account code remains overlay-owned and traced with a prepared backend entry" {
     const contract = addr(0xc0de);
     const code = [_]u8{ 0x60, 0x00 };
     var memory = MemoryStore.init(std.testing.allocator);
@@ -1062,15 +1074,18 @@ test "Vm account code remains overlay-owned and traced with a prepared cache ent
     };
     var recorder = Recorder{};
     var sink = recorder.sink();
+    var prepared_pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer prepared_pool.deinit();
     var vm = Default.init(std.testing.allocator, .{
         .revision = .osaka,
         .state_reader = memory.reader(),
+        .prepared_code_backend = prepared_pool.backend(),
         .trace_sink = &sink,
     });
     defer vm.deinit();
 
     const code_hash = evmz.mpt.codeHash(&code);
-    const prepared = try vm.executor.prepared_code_cache.getOrPrepare(code_hash, &code);
+    const prepared = try prepared_pool.getOrPrepare(vm.executor.preparedCodeKey(), code_hash, &code);
     const view = (try vm.getAccount(contract)).?;
 
     try std.testing.expect(view.code.ptr != prepared.bytes.ptr);
@@ -1079,7 +1094,7 @@ test "Vm account code remains overlay-owned and traced with a prepared cache ent
     try std.testing.expectEqualSlices(u8, &contract, &recorder.last.address);
     try std.testing.expectEqual(code.len, recorder.last.size);
 
-    try vm.executor.prepared_code_cache.clearRetainingCapacity(vm.executor.config);
+    try prepared_pool.clearRetainingCapacity();
     try std.testing.expectEqualSlices(u8, &code, view.code);
 }
 

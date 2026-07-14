@@ -245,10 +245,6 @@ pub fn For(comptime ProtocolType: type) type {
             return executeAt(frame, read_bytes.ptr);
         }
 
-        pub fn executeZeroPaddedRaw(frame: *CallFrame) anyerror!void {
-            return executeAt(frame, frame.code.ptr);
-        }
-
         fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
             const stack_base: [*]u256 = frame.stack.slots;
             var ctx = Context{

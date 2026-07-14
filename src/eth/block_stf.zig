@@ -23,6 +23,7 @@ const eth_config = @import("config.zig");
 const eth_system = @import("system.zig");
 const eth_transaction = @import("transaction.zig");
 const mpt = @import("../mpt.zig");
+const prepared_code = @import("../prepared_code.zig");
 const rlp = @import("../rlp.zig");
 const Revision = @import("revision.zig").Revision;
 const state = @import("../state.zig");
@@ -149,6 +150,8 @@ pub const BlockInput = struct {
     block_hash_source: ?BlockHashSource = null,
     block_header: ?BlockHeader = null,
     state_backend: state.Backend,
+    /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+    prepared_code_backend: ?prepared_code.Backend = null,
     transactions: []const TransactionInput,
     withdrawals: []const mpt.Withdrawal = &.{},
     parent_header: ?ParentHeaderContext = null,
@@ -283,6 +286,7 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var evm = Vm.init(allocator, .{
         .revision = input.revision,
         .state_reader = state_backend.reader(),
+        .prepared_code_backend = input.prepared_code_backend,
         .block_hash_source = input.block_hash_source,
         .env = input.env,
         .config = input.config,
