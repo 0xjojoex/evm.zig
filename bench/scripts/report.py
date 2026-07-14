@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optimize", default="ReleaseFast")
     parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
     parser.add_argument("--native-keccak", choices=("std", "xkcp"), default="std")
+    parser.add_argument("--native-secp256k1", choices=("std", "libsecp256k1"), default="std")
     parser.add_argument("--out-dir", default="../output/bench-report")
     parser.add_argument("--report")
     parser.add_argument("--checkpoint")
@@ -98,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.profile == "zkvm":
         args.native_keccak = "std"
+        args.native_secp256k1 = "std"
     return args
 
 
@@ -116,6 +118,8 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "profile": args.profile,
         "native_keccak": args.native_keccak,
         "keccak_provider": args.native_keccak if args.profile == "native" else "zkvm",
+        "native_secp256k1": args.native_secp256k1,
+        "secp256k1_provider": args.native_secp256k1 if args.profile == "native" else "zkvm",
         "rustc": tool_major_version(command_version(["rustc", "--version"])),
         "cargo": tool_major_version(command_version(["cargo", "--version"])),
         "solc": solc_version(),
@@ -300,7 +304,11 @@ def vm_loop_scope(engine: str) -> str:
 
 
 def build_profile_args(args: argparse.Namespace) -> list[str]:
-    return [f"-Dprofile={args.profile}", f"-Dnative-keccak={args.native_keccak}"]
+    return [
+        f"-Dprofile={args.profile}",
+        f"-Dnative-keccak={args.native_keccak}",
+        f"-Dnative-secp256k1={args.native_secp256k1}",
+    ]
 
 
 def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:

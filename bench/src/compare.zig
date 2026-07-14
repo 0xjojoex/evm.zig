@@ -44,6 +44,7 @@ const Options = struct {
     optimize: []const u8 = "ReleaseFast",
     profile: []const u8 = "native",
     native_keccak: []const u8 = "std",
+    native_secp256k1: []const u8 = "std",
     support_min: ?[]const u8 = null,
     support_max: ?[]const u8 = null,
     engines: std.ArrayList(Engine) = .empty,
@@ -156,6 +157,11 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.native_keccak = try parseNativeKeccak(allocator, value);
         } else if (stripPrefix(arg, "--native-keccak=")) |value| {
             options.native_keccak = try parseNativeKeccak(allocator, value);
+        } else if (std.mem.eql(u8, arg, "--native-secp256k1")) {
+            const value = args.next() orelse return error.MissingNativeSecp256k1;
+            options.native_secp256k1 = try parseNativeSecp256k1(allocator, value);
+        } else if (stripPrefix(arg, "--native-secp256k1=")) |value| {
+            options.native_secp256k1 = try parseNativeSecp256k1(allocator, value);
         } else if (std.mem.eql(u8, arg, "--support-min")) {
             const value = args.next() orelse return error.MissingSupportMin;
             options.support_min = try allocator.dupe(u8, value);
@@ -205,7 +211,10 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
         }
     }
 
-    if (std.mem.eql(u8, options.profile, "zkvm")) options.native_keccak = "std";
+    if (std.mem.eql(u8, options.profile, "zkvm")) {
+        options.native_keccak = "std";
+        options.native_secp256k1 = "std";
+    }
     return options;
 }
 
@@ -220,6 +229,7 @@ fn printUsage() void {
         \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
         \\  --profile <profile>    evmz build profile forwarded to child Zig builds
         \\  --native-keccak <name> native Keccak backend forwarded to evmz builds
+        \\  --native-secp256k1 <name> native secp256k1 backend forwarded to evmz builds
         \\  --support-min <name>   minimum evmz fork compiled into the VM-loop runner
         \\  --support-max <name>   maximum evmz fork compiled into the VM-loop runner
         \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, revm, evmone-baseline, evmone-advanced, revm-interpreter
@@ -296,6 +306,7 @@ fn engineCommand(
     if (engine == .evmz) {
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dnative-keccak={s}", .{options.native_keccak}));
+        try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dnative-secp256k1={s}", .{options.native_secp256k1}));
         if (options.support_min) |support_min| {
             try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-min={s}", .{support_min}));
         }
@@ -702,6 +713,13 @@ fn parseProfile(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
 fn parseNativeKeccak(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     if (!std.mem.eql(u8, value, "std") and !std.mem.eql(u8, value, "xkcp")) {
         return error.UnsupportedNativeKeccak;
+    }
+    return allocator.dupe(u8, value);
+}
+
+fn parseNativeSecp256k1(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (!std.mem.eql(u8, value, "std") and !std.mem.eql(u8, value, "libsecp256k1")) {
+        return error.UnsupportedNativeSecp256k1;
     }
     return allocator.dupe(u8, value);
 }
