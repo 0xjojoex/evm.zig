@@ -3,7 +3,7 @@
 const std = @import("std");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const t = @import("../t.zig");
 
 const Allocator = std.mem.Allocator;
@@ -53,6 +53,7 @@ pub const AccountChanges = struct {
 };
 
 pub const BlockAccessList = []const AccountChanges;
+const max_rlp_depth: usize = 6;
 
 pub const ValidationOptions = struct {
     transaction_count: ?BlockAccessIndex = null,
@@ -288,48 +289,81 @@ pub fn validateGasLimit(block_access_list: BlockAccessList, block_gas_limit: u64
     if (item_count > max_items) return error.BlockAccessListGasLimitExceeded;
 }
 
-pub fn encode(allocator: Allocator, writer: *rlp.Writer, block_access_list: BlockAccessList) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (block_access_list) |account| try encodeAccount(allocator, &payload, account);
-    try writer.list(payload.written());
+pub fn encodeAlloc(
+    allocator: Allocator,
+    block_access_list: BlockAccessList,
+) (rlp.EncodeError || Allocator.Error)![]u8 {
+    return rlp.encodeAlloc(BlockAccessList, allocator, block_access_list);
 }
 
-pub fn encodeAlloc(allocator: Allocator, block_access_list: BlockAccessList) (rlp.Writer.Error || rlp.Writer.OwnedSliceError)![]u8 {
-    var writer = rlp.Writer.alloc(allocator);
-    errdefer writer.deinit();
-    try encode(allocator, &writer, block_access_list);
-    return writer.toOwnedSlice();
+pub fn hash(allocator: Allocator, block_access_list: BlockAccessList) (rlp.EncodeError || Allocator.Error)![32]u8 {
+    const encoded = try encodeAlloc(allocator, block_access_list);
+    defer allocator.free(encoded);
+    return crypto.keccak256(encoded);
 }
 
-pub fn hash(allocator: Allocator, block_access_list: BlockAccessList) rlp.Writer.Error![32]u8 {
-    var writer = rlp.Writer.alloc(allocator);
-    defer writer.deinit();
-    try encode(allocator, &writer, block_access_list);
-    return crypto.keccak256(writer.written());
+pub fn decode(allocator: Allocator, encoded: []const u8) (Allocator.Error || rlp.DecodeError)!Decoded {
+    var budget = rlp.Budget.init(inputDecodeLimits(encoded.len));
+    return decodeWithBudget(allocator, encoded, &budget);
 }
 
-pub fn decode(allocator: Allocator, encoded: []const u8) (Allocator.Error || rlp.Error)!Decoded {
-    var cursor = rlp.Cursor.init(encoded);
-    var list = try cursor.nextList();
-    try cursor.expectDone();
+pub fn decodeWithBudget(
+    allocator: Allocator,
+    encoded: []const u8,
+    budget: *rlp.Budget,
+) (Allocator.Error || rlp.DecodeError)!Decoded {
+    var accounts = try rlp.decodeAllocWithBudget(BlockAccessList, allocator, encoded, budget);
+    errdefer rlp.deinit(BlockAccessList, allocator, &accounts);
+    try copyCodeBytes(allocator, @constCast(accounts), budget);
+    return .{ .accounts = @constCast(accounts) };
+}
 
-    var accounts: std.ArrayList(AccountChanges) = .empty;
-    errdefer {
-        for (accounts.items) |*account| deinitAccount(allocator, account);
-        accounts.deinit(allocator);
-    }
+/// Finite fallback for callers without protocol context.
+fn inputDecodeLimits(encoded_len: usize) rlp.Limits {
+    return .{
+        .max_depth = max_rlp_depth,
+        .max_items = encoded_len,
+        .max_allocated_bytes = saturatingMul(encoded_len, max_aggregate_value_size + 1),
+    };
+}
 
-    while (!list.isDone()) {
-        var account_cursor = try list.nextList();
-        var account = try decodeAccount(allocator, &account_cursor);
-        errdefer deinitAccount(allocator, &account);
-        try account_cursor.expectDone();
-        try accounts.append(allocator, account);
-    }
+/// Pre-materialization envelope derived from block gas, transaction indices,
+/// and encoded byte length. Semantic ordering and uniqueness remain in
+/// `validate`; this bounds work before those checks run.
+pub fn blockDecodeLimits(
+    encoded_len: usize,
+    transaction_count: BlockAccessIndex,
+    block_gas_limit: u64,
+) rlp.Limits {
+    const input_limits = inputDecodeLimits(encoded_len);
+    if (block_gas_limit == 0) return input_limits;
+    const access_items = std.math.cast(usize, block_gas_limit / item_cost) orelse
+        std.math.maxInt(usize);
+    const index_values = saturatingAdd(@as(usize, transaction_count), 2);
+    const indexed_entries = saturatingMul(access_items, index_values);
 
-    return .{ .accounts = try accounts.toOwnedSlice(allocator) };
+    const item_limit = saturatingAdd(
+        1,
+        saturatingAdd(saturatingMul(access_items, 11), saturatingMul(indexed_entries, 12)),
+    );
+    const aggregate_per_access = @sizeOf(AccountChanges) + @sizeOf(SlotChanges) + @sizeOf(u256);
+    const aggregate_per_index = @sizeOf(StorageChange) +
+        @sizeOf(BalanceChange) +
+        @sizeOf(NonceChange) +
+        @sizeOf(CodeChange);
+    const allocation_limit = saturatingAdd(
+        encoded_len,
+        saturatingAdd(
+            saturatingMul(access_items, aggregate_per_access),
+            saturatingMul(indexed_entries, aggregate_per_index),
+        ),
+    );
+
+    return .{
+        .max_depth = max_rlp_depth,
+        .max_items = @min(input_limits.max_items, item_limit),
+        .max_allocated_bytes = @min(input_limits.max_allocated_bytes, allocation_limit),
+    };
 }
 
 fn validateAccount(account: AccountChanges, options: ValidationOptions) ValidationError!void {
@@ -415,228 +449,50 @@ fn updateMaxIndex(counts_value: *Counts, block_access_index: BlockAccessIndex) v
     }
 }
 
-fn encodeAccount(allocator: Allocator, writer: *rlp.Writer, account: AccountChanges) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    try payload.bytes(&account.address);
-    try encodeStorageChanges(allocator, &payload, account.storage_changes);
-    try encodeIntList(allocator, &payload, u256, account.storage_reads);
-    try encodeBalanceChanges(allocator, &payload, account.balance_changes);
-    try encodeNonceChanges(allocator, &payload, account.nonce_changes);
-    try encodeCodeChanges(allocator, &payload, account.code_changes);
-
-    try writer.list(payload.written());
-}
-
-fn encodeStorageChanges(allocator: Allocator, writer: *rlp.Writer, storage_changes: []const SlotChanges) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (storage_changes) |slot| {
-        var slot_payload = rlp.Writer.alloc(allocator);
-        defer slot_payload.deinit();
-        try slot_payload.int(u256, slot.slot);
-        try encodeStorageChangeList(allocator, &slot_payload, slot.changes);
-        try payload.list(slot_payload.written());
-    }
-
-    try writer.list(payload.written());
-}
-
-fn encodeStorageChangeList(allocator: Allocator, writer: *rlp.Writer, changes: []const StorageChange) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (changes) |change| {
-        var change_payload = rlp.Writer.alloc(allocator);
-        defer change_payload.deinit();
-        try change_payload.int(BlockAccessIndex, change.block_access_index);
-        try change_payload.int(u256, change.new_value);
-        try payload.list(change_payload.written());
-    }
-
-    try writer.list(payload.written());
-}
-
-fn encodeBalanceChanges(allocator: Allocator, writer: *rlp.Writer, changes: []const BalanceChange) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (changes) |change| {
-        var change_payload = rlp.Writer.alloc(allocator);
-        defer change_payload.deinit();
-        try change_payload.int(BlockAccessIndex, change.block_access_index);
-        try change_payload.int(u256, change.post_balance);
-        try payload.list(change_payload.written());
-    }
-
-    try writer.list(payload.written());
-}
-
-fn encodeNonceChanges(allocator: Allocator, writer: *rlp.Writer, changes: []const NonceChange) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (changes) |change| {
-        var change_payload = rlp.Writer.alloc(allocator);
-        defer change_payload.deinit();
-        try change_payload.int(BlockAccessIndex, change.block_access_index);
-        try change_payload.int(u64, change.new_nonce);
-        try payload.list(change_payload.written());
-    }
-
-    try writer.list(payload.written());
-}
-
-fn encodeCodeChanges(allocator: Allocator, writer: *rlp.Writer, changes: []const CodeChange) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-
-    for (changes) |change| {
-        var change_payload = rlp.Writer.alloc(allocator);
-        defer change_payload.deinit();
-        try change_payload.int(BlockAccessIndex, change.block_access_index);
-        try change_payload.bytes(change.new_code);
-        try payload.list(change_payload.written());
-    }
-
-    try writer.list(payload.written());
-}
-
-fn encodeIntList(allocator: Allocator, writer: *rlp.Writer, comptime T: type, values: []const T) rlp.Writer.Error!void {
-    var payload = rlp.Writer.alloc(allocator);
-    defer payload.deinit();
-    for (values) |value| try payload.int(T, value);
-    try writer.list(payload.written());
-}
-
-fn decodeAccount(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)!AccountChanges {
-    var result = AccountChanges{
-        .address = undefined,
-    };
-    errdefer deinitAccount(allocator, &result);
-
-    const account_address = try cursor.nextBytesExact(20);
-    @memcpy(&result.address, account_address);
-    var storage_changes = try cursor.nextList();
-    result.storage_changes = try decodeStorageChanges(allocator, &storage_changes);
-    try storage_changes.expectDone();
-    var storage_reads = try cursor.nextList();
-    result.storage_reads = try decodeIntList(allocator, u256, &storage_reads);
-    try storage_reads.expectDone();
-    var balance_changes = try cursor.nextList();
-    result.balance_changes = try decodeBalanceChanges(allocator, &balance_changes);
-    try balance_changes.expectDone();
-    var nonce_changes = try cursor.nextList();
-    result.nonce_changes = try decodeNonceChanges(allocator, &nonce_changes);
-    try nonce_changes.expectDone();
-    var code_changes = try cursor.nextList();
-    result.code_changes = try decodeCodeChanges(allocator, &code_changes);
-    try code_changes.expectDone();
-
-    return result;
-}
-
-fn decodeStorageChanges(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]SlotChanges {
-    var out: std.ArrayList(SlotChanges) = .empty;
+fn copyCodeBytes(
+    allocator: Allocator,
+    accounts: []AccountChanges,
+    budget: *rlp.Budget,
+) (Allocator.Error || rlp.DecodeError)!void {
+    var account_index: usize = 0;
+    var code_index: usize = 0;
     errdefer {
-        for (out.items) |*slot| allocator.free(@constCast(slot.changes));
-        out.deinit(allocator);
+        for (accounts[0..account_index]) |account| {
+            for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
+        }
+        if (account_index < accounts.len) {
+            for (accounts[account_index].code_changes[0..code_index]) |change| {
+                allocator.free(@constCast(change.new_code));
+            }
+        }
     }
 
-    while (!cursor.isDone()) {
-        var slot_cursor = try cursor.nextList();
-        const slot = try slot_cursor.nextInt(u256);
-        var changes_cursor = try slot_cursor.nextList();
-        const changes = try decodeStorageChangeList(allocator, &changes_cursor);
-        errdefer allocator.free(changes);
-        try changes_cursor.expectDone();
-        try slot_cursor.expectDone();
-        try out.append(allocator, .{
-            .slot = slot,
-            .changes = changes,
-        });
+    while (account_index < accounts.len) : (account_index += 1) {
+        const changes = @constCast(accounts[account_index].code_changes);
+        code_index = 0;
+        while (code_index < changes.len) : (code_index += 1) {
+            try budget.ensureAllocation(changes[code_index].new_code.len);
+            const owned = try allocator.dupe(u8, changes[code_index].new_code);
+            budget.commitAllocation(owned.len);
+            changes[code_index].new_code = owned;
+        }
     }
-
-    return out.toOwnedSlice(allocator);
 }
 
-fn decodeStorageChangeList(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]StorageChange {
-    var out: std.ArrayList(StorageChange) = .empty;
-    errdefer out.deinit(allocator);
-
-    while (!cursor.isDone()) {
-        var change_cursor = try cursor.nextList();
-        try out.append(allocator, .{
-            .block_access_index = try change_cursor.nextInt(BlockAccessIndex),
-            .new_value = try change_cursor.nextInt(u256),
-        });
-        try change_cursor.expectDone();
+const max_aggregate_value_size = blk: {
+    var maximum: usize = 0;
+    for (.{ AccountChanges, SlotChanges, StorageChange, BalanceChange, NonceChange, CodeChange, u256 }) |T| {
+        maximum = @max(maximum, @sizeOf(T));
     }
+    break :blk maximum;
+};
 
-    return out.toOwnedSlice(allocator);
+fn saturatingAdd(lhs: usize, rhs: usize) usize {
+    return std.math.add(usize, lhs, rhs) catch std.math.maxInt(usize);
 }
 
-fn decodeBalanceChanges(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]BalanceChange {
-    var out: std.ArrayList(BalanceChange) = .empty;
-    errdefer out.deinit(allocator);
-
-    while (!cursor.isDone()) {
-        var change_cursor = try cursor.nextList();
-        try out.append(allocator, .{
-            .block_access_index = try change_cursor.nextInt(BlockAccessIndex),
-            .post_balance = try change_cursor.nextInt(u256),
-        });
-        try change_cursor.expectDone();
-    }
-
-    return out.toOwnedSlice(allocator);
-}
-
-fn decodeNonceChanges(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]NonceChange {
-    var out: std.ArrayList(NonceChange) = .empty;
-    errdefer out.deinit(allocator);
-
-    while (!cursor.isDone()) {
-        var change_cursor = try cursor.nextList();
-        try out.append(allocator, .{
-            .block_access_index = try change_cursor.nextInt(BlockAccessIndex),
-            .new_nonce = try change_cursor.nextInt(u64),
-        });
-        try change_cursor.expectDone();
-    }
-
-    return out.toOwnedSlice(allocator);
-}
-
-fn decodeCodeChanges(allocator: Allocator, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]CodeChange {
-    var out: std.ArrayList(CodeChange) = .empty;
-    errdefer {
-        for (out.items) |change| allocator.free(@constCast(change.new_code));
-        out.deinit(allocator);
-    }
-
-    while (!cursor.isDone()) {
-        var change_cursor = try cursor.nextList();
-        const block_access_index = try change_cursor.nextInt(BlockAccessIndex);
-        const code = try allocator.dupe(u8, try change_cursor.nextBytes());
-        errdefer allocator.free(code);
-        try change_cursor.expectDone();
-        try out.append(allocator, .{
-            .block_access_index = block_access_index,
-            .new_code = code,
-        });
-    }
-
-    return out.toOwnedSlice(allocator);
-}
-
-fn decodeIntList(allocator: Allocator, comptime T: type, cursor: *rlp.Cursor) (Allocator.Error || rlp.Error)![]T {
-    var out: std.ArrayList(T) = .empty;
-    errdefer out.deinit(allocator);
-    while (!cursor.isDone()) try out.append(allocator, try cursor.nextInt(T));
-    return out.toOwnedSlice(allocator);
+fn saturatingMul(lhs: usize, rhs: usize) usize {
+    return std.math.mul(usize, lhs, rhs) catch std.math.maxInt(usize);
 }
 
 fn deinitAccount(allocator: Allocator, account: *AccountChanges) void {
@@ -718,6 +574,51 @@ test "BAL RLP round trips model data" {
     try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x00, 0x56 }, decoded.accounts[1].code_changes[0].new_code);
 }
 
+test "BAL typed codec writes directly and encodeAlloc allocates once" {
+    const input = sampleBlockAccessList();
+    var direct_buffer: [512]u8 = undefined;
+    const direct = try rlp.encode(BlockAccessList, &direct_buffer, input);
+
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const before = counted.alloc_index;
+    const allocated = try encodeAlloc(counted.allocator(), input);
+    defer counted.allocator().free(allocated);
+
+    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    try std.testing.expectEqualSlices(u8, direct, allocated);
+}
+
+test "BAL typed decode applies block-derived budget before materialization" {
+    const input = sampleBlockAccessList();
+    const encoded = try encodeAlloc(std.testing.allocator, input);
+    defer std.testing.allocator.free(encoded);
+
+    var valid_budget = rlp.Budget.init(blockDecodeLimits(encoded.len, 2, 8_000));
+    var decoded = try decodeWithBudget(std.testing.allocator, encoded, &valid_budget);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), decoded.accounts.len);
+    try std.testing.expect(valid_budget.allocated_bytes > 0);
+
+    var too_small = rlp.Budget.init(blockDecodeLimits(encoded.len, 2, 1));
+    try std.testing.expectError(
+        error.DecodeItemLimitExceeded,
+        decodeWithBudget(std.testing.allocator, encoded, &too_small),
+    );
+}
+
+test "BAL typed decode cleans every allocation failure position" {
+    const Harness = struct {
+        fn run(allocator: Allocator) !void {
+            const encoded = try encodeAlloc(std.testing.allocator, sampleBlockAccessList());
+            defer std.testing.allocator.free(encoded);
+            var decoded = try decode(allocator, encoded);
+            defer decoded.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 2), decoded.accounts.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
+}
+
 test "BAL decode frees an account rejected for trailing fields" {
     var code_change_payload = rlp.Writer.alloc(std.testing.allocator);
     defer code_change_payload.deinit();
@@ -726,22 +627,22 @@ test "BAL decode frees an account rejected for trailing fields" {
 
     var code_changes_payload = rlp.Writer.alloc(std.testing.allocator);
     defer code_changes_payload.deinit();
-    try code_changes_payload.list(code_change_payload.written());
+    try code_changes_payload.listPayload(code_change_payload.written());
 
     var account_payload = rlp.Writer.alloc(std.testing.allocator);
     defer account_payload.deinit();
     try account_payload.bytes(&address.addr(1));
-    inline for (0..4) |_| try account_payload.list(&.{});
-    try account_payload.list(code_changes_payload.written());
-    try account_payload.list(&.{}); // Trailing seventh account field.
+    inline for (0..4) |_| try account_payload.listPayload(&.{});
+    try account_payload.listPayload(code_changes_payload.written());
+    try account_payload.listPayload(&.{}); // Trailing seventh account field.
 
     var account = rlp.Writer.alloc(std.testing.allocator);
     defer account.deinit();
-    try account.list(account_payload.written());
+    try account.listPayload(account_payload.written());
 
     var encoded = rlp.Writer.alloc(std.testing.allocator);
     defer encoded.deinit();
-    try encoded.list(account.written());
+    try encoded.listPayload(account.written());
 
     try std.testing.expectError(error.TrailingBytes, decode(std.testing.allocator, encoded.written()));
 }

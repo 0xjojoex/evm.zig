@@ -541,7 +541,7 @@ fn encodeLegacyTransaction(
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(fields.written());
+    try out.listPayload(fields.written());
     return try out.toOwnedSlice();
 }
 

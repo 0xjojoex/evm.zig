@@ -5,7 +5,7 @@ const std = @import("std");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const mpt = @import("../mpt.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const Account = @import("./Account.zig");
 const StateReader = @import("./Reader.zig");
 
@@ -102,7 +102,7 @@ fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
     return !std.mem.eql(u8, &account.storage_root, &mpt.empty_root_hash);
 }
 
-fn decodeStorageValue(encoded: []const u8) rlp.Error!u256 {
+fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
     var cursor = rlp.Cursor.init(encoded);
     const value = try cursor.nextInt(u256);
     try cursor.expectDone();
@@ -214,7 +214,7 @@ fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload.written());
+    try out.listPayload(payload.written());
     return try writerOwned(&out);
 }
 

@@ -24,7 +24,7 @@ const eth_system = @import("system.zig");
 const eth_transaction = @import("transaction.zig");
 const mpt = @import("../mpt.zig");
 const prepared_code = @import("../prepared_code.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const Revision = @import("revision.zig").Revision;
 const state = @import("../state.zig");
 const transaction = @import("../transaction.zig");
@@ -267,8 +267,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var claimed_block_access_list: ?eth_bal.Decoded = null;
     defer if (claimed_block_access_list) |*decoded| decoded.deinit(allocator);
     if (input.block_access_list) |encoded_claim| {
-        claimed_block_access_list = eth_bal.decode(allocator, encoded_claim) catch |err| switch (err) {
+        var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
+            encoded_claim.len,
+            block_access_transaction_count,
+            input.env.gas_limit,
+        ));
+        claimed_block_access_list = eth_bal.decodeWithBudget(allocator, encoded_claim, &bal_budget) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.DecodeAllocationLimitExceeded,
+            error.DecodeItemLimitExceeded,
+            => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
         validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
@@ -847,66 +855,53 @@ fn blockBlobGasLimit(revision: Revision, blob_schedule: ?transaction.BlobSchedul
     return std.math.mul(u64, schedule.max, schedule.gas_per_blob) catch error.BlobGasOverflow;
 }
 
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Vm.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
-    const payload = try encodeReceiptPayload(allocator, receipt);
-    errdefer allocator.free(payload);
+const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
+    pub fn toWire(topic: u256) [32]u8 {
+        return uint256.toBytes32(topic);
+    }
 
-    const type_id = transactionType(kind) orelse return payload;
-    const encoded = try allocator.alloc(u8, payload.len + 1);
-    encoded[0] = type_id;
-    @memcpy(encoded[1..], payload);
-    allocator.free(payload);
+    pub fn fromWire(encoded: [32]u8) u256 {
+        return uint256.fromBytes32(&encoded);
+    }
+});
+
+const LogRlp = rlp.Struct(Log, .{
+    .topics = rlp.BoundedListOf(TopicRlp, 4),
+});
+
+const ReceiptPayload = struct {
+    status: u8,
+    cumulative_gas_used: u64,
+    logs_bloom: [256]u8,
+    logs: []const Log,
+
+    pub const Rlp = rlp.Struct(@This(), .{
+        .logs = rlp.ListOf(LogRlp),
+    });
+};
+
+pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Vm.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
+    const payload: ReceiptPayload = .{
+        .status = receiptStatus(receipt.status),
+        .cumulative_gas_used = receipt.cumulative_gas_used,
+        .logs_bloom = logsBloom(receipt.logs),
+        .logs = receipt.logs,
+    };
+    const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
+    const type_id = transactionType(kind);
+    const envelope_len: usize = if (type_id == null) 0 else 1;
+    const encoded_len = std.math.add(usize, envelope_len, payload_len) catch
+        return error.EncodedLengthOverflow;
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+
+    if (type_id) |id| encoded[0] = id;
+    const written = try rlp.encode(ReceiptPayload, encoded[envelope_len..], &payload);
+    std.debug.assert(written.len == payload_len);
     return encoded;
 }
 
-fn encodeReceiptPayload(allocator: std.mem.Allocator, receipt: TxReceiptView) ![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    defer fields.deinit();
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-
-    try fields.int(u8, try receiptStatus(receipt.status));
-    try fields.int(u64, receipt.cumulative_gas_used);
-    try fields.bytes(&logsBloom(receipt.logs));
-    const logs_payload = try encodedLogsPayload(allocator, receipt.logs);
-    defer allocator.free(logs_payload);
-    try fields.list(logs_payload);
-
-    try out.list(fields.written());
-    return try writerOwned(&out);
-}
-
-fn encodedLogsPayload(allocator: std.mem.Allocator, logs: []const Log) ![]u8 {
-    var payload = rlp.Writer.alloc(allocator);
-    errdefer payload.deinit();
-
-    for (logs) |event_log| {
-        const encoded = try encodeLogPayload(allocator, event_log);
-        defer allocator.free(encoded);
-        try payload.list(encoded);
-    }
-
-    return try writerOwned(&payload);
-}
-
-fn encodeLogPayload(allocator: std.mem.Allocator, event_log: Log) ![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    errdefer fields.deinit();
-    var topics = rlp.Writer.alloc(allocator);
-    defer topics.deinit();
-
-    try fields.bytes(&event_log.address);
-    for (event_log.topics) |topic| {
-        var encoded_topic: [32]u8 = undefined;
-        std.mem.writeInt(u256, &encoded_topic, topic, .big);
-        try topics.bytes(&encoded_topic);
-    }
-    try fields.list(topics.written());
-    try fields.bytes(event_log.data);
-    return try writerOwned(&fields);
-}
-
-fn receiptStatus(status: TxStatus) !u8 {
+fn receiptStatus(status: TxStatus) u8 {
     return switch (status) {
         .success => 1,
         .revert, .invalid, .out_of_gas => 0,
@@ -928,8 +923,7 @@ fn logsBloom(logs: []const Log) [256]u8 {
     for (logs) |event_log| {
         addBloomEntry(&bloom, &event_log.address);
         for (event_log.topics) |topic| {
-            var encoded_topic: [32]u8 = undefined;
-            std.mem.writeInt(u256, &encoded_topic, topic, .big);
+            const encoded_topic = uint256.toBytes32(topic);
             addBloomEntry(&bloom, &encoded_topic);
         }
     }
@@ -2016,19 +2010,24 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
 }
 
 test "stateless receipt encoder writes consensus receipt rlp" {
-    const encoded = try encodeReceipt(std.testing.allocator, .legacy, .{
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const legacy_before = counted.alloc_index;
+    const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .success,
         .cumulative_gas_used = 21_000,
     });
-    defer std.testing.allocator.free(encoded);
+    defer counted.allocator().free(encoded);
 
+    try std.testing.expectEqual(legacy_before + 1, counted.alloc_index);
     try expectHex(encoded, "f9010801825208b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0");
 
-    const typed = try encodeReceipt(std.testing.allocator, .dynamic_fee, .{
+    const typed_before = counted.alloc_index;
+    const typed = try encodeReceipt(counted.allocator(), .dynamic_fee, .{
         .status = .success,
         .cumulative_gas_used = 21_000,
     });
-    defer std.testing.allocator.free(typed);
+    defer counted.allocator().free(typed);
+    try std.testing.expectEqual(typed_before + 1, counted.alloc_index);
     try std.testing.expectEqual(@as(u8, 0x02), typed[0]);
     try std.testing.expectEqualSlices(u8, encoded, typed[1..]);
 }
@@ -2041,32 +2040,91 @@ test "stateless receipt encoder includes logs and bloom" {
         .topics = &topics,
         .data = &.{ 0xab, 0xcd },
     };
-    const encoded = try encodeReceipt(std.testing.allocator, .legacy, .{
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const before = counted.alloc_index;
+    const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .revert,
         .cumulative_gas_used = 30_000,
         .logs = &.{event_log},
     });
-    defer std.testing.allocator.free(encoded);
+    defer counted.allocator().free(encoded);
 
-    var cursor = rlp.Cursor.init(encoded);
-    var receipt = try cursor.nextList();
-    try cursor.expectDone();
-    try std.testing.expectEqual(@as(u8, 0), try receipt.nextInt(u8));
-    try std.testing.expectEqual(@as(u64, 30_000), try receipt.nextInt(u64));
-    const bloom = try receipt.nextBytesExact(256);
-    try std.testing.expect(!std.mem.allEqual(u8, bloom, 0));
+    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    var raw = rlp.Cursor.init(encoded);
+    var raw_receipt = try raw.nextList();
+    try raw.expectDone();
+    _ = try raw_receipt.nextInt(u8);
+    _ = try raw_receipt.nextInt(u64);
+    _ = try raw_receipt.nextBytesExact(256);
+    var raw_logs = try raw_receipt.nextList();
+    var raw_log = try raw_logs.nextList();
+    try std.testing.expectEqualSlices(u8, &target, try raw_log.nextBytesExact(20));
+    var raw_topics = try raw_log.nextList();
+    const expected_topic = uint256.toBytes32(topics[0]);
+    try std.testing.expectEqualSlices(u8, &expected_topic, try raw_topics.nextBytesExact(32));
+    try raw_topics.expectDone();
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, try raw_log.nextBytes());
+    try raw_log.expectDone();
+    try raw_logs.expectDone();
+    try raw_receipt.expectDone();
 
-    var logs = try receipt.nextList();
-    var log = try logs.nextList();
-    try std.testing.expectEqualSlices(u8, &target, try log.nextBytesExact(20));
-    var encoded_topics = try log.nextList();
-    const encoded_topic = try encoded_topics.nextBytesExact(32);
-    try std.testing.expectEqual(@as(u256, 0x1234), std.mem.readInt(u256, encoded_topic[0..32], .big));
-    try encoded_topics.expectDone();
-    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, try log.nextBytes());
-    try log.expectDone();
-    try logs.expectDone();
-    try receipt.expectDone();
+    var decoded = try rlp.decodeAlloc(ReceiptPayload, std.testing.allocator, encoded);
+    defer rlp.deinit(ReceiptPayload, std.testing.allocator, &decoded);
+    try std.testing.expectEqual(@as(u8, 0), decoded.status);
+    try std.testing.expectEqual(@as(u64, 30_000), decoded.cumulative_gas_used);
+    try std.testing.expect(!std.mem.allEqual(u8, &decoded.logs_bloom, 0));
+    try std.testing.expectEqual(@as(usize, 1), decoded.logs.len);
+    try std.testing.expectEqualSlices(u8, &target, &decoded.logs[0].address);
+    try std.testing.expectEqualSlices(u256, &topics, decoded.logs[0].topics);
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, decoded.logs[0].data);
+}
+
+test "stateless receipt schema enforces the EVM log topic limit" {
+    const accepted_topics = [_]u256{ 1, 2, 3, 4 };
+    const accepted = try encodeReceipt(std.testing.allocator, .legacy, .{
+        .status = .success,
+        .logs = &.{.{
+            .address = address.addr(0x3000),
+            .topics = &accepted_topics,
+            .data = &.{},
+        }},
+    });
+    defer std.testing.allocator.free(accepted);
+
+    const rejected_topics = [_]u256{ 1, 2, 3, 4, 5 };
+    try std.testing.expectError(error.ListLimitExceeded, encodeReceipt(std.testing.allocator, .legacy, .{
+        .status = .success,
+        .logs = &.{.{
+            .address = address.addr(0x3000),
+            .topics = &rejected_topics,
+            .data = &.{},
+        }},
+    }));
+}
+
+test "stateless receipt typed decode cleans nested allocation failures" {
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const topics = [_]u256{ 1, 2 };
+            const logs = [_]Log{.{
+                .address = address.addr(0x3000),
+                .topics = &topics,
+                .data = &.{ 0xab, 0xcd },
+            }};
+            const payload: ReceiptPayload = .{
+                .status = 1,
+                .cumulative_gas_used = 21_000,
+                .logs_bloom = logsBloom(&logs),
+                .logs = &logs,
+            };
+            var out: [512]u8 = undefined;
+            const encoded = try rlp.encode(ReceiptPayload, &out, &payload);
+            var decoded = try rlp.decodeAlloc(ReceiptPayload, allocator, encoded);
+            defer rlp.deinit(ReceiptPayload, allocator, &decoded);
+            try std.testing.expectEqualSlices(u256, &topics, decoded.logs[0].topics);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
 }
 
 fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
@@ -2077,7 +2135,7 @@ fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload.written());
+    try out.listPayload(payload.written());
     return try writerOwned(&out);
 }
 

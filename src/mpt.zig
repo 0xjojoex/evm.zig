@@ -6,7 +6,7 @@ const std = @import("std");
 
 const address = @import("./address.zig");
 const crypto = @import("./crypto.zig");
-const rlp = @import("./rlp.zig");
+const rlp = @import("rlp");
 const uint256 = @import("./uint256.zig");
 const Changeset = @import("./state/Changeset.zig");
 const t = @import("./t.zig");
@@ -15,7 +15,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = Allocator.Error || error{DuplicateKey};
 
-pub const ProofLookupError = rlp.Error || error{
+pub const ProofLookupError = rlp.DecodeError || error{
     InvalidCompactPath,
     InvalidNode,
     InvalidNodeReference,
@@ -276,45 +276,20 @@ pub fn accountValue(
     storage_root: [32]u8,
     code_hash: [32]u8,
 ) Allocator.Error![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    defer fields.deinit();
-    try writerInt(&fields, u64, nonce);
-    try writerInt(&fields, u256, balance);
-    try writerBytes(&fields, &storage_root);
-    try writerBytes(&fields, &code_hash);
-
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-    try writerList(&out, fields.written());
-    return try writerOwned(&out);
-}
-
-pub fn accountValueFrom(allocator: Allocator, account: Account) Allocator.Error![]u8 {
-    return accountValue(allocator, account.nonce, account.balance, account.storage_root, account.code_hash);
-}
-
-pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
-    var cursor = rlp.Cursor.init(encoded);
-    var fields = try cursor.nextList();
-    try cursor.expectDone();
-
-    const nonce = try fields.nextInt(u64);
-    const balance = try fields.nextInt(u256);
-    const storage_root_bytes = try fields.nextBytesExact(32);
-    const code_hash_bytes = try fields.nextBytesExact(32);
-    try fields.expectDone();
-
-    var storage_root: [32]u8 = undefined;
-    @memcpy(&storage_root, storage_root_bytes);
-    var code_hash_value: [32]u8 = undefined;
-    @memcpy(&code_hash_value, code_hash_bytes);
-
-    return .{
+    return accountValueFrom(allocator, .{
         .nonce = nonce,
         .balance = balance,
         .storage_root = storage_root,
-        .code_hash = code_hash_value,
-    };
+        .code_hash = code_hash,
+    });
+}
+
+pub fn accountValueFrom(allocator: Allocator, account: Account) Allocator.Error![]u8 {
+    return encodeFixedRlp(Account, allocator, account);
+}
+
+pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
+    return rlp.decode(Account, encoded);
 }
 
 pub fn codeHash(code: []const u8) [32]u8 {
@@ -322,17 +297,7 @@ pub fn codeHash(code: []const u8) [32]u8 {
 }
 
 pub fn withdrawalValue(allocator: Allocator, withdrawal: Withdrawal) Allocator.Error![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    defer fields.deinit();
-    try writerInt(&fields, u64, withdrawal.index);
-    try writerInt(&fields, u64, withdrawal.validator_index);
-    try writerBytes(&fields, &withdrawal.address);
-    try writerInt(&fields, u64, withdrawal.amount);
-
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-    try writerList(&out, fields.written());
-    return try writerOwned(&out);
+    return encodeFixedRlp(Withdrawal, allocator, withdrawal);
 }
 
 fn indexKey(allocator: Allocator, index: usize) Allocator.Error![]u8 {
@@ -1122,6 +1087,22 @@ fn rejectDuplicateUpdates(updates: []const Update) UpdateError!void {
     }
 }
 
+/// Narrows encode errors for schemas containing only bounded integers and fixed byte arrays.
+fn encodeFixedRlp(
+    comptime T: type,
+    allocator: Allocator,
+    value: anytype,
+) Allocator.Error![]u8 {
+    return rlp.encodeAlloc(T, allocator, value) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.BufferTooSmall,
+        error.EncodedLengthMismatch,
+        error.EncodedLengthOverflow,
+        error.ListLimitExceeded,
+        => unreachable,
+    };
+}
+
 fn writerBytes(writer: *rlp.Writer, value: []const u8) Allocator.Error!void {
     writer.bytes(value) catch |err| switch (err) {
         error.NoSpaceLeft => unreachable,
@@ -1137,7 +1118,7 @@ fn writerInt(writer: *rlp.Writer, comptime T: type, value: T) Allocator.Error!vo
 }
 
 fn writerList(writer: *rlp.Writer, payload: []const u8) Allocator.Error!void {
-    writer.list(payload) catch |err| switch (err) {
+    writer.listPayload(payload) catch |err| switch (err) {
         error.NoSpaceLeft => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -1194,6 +1175,26 @@ test "MPT ordered trie root uses RLP list indexes" {
     try t.expectHex(&(try orderedTrieRoot(std.testing.allocator, &.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 }
 
+test "MPT account value uses typed RLP with one allocation" {
+    const input: Account = .{
+        .nonce = 7,
+        .balance = 42,
+        .storage_root = [_]u8{0x11} ** 32,
+        .code_hash = [_]u8{0x22} ** 32,
+    };
+    var direct_buffer: [128]u8 = undefined;
+    const direct = try rlp.encode(Account, &direct_buffer, &input);
+
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const before = counted.alloc_index;
+    const encoded = try accountValueFrom(counted.allocator(), input);
+    defer counted.allocator().free(encoded);
+
+    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    try std.testing.expectEqualSlices(u8, direct, encoded);
+    try std.testing.expectEqualDeep(input, try decodeAccountValue(encoded));
+}
+
 test "MPT withdrawals root encodes ordered withdrawals" {
     const withdrawals = [_]Withdrawal{
         .{
@@ -1210,8 +1211,15 @@ test "MPT withdrawals root encodes ordered withdrawals" {
         },
     };
 
-    const value0 = try withdrawalValue(std.testing.allocator, withdrawals[0]);
-    defer std.testing.allocator.free(value0);
+    var direct_buffer: [64]u8 = undefined;
+    const direct = try rlp.encode(Withdrawal, &direct_buffer, &withdrawals[0]);
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const before = counted.alloc_index;
+    const value0 = try withdrawalValue(counted.allocator(), withdrawals[0]);
+    defer counted.allocator().free(value0);
+
+    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    try std.testing.expectEqualSlices(u8, direct, value0);
     try t.expectHex(value0, "d8010294000000000000000000000000000000000000100003");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &withdrawals)), "ba94e67f1ff34df6be897a534b805005dc84403f69a89614daa2283fa8b1862f");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");

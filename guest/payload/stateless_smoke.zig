@@ -148,7 +148,7 @@ fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![
 
     var out = evmz.rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload.written());
+    try out.listPayload(payload.written());
     return try writerOwned(&out);
 }
 

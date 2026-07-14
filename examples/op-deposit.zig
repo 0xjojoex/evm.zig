@@ -36,7 +36,7 @@ pub const DepositTransaction = struct {
 
 /// Canonical typed-envelope codec for a deposited transaction.
 pub const Codec = struct {
-    pub const DecodeError = rlp.Error || error{
+    pub const DecodeError = rlp.ParseError || error{
         InvalidSystemTransactionFlag,
         UnexpectedTypeId,
     };
@@ -60,7 +60,7 @@ pub const Codec = struct {
 
         var envelope = rlp.Writer.alloc(allocator);
         defer envelope.deinit();
-        try envelope.list(fields.written());
+        try envelope.listPayload(fields.written());
         const encoded_list = envelope.written();
 
         const encoded = try allocator.alloc(u8, encoded_list.len + 1);

@@ -99,7 +99,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const rlp_mod = b.addModule("rlp", .{
+        .root_source_file = b.path("pkg/rlp/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     evmz_mod.addImport("ssz", ssz_mod);
+    evmz_mod.addImport("rlp", rlp_mod);
 
     const static_c_lib = if (is_native_profile) static_c_lib: {
         const c_lib_mod = b.createModule(.{
@@ -111,6 +117,7 @@ pub fn build(b: *std.Build) void {
         });
         c_lib_mod.addOptions("build_options", build_options);
         c_lib_mod.addImport("ssz", ssz_mod);
+        c_lib_mod.addImport("rlp", rlp_mod);
         c_lib_mod.addIncludePath(b.path("include"));
         c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
         addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
@@ -156,6 +163,7 @@ pub fn build(b: *std.Build) void {
         });
         lib_unit_tests_mod.addOptions("build_options", build_options);
         lib_unit_tests_mod.addImport("ssz", ssz_mod);
+        lib_unit_tests_mod.addImport("rlp", rlp_mod);
         lib_unit_tests_mod.addIncludePath(b.path("include"));
         lib_unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
         if (native_precompile_deps) |deps| {
@@ -181,10 +189,19 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = b.args orelse &.{},
         });
+        const rlp_unit_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("pkg/rlp/src/test.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = b.args orelse &.{},
+        });
 
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_lib_unit_tests.step);
         test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
+        test_step.dependOn(&b.addRunArtifact(rlp_unit_tests).step);
         if (is_native_profile) {
             const c_api_tests_mod = b.createModule(.{
                 .root_source_file = b.path("src/evmc.zig"),
@@ -195,6 +212,7 @@ pub fn build(b: *std.Build) void {
             });
             c_api_tests_mod.addOptions("build_options", build_options);
             c_api_tests_mod.addImport("ssz", ssz_mod);
+            c_api_tests_mod.addImport("rlp", rlp_mod);
             c_api_tests_mod.addIncludePath(b.path("include"));
             c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
             addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
@@ -238,9 +256,22 @@ pub fn build(b: *std.Build) void {
         modexp_fuzz_tests.use_llvm = true;
         const run_modexp_fuzz_tests = b.addRunArtifact(modexp_fuzz_tests);
 
+        const rlp_fuzz_mod = b.createModule(.{
+            .root_source_file = b.path("pkg/rlp/src/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+        });
+        const rlp_fuzz_tests = b.addTest(.{
+            .name = "rlp-fuzz",
+            .root_module = rlp_fuzz_mod,
+        });
+        const run_rlp_fuzz_tests = b.addRunArtifact(rlp_fuzz_tests);
+
         const fuzz_step = b.step("fuzz", "Run fuzzable pure-Zig unit tests");
         fuzz_step.dependOn(&run_uint256_fuzz_tests.step);
         fuzz_step.dependOn(&run_modexp_fuzz_tests.step);
+        fuzz_step.dependOn(&run_rlp_fuzz_tests.step);
 
         const uint256_fuzz_step = b.step("fuzz-uint256", "Run uint256 fuzz tests");
         uint256_fuzz_step.dependOn(&run_uint256_fuzz_tests.step);
@@ -322,6 +353,8 @@ pub fn build(b: *std.Build) void {
                 .link_libcpp = is_native_profile,
             });
             example_mod.addOptions("build_options", build_options);
+            example_mod.addImport("ssz", ssz_mod);
+            example_mod.addImport("rlp", rlp_mod);
             example_mod.addIncludePath(evmone_dep.path("evmc/include"));
             if (native_precompile_deps) |deps| {
                 addPrecompileNative(b, example_mod, deps, evmone_dep);
@@ -680,7 +713,13 @@ fn addGuestZisk(
         .target = target,
         .optimize = optimize,
     });
+    const rlp_mod = b.createModule(.{
+        .root_source_file = b.path("pkg/rlp/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     evmz_mod.addImport("ssz", ssz_mod);
+    evmz_mod.addImport("rlp", rlp_mod);
 
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),

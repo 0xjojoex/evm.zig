@@ -10,13 +10,13 @@ const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
 const input_mod = @import("./input.zig");
 const mpt = @import("../mpt.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const state = @import("../state.zig");
 const stateless_tx = @import("./tx.zig");
 const trace = @import("../trace.zig");
 const transaction = @import("../transaction.zig");
 
-pub const Error = std.mem.Allocator.Error || rlp.Error || mpt.Error || stateless_tx.Error || error{
+pub const Error = std.mem.Allocator.Error || rlp.ParseError || mpt.Error || stateless_tx.Error || error{
     MissingParentHeader,
     InvalidHeaderWitness,
     InvalidRequest,

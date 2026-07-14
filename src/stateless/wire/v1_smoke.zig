@@ -7,7 +7,7 @@ const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const crypto = @import("../../crypto.zig");
 const mpt = @import("../../mpt.zig");
-const rlp = @import("../../rlp.zig");
+const rlp = @import("rlp");
 const t = @import("../../t.zig");
 const wire = @import("./v1.zig");
 
@@ -176,7 +176,7 @@ fn smokeParentHeader(allocator: std.mem.Allocator) wire.Error![]u8 {
     try writeAllocatingRlp(fields.bytes(&zero_hash));
     try writeAllocatingRlp(fields.bytes(&([_]u8{0} ** 8)));
     try writeAllocatingRlp(fields.int(u256, 0));
-    try writeAllocatingRlp(header.list(fields.written()));
+    try writeAllocatingRlp(header.listPayload(fields.written()));
 
     return header.toOwnedSlice() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

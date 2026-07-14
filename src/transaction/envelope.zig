@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const definition_support = @import("../protocol/support.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const EthRevision = @import("../eth/revision.zig").Revision;
 const eip7702 = @import("../executor/eip7702.zig");
 const tx = @import("./types.zig");
