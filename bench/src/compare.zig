@@ -43,6 +43,7 @@ const Options = struct {
     zig_exe: []const u8 = "zig",
     optimize: []const u8 = "ReleaseFast",
     profile: []const u8 = "native",
+    native_keccak: []const u8 = "std",
     support_min: ?[]const u8 = null,
     support_max: ?[]const u8 = null,
     engines: std.ArrayList(Engine) = .empty,
@@ -150,6 +151,11 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
             options.profile = try parseProfile(allocator, value);
         } else if (stripPrefix(arg, "--profile=")) |value| {
             options.profile = try parseProfile(allocator, value);
+        } else if (std.mem.eql(u8, arg, "--native-keccak")) {
+            const value = args.next() orelse return error.MissingNativeKeccak;
+            options.native_keccak = try parseNativeKeccak(allocator, value);
+        } else if (stripPrefix(arg, "--native-keccak=")) |value| {
+            options.native_keccak = try parseNativeKeccak(allocator, value);
         } else if (std.mem.eql(u8, arg, "--support-min")) {
             const value = args.next() orelse return error.MissingSupportMin;
             options.support_min = try allocator.dupe(u8, value);
@@ -199,6 +205,7 @@ fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
         }
     }
 
+    if (std.mem.eql(u8, options.profile, "zkvm")) options.native_keccak = "std";
     return options;
 }
 
@@ -212,6 +219,7 @@ fn printUsage() void {
         \\  --zig-exe <path>       Zig executable used for child bench steps
         \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
         \\  --profile <profile>    evmz build profile forwarded to child Zig builds
+        \\  --native-keccak <name> native Keccak backend forwarded to evmz builds
         \\  --support-min <name>   minimum evmz fork compiled into the VM-loop runner
         \\  --support-max <name>   maximum evmz fork compiled into the VM-loop runner
         \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, revm, evmone-baseline, evmone-advanced, revm-interpreter
@@ -287,6 +295,7 @@ fn engineCommand(
     }
     if (engine == .evmz) {
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
+        try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dnative-keccak={s}", .{options.native_keccak}));
         if (options.support_min) |support_min| {
             try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-min={s}", .{support_min}));
         }
@@ -686,6 +695,13 @@ fn baseName(path: []const u8) []const u8 {
 fn parseProfile(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     if (!std.mem.eql(u8, value, "native") and !std.mem.eql(u8, value, "zkvm")) {
         return error.UnsupportedProfile;
+    }
+    return allocator.dupe(u8, value);
+}
+
+fn parseNativeKeccak(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (!std.mem.eql(u8, value, "std") and !std.mem.eql(u8, value, "xkcp")) {
+        return error.UnsupportedNativeKeccak;
     }
     return allocator.dupe(u8, value);
 }

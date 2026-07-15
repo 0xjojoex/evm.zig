@@ -20,6 +20,11 @@
             .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.06.tar.gz",
             .hash = "N-V-__8AAIbQPgBN3AkA58o43UT3Y6jkn55OesBXTWc63zEF",
         },
+        .xkcp = .{
+            .url = "git+https://github.com/XKCP/XKCP.git#78477d2e0b980737deaa07b928b29302257055ca",
+            .hash = "N-V-__8AAGMY2QG5Ku-5NI36wI2cqcZmaHbh-im2Pj0r0bb_",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zig-exe", default="zig")
     parser.add_argument("--optimize", default="ReleaseFast")
     parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
+    parser.add_argument("--native-keccak", choices=("std", "xkcp"), default="std")
     parser.add_argument("--out-dir", default="../output/bench-report")
     parser.add_argument("--report")
     parser.add_argument("--checkpoint")
@@ -94,7 +95,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host-iterations", type=int, default=100_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.profile == "zkvm":
+        args.native_keccak = "std"
+    return args
 
 
 def resolve_path(value: str | Path) -> Path:
@@ -110,6 +114,8 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "platform": f"{platform.system()} {platform.machine()}",
         "zig": command_version([args.zig_exe, "version"]),
         "profile": args.profile,
+        "native_keccak": args.native_keccak,
+        "keccak_provider": args.native_keccak if args.profile == "native" else "zkvm",
         "rustc": tool_major_version(command_version(["rustc", "--version"])),
         "cargo": tool_major_version(command_version(["cargo", "--version"])),
         "solc": solc_version(),
@@ -294,7 +300,7 @@ def vm_loop_scope(engine: str) -> str:
 
 
 def build_profile_args(args: argparse.Namespace) -> list[str]:
-    return [f"-Dprofile={args.profile}"]
+    return [f"-Dprofile={args.profile}", f"-Dnative-keccak={args.native_keccak}"]
 
 
 def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:

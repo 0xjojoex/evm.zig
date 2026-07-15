@@ -1,11 +1,34 @@
 const std = @import("std");
 
+const EvmzBuildConfig = struct {
+    profile: []const u8,
+    native_keccak: []const u8,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = buildProfileOption(b);
     const is_native_profile = std.mem.eql(u8, profile, "native");
-    const build_options = buildOptions(b, profile);
+    const requested_native_keccak = nativeKeccakOption(b);
+    const native_keccak = resolveNativeKeccak(profile, target, requested_native_keccak);
+    const evmz_build = EvmzBuildConfig{ .profile = profile, .native_keccak = native_keccak };
+    const use_xkcp = std.mem.eql(u8, native_keccak, "xkcp");
+    const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
+    if (use_xkcp and xkcp_dep == null) return;
+    const xkcp_object = if (xkcp_dep) |dep|
+        buildXkcpObject(b, target, optimize, dep, "xkcp", null)
+    else
+        null;
+    const xkcp_pic_object = if (xkcp_dep) |dep|
+        buildXkcpObject(b, target, optimize, dep, "xkcp-pic", true)
+    else
+        null;
+    if (xkcp_dep) |dep| {
+        const install_license = b.addInstallFile(dep.path("LICENSE"), "share/licenses/evmz/XKCP.txt");
+        b.getInstallStep().dependOn(&install_license.step);
+    }
+    const build_options = buildOptions(b, profile, native_keccak);
     const bench_optimize = b.option(
         std.builtin.OptimizeMode,
         "bench-optimize",
@@ -43,6 +66,7 @@ pub fn build(b: *std.Build) void {
     if (native_precompile_deps) |deps| {
         addPrecompileNative(b, evmz_mod, deps, evmone_dep);
     }
+    addNativeKeccak(evmz_mod, xkcp_object);
 
     const ssz_mod = b.addModule("ssz", .{
         .root_source_file = b.path("pkg/ssz/src/lib.zig"),
@@ -64,6 +88,7 @@ pub fn build(b: *std.Build) void {
         c_lib_mod.addIncludePath(b.path("include"));
         c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
         addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
+        addNativeKeccak(c_lib_mod, xkcp_pic_object);
 
         const static_c_lib = b.addLibrary(.{
             .name = "evmz",
@@ -109,6 +134,7 @@ pub fn build(b: *std.Build) void {
         if (native_precompile_deps) |deps| {
             addPrecompileNative(b, lib_unit_tests_mod, deps, evmone_dep);
         }
+        addNativeKeccak(lib_unit_tests_mod, xkcp_object);
         const lib_unit_tests = b.addTest(.{
             .root_module = lib_unit_tests_mod,
             .filters = b.args orelse &.{},
@@ -144,6 +170,7 @@ pub fn build(b: *std.Build) void {
             c_api_tests_mod.addIncludePath(b.path("include"));
             c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
             addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
+            addNativeKeccak(c_api_tests_mod, xkcp_object);
             const c_api_tests = b.addTest(.{
                 .root_module = c_api_tests_mod,
                 .filters = b.args orelse &.{},
@@ -178,33 +205,33 @@ pub fn build(b: *std.Build) void {
     const optimize_name = @tagName(optimize);
     const bench_optimize_name = @tagName(bench_optimize);
     if (pathExists(b, "eest/build.zig")) {
-        addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, profile);
-        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null, profile);
-        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, profile);
-        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, profile);
-        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, profile);
-        addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, profile);
-        addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", "zkevm-input", optimize_name, null, profile);
-        addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, profile);
-        addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, profile);
-        addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, profile);
-        addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, profile);
-        addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, profile);
+        addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, evmz_build);
+        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null, evmz_build);
+        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, evmz_build);
+        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, evmz_build);
+        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", "zkevm-input", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, evmz_build);
+        addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, evmz_build);
+        addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, evmz_build);
+        addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, evmz_build);
     }
     if (pathExists(b, "bench/build.zig")) {
-        addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, profile);
-        addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
-        addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, profile);
-        addBenchCompareDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, profile);
-        addBenchDelegate(b, "bench-block-lifecycle", "Run VM block lifecycle benchmark", "block-lifecycle", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, profile);
-        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, profile);
-        addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, profile);
-        addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, profile);
+        addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, evmz_build);
+        addBenchVmLoopDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, evmz_build);
+        addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, evmz_build);
+        addBenchCompareDelegate(b, bench_optimize_name, bench_support_min, bench_support_max, evmz_build);
+        addBenchDelegate(b, "bench-block-lifecycle", "Run VM block lifecycle benchmark", "block-lifecycle", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, evmz_build);
+        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, evmz_build);
+        addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, evmz_build);
+        addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, evmz_build);
     }
     if (pathExists(b, "pkg/ssz/build.zig")) {
         addSszBenchDelegate(b, bench_optimize_name);
@@ -252,6 +279,7 @@ pub fn build(b: *std.Build) void {
             if (native_precompile_deps) |deps| {
                 addPrecompileNative(b, example_mod, deps, evmone_dep);
             }
+            addNativeKeccak(example_mod, xkcp_object);
             const example = b.addExecutable(.{
                 .name = example_exe_name,
                 .root_module = b.createModule(.{
@@ -321,9 +349,34 @@ fn buildProfileOption(b: *std.Build) []const u8 {
     return profile;
 }
 
-fn buildOptions(b: *std.Build, profile: []const u8) *std.Build.Step.Options {
+fn nativeKeccakOption(b: *std.Build) []const u8 {
+    const backend = b.option(
+        []const u8,
+        "native-keccak",
+        "Native Keccak backend: std or xkcp (ignored by profile=zkvm)",
+    ) orelse "std";
+    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "xkcp")) {
+        std.debug.panic("unsupported native Keccak backend '{s}' (expected std or xkcp)", .{backend});
+    }
+    return backend;
+}
+
+fn resolveNativeKeccak(
+    profile: []const u8,
+    target: std.Build.ResolvedTarget,
+    requested: []const u8,
+) []const u8 {
+    if (!std.mem.eql(u8, profile, "native") or !std.mem.eql(u8, requested, "xkcp")) return "std";
+    return switch (target.result.cpu.arch) {
+        .x86_64, .aarch64, .riscv64 => "xkcp",
+        else => "std",
+    };
+}
+
+fn buildOptions(b: *std.Build, profile: []const u8, native_keccak: []const u8) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption([]const u8, "profile", profile);
+    options.addOption([]const u8, "native_keccak", native_keccak);
     return options;
 }
 
@@ -525,7 +578,7 @@ fn addGuestZisk(
     };
 
     const target = guestZiskTarget(b);
-    const build_options = buildOptions(b, "zkvm");
+    const build_options = buildOptions(b, "zkvm", "std");
     const guest_options = guestOptions(b, true);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guestPayloadSource(guest_payload) catch unreachable;
@@ -680,7 +733,7 @@ fn addEestDelegate(
     child_step: []const u8,
     optimize_name: ?[]const u8,
     bench_optimize_name: ?[]const u8,
-    profile: []const u8,
+    config: EvmzBuildConfig,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -692,7 +745,7 @@ fn addEestDelegate(
     if (bench_optimize_name) |name| {
         run.addArg(b.fmt("-Dbench-optimize={s}", .{name}));
     }
-    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    addEvmzBuildArgs(run, b, config);
     run.addArg(child_step);
     if (b.args) |args| {
         run.addArg("--");
@@ -710,7 +763,7 @@ fn addBenchDelegate(
     description: []const u8,
     child_step: []const u8,
     optimize_name: ?[]const u8,
-    profile: []const u8,
+    config: EvmzBuildConfig,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -719,7 +772,7 @@ fn addBenchDelegate(
     if (optimize_name) |name| {
         run.addArg(b.fmt("-Doptimize={s}", .{name}));
     }
-    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    addEvmzBuildArgs(run, b, config);
     run.addArg(child_step);
     if (b.args) |args| {
         run.addArg("--");
@@ -753,14 +806,14 @@ fn addBenchCompareDelegate(
     optimize_name: []const u8,
     support_min: ?[]const u8,
     support_max: ?[]const u8,
-    profile: []const u8,
+    config: EvmzBuildConfig,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
     });
     run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
-    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    addEvmzBuildArgs(run, b, config);
     if (support_min) |revision| {
         run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
     }
@@ -783,14 +836,14 @@ fn addBenchVmLoopDelegate(
     optimize_name: []const u8,
     support_min: ?[]const u8,
     support_max: ?[]const u8,
-    profile: []const u8,
+    config: EvmzBuildConfig,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
     });
     run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
-    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    addEvmzBuildArgs(run, b, config);
     if (support_min) |revision| {
         run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
     }
@@ -812,14 +865,14 @@ fn addBenchMicroDelegate(
     b: *std.Build,
     optimize_name: []const u8,
     micro_filter: ?[]const u8,
-    profile: []const u8,
+    config: EvmzBuildConfig,
 ) void {
     const run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
     });
     run.addArg(b.fmt("-Doptimize={s}", .{optimize_name}));
-    run.addArg(b.fmt("-Dprofile={s}", .{profile}));
+    addEvmzBuildArgs(run, b, config);
     if (micro_filter) |filter| {
         run.addArg(b.fmt("-Dmicro-filter={s}", .{filter}));
     }
@@ -828,6 +881,137 @@ fn addBenchMicroDelegate(
 
     const step = b.step("bench-micro", "Run focused zBench micro benchmarks");
     step.dependOn(&run.step);
+}
+
+fn addEvmzBuildArgs(run: *std.Build.Step.Run, b: *std.Build, config: EvmzBuildConfig) void {
+    run.addArg(b.fmt("-Dprofile={s}", .{config.profile}));
+    run.addArg(b.fmt("-Dnative-keccak={s}", .{config.native_keccak}));
+}
+
+const XkcpLane = enum {
+    x86_64_dispatch,
+    aarch64_dispatch,
+    generic64,
+};
+
+fn buildXkcpObject(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    dep: *std.Build.Dependency,
+    name: []const u8,
+    pic: ?bool,
+) *std.Build.Step.Compile {
+    const lane: XkcpLane = switch (target.result.cpu.arch) {
+        .x86_64 => if (target.result.os.tag == .windows) .generic64 else .x86_64_dispatch,
+        .aarch64 => switch (target.result.os.tag) {
+            .linux, .macos => .aarch64_dispatch,
+            else => .generic64,
+        },
+        .riscv64 => .generic64,
+        else => unreachable,
+    };
+
+    const config = switch (lane) {
+        .x86_64_dispatch =>
+        \\#define XKCP_has_KeccakP1600
+        \\#define XKCP_has_x86_64_CPU_detection
+        \\
+        ,
+        .aarch64_dispatch =>
+        \\#define XKCP_has_KeccakP1600
+        \\#define XKCP_has_aarch64_CPU_detection
+        \\
+        ,
+        .generic64 =>
+        \\#define XKCP_has_KeccakP1600
+        \\
+        ,
+    };
+    const generated = b.addWriteFiles();
+    const config_header = generated.add("xkcp/config.h", config);
+    const module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = pic,
+    });
+    const c_flags = &[_][]const u8{
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+    };
+
+    module.addIncludePath(config_header.dirname());
+    module.addIncludePath(dep.path("lib/common"));
+    module.addIncludePath(dep.path("lib/high/Keccak"));
+    module.addIncludePath(dep.path("lib/low/common"));
+    module.addIncludePath(dep.path("lib/low/KeccakP-1600/common"));
+    module.addIncludePath(dep.path("lib/low/KeccakP-1600/plain-64bits"));
+    module.addCSourceFile(.{
+        .file = dep.path("lib/high/Keccak/KeccakSponge.c"),
+        .flags = c_flags,
+    });
+    module.addCSourceFile(.{
+        .file = b.path("src/crypto/xkcp_keccak.c"),
+        .flags = c_flags,
+    });
+    module.addCSourceFile(.{
+        .file = dep.path("lib/low/KeccakP-1600/plain-64bits/KeccakP-1600-opt64.c"),
+        .flags = c_flags,
+    });
+
+    switch (lane) {
+        .x86_64_dispatch => {
+            module.addIncludePath(dep.path("lib/low/x86-64-dispatch"));
+            module.addIncludePath(dep.path("lib/low/KeccakP-1600/AVX2"));
+            module.addIncludePath(dep.path("lib/low/KeccakP-1600/AVX512"));
+            module.addCSourceFile(.{
+                .file = dep.path("lib/low/x86-64-dispatch/x86-64-dispatch.c"),
+                .flags = c_flags,
+            });
+            const asm_flags: []const []const u8 = if (target.result.os.tag == .macos)
+                &.{"-Wa,-defsym,old_gas_syntax=1"}
+            else
+                &.{};
+            module.addCSourceFile(.{
+                .file = dep.path("lib/low/KeccakP-1600/AVX2/KeccakP-1600-AVX2.s"),
+                .flags = asm_flags,
+            });
+            module.addCSourceFile(.{
+                .file = dep.path("lib/low/KeccakP-1600/AVX512/KeccakP-1600-AVX512.s"),
+                .flags = asm_flags,
+            });
+        },
+        .aarch64_dispatch => {
+            module.addIncludePath(dep.path("lib/low/aarch64-dispatch"));
+            module.addIncludePath(dep.path("lib/low/KeccakP-1600/ARMv8A-SHA3"));
+            module.addCSourceFile(.{
+                .file = dep.path("lib/low/aarch64-dispatch/aarch64-dispatch.c"),
+                .flags = c_flags,
+            });
+            module.addCSourceFile(.{
+                .file = dep.path("lib/low/KeccakP-1600/ARMv8A-SHA3/KeccakP-1600-x1-v84a.c"),
+                .flags = c_flags,
+            });
+            module.addCSourceFile(.{
+                .file = b.path("src/crypto/xkcp_aarch64.S"),
+                .flags = &.{
+                    "-D__ARM_FEATURE_SHA3=1",
+                    "-Wa,-march=armv8.4-a+sha3",
+                },
+            });
+        },
+        .generic64 => module.addIncludePath(dep.path("lib/low/KeccakP-1600/plain-64bits/SnP")),
+    }
+
+    return b.addObject(.{ .name = name, .root_module = module });
+}
+
+fn addNativeKeccak(module: *std.Build.Module, xkcp_object: ?*std.Build.Step.Compile) void {
+    const object = xkcp_object orelse return;
+    module.link_libc = true;
+    module.addObject(object);
 }
 
 fn addPrecompileNative(
