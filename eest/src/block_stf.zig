@@ -6,7 +6,7 @@ const JsonArray = std.json.Array;
 const JsonObject = std.json.ObjectMap;
 const JsonValue = fixture_common.JsonValue;
 const block_stf = evmz.eth.block_stf;
-const mpt = evmz.eth.trie;
+const trie = evmz.eth.trie;
 
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;

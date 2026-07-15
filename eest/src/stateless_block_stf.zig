@@ -8,7 +8,7 @@ const JsonValue = fixture_common.JsonValue;
 const block_stf = evmz.eth.block_stf;
 const bal = evmz.eth.bal;
 const crypto = evmz.crypto;
-const mpt = evmz.eth.trie;
+const trie = evmz.eth.trie;
 const rlp = evmz.rlp;
 
 const asArray = fixture_common.asArray;
@@ -723,7 +723,7 @@ fn bloomField(allocator: std.mem.Allocator, object: *const JsonObject, name: []c
 }
 
 test "stateless BlockSTF EEST runner validates a witness-backed empty Cancun block" {
-    const empty_root = mpt.empty_root_hash;
+    const empty_root = trie.empty_root_hash;
     const block_hash = try (evmz.eth.ExecutionHeader{
         .parent_hash = [_]u8{0} ** 32,
         .coinbase = [_]u8{0} ** 20,
