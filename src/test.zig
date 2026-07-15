@@ -4,6 +4,7 @@ test {
     _ = @import("./test/block_lifecycle.zig");
     _ = @import("./test/gas_bound_checkpoint.zig");
     _ = @import("./test/block_stf_cases.zig");
+    _ = @import("./test/mpt_package_test.zig");
     _ = @import("./test/eip2200.zig");
     _ = @import("./test/amsterdam/eip2780.zig");
     _ = @import("./test/amsterdam/bal_fixtures.zig");

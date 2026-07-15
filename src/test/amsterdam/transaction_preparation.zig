@@ -166,7 +166,7 @@ test "prepare accepts delegation-shaped sender code only after EIP-7702 activate
         .summary = .{
             .nonce = 0,
             .balance = 30_000,
-            .code_hash = evmz.mpt.codeHash(&delegation_code),
+            .code_hash = evmz.crypto.keccak256(&delegation_code),
         },
         .code_bytes = &delegation_code,
     };

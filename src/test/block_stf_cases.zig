@@ -8,7 +8,7 @@ const JsonValue = std.json.Value;
 const address = evmz.address;
 const bal = evmz.eth.bal;
 const block_stf = evmz.eth.block_stf;
-const mpt = evmz.mpt;
+const trie = evmz.eth.trie;
 
 const cases_json = @embedFile("fixtures/block_stf/cases.json");
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
@@ -91,10 +91,10 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
 
     const valid = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{
             .requests_hash = block_stf.empty_requests_hash,
             .block_access_list_hash = bal.empty_hash,
@@ -108,10 +108,10 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
     wrong_requests_hash[31] ^= 1;
     const mismatch = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{
             .requests_hash = wrong_requests_hash,
             .block_access_list_hash = bal.empty_hash,
@@ -129,10 +129,10 @@ test "BlockSTF semantic case smoke: provided BAL is structurally validated first
 
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(block_stf.Status.invalid_block_access_list, result.status);
 }
@@ -149,10 +149,10 @@ test "BlockSTF semantic case smoke: BAL size excess maps to status" {
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
         .env = .{ .gas_limit = bal.item_cost - 1 },
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(block_stf.Status.block_access_list_too_large, result.status);
 }
@@ -166,18 +166,18 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
 
     const recipient_a = address.addr(0x7777);
     const recipient_b = address.addr(0x8888);
-    const withdrawals = [_]mpt.Withdrawal{
+    const withdrawals = [_]evmz.eth.Withdrawal{
         .{ .index = 0, .validator_index = 1, .address = recipient_a, .amount = 0 },
         .{ .index = 1, .validator_index = 2, .address = recipient_a, .amount = 3 },
         .{ .index = 2, .validator_index = 3, .address = recipient_b, .amount = 0 },
     };
 
     const credited_balance = 3 * withdrawal_gwei_in_wei;
-    const account_a_key = mpt.hashedAddressKey(recipient_a);
-    const account_a_value = try mpt.accountValueFrom(scratch, .{ .balance = credited_balance });
-    const expected_state_pairs = [_]mpt.Pair{.{ .key = &account_a_key, .value = account_a_value }};
-    const expected_state_root = try mpt.root(scratch, &expected_state_pairs);
-    const expected_withdrawals_root = try mpt.withdrawalsRoot(scratch, &withdrawals);
+    const account_a_key = trie.hashedAddressKey(recipient_a);
+    const account_a_value = try trie.accountValueFrom(scratch, .{ .balance = credited_balance });
+    const expected_state_pairs = [_]trie.Pair{.{ .key = &account_a_key, .value = account_a_value }};
+    const expected_state_root = try trie.root(scratch, &expected_state_pairs);
+    const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
     const balance_changes_a = [_]bal.BalanceChange{.{
         .block_access_index = 1,
@@ -191,14 +191,14 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
 
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .block_access_list = claimed_bal,
         .root_checks = testRootChecksWithWithdrawals(
             expected_state_root,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             expected_withdrawals_root,
         ),
     });
@@ -294,7 +294,7 @@ fn caseById(cases: JsonArray, id: []const u8) !JsonObject {
 }
 
 fn testRootChecks(header_state: [32]u8, header_transactions: [32]u8, header_receipts: [32]u8) block_stf.RootChecks {
-    return testRootChecksWithWithdrawals(header_state, header_transactions, header_receipts, mpt.empty_root_hash);
+    return testRootChecksWithWithdrawals(header_state, header_transactions, header_receipts, trie.empty_root_hash);
 }
 
 fn testRootChecksWithWithdrawals(header_state: [32]u8, header_transactions: [32]u8, header_receipts: [32]u8, header_withdrawals: [32]u8) block_stf.RootChecks {

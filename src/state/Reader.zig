@@ -6,8 +6,8 @@
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
+const crypto = @import("../crypto.zig");
 const Account = @import("./Account.zig");
-const mpt = @import("../mpt.zig");
 
 const Reader = @This();
 
@@ -33,7 +33,7 @@ pub fn loadAccount(self: Reader, address: Address) !?Account {
 
 pub fn loadCode(self: Reader, code_hash: [32]u8) ![]const u8 {
     const code = try self.vtable.loadCode(self.ptr, code_hash);
-    if (!std.mem.eql(u8, &mpt.codeHash(code), &code_hash)) return error.CodeHashMismatch;
+    if (!std.mem.eql(u8, &crypto.keccak256(code), &code_hash)) return error.CodeHashMismatch;
     return code;
 }
 
@@ -73,7 +73,7 @@ fn emptyLoadAccount(ptr: *anyopaque, address: Address) !?Account {
 
 fn emptyLoadCode(ptr: *anyopaque, code_hash: [32]u8) ![]const u8 {
     _ = ptr;
-    if (std.mem.eql(u8, &code_hash, &mpt.empty_code_hash)) return &.{};
+    if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
     return error.CodeUnavailable;
 }
 
@@ -95,7 +95,7 @@ test "empty state reader returns empty state" {
     const reader = Reader.empty();
     try std.testing.expect(!try reader.accountExists(addr(1)));
     try std.testing.expectEqual(@as(?Account, null), try reader.loadAccount(addr(1)));
-    try std.testing.expectEqualSlices(u8, &.{}, try reader.loadCode(mpt.empty_code_hash));
+    try std.testing.expectEqualSlices(u8, &.{}, try reader.loadCode(crypto.keccak256_empty));
     try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(addr(1), 1));
     try std.testing.expect(!try reader.accountHasStorage(addr(1)));
 }

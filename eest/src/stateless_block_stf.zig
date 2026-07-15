@@ -8,7 +8,7 @@ const JsonValue = fixture_common.JsonValue;
 const block_stf = evmz.eth.block_stf;
 const bal = evmz.eth.bal;
 const crypto = evmz.crypto;
-const mpt = evmz.mpt;
+const trie = evmz.eth.trie;
 const rlp = evmz.rlp;
 
 const asArray = fixture_common.asArray;
@@ -357,7 +357,8 @@ fn runBlock(
             .parent_hash = parent_hash,
             .parent_beacon_block_root = try optionalHashField(&block_header, "parentBeaconBlockRoot"),
         },
-        .state_backend = evmz.state.Backend.fromWitness(
+        .state_backend = try evmz.state.Backend.fromWitness(
+            allocator,
             try hashField(&genesis_header, "stateRoot"),
             witness_nodes,
             codes,
@@ -452,7 +453,7 @@ fn parseByteList(allocator: std.mem.Allocator, array: JsonArray) ![]const []cons
 
 fn witnessCodes(allocator: std.mem.Allocator, codes: []const []const u8) ![]const evmz.state.WitnessStateReader.Code {
     const out = try allocator.alloc(evmz.state.WitnessStateReader.Code, codes.len);
-    for (out, codes) |*item, code| item.* = .{ .hash = mpt.codeHash(code), .bytes = code };
+    for (out, codes) |*item, code| item.* = .{ .hash = crypto.keccak256(code), .bytes = code };
     return out;
 }
 
@@ -541,12 +542,12 @@ fn encodeLegacyTransaction(
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(fields.written());
+    try out.listPayload(fields.written());
     return try out.toOwnedSlice();
 }
 
-fn parseWithdrawals(allocator: std.mem.Allocator, array: JsonArray) ![]const mpt.Withdrawal {
-    const out = try allocator.alloc(mpt.Withdrawal, array.items.len);
+fn parseWithdrawals(allocator: std.mem.Allocator, array: JsonArray) ![]const evmz.eth.Withdrawal {
+    const out = try allocator.alloc(evmz.eth.Withdrawal, array.items.len);
     for (out, array.items) |*target, value| {
         const object = asObject(value) orelse return error.MalformedFixture;
         target.* = .{
@@ -722,7 +723,7 @@ fn bloomField(allocator: std.mem.Allocator, object: *const JsonObject, name: []c
 }
 
 test "stateless BlockSTF EEST runner validates a witness-backed empty Cancun block" {
-    const empty_root = mpt.empty_root_hash;
+    const empty_root = trie.empty_root_hash;
     const block_hash = try (evmz.eth.ExecutionHeader{
         .parent_hash = [_]u8{0} ** 32,
         .coinbase = [_]u8{0} ** 20,

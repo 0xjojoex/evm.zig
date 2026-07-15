@@ -4,8 +4,8 @@ const std = @import("std");
 
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
-const mpt = @import("../mpt.zig");
-const rlp = @import("../rlp.zig");
+const trie = @import("../eth/trie.zig");
+const rlp = @import("rlp");
 const Account = @import("./Account.zig");
 const StateReader = @import("./Reader.zig");
 
@@ -21,15 +21,20 @@ pub const Code = struct {
 };
 
 state_root: [32]u8,
-nodes: []const []const u8,
+indexed: *trie.IndexedNodes,
 codes: []const Code = &.{},
 
-pub fn init(state_root: [32]u8, nodes: []const []const u8, codes: []const Code) WitnessStateReader {
+pub fn init(state_root: [32]u8, indexed: *trie.IndexedNodes, codes: []const Code) WitnessStateReader {
     return .{
         .state_root = state_root,
-        .nodes = nodes,
+        .indexed = indexed,
         .codes = codes,
     };
+}
+
+pub fn deinit(self: *WitnessStateReader) void {
+    self.indexed.deinit();
+    self.* = undefined;
 }
 
 pub fn reader(self: *WitnessStateReader) StateReader {
@@ -39,17 +44,17 @@ pub fn reader(self: *WitnessStateReader) StateReader {
     };
 }
 
-fn loadMptAccount(self: *const WitnessStateReader, target: Address) Error!?mpt.Account {
-    const key = mpt.hashedAddressKey(target);
-    const encoded = mpt.proof(self.state_root, self.nodes).get(&key) catch return error.InvalidWitness;
-    return mpt.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
+fn loadMptAccount(self: *const WitnessStateReader, target: Address) Error!?trie.Account {
+    const key = trie.hashedAddressKey(target);
+    const encoded = trie.proof(self.state_root, self.indexed).get(&key) catch return error.InvalidWitness;
+    return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
 }
 
 fn codeForHash(self: *const WitnessStateReader, hash: [32]u8) Error![]const u8 {
-    if (std.mem.eql(u8, &hash, &mpt.empty_code_hash)) return "";
+    if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return "";
     for (self.codes) |code| {
         if (!std.mem.eql(u8, &code.hash, &hash)) continue;
-        const actual_hash = mpt.codeHash(code.bytes);
+        const actual_hash = crypto.keccak256(code.bytes);
         if (!std.mem.eql(u8, &actual_hash, &hash)) return error.InvalidWitness;
         return code.bytes;
     }
@@ -90,19 +95,19 @@ fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
 fn getStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
     const self = context(ptr);
     const account = try self.loadMptAccount(target) orelse return 0;
-    if (std.mem.eql(u8, &account.storage_root, &mpt.empty_root_hash)) return 0;
+    if (std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash)) return 0;
 
-    const storage_key = mpt.hashedStorageKey(key);
-    const encoded = mpt.proof(account.storage_root, self.nodes).get(&storage_key) catch return error.InvalidWitness;
+    const storage_key = trie.hashedStorageKey(key);
+    const encoded = trie.proof(account.storage_root, self.indexed).get(&storage_key) catch return error.InvalidWitness;
     return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
 }
 
 fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
     const account = try context(ptr).loadMptAccount(target) orelse return false;
-    return !std.mem.eql(u8, &account.storage_root, &mpt.empty_root_hash);
+    return !std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash);
 }
 
-fn decodeStorageValue(encoded: []const u8) rlp.Error!u256 {
+fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
     var cursor = rlp.Cursor.init(encoded);
     const value = try cursor.nextInt(u256);
     try cursor.expectDone();
@@ -110,7 +115,7 @@ fn decodeStorageValue(encoded: []const u8) rlp.Error!u256 {
 }
 
 test "witness state reader returns empty state for empty root" {
-    var witness = WitnessStateReader.init(mpt.empty_root_hash, &.{}, &.{});
+    var witness = try initForTest(std.testing.allocator, trie.empty_root_hash, &.{}, &.{});
     const state_reader = witness.reader();
     const target = address.addr(0x1000);
 
@@ -127,20 +132,20 @@ test "witness state reader loads account and code" {
 
     const target = address.addr(0x1000);
     const code = [_]u8{ 0x60, 0x00 };
-    const code_hash = mpt.codeHash(&code);
-    const account = mpt.Account{
+    const code_hash = crypto.keccak256(&code);
+    const account = trie.Account{
         .nonce = 7,
         .balance = 99,
         .code_hash = code_hash,
     };
-    const account_value = try mpt.accountValueFrom(scratch, account);
-    const account_key = mpt.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, account);
+    const account_key = trie.hashedAddressKey(target);
     const state_node = try testLeafNode(scratch, &account_key, account_value);
     const state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
     const codes = [_]Code{.{ .hash = code_hash, .bytes = &code }};
 
-    var witness = WitnessStateReader.init(state_root, &nodes, &codes);
+    var witness = try initForTest(scratch, state_root, &nodes, &codes);
     const state_reader = witness.reader();
 
     try std.testing.expect(try state_reader.accountExists(target));
@@ -157,18 +162,18 @@ test "witness state reader reads storage through account storage root" {
     const scratch = arena.allocator();
 
     const target = address.addr(0x2000);
-    const storage_key = mpt.hashedStorageKey(3);
-    const storage_value = try mpt.storageValue(scratch, 42);
+    const storage_key = trie.hashedStorageKey(3);
+    const storage_value = try trie.storageValue(scratch, 42);
     const storage_node = try testLeafNode(scratch, &storage_key, storage_value);
     const storage_root = crypto.keccak256(storage_node);
 
-    const account_value = try mpt.accountValueFrom(scratch, .{ .storage_root = storage_root });
-    const account_key = mpt.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, .{ .storage_root = storage_root });
+    const account_key = trie.hashedAddressKey(target);
     const state_node = try testLeafNode(scratch, &account_key, account_value);
     const state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{ state_node, storage_node };
 
-    var witness = WitnessStateReader.init(state_root, &nodes, &.{});
+    var witness = try initForTest(scratch, state_root, &nodes, &.{});
     const state_reader = witness.reader();
     try std.testing.expect(try state_reader.accountHasStorage(target));
     try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
@@ -182,17 +187,17 @@ test "witness state reader rejects missing witness nodes and code" {
 
     const target = address.addr(0x3000);
     const storage_root = [_]u8{0xab} ** 32;
-    const code_hash = mpt.codeHash(&.{0x5f});
-    const account_value = try mpt.accountValueFrom(scratch, .{
+    const code_hash = crypto.keccak256(&.{0x5f});
+    const account_value = try trie.accountValueFrom(scratch, .{
         .storage_root = storage_root,
         .code_hash = code_hash,
     });
-    const account_key = mpt.hashedAddressKey(target);
+    const account_key = trie.hashedAddressKey(target);
     const state_node = try testLeafNode(scratch, &account_key, account_value);
     const state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
 
-    var witness = WitnessStateReader.init(state_root, &nodes, &.{});
+    var witness = try initForTest(scratch, state_root, &nodes, &.{});
     const state_reader = witness.reader();
 
     const loaded = (try state_reader.loadAccount(target)).?;
@@ -202,6 +207,15 @@ test "witness state reader rejects missing witness nodes and code" {
     const malformed_codes = [_]Code{.{ .hash = code_hash, .bytes = &.{0x00} }};
     witness.codes = &malformed_codes;
     try std.testing.expectError(error.InvalidWitness, state_reader.loadCode(loaded.code_hash));
+}
+
+fn initForTest(
+    allocator: std.mem.Allocator,
+    state_root: [32]u8,
+    nodes: []const []const u8,
+    codes: []const Code,
+) !WitnessStateReader {
+    return WitnessStateReader.init(state_root, try trie.indexNodes(allocator, nodes), codes);
 }
 
 fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
@@ -214,7 +228,7 @@ fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload.written());
+    try out.listPayload(payload.written());
     return try writerOwned(&out);
 }
 

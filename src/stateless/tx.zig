@@ -1,14 +1,14 @@
 const std = @import("std");
 
 const Evm = @import("../evm.zig").Evm;
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const transaction = @import("../transaction.zig");
 const transaction_envelope = @import("../transaction/envelope.zig");
 const transaction_signing = @import("../transaction/signing.zig");
 
 const Address = @import("../address.zig").Address;
 
-pub const Error = std.mem.Allocator.Error || rlp.Error || transaction_signing.SenderRecoveryError || error{
+pub const Error = std.mem.Allocator.Error || rlp.ParseError || transaction_signing.SenderRecoveryError || error{
     InvalidTransactionEnvelope,
     InvalidTransactionFormat,
     UnsupportedTransactionType,
@@ -314,8 +314,8 @@ test "raw stateless tx decoder counts but skips unrecoverable authorization tupl
     try tuple_fields.int(u8, 0);
     try tuple_fields.int(u8, 0);
     try tuple_fields.int(u8, 1);
-    try tuple.list(tuple_fields.written());
-    try list.list(tuple.written());
+    try tuple.listPayload(tuple_fields.written());
+    try list.listPayload(tuple.written());
 
     var cursor = rlp.Cursor.init(list.written());
     const parsed = try nextAuthorizationList(allocator, &cursor);

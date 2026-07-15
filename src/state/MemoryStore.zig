@@ -15,7 +15,7 @@ const MemoryAccount = @import("./MemoryAccount.zig");
 const Changeset = @import("./Changeset.zig");
 const Committer = @import("./Committer.zig");
 const StateReader = @import("./Reader.zig");
-const mpt = @import("../mpt.zig");
+const trie = @import("../eth/trie.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Address = evmz.Address;
@@ -87,7 +87,7 @@ pub fn getOrCreateAccount(self: *MemoryStore, address: Address) !*MemoryAccount 
 /// Copy an account into the in-memory pre-state using the store allocator.
 pub fn putAccount(self: *MemoryStore, address: Address, account: *const MemoryAccount) !void {
     const code_hash = accountCodeHash(account);
-    if (!std.mem.eql(u8, &mpt.codeHash(account.code), &code_hash)) return error.CodeHashMismatch;
+    if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &code_hash)) return error.CodeHashMismatch;
 
     var owned = try account.clone(self.allocator);
     errdefer owned.deinit();
@@ -149,14 +149,14 @@ pub fn stateRoot(self: *MemoryStore, allocator: std.mem.Allocator) ![32]u8 {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    var pairs: std.ArrayList(mpt.Pair) = .empty;
+    var pairs: std.ArrayList(trie.Pair) = .empty;
     defer pairs.deinit(scratch);
 
     var account_it = self.accounts.iterator();
     while (account_it.next()) |entry| {
         const storage_root = try accountStorageRoot(scratch, entry.value_ptr);
         const code_hash = accountCodeHash(entry.value_ptr);
-        const account = mpt.Account{
+        const account = trie.Account{
             .nonce = entry.value_ptr.nonce,
             .balance = entry.value_ptr.balance,
             .storage_root = storage_root,
@@ -165,16 +165,16 @@ pub fn stateRoot(self: *MemoryStore, allocator: std.mem.Allocator) ![32]u8 {
         if (account.isEmpty()) continue;
 
         const key = try scratch.alloc(u8, 32);
-        const hashed_key = mpt.hashedAddressKey(entry.key_ptr.*);
+        const hashed_key = trie.hashedAddressKey(entry.key_ptr.*);
         @memcpy(key, &hashed_key);
 
         try pairs.append(scratch, .{
             .key = key,
-            .value = try mpt.accountValueFrom(scratch, account),
+            .value = try trie.accountValueFrom(scratch, account),
         });
     }
 
-    return try mpt.root(allocator, pairs.items);
+    return try trie.root(allocator, pairs.items);
 }
 
 pub fn stateRootAfterChangeset(self: *MemoryStore, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
@@ -196,7 +196,7 @@ pub fn applyChangeset(self: *MemoryStore, changeset: *const Changeset) !void {
 
 fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void {
     for (changeset.code_inserts.items) |insert| {
-        if (!std.mem.eql(u8, &mpt.codeHash(insert.code), &insert.code_hash)) return error.CodeHashMismatch;
+        if (!std.mem.eql(u8, &evmz.crypto.keccak256(insert.code), &insert.code_hash)) return error.CodeHashMismatch;
         try self.putCode(insert.code_hash, insert.code);
     }
 
@@ -213,7 +213,7 @@ fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void 
         account.nonce = update.nonce;
         account.balance = update.balance;
         if (!std.mem.eql(u8, &previous_code_hash, &update.code_hash)) {
-            const code = if (std.mem.eql(u8, &update.code_hash, &mpt.empty_code_hash))
+            const code = if (std.mem.eql(u8, &update.code_hash, &evmz.crypto.keccak256_empty))
                 &.{}
             else
                 try self.codeForHash(update.code_hash);
@@ -260,13 +260,13 @@ fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
 }
 
 fn codeForHash(self: *MemoryStore, hash: [32]u8) ![]const u8 {
-    if (std.mem.eql(u8, &hash, &mpt.empty_code_hash)) return &.{};
+    if (std.mem.eql(u8, &hash, &evmz.crypto.keccak256_empty)) return &.{};
     if (self.codes.get(hash)) |code| return code;
 
     var account_it = self.accounts.valueIterator();
     while (account_it.next()) |account| {
         if (!std.mem.eql(u8, &accountCodeHash(account), &hash)) continue;
-        if (!std.mem.eql(u8, &mpt.codeHash(account.code), &hash)) return error.CodeHashMismatch;
+        if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &hash)) return error.CodeHashMismatch;
         try self.putCode(hash, account.code);
         return self.codes.get(hash).?;
     }
@@ -286,7 +286,7 @@ fn accountHasStorage(ptr: *anyopaque, address: Address) !bool {
 }
 
 fn accountStorageRoot(allocator: std.mem.Allocator, account: *const MemoryAccount) ![32]u8 {
-    var pairs: std.ArrayList(mpt.Pair) = .empty;
+    var pairs: std.ArrayList(trie.Pair) = .empty;
     defer pairs.deinit(allocator);
 
     var storage = account.storage;
@@ -295,20 +295,20 @@ fn accountStorageRoot(allocator: std.mem.Allocator, account: *const MemoryAccoun
         if (entry.value_ptr.* == 0) continue;
 
         const key = try allocator.alloc(u8, 32);
-        const hashed_key = mpt.hashedStorageKey(entry.key_ptr.*);
+        const hashed_key = trie.hashedStorageKey(entry.key_ptr.*);
         @memcpy(key, &hashed_key);
 
         try pairs.append(allocator, .{
             .key = key,
-            .value = try mpt.storageValue(allocator, entry.value_ptr.*),
+            .value = try trie.storageValue(allocator, entry.value_ptr.*),
         });
     }
 
-    return try mpt.root(allocator, pairs.items);
+    return try trie.root(allocator, pairs.items);
 }
 
 fn accountCodeHash(account: *const MemoryAccount) [32]u8 {
-    return account.code_hash orelse mpt.codeHash(account.code);
+    return account.code_hash orelse evmz.crypto.keccak256(account.code);
 }
 
 test "memory store exposes state reader" {
@@ -346,17 +346,17 @@ test "memory store computes full state root" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const storage_key = mpt.hashedStorageKey(1);
-    const storage_value = try mpt.storageValue(scratch, 42);
-    const storage_root = try mpt.root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
-    const account_key = mpt.hashedAddressKey(address);
-    const account_value = try mpt.accountValueFrom(scratch, .{
+    const storage_key = trie.hashedStorageKey(1);
+    const storage_value = try trie.storageValue(scratch, 42);
+    const storage_root = try trie.root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
+    const account_key = trie.hashedAddressKey(address);
+    const account_value = try trie.accountValueFrom(scratch, .{
         .nonce = 7,
         .balance = 99,
         .storage_root = storage_root,
-        .code_hash = mpt.codeHash(&.{ 0x60, 0x00 }),
+        .code_hash = evmz.crypto.keccak256(&.{ 0x60, 0x00 }),
     });
-    const expected = try mpt.root(scratch, &.{.{ .key = &account_key, .value = account_value }});
+    const expected = try trie.root(scratch, &.{.{ .key = &account_key, .value = account_value }});
     const actual = try memory.stateRoot(std.testing.allocator);
 
     try std.testing.expectEqualSlices(u8, &expected, &actual);
@@ -376,7 +376,7 @@ test "memory store computes state root after changeset without committing" {
         .address = address,
         .nonce = 1,
         .balance = 3,
-        .code_hash = mpt.empty_code_hash,
+        .code_hash = evmz.crypto.keccak256_empty,
     });
 
     const next_root = try memory.stateRootAfterChangeset(std.testing.allocator, &delta);
@@ -421,7 +421,7 @@ test "memory store retains a code hash derived during account insertion" {
     try account.setCode(&code);
     try memory.putAccount(address, &account);
 
-    try std.testing.expectEqual(mpt.codeHash(&code), memory.getAccount(address).?.code_hash.?);
+    try std.testing.expectEqual(evmz.crypto.keccak256(&code), memory.getAccount(address).?.code_hash.?);
 }
 
 test "memory store rejects empty code with non-empty explicit hash" {
@@ -458,10 +458,10 @@ test "memory store applies changeset updates and storage writes" {
             .address = address,
             .nonce = 3,
             .balance = 9,
-            .code_hash = mpt.codeHash(code),
+            .code_hash = evmz.crypto.keccak256(code),
         });
         try delta.code_inserts.append(std.testing.allocator, .{
-            .code_hash = mpt.codeHash(code),
+            .code_hash = evmz.crypto.keccak256(code),
             .code = code,
         });
     }
@@ -495,7 +495,7 @@ test "memory store applies changeset updates and storage writes" {
 test "memory store preserves existing code bytes on metadata-only account update" {
     const address = addr(0xcafe);
     const code = [_]u8{ 0x60, 0x00 };
-    const code_hash = mpt.codeHash(&code);
+    const code_hash = evmz.crypto.keccak256(&code);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
@@ -532,7 +532,7 @@ test "memory store applies explicit empty code replacement" {
         .address = address,
         .nonce = 0,
         .balance = 0,
-        .code_hash = mpt.empty_code_hash,
+        .code_hash = evmz.crypto.keccak256_empty,
     });
 
     try memory.applyChangeset(&delta);

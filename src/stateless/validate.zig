@@ -9,14 +9,14 @@ const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
 const input_mod = @import("./input.zig");
-const mpt = @import("../mpt.zig");
-const rlp = @import("../rlp.zig");
+const trie = @import("../eth/trie.zig");
+const rlp = @import("rlp");
 const state = @import("../state.zig");
 const stateless_tx = @import("./tx.zig");
 const trace = @import("../trace.zig");
 const transaction = @import("../transaction.zig");
 
-pub const Error = std.mem.Allocator.Error || rlp.Error || mpt.Error || stateless_tx.Error || error{
+pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || stateless_tx.Error || error{
     MissingParentHeader,
     InvalidHeaderWitness,
     InvalidRequest,
@@ -72,7 +72,7 @@ fn validateWithScratch(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = state.Backend.fromWitness(parent_header.state_root, input.witness.state, codes),
+        .state_backend = try state.Backend.fromWitness(allocator, parent_header.state_root, input.witness.state, codes),
         .transactions = transaction_inputs,
         .withdrawals = block.withdrawals,
         .parent_header = .{
@@ -298,7 +298,7 @@ fn containsHeaderHash(headers: []const ParsedHeader, hash: [32]u8) bool {
 fn witnessCodes(allocator: std.mem.Allocator, codes: []const []const u8) std.mem.Allocator.Error![]const state.WitnessStateReader.Code {
     const out = try allocator.alloc(state.WitnessStateReader.Code, codes.len);
     for (out, codes) |*item, code| {
-        item.* = .{ .hash = mpt.codeHash(code), .bytes = code };
+        item.* = .{ .hash = crypto.keccak256(code), .bytes = code };
     }
     return out;
 }

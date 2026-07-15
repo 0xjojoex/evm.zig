@@ -2011,11 +2011,11 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
 
     const target = evmz.addr(0x3000);
     const code = [_]u8{@intFromEnum(evmz.Opcode.STOP)};
-    const code_hash = evmz.mpt.codeHash(&code);
-    const account_value = try evmz.mpt.accountValueFrom(scratch, .{
+    const code_hash = evmz.crypto.keccak256(&code);
+    const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{
         .code_hash = code_hash,
     });
-    const account_key = evmz.mpt.hashedAddressKey(target);
+    const account_key = evmz.eth.trie.hashedAddressKey(target);
 
     const TestTrie = struct {
         fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
@@ -2030,14 +2030,16 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
 
             var out = evmz.rlp.Writer.alloc(allocator);
             errdefer out.deinit();
-            try out.list(payload.written());
+            try out.listPayload(payload.written());
             return try out.toOwnedSlice();
         }
     };
     const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
     const state_root = evmz.crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
-    var witness = evmz.state.WitnessStateReader.init(state_root, &nodes, &.{});
+    const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
+    var witness = evmz.state.WitnessStateReader.init(state_root, indexed, &.{});
+    defer witness.deinit();
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();

@@ -10,7 +10,7 @@ const Revision = @import("../../eth/revision.zig").Revision;
 const EthTransaction = @import("../../eth/transaction.zig").Transaction;
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
-const mpt = @import("../../mpt.zig");
+const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const transaction = @import("../../transaction.zig");
@@ -171,7 +171,7 @@ pub const Withdrawal = struct {
     address: address.Address,
     amount: u64,
 
-    fn toMpt(self: Withdrawal) mpt.Withdrawal {
+    fn toEth(self: Withdrawal) EthWithdrawal {
         return .{
             .index = self.index,
             .validator_index = self.validator_index,
@@ -1296,10 +1296,10 @@ fn normalizeBlobSchedule(schedule: BlobSchedule, revision: Revision) Error!trans
     return out;
 }
 
-fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const mpt.Withdrawal {
+fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const EthWithdrawal {
     if (withdrawals.len == 0) return &.{};
-    const out = try allocator.alloc(mpt.Withdrawal, withdrawals.len);
-    for (out, withdrawals) |*target, source| target.* = source.toMpt();
+    const out = try allocator.alloc(EthWithdrawal, withdrawals.len);
+    for (out, withdrawals) |*target, source| target.* = source.toEth();
     return out;
 }
 

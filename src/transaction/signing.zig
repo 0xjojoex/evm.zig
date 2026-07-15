@@ -6,7 +6,7 @@ const crypto = @import("../crypto.zig");
 const eip7702 = @import("../executor/eip7702.zig");
 const eip7702_params = @import("../eth/eip/7702.zig");
 const envelope = @import("./envelope.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const tx_type_id = @import("./type_id.zig");
 const uint256 = @import("../uint256.zig");
 const t = @import("../t.zig");
@@ -22,15 +22,21 @@ pub const set_code_authorization_magic = eip7702_params.magic;
 const max_rlp_u256_bytes = 1 + 32;
 const max_rlp_u64_bytes = 1 + 8;
 const max_rlp_address_bytes = 1 + 20;
-const authorization_fields_buffer_bytes = max_rlp_u256_bytes + max_rlp_address_bytes + max_rlp_u64_bytes;
+const authorization_signing_buffer_bytes = 1 + rlp.max_length_prefix_bytes + max_rlp_u256_bytes + max_rlp_address_bytes + max_rlp_u64_bytes;
 const protected_legacy_tail_buffer_bytes = max_rlp_u256_bytes + 2;
+
+const AuthorizationSigningFields = struct {
+    chain_id: u256,
+    target: Address,
+    nonce: u64,
+};
 
 pub const SenderRecovery = struct {
     sender: Address,
     signing_hash: [32]u8,
 };
 
-pub const SenderRecoveryError = std.mem.Allocator.Error || rlp.Error || error{
+pub const SenderRecoveryError = std.mem.Allocator.Error || rlp.ParseError || error{
     EmptyTransaction,
     InvalidTransactionEnvelope,
     InvalidTransactionFormat,
@@ -60,23 +66,20 @@ pub fn recoverAuthorizationSigner(
     s: u256,
 ) SenderRecoveryError!Address {
     const parity = std.math.cast(u8, y_parity) orelse return error.InvalidSignature;
-    var fields_buffer: [authorization_fields_buffer_bytes]u8 = undefined;
-    var fields = rlp.Writer.fixed(&fields_buffer);
-    writeFixedInt(&fields, u256, chain_id);
-    writeFixedBytes(&fields, &target);
-    writeFixedInt(&fields, u64, nonce);
-
-    var prefix_buffer: [rlp.max_length_prefix_bytes]u8 = undefined;
-    const prefix = rlp.listPrefix(&prefix_buffer, fields.written().len);
-    var message: [1 + rlp.max_length_prefix_bytes + authorization_fields_buffer_bytes]u8 = undefined;
-    var offset: usize = 0;
-    message[offset] = set_code_authorization_magic;
-    offset += 1;
-    @memcpy(message[offset..][0..prefix.len], prefix);
-    offset += prefix.len;
-    @memcpy(message[offset..][0..fields.written().len], fields.written());
-    offset += fields.written().len;
-    return recoverAddress(crypto.keccak256(message[0..offset]), parity, r, s);
+    var message: [authorization_signing_buffer_bytes]u8 = undefined;
+    message[0] = set_code_authorization_magic;
+    const encoded = rlp.encode(
+        AuthorizationSigningFields,
+        message[1..],
+        .{ .chain_id = chain_id, .target = target, .nonce = nonce },
+    ) catch |err| switch (err) {
+        error.BufferTooSmall,
+        error.EncodedLengthMismatch,
+        error.EncodedLengthOverflow,
+        error.ListLimitExceeded,
+        => unreachable,
+    };
+    return recoverAddress(crypto.keccak256(message[0 .. 1 + encoded.len]), parity, r, s);
 }
 
 pub const SigningMessage = struct {
@@ -229,12 +232,6 @@ fn hashParts(allocator: std.mem.Allocator, parts: []const []const u8) SenderReco
 
 fn writeFixedInt(writer: *rlp.Writer, comptime T: type, value: T) void {
     writer.int(T, value) catch |err| switch (err) {
-        error.NoSpaceLeft, error.OutOfMemory => unreachable,
-    };
-}
-
-fn writeFixedBytes(writer: *rlp.Writer, payload: []const u8) void {
-    writer.bytes(payload) catch |err| switch (err) {
         error.NoSpaceLeft, error.OutOfMemory => unreachable,
     };
 }
@@ -413,7 +410,7 @@ fn signedLegacyPayloadForTest(allocator: std.mem.Allocator, unsigned_payload: []
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload);
+    try out.listPayload(payload);
     return try writerOwnedForTest(&out);
 }
 
@@ -434,15 +431,15 @@ fn unsignedTypedPayloadForTest(allocator: std.mem.Allocator, type_id: u8) ![]u8 
     try fields.bytes(&address.addr(0x4444));
     try fields.int(u64, 1_000);
     try fields.bytes("hello");
-    try fields.list("");
+    try fields.listPayload("");
     if (type_id == blob_transaction_type) {
         try fields.int(u64, 3);
         var hashes = rlp.Writer.alloc(allocator);
         defer hashes.deinit();
         try hashes.bytes(&([_]u8{0x01} ** 32));
-        try fields.list(hashes.written());
+        try fields.listPayload(hashes.written());
     } else if (type_id == set_code_transaction_type) {
-        try fields.list("");
+        try fields.listPayload("");
     }
     return try writerOwnedForTest(&fields);
 }
@@ -461,7 +458,7 @@ fn signedTypedTransactionForTest(allocator: std.mem.Allocator, signer: TestSigne
 
     var payload = rlp.Writer.alloc(allocator);
     defer payload.deinit();
-    try payload.list(signed_payload);
+    try payload.listPayload(signed_payload);
 
     const out = try allocator.alloc(u8, 1 + payload.written().len);
     out[0] = type_id;
@@ -478,7 +475,7 @@ fn authorizationHashForTest(allocator: std.mem.Allocator, chain_id: u256, target
 
     var list = rlp.Writer.alloc(allocator);
     defer list.deinit();
-    try list.list(fields.written());
+    try list.listPayload(fields.written());
 
     const message = try allocator.alloc(u8, 1 + list.written().len);
     defer allocator.free(message);

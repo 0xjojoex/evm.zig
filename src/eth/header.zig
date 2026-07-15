@@ -4,7 +4,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
-const rlp = @import("../rlp.zig");
+const rlp = @import("rlp");
 const Revision = @import("revision.zig").Revision;
 
 pub const empty_ommers_hash = [_]u8{
@@ -16,7 +16,7 @@ pub const empty_ommers_hash = [_]u8{
 
 pub const pos_nonce = [_]u8{0} ** 8;
 
-pub const Error = rlp.Writer.Error || error{
+pub const Error = std.mem.Allocator.Error || error{
     ExtraDataTooLong,
     HeaderSurfaceMismatch,
 };
@@ -74,38 +74,14 @@ pub const ExecutionHeader = struct {
 
     pub fn encodeAlloc(self: ExecutionHeader, allocator: std.mem.Allocator, revision: Revision) Error![]u8 {
         try self.validate(revision);
-
-        var fields = rlp.Writer.alloc(allocator);
-        defer fields.deinit();
-        try fields.bytes(&self.parent_hash);
-        try fields.bytes(&self.ommers_hash);
-        try fields.bytes(&self.coinbase);
-        try fields.bytes(&self.state_root);
-        try fields.bytes(&self.transactions_root);
-        try fields.bytes(&self.receipts_root);
-        try fields.bytes(&self.logs_bloom);
-        try fields.int(u256, self.difficulty);
-        try fields.int(u64, self.number);
-        try fields.int(u64, self.gas_limit);
-        try fields.int(u64, self.gas_used);
-        try fields.int(u64, self.timestamp);
-        try fields.bytes(self.extra_data);
-        try fields.bytes(&self.prev_randao);
-        try fields.bytes(&self.nonce);
-
-        if (self.base_fee_per_gas) |value| try fields.int(u256, value);
-        if (self.withdrawals_root) |value| try fields.bytes(&value);
-        if (self.blob_gas_used) |value| try fields.int(u64, value);
-        if (self.excess_blob_gas) |value| try fields.int(u64, value);
-        if (self.parent_beacon_block_root) |value| try fields.bytes(&value);
-        if (self.requests_hash) |value| try fields.bytes(&value);
-        if (self.block_access_list_hash) |value| try fields.bytes(&value);
-        if (self.slot_number) |value| try fields.int(u64, value);
-
-        var encoded = rlp.Writer.alloc(allocator);
-        defer encoded.deinit();
-        try encoded.list(fields.written());
-        return try allocator.dupe(u8, encoded.written());
+        return rlp.encodeListAlloc(emitHeader, allocator, &self) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.BufferTooSmall,
+            error.EncodedLengthMismatch,
+            error.EncodedLengthOverflow,
+            error.ListLimitExceeded,
+            => unreachable,
+        };
     }
 
     pub fn hash(self: ExecutionHeader, allocator: std.mem.Allocator, revision: Revision) Error![32]u8 {
@@ -114,6 +90,37 @@ pub const ExecutionHeader = struct {
         return crypto.keccak256(encoded);
     }
 };
+
+const SharedHeader = struct {
+    parent_hash: [32]u8,
+    ommers_hash: [32]u8,
+    coinbase: Address,
+    state_root: [32]u8,
+    transactions_root: [32]u8,
+    receipts_root: [32]u8,
+    logs_bloom: [256]u8,
+    difficulty: u256,
+    number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    prev_randao: [32]u8,
+    nonce: [8]u8,
+};
+
+fn emitHeader(fields: anytype, header: *const ExecutionHeader) rlp.EncodeError!void {
+    try fields.encodeFields(SharedHeader, header);
+
+    if (header.base_fee_per_gas) |value| try fields.encode(u256, value);
+    if (header.withdrawals_root) |value| try fields.encode([32]u8, value);
+    if (header.blob_gas_used) |value| try fields.encode(u64, value);
+    if (header.excess_blob_gas) |value| try fields.encode(u64, value);
+    if (header.parent_beacon_block_root) |value| try fields.encode([32]u8, value);
+    if (header.requests_hash) |value| try fields.encode([32]u8, value);
+    if (header.block_access_list_hash) |value| try fields.encode([32]u8, value);
+    if (header.slot_number) |value| try fields.encode(u64, value);
+}
 
 test "execution header reproduces Ethereum mainnet genesis hash" {
     const zero_hash = [_]u8{0} ** 32;
@@ -235,6 +242,90 @@ test "Amsterdam execution header encodes distinct tail fields in canonical order
     try std.testing.expectEqualSlices(u8, &([_]u8{0x44} ** 32), try fields.nextBytesExact(32));
     try std.testing.expectEqual(@as(u64, 3), try fields.nextInt(u64));
     try fields.expectDone();
+}
+
+test "execution header selects the exact revision wire surface with one allocation" {
+    const cases = [_]struct {
+        revision: Revision,
+        field_count: usize,
+    }{
+        .{ .revision = .frontier, .field_count = 15 },
+        .{ .revision = .london, .field_count = 16 },
+        .{ .revision = .shanghai, .field_count = 17 },
+        .{ .revision = .cancun, .field_count = 20 },
+        .{ .revision = .prague, .field_count = 21 },
+        .{ .revision = .osaka, .field_count = 21 },
+        .{ .revision = .amsterdam, .field_count = 23 },
+    };
+
+    for (cases) |case| {
+        const header = testHeader(case.revision);
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const before = counted.alloc_index;
+        const encoded = try header.encodeAlloc(counted.allocator(), case.revision);
+        defer counted.allocator().free(encoded);
+        try std.testing.expectEqual(before + 1, counted.alloc_index);
+
+        var root = rlp.Cursor.init(encoded);
+        var fields = try root.nextList();
+        try root.expectDone();
+        var field_count: usize = 0;
+        for (0..15) |_| {
+            _ = try fields.next();
+            field_count += 1;
+        }
+        if (case.revision.isImpl(.london)) {
+            try std.testing.expectEqual(@as(u256, 0x10), try fields.nextInt(u256));
+            field_count += 1;
+        }
+        if (case.revision.isImpl(.shanghai)) {
+            try std.testing.expectEqualSlices(u8, &([_]u8{0x22} ** 32), try fields.nextBytesExact(32));
+            field_count += 1;
+        }
+        if (case.revision.isImpl(.cancun)) {
+            try std.testing.expectEqual(@as(u64, 0x31), try fields.nextInt(u64));
+            try std.testing.expectEqual(@as(u64, 0x32), try fields.nextInt(u64));
+            try std.testing.expectEqualSlices(u8, &([_]u8{0x33} ** 32), try fields.nextBytesExact(32));
+            field_count += 3;
+        }
+        if (case.revision.isImpl(.prague)) {
+            try std.testing.expectEqualSlices(u8, &([_]u8{0x44} ** 32), try fields.nextBytesExact(32));
+            field_count += 1;
+        }
+        if (case.revision.isImpl(.amsterdam)) {
+            try std.testing.expectEqualSlices(u8, &([_]u8{0x55} ** 32), try fields.nextBytesExact(32));
+            try std.testing.expectEqual(@as(u64, 0x56), try fields.nextInt(u64));
+            field_count += 2;
+        }
+        try std.testing.expectEqual(case.field_count, field_count);
+        try fields.expectDone();
+    }
+}
+
+fn testHeader(revision: Revision) ExecutionHeader {
+    const zero_hash = [_]u8{0} ** 32;
+    return .{
+        .parent_hash = zero_hash,
+        .coinbase = [_]u8{0} ** 20,
+        .state_root = zero_hash,
+        .transactions_root = zero_hash,
+        .receipts_root = zero_hash,
+        .logs_bloom = [_]u8{0} ** 256,
+        .number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1,
+        .extra_data = &.{},
+        .prev_randao = zero_hash,
+        .base_fee_per_gas = if (revision.isImpl(.london)) 0x10 else null,
+        .withdrawals_root = if (revision.isImpl(.shanghai)) [_]u8{0x22} ** 32 else null,
+        .blob_gas_used = if (revision.isImpl(.cancun)) 0x31 else null,
+        .excess_blob_gas = if (revision.isImpl(.cancun)) 0x32 else null,
+        .parent_beacon_block_root = if (revision.isImpl(.cancun)) [_]u8{0x33} ** 32 else null,
+        .requests_hash = if (revision.isImpl(.prague)) [_]u8{0x44} ** 32 else null,
+        .block_access_list_hash = if (revision.isImpl(.amsterdam)) [_]u8{0x55} ** 32 else null,
+        .slot_number = if (revision.isImpl(.amsterdam)) 0x56 else null,
+    };
 }
 
 fn testHex(comptime hex: []const u8) [hex.len / 2]u8 {

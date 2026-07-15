@@ -22,9 +22,10 @@ const eip8282 = @import("eip/8282.zig");
 const eth_config = @import("config.zig");
 const eth_system = @import("system.zig");
 const eth_transaction = @import("transaction.zig");
-const mpt = @import("../mpt.zig");
+const trie = @import("trie.zig");
 const prepared_code = @import("../prepared_code.zig");
-const rlp = @import("../rlp.zig");
+const Withdrawal = @import("Withdrawal.zig");
+const rlp = @import("rlp");
 const Revision = @import("revision.zig").Revision;
 const state = @import("../state.zig");
 const transaction = @import("../transaction.zig");
@@ -153,7 +154,7 @@ pub const BlockInput = struct {
     /// Caller-owned prepared-artifact service; not part of the VM resource bound.
     prepared_code_backend: ?prepared_code.Backend = null,
     transactions: []const TransactionInput,
-    withdrawals: []const mpt.Withdrawal = &.{},
+    withdrawals: []const Withdrawal = &.{},
     parent_header: ?ParentHeaderContext = null,
     parent_blob_gas: ?ParentBlobGas = null,
     block_access_list: ?[]const u8 = null,
@@ -203,10 +204,10 @@ pub const Result = struct {
     gas_used: u64 = 0,
     block_gas_used: u64 = 0,
     block_state_gas_used: u64 = 0,
-    state_root: [32]u8 = mpt.empty_root_hash,
-    transactions_root: [32]u8 = mpt.empty_root_hash,
-    receipts_root: [32]u8 = mpt.empty_root_hash,
-    withdrawals_root: [32]u8 = mpt.empty_root_hash,
+    state_root: [32]u8 = trie.empty_root_hash,
+    transactions_root: [32]u8 = trie.empty_root_hash,
+    receipts_root: [32]u8 = trie.empty_root_hash,
+    withdrawals_root: [32]u8 = trie.empty_root_hash,
     logs_bloom: [256]u8 = empty_logs_bloom,
     blob_gas_used: u64 = 0,
     excess_blob_gas: ?u256 = null,
@@ -251,7 +252,12 @@ comptime {
     }
 }
 
+/// Execute one block transition. Ownership of `input.state_backend` transfers
+/// to this call and is released on every return path.
 pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
+    var state_backend = input.state_backend;
+    defer state_backend.deinit();
+
     if (!blockBodyValid(input)) return .{ .status = .invalid_block_body };
     if (parentHeaderStatus(input)) |status| return .{ .status = status };
     if (!blockContextValid(input)) return .{ .status = .header_surface_mismatch };
@@ -267,8 +273,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var claimed_block_access_list: ?eth_bal.Decoded = null;
     defer if (claimed_block_access_list) |*decoded| decoded.deinit(allocator);
     if (input.block_access_list) |encoded_claim| {
-        claimed_block_access_list = eth_bal.decode(allocator, encoded_claim) catch |err| switch (err) {
+        var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
+            encoded_claim.len,
+            block_access_transaction_count,
+            input.env.gas_limit,
+        ));
+        claimed_block_access_list = eth_bal.decodeWithBudget(allocator, encoded_claim, &bal_budget) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.DecodeAllocationLimitExceeded,
+            error.DecodeItemLimitExceeded,
+            => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
         validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
@@ -282,7 +296,6 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    var state_backend = input.state_backend;
     var evm = Vm.init(allocator, .{
         .revision = input.revision,
         .state_reader = state_backend.reader(),
@@ -475,8 +488,8 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             else => return err,
         },
         .transactions_root = try transactionRoot(allocator, input.transactions),
-        .receipts_root = try mpt.receiptRoot(allocator, encoded_receipts.items),
-        .withdrawals_root = try mpt.withdrawalsRoot(allocator, input.withdrawals),
+        .receipts_root = try trie.receiptRoot(allocator, encoded_receipts.items),
+        .withdrawals_root = try trie.withdrawalsRoot(allocator, input.withdrawals),
         .logs_bloom = block_logs_bloom,
         .blob_gas_used = blob_gas_used,
         .excess_blob_gas = excess_blob_gas,
@@ -784,12 +797,12 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
     defer encoded.deinit(allocator);
     try encoded.ensureTotalCapacity(allocator, transactions.len);
     for (transactions) |entry| encoded.appendAssumeCapacity(entry.encoded);
-    return try mpt.transactionRoot(allocator, encoded.items);
+    return try trie.transactionRoot(allocator, encoded.items);
 }
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-fn applyWithdrawals(evm: *Vm, withdrawals: []const mpt.Withdrawal) !void {
+fn applyWithdrawals(evm: *Vm, withdrawals: []const Withdrawal) !void {
     for (withdrawals) |withdrawal| {
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
         evm.creditBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
@@ -847,66 +860,53 @@ fn blockBlobGasLimit(revision: Revision, blob_schedule: ?transaction.BlobSchedul
     return std.math.mul(u64, schedule.max, schedule.gas_per_blob) catch error.BlobGasOverflow;
 }
 
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Vm.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
-    const payload = try encodeReceiptPayload(allocator, receipt);
-    errdefer allocator.free(payload);
+const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
+    pub fn toWire(topic: u256) [32]u8 {
+        return uint256.toBytes32(topic);
+    }
 
-    const type_id = transactionType(kind) orelse return payload;
-    const encoded = try allocator.alloc(u8, payload.len + 1);
-    encoded[0] = type_id;
-    @memcpy(encoded[1..], payload);
-    allocator.free(payload);
+    pub fn fromWire(encoded: [32]u8) u256 {
+        return uint256.fromBytes32(&encoded);
+    }
+});
+
+const LogRlp = rlp.Struct(Log, .{
+    .topics = rlp.BoundedListOf(TopicRlp, 4),
+});
+
+const ReceiptPayload = struct {
+    status: u8,
+    cumulative_gas_used: u64,
+    logs_bloom: [256]u8,
+    logs: []const Log,
+
+    pub const Rlp = rlp.Struct(@This(), .{
+        .logs = rlp.ListOf(LogRlp),
+    });
+};
+
+pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Vm.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
+    const payload: ReceiptPayload = .{
+        .status = receiptStatus(receipt.status),
+        .cumulative_gas_used = receipt.cumulative_gas_used,
+        .logs_bloom = logsBloom(receipt.logs),
+        .logs = receipt.logs,
+    };
+    const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
+    const type_id = transactionType(kind);
+    const envelope_len: usize = if (type_id == null) 0 else 1;
+    const encoded_len = std.math.add(usize, envelope_len, payload_len) catch
+        return error.EncodedLengthOverflow;
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+
+    if (type_id) |id| encoded[0] = id;
+    const written = try rlp.encode(ReceiptPayload, encoded[envelope_len..], &payload);
+    std.debug.assert(written.len == payload_len);
     return encoded;
 }
 
-fn encodeReceiptPayload(allocator: std.mem.Allocator, receipt: TxReceiptView) ![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    defer fields.deinit();
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-
-    try fields.int(u8, try receiptStatus(receipt.status));
-    try fields.int(u64, receipt.cumulative_gas_used);
-    try fields.bytes(&logsBloom(receipt.logs));
-    const logs_payload = try encodedLogsPayload(allocator, receipt.logs);
-    defer allocator.free(logs_payload);
-    try fields.list(logs_payload);
-
-    try out.list(fields.written());
-    return try writerOwned(&out);
-}
-
-fn encodedLogsPayload(allocator: std.mem.Allocator, logs: []const Log) ![]u8 {
-    var payload = rlp.Writer.alloc(allocator);
-    errdefer payload.deinit();
-
-    for (logs) |event_log| {
-        const encoded = try encodeLogPayload(allocator, event_log);
-        defer allocator.free(encoded);
-        try payload.list(encoded);
-    }
-
-    return try writerOwned(&payload);
-}
-
-fn encodeLogPayload(allocator: std.mem.Allocator, event_log: Log) ![]u8 {
-    var fields = rlp.Writer.alloc(allocator);
-    errdefer fields.deinit();
-    var topics = rlp.Writer.alloc(allocator);
-    defer topics.deinit();
-
-    try fields.bytes(&event_log.address);
-    for (event_log.topics) |topic| {
-        var encoded_topic: [32]u8 = undefined;
-        std.mem.writeInt(u256, &encoded_topic, topic, .big);
-        try topics.bytes(&encoded_topic);
-    }
-    try fields.list(topics.written());
-    try fields.bytes(event_log.data);
-    return try writerOwned(&fields);
-}
-
-fn receiptStatus(status: TxStatus) !u8 {
+fn receiptStatus(status: TxStatus) u8 {
     return switch (status) {
         .success => 1,
         .revert, .invalid, .out_of_gas => 0,
@@ -928,8 +928,7 @@ fn logsBloom(logs: []const Log) [256]u8 {
     for (logs) |event_log| {
         addBloomEntry(&bloom, &event_log.address);
         for (event_log.topics) |topic| {
-            var encoded_topic: [32]u8 = undefined;
-            std.mem.writeInt(u256, &encoded_topic, topic, .big);
+            const encoded_topic = uint256.toBytes32(topic);
             addBloomEntry(&bloom, &encoded_topic);
         }
     }
@@ -994,10 +993,10 @@ test "BlockSTF validates a single witnessed transaction" {
         0xa1, // LOG1
         0x00, // STOP
     };
-    const code_hash = mpt.codeHash(&code);
+    const code_hash = crypto.keccak256(&code);
 
-    const account_key = mpt.hashedAddressKey(target);
-    const pre_account_value = try mpt.accountValueFrom(scratch, .{
+    const account_key = trie.hashedAddressKey(target);
+    const pre_account_value = try trie.accountValueFrom(scratch, .{
         .balance = 1_000_000,
         .code_hash = code_hash,
     });
@@ -1015,27 +1014,27 @@ test "BlockSTF validates a single witnessed transaction" {
         .encoded = "tx0",
     }};
 
-    const storage_key = mpt.hashedStorageKey(0);
-    const storage_value = try mpt.storageValue(scratch, 42);
-    const post_storage_pairs = [_]mpt.Pair{.{ .key = &storage_key, .value = storage_value }};
-    const post_storage_root = try mpt.root(scratch, &post_storage_pairs);
-    const post_account_value = try mpt.accountValueFrom(scratch, .{
+    const storage_key = trie.hashedStorageKey(0);
+    const storage_value = try trie.storageValue(scratch, 42);
+    const post_storage_pairs = [_]trie.Pair{.{ .key = &storage_key, .value = storage_value }};
+    const post_storage_root = try trie.root(scratch, &post_storage_pairs);
+    const post_account_value = try trie.accountValueFrom(scratch, .{
         .nonce = 1,
         .balance = 1_000_000,
         .storage_root = post_storage_root,
         .code_hash = code_hash,
     });
-    const post_state_pairs = [_]mpt.Pair{.{ .key = &account_key, .value = post_account_value }};
-    const expected_state_root = try mpt.root(scratch, &post_state_pairs);
+    const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
+    const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
     const first_result = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             [_]u8{0xff} ** 32,
         ),
     });
@@ -1052,7 +1051,7 @@ test "BlockSTF validates a single witnessed transaction" {
         .cumulative_gas_used = first_result.gas_used,
         .logs = &.{receipt_log},
     });
-    const expected_receipts_root = try mpt.receiptRoot(scratch, &.{encoded_receipt});
+    const expected_receipts_root = try trie.receiptRoot(scratch, &.{encoded_receipt});
     const expected_logs_bloom = logsBloom(&.{receipt_log});
     try std.testing.expectEqualSlices(u8, &expected_receipts_root, &first_result.receipts_root);
     try std.testing.expectEqualSlices(u8, &expected_logs_bloom, &first_result.logs_bloom);
@@ -1060,11 +1059,11 @@ test "BlockSTF validates a single witnessed transaction" {
     const result = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
         .header_claims = .{
@@ -1081,11 +1080,11 @@ test "BlockSTF validates a single witnessed transaction" {
     const gas_mismatch = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
         .header_claims = .{ .gas_used = first_result.gas_used + 1 },
@@ -1095,11 +1094,11 @@ test "BlockSTF validates a single witnessed transaction" {
     const block_gas_mismatch = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
         .header_claims = .{ .block_gas_used = first_result.block_gas_used + 1 },
@@ -1109,11 +1108,11 @@ test "BlockSTF validates a single witnessed transaction" {
     const logs_bloom_mismatch = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
         .header_claims = .{ .logs_bloom = [_]u8{0xff} ** 256 },
@@ -1127,8 +1126,8 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     const scratch = arena.allocator();
 
     const sender = address.addr(0x1100);
-    const sender_key = mpt.hashedAddressKey(sender);
-    const sender_account_value = try mpt.accountValueFrom(scratch, .{ .balance = 1_000_000 });
+    const sender_key = trie.hashedAddressKey(sender);
+    const sender_account_value = try trie.accountValueFrom(scratch, .{ .balance = 1_000_000 });
     const state_node = try testLeafNode(scratch, &sender_key, sender_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
@@ -1155,35 +1154,35 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     randao_bytes[0] = 0x01;
     randao_bytes[31] = 0x02;
     const prev_randao = std.mem.readInt(u256, &randao_bytes, .big);
-    const storage_key = mpt.hashedStorageKey(0);
-    const storage_value = try mpt.storageValue(scratch, prev_randao);
-    const storage_pairs = [_]mpt.Pair{.{ .key = &storage_key, .value = storage_value }};
-    const created_storage_root = try mpt.root(scratch, &storage_pairs);
+    const storage_key = trie.hashedStorageKey(0);
+    const storage_value = try trie.storageValue(scratch, prev_randao);
+    const storage_pairs = [_]trie.Pair{.{ .key = &storage_key, .value = storage_value }};
+    const created_storage_root = try trie.root(scratch, &storage_pairs);
 
     const created = address.create(sender, 0);
-    const created_key = mpt.hashedAddressKey(created);
-    const post_sender_account = try mpt.accountValueFrom(scratch, .{
+    const created_key = trie.hashedAddressKey(created);
+    const post_sender_account = try trie.accountValueFrom(scratch, .{
         .nonce = 1,
         .balance = 1_000_000,
     });
-    const post_created_account = try mpt.accountValueFrom(scratch, .{
+    const post_created_account = try trie.accountValueFrom(scratch, .{
         .nonce = 1,
         .storage_root = created_storage_root,
     });
-    const post_state_pairs = [_]mpt.Pair{
+    const post_state_pairs = [_]trie.Pair{
         .{ .key = &sender_key, .value = post_sender_account },
         .{ .key = &created_key, .value = post_created_account },
     };
-    const expected_state_root = try mpt.root(scratch, &post_state_pairs);
+    const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
     const first_result = try apply(scratch, .{
         .revision = .merge,
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             [_]u8{0xff} ** 32,
         ),
     });
@@ -1192,11 +1191,11 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     const result = try apply(scratch, .{
         .revision = .merge,
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
         .header_claims = .{ .gas_used = first_result.gas_used },
@@ -1212,8 +1211,8 @@ test "BlockSTF reports root mismatches and invalid witness" {
     const scratch = arena.allocator();
 
     const target = address.addr(0x2000);
-    const account_key = mpt.hashedAddressKey(target);
-    const account_value = try mpt.accountValueFrom(scratch, .{ .balance = 1_000_000 });
+    const account_key = trie.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = 1_000_000 });
     const state_node = try testLeafNode(scratch, &account_key, account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
@@ -1225,11 +1224,11 @@ test "BlockSTF reports root mismatches and invalid witness" {
     const mismatch = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             [_]u8{0xff} ** 32,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             [_]u8{0xff} ** 32,
         ),
     });
@@ -1238,12 +1237,12 @@ test "BlockSTF reports root mismatches and invalid witness" {
     const invalid = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             pre_state_root,
-            try mpt.transactionRoot(scratch, &.{tx_input[0].encoded}),
-            mpt.empty_root_hash,
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            trie.empty_root_hash,
         ),
     });
     try std.testing.expectEqual(Status.invalid_witness, invalid.status);
@@ -1255,7 +1254,7 @@ test "BlockSTF validates withdrawals root" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const withdrawals = [_]mpt.Withdrawal{
+    const withdrawals = [_]Withdrawal{
         .{
             .index = 1,
             .validator_index = 2,
@@ -1269,25 +1268,25 @@ test "BlockSTF validates withdrawals root" {
             .amount = 6,
         },
     };
-    const expected_withdrawals_root = try mpt.withdrawalsRoot(scratch, &withdrawals);
-    const account0_key = mpt.hashedAddressKey(withdrawals[0].address);
-    const account0_value = try mpt.accountValueFrom(scratch, .{ .balance = withdrawals[0].amount * withdrawal_gwei_in_wei });
-    const account1_key = mpt.hashedAddressKey(withdrawals[1].address);
-    const account1_value = try mpt.accountValueFrom(scratch, .{ .balance = withdrawals[1].amount * withdrawal_gwei_in_wei });
-    const expected_state_pairs = [_]mpt.Pair{
+    const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
+    const account0_key = trie.hashedAddressKey(withdrawals[0].address);
+    const account0_value = try trie.accountValueFrom(scratch, .{ .balance = withdrawals[0].amount * withdrawal_gwei_in_wei });
+    const account1_key = trie.hashedAddressKey(withdrawals[1].address);
+    const account1_value = try trie.accountValueFrom(scratch, .{ .balance = withdrawals[1].amount * withdrawal_gwei_in_wei });
+    const expected_state_pairs = [_]trie.Pair{
         .{ .key = &account0_key, .value = account0_value },
         .{ .key = &account1_key, .value = account1_value },
     };
-    const expected_state_root = try mpt.root(scratch, &expected_state_pairs);
+    const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
     const result = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
             expected_state_root,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             expected_withdrawals_root,
         ),
     });
@@ -1296,13 +1295,13 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
     const mismatch = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
             expected_state_root,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             [_]u8{0xff} ** 32,
         ),
     });
@@ -1320,10 +1319,10 @@ test "BlockSTF applies Cancun block-start system contract" {
         &beacon_code_buf,
         "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500",
     );
-    const beacon_code_hash = mpt.codeHash(beacon_code);
+    const beacon_code_hash = crypto.keccak256(beacon_code);
 
-    const account_key = mpt.hashedAddressKey(beacon_address);
-    const pre_account_value = try mpt.accountValueFrom(scratch, .{ .code_hash = beacon_code_hash });
+    const account_key = trie.hashedAddressKey(beacon_address);
+    const pre_account_value = try trie.accountValueFrom(scratch, .{ .code_hash = beacon_code_hash });
     const state_node = try testLeafNode(scratch, &account_key, pre_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
@@ -1332,21 +1331,21 @@ test "BlockSTF applies Cancun block-start system contract" {
     var parent_beacon_root = [_]u8{0} ** 32;
     parent_beacon_root[31] = 0xbb;
     const timestamp: u64 = 12;
-    const timestamp_key = mpt.hashedStorageKey(timestamp);
-    const root_key = mpt.hashedStorageKey(8191 + timestamp);
-    const timestamp_value = try mpt.storageValue(scratch, timestamp);
-    const root_value = try mpt.storageValue(scratch, std.mem.readInt(u256, &parent_beacon_root, .big));
-    const post_storage_pairs = [_]mpt.Pair{
+    const timestamp_key = trie.hashedStorageKey(timestamp);
+    const root_key = trie.hashedStorageKey(8191 + timestamp);
+    const timestamp_value = try trie.storageValue(scratch, timestamp);
+    const root_value = try trie.storageValue(scratch, std.mem.readInt(u256, &parent_beacon_root, .big));
+    const post_storage_pairs = [_]trie.Pair{
         .{ .key = &timestamp_key, .value = timestamp_value },
         .{ .key = &root_key, .value = root_value },
     };
-    const post_storage_root = try mpt.root(scratch, &post_storage_pairs);
-    const post_account_value = try mpt.accountValueFrom(scratch, .{
+    const post_storage_root = try trie.root(scratch, &post_storage_pairs);
+    const post_account_value = try trie.accountValueFrom(scratch, .{
         .storage_root = post_storage_root,
         .code_hash = beacon_code_hash,
     });
-    const post_state_pairs = [_]mpt.Pair{.{ .key = &account_key, .value = post_account_value }};
-    const expected_state_root = try mpt.root(scratch, &post_state_pairs);
+    const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
+    const expected_state_root = try trie.root(scratch, &post_state_pairs);
     const parent_hash = [_]u8{0x11} ** 32;
 
     const result = try apply(scratch, .{
@@ -1358,7 +1357,7 @@ test "BlockSTF applies Cancun block-start system contract" {
             .parent_hash = parent_hash,
             .parent_beacon_block_root = parent_beacon_root,
         },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &codes),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &.{},
         .parent_header = .{
             .hash = parent_hash,
@@ -1368,7 +1367,7 @@ test "BlockSTF applies Cancun block-start system contract" {
             .gas_used = 0,
             .base_fee_per_gas = 0,
         },
-        .root_checks = testRootChecks(expected_state_root, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(expected_state_root, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_state_root, &result.state_root);
@@ -1378,9 +1377,9 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     const missing = try apply(std.testing.allocator, .{
         .revision = .cancun,
         .env = .{ .number = 1, .timestamp = 2 },
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
@@ -1394,7 +1393,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
             .parent_hash = parent_hash,
             .parent_beacon_block_root = [_]u8{0} ** 32,
         },
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_header = .{
             .hash = parent_hash,
@@ -1404,7 +1403,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
             .gas_used = 0,
             .base_fee_per_gas = 0,
         },
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.timestamp_mismatch, inconsistent.status);
 }
@@ -1423,9 +1422,9 @@ test "BlockSTF validates parent-derived header rules before execution" {
             .gas_used = 5_000_000,
             .base_fee_per_gas = 7,
         },
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     };
     try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(input));
 
@@ -1475,9 +1474,9 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     const scratch = arena.allocator();
 
     const result = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{ .requests_hash = empty_requests_hash },
     });
     try std.testing.expectEqual(Status.valid, result.status);
@@ -1500,9 +1499,9 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
         const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
 
         const mismatch = try apply(scratch, .{
-            .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+            .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
             .transactions = &.{},
-            .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+            .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
             .header_claims = .{ .requests_hash = claimed_requests_hash },
         });
         try std.testing.expectEqual(Status.requests_hash_mismatch, mismatch.status);
@@ -1553,14 +1552,14 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
             .gas_limit = 30_000_000,
             .base_fee = 7,
         },
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
             .parent_excess_blob_gas = 0,
             .parent_blob_gas_used = 0,
             .parent_base_fee_per_gas = 7,
         },
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_hash_claim = .{
             .block_hash = zero_hash,
             .parent_hash = zero_hash,
@@ -1588,10 +1587,10 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
     const valid = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{ .block_access_list_hash = eth_bal.empty_hash },
     });
     try std.testing.expectEqual(Status.valid, valid.status);
@@ -1600,36 +1599,36 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
     const artifact_mismatch = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
     const hash_mismatch = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{ .block_access_list_hash = [_]u8{0xff} ** 32 },
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
     const malformed_claim = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.invalid_block_access_list, malformed_claim.status);
 
     const oversized_claim = try apply(scratch, .{
         .env = .{ .gas_limit = 1 },
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.block_access_list_too_large, oversized_claim.status);
 }
@@ -1639,26 +1638,26 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const withdrawal = mpt.Withdrawal{
+    const withdrawal = Withdrawal{
         .index = 1,
         .validator_index = 2,
         .address = address.addr(0x7777),
         .amount = 0,
     };
-    const withdrawals = [_]mpt.Withdrawal{withdrawal};
-    const expected_withdrawals_root = try mpt.withdrawalsRoot(scratch, &withdrawals);
+    const withdrawals = [_]Withdrawal{withdrawal};
+    const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
     const claimed_accounts = [_]eth_bal.AccountChanges{.{ .address = withdrawal.address }};
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
     const result = try apply(scratch, .{
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .block_access_list = claimed_bal,
         .root_checks = testRootChecksWithWithdrawals(
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             expected_withdrawals_root,
         ),
     });
@@ -1679,8 +1678,8 @@ test "BlockSTF validates blob gas header fields" {
     const expected_blob_gas_used: u64 = 2 * eth_transaction.Transaction.blobSchedule(.prague).?.gas_per_blob;
     const starting_balance: u256 = 1_000_000;
 
-    const account_key = mpt.hashedAddressKey(sender);
-    const pre_account_value = try mpt.accountValueFrom(scratch, .{ .balance = starting_balance });
+    const account_key = trie.hashedAddressKey(sender);
+    const pre_account_value = try trie.accountValueFrom(scratch, .{ .balance = starting_balance });
     const state_node = try testLeafNode(scratch, &account_key, pre_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
@@ -1698,13 +1697,13 @@ test "BlockSTF validates blob gas header fields" {
         .encoded = "blobtx0",
     }};
 
-    const post_account_value = try mpt.accountValueFrom(scratch, .{
+    const post_account_value = try trie.accountValueFrom(scratch, .{
         .nonce = 1,
         .balance = starting_balance - expected_blob_gas_used,
     });
-    const post_state_pairs = [_]mpt.Pair{.{ .key = &account_key, .value = post_account_value }};
-    const expected_state_root = try mpt.root(scratch, &post_state_pairs);
-    const expected_transactions_root = try mpt.transactionRoot(scratch, &.{tx_input[0].encoded});
+    const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
+    const expected_state_root = try trie.root(scratch, &post_state_pairs);
+    const expected_transactions_root = try trie.transactionRoot(scratch, &.{tx_input[0].encoded});
     const parent_blob_gas = ParentBlobGas{
         .parent_excess_blob_gas = 786_432,
         .parent_blob_gas_used = 786_432,
@@ -1719,7 +1718,7 @@ test "BlockSTF validates blob gas header fields" {
     const first_result = try apply(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -1735,7 +1734,7 @@ test "BlockSTF validates blob gas header fields" {
     const result = try apply(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -1753,7 +1752,7 @@ test "BlockSTF validates blob gas header fields" {
     const custom_schedule_result = try apply(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_blob_schedule },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -1772,7 +1771,7 @@ test "BlockSTF validates blob gas header fields" {
     const blob_gas_mismatch = try apply(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -1787,7 +1786,7 @@ test "BlockSTF validates blob gas header fields" {
     const excess_blob_gas_mismatch = try apply(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -1824,8 +1823,8 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
         (@as(u256, 0x01) << 248) | 5,
         (@as(u256, 0x01) << 248) | 6,
     };
-    const account_key = mpt.hashedAddressKey(sender);
-    const pre_account_value = try mpt.accountValueFrom(scratch, .{ .balance = 2_000_000 });
+    const account_key = trie.hashedAddressKey(sender);
+    const pre_account_value = try trie.accountValueFrom(scratch, .{ .balance = 2_000_000 });
     const state_node = try testLeafNode(scratch, &account_key, pre_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
@@ -1874,9 +1873,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     const oversized_result = try apply(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, oversized_result.status);
     try std.testing.expectEqual(@as(?usize, 0), oversized_result.tx_index);
@@ -1885,9 +1884,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     const pre_cancun_result = try apply(scratch, .{
         .revision = .shanghai,
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.transaction_rejected, pre_cancun_result.status);
     try std.testing.expectEqual(@as(?usize, 0), pre_cancun_result.tx_index);
@@ -1897,9 +1896,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     const custom_schedule_result = try apply(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_schedule },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = transactions[0..1],
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, custom_schedule_result.status);
     try std.testing.expectEqual(@as(?usize, 0), custom_schedule_result.tx_index);
@@ -1907,9 +1906,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     const result = try apply(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 42_000, .blob_base_fee = 1 },
-        .state_backend = state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &transactions,
-        .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
 
     const schedule = eth_transaction.Transaction.blobSchedule(.cancun).?;
@@ -1924,50 +1923,50 @@ test "BlockSTF applies withdrawals to state balances" {
     const scratch = arena.allocator();
 
     const recipient = address.addr(0x1234);
-    const withdrawals = [_]mpt.Withdrawal{.{
+    const withdrawals = [_]Withdrawal{.{
         .index = 0,
         .validator_index = 1,
         .address = recipient,
         .amount = 3,
     }};
     const credited_balance: u256 = 3 * withdrawal_gwei_in_wei;
-    const account_key = mpt.hashedAddressKey(recipient);
-    const account_value = try mpt.accountValueFrom(scratch, .{ .balance = credited_balance });
-    const expected_state_pairs = [_]mpt.Pair{.{ .key = &account_key, .value = account_value }};
-    const expected_state_root = try mpt.root(scratch, &expected_state_pairs);
-    const expected_withdrawals_root = try mpt.withdrawalsRoot(scratch, &withdrawals);
+    const account_key = trie.hashedAddressKey(recipient);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = credited_balance });
+    const expected_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = account_value }};
+    const expected_state_root = try trie.root(scratch, &expected_state_pairs);
+    const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
     const result = try apply(scratch, .{
         .revision = .shanghai,
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
             expected_state_root,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             expected_withdrawals_root,
         ),
     });
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_state_root, &result.state_root);
 
-    const mutated_withdrawals = [_]mpt.Withdrawal{.{
+    const mutated_withdrawals = [_]Withdrawal{.{
         .index = withdrawals[0].index,
         .validator_index = withdrawals[0].validator_index,
         .address = withdrawals[0].address,
         .amount = withdrawals[0].amount + 1,
     }};
-    const mutated_withdrawals_root = try mpt.withdrawalsRoot(scratch, &mutated_withdrawals);
+    const mutated_withdrawals_root = try trie.withdrawalsRoot(scratch, &mutated_withdrawals);
     const mutated = try apply(scratch, .{
         .revision = .shanghai,
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &mutated_withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
             expected_state_root,
-            mpt.empty_root_hash,
-            mpt.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
             mutated_withdrawals_root,
         ),
     });
@@ -1975,17 +1974,17 @@ test "BlockSTF applies withdrawals to state balances" {
 }
 
 test "BlockSTF rejects fork-inactive body fields before state access" {
-    const withdrawal = mpt.Withdrawal{
+    const withdrawal = Withdrawal{
         .index = 0,
         .validator_index = 0,
         .address = address.addr(0x1234),
         .amount = 1,
     };
-    const roots = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash);
+    const roots = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash);
 
     const pre_shanghai = try apply(std.testing.allocator, .{
         .revision = .merge,
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &.{withdrawal},
         .root_checks = roots,
@@ -1994,7 +1993,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
 
     const pre_cancun = try apply(std.testing.allocator, .{
         .revision = .shanghai,
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
             .parent_excess_blob_gas = 0,
@@ -2007,7 +2006,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
 
     const pre_amsterdam = try apply(std.testing.allocator, .{
         .revision = .prague,
-        .state_backend = state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{},
         .root_checks = roots,
@@ -2016,19 +2015,24 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
 }
 
 test "stateless receipt encoder writes consensus receipt rlp" {
-    const encoded = try encodeReceipt(std.testing.allocator, .legacy, .{
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const legacy_before = counted.alloc_index;
+    const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .success,
         .cumulative_gas_used = 21_000,
     });
-    defer std.testing.allocator.free(encoded);
+    defer counted.allocator().free(encoded);
 
+    try std.testing.expectEqual(legacy_before + 1, counted.alloc_index);
     try expectHex(encoded, "f9010801825208b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0");
 
-    const typed = try encodeReceipt(std.testing.allocator, .dynamic_fee, .{
+    const typed_before = counted.alloc_index;
+    const typed = try encodeReceipt(counted.allocator(), .dynamic_fee, .{
         .status = .success,
         .cumulative_gas_used = 21_000,
     });
-    defer std.testing.allocator.free(typed);
+    defer counted.allocator().free(typed);
+    try std.testing.expectEqual(typed_before + 1, counted.alloc_index);
     try std.testing.expectEqual(@as(u8, 0x02), typed[0]);
     try std.testing.expectEqualSlices(u8, encoded, typed[1..]);
 }
@@ -2041,32 +2045,91 @@ test "stateless receipt encoder includes logs and bloom" {
         .topics = &topics,
         .data = &.{ 0xab, 0xcd },
     };
-    const encoded = try encodeReceipt(std.testing.allocator, .legacy, .{
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const before = counted.alloc_index;
+    const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .revert,
         .cumulative_gas_used = 30_000,
         .logs = &.{event_log},
     });
-    defer std.testing.allocator.free(encoded);
+    defer counted.allocator().free(encoded);
 
-    var cursor = rlp.Cursor.init(encoded);
-    var receipt = try cursor.nextList();
-    try cursor.expectDone();
-    try std.testing.expectEqual(@as(u8, 0), try receipt.nextInt(u8));
-    try std.testing.expectEqual(@as(u64, 30_000), try receipt.nextInt(u64));
-    const bloom = try receipt.nextBytesExact(256);
-    try std.testing.expect(!std.mem.allEqual(u8, bloom, 0));
+    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    var raw = rlp.Cursor.init(encoded);
+    var raw_receipt = try raw.nextList();
+    try raw.expectDone();
+    _ = try raw_receipt.nextInt(u8);
+    _ = try raw_receipt.nextInt(u64);
+    _ = try raw_receipt.nextBytesExact(256);
+    var raw_logs = try raw_receipt.nextList();
+    var raw_log = try raw_logs.nextList();
+    try std.testing.expectEqualSlices(u8, &target, try raw_log.nextBytesExact(20));
+    var raw_topics = try raw_log.nextList();
+    const expected_topic = uint256.toBytes32(topics[0]);
+    try std.testing.expectEqualSlices(u8, &expected_topic, try raw_topics.nextBytesExact(32));
+    try raw_topics.expectDone();
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, try raw_log.nextBytes());
+    try raw_log.expectDone();
+    try raw_logs.expectDone();
+    try raw_receipt.expectDone();
 
-    var logs = try receipt.nextList();
-    var log = try logs.nextList();
-    try std.testing.expectEqualSlices(u8, &target, try log.nextBytesExact(20));
-    var encoded_topics = try log.nextList();
-    const encoded_topic = try encoded_topics.nextBytesExact(32);
-    try std.testing.expectEqual(@as(u256, 0x1234), std.mem.readInt(u256, encoded_topic[0..32], .big));
-    try encoded_topics.expectDone();
-    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, try log.nextBytes());
-    try log.expectDone();
-    try logs.expectDone();
-    try receipt.expectDone();
+    var decoded = try rlp.decodeAlloc(ReceiptPayload, std.testing.allocator, encoded);
+    defer rlp.deinit(ReceiptPayload, std.testing.allocator, &decoded);
+    try std.testing.expectEqual(@as(u8, 0), decoded.status);
+    try std.testing.expectEqual(@as(u64, 30_000), decoded.cumulative_gas_used);
+    try std.testing.expect(!std.mem.allEqual(u8, &decoded.logs_bloom, 0));
+    try std.testing.expectEqual(@as(usize, 1), decoded.logs.len);
+    try std.testing.expectEqualSlices(u8, &target, &decoded.logs[0].address);
+    try std.testing.expectEqualSlices(u256, &topics, decoded.logs[0].topics);
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, decoded.logs[0].data);
+}
+
+test "stateless receipt schema enforces the EVM log topic limit" {
+    const accepted_topics = [_]u256{ 1, 2, 3, 4 };
+    const accepted = try encodeReceipt(std.testing.allocator, .legacy, .{
+        .status = .success,
+        .logs = &.{.{
+            .address = address.addr(0x3000),
+            .topics = &accepted_topics,
+            .data = &.{},
+        }},
+    });
+    defer std.testing.allocator.free(accepted);
+
+    const rejected_topics = [_]u256{ 1, 2, 3, 4, 5 };
+    try std.testing.expectError(error.ListLimitExceeded, encodeReceipt(std.testing.allocator, .legacy, .{
+        .status = .success,
+        .logs = &.{.{
+            .address = address.addr(0x3000),
+            .topics = &rejected_topics,
+            .data = &.{},
+        }},
+    }));
+}
+
+test "stateless receipt typed decode cleans nested allocation failures" {
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const topics = [_]u256{ 1, 2 };
+            const logs = [_]Log{.{
+                .address = address.addr(0x3000),
+                .topics = &topics,
+                .data = &.{ 0xab, 0xcd },
+            }};
+            const payload: ReceiptPayload = .{
+                .status = 1,
+                .cumulative_gas_used = 21_000,
+                .logs_bloom = logsBloom(&logs),
+                .logs = &logs,
+            };
+            var out: [512]u8 = undefined;
+            const encoded = try rlp.encode(ReceiptPayload, &out, &payload);
+            var decoded = try rlp.decodeAlloc(ReceiptPayload, allocator, encoded);
+            defer rlp.deinit(ReceiptPayload, allocator, &decoded);
+            try std.testing.expectEqualSlices(u256, &topics, decoded.logs[0].topics);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
 }
 
 fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
@@ -2077,7 +2140,7 @@ fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8
 
     var out = rlp.Writer.alloc(allocator);
     errdefer out.deinit();
-    try out.list(payload.written());
+    try out.listPayload(payload.written());
     return try writerOwned(&out);
 }
 

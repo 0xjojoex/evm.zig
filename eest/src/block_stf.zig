@@ -6,7 +6,7 @@ const JsonArray = std.json.Array;
 const JsonObject = std.json.ObjectMap;
 const JsonValue = fixture_common.JsonValue;
 const block_stf = evmz.eth.block_stf;
-const mpt = evmz.mpt;
+const trie = evmz.eth.trie;
 
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
@@ -493,8 +493,8 @@ fn parseTransactions(allocator: std.mem.Allocator, array: JsonArray) ![]const bl
     return out;
 }
 
-fn parseWithdrawals(allocator: std.mem.Allocator, array: JsonArray) ![]const mpt.Withdrawal {
-    const out = try allocator.alloc(mpt.Withdrawal, array.items.len);
+fn parseWithdrawals(allocator: std.mem.Allocator, array: JsonArray) ![]const evmz.eth.Withdrawal {
+    const out = try allocator.alloc(evmz.eth.Withdrawal, array.items.len);
     for (out, array.items) |*target, value| {
         const object = asObject(value) orelse return error.MalformedFixture;
         target.* = .{
