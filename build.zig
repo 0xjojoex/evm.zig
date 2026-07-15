@@ -222,6 +222,7 @@ pub fn build(b: *std.Build) void {
             .name = "uint256-fuzz",
             .root_module = uint256_fuzz_mod,
         });
+        uint256_fuzz_tests.use_llvm = true;
         const run_uint256_fuzz_tests = b.addRunArtifact(uint256_fuzz_tests);
 
         const modexp_fuzz_mod = b.createModule(.{
@@ -234,6 +235,7 @@ pub fn build(b: *std.Build) void {
             .name = "modexp-fuzz",
             .root_module = modexp_fuzz_mod,
         });
+        modexp_fuzz_tests.use_llvm = true;
         const run_modexp_fuzz_tests = b.addRunArtifact(modexp_fuzz_tests);
 
         const fuzz_step = b.step("fuzz", "Run fuzzable pure-Zig unit tests");

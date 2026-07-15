@@ -55,7 +55,6 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-          use-cache: false
 
       - name: Fuzz uint256
         run: zig build fuzz-uint256 --fuzz=200K --summary all
