@@ -399,6 +399,19 @@ test "bounded warm access sets report capacity exhaustion" {
     try overlay.warmStorage(evmz.addr(3), 3);
 }
 
+test "bounded fused storage lookup removes rejected cache insertion" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(4);
+    try overlay.configureAccessResources(.{ .accounts = 0, .storage_keys = 1 });
+
+    overlay.beginTransaction();
+    try std.testing.expectEqual(Host.AccessStatus.cold, (try overlay.loadStorage(evmz.addr(1), 1)).access_status);
+    try std.testing.expectError(error.WarmStorageCapacityExceeded, overlay.loadStorage(evmz.addr(1), 2));
+    try std.testing.expectEqual(@as(u32, 1), overlay.storage_slots.count());
+    try std.testing.expect(overlay.storage_slots.contains(.{ .address = evmz.addr(1), .key = 1 }));
+}
+
 test "warm access reserve hint does not enable capacity errors" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -1250,6 +1263,8 @@ const TestStateReader = struct {
     balance: u256,
     load_count: usize = 0,
     storage_reads: usize = 0,
+    overlay: ?*Overlay = null,
+    require_warm_storage: bool = false,
 
     fn reader(self: *TestStateReader) StateReader {
         return .{ .ptr = self, .vtable = &.{
@@ -1285,6 +1300,12 @@ const TestStateReader = struct {
     fn readerGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self: *TestStateReader = @ptrCast(@alignCast(ptr));
         self.storage_reads += 1;
+        if (self.require_warm_storage) {
+            const overlay = self.overlay orelse return error.MissingOverlay;
+            if (!overlay.warm_storage.contains(.{ .address = address, .key = key })) {
+                return error.StorageReadBeforeWarmAccess;
+            }
+        }
         if (std.mem.eql(u8, &self.address, &address) and key == self.key) return self.value;
         return 0;
     }
@@ -1294,6 +1315,26 @@ const TestStateReader = struct {
         return std.mem.eql(u8, &self.address, &address) and self.value != 0;
     }
 };
+
+test "fused storage lookup warms before reading backing state" {
+    const address = evmz.addr(0xbeef);
+    var reader = TestStateReader{
+        .address = address,
+        .key = 7,
+        .value = 0xab,
+        .balance = 0,
+        .require_warm_storage = true,
+    };
+    var overlay = Overlay.initWithStateReader(std.testing.allocator, reader.reader());
+    defer overlay.deinit();
+    reader.overlay = &overlay;
+
+    overlay.beginTransaction();
+    const result = try overlay.loadStorage(address, 7);
+    try std.testing.expectEqual(Host.AccessStatus.cold, result.access_status);
+    try std.testing.expectEqual(@as(u256, 0xab), result.value);
+    try std.testing.expectEqual(@as(usize, 1), reader.storage_reads);
+}
 
 test "state reader loads account and storage lazily" {
     const address = evmz.addr(0xbeef);

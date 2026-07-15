@@ -39,6 +39,10 @@ const StorageSlot = struct {
     original_recorded: bool,
 };
 const StorageSlotMap = SparseHashMap(StorageKey, StorageSlot);
+const StorageSlotAccess = struct {
+    slot: *StorageSlot,
+    access_status: Host.AccessStatus,
+};
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 
 pub const LogResources = struct {
@@ -646,71 +650,77 @@ pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
 
 pub fn loadStorage(self: *Overlay, address: Address, key: u256) !Host.StorageLoadResult {
     const storage_key = StorageKey{ .address = address, .key = key };
-    const access_status = try self.accessStorageSlot(storage_key);
-    const slot = try self.getOrPutStorageSlot(storage_key);
+    const access = try self.accessStorageSlot(storage_key);
     self.traceStateRead(.{
         .storage = .{
             .address = address,
             .key = key,
-            .value = slot.current,
+            .value = access.slot.current,
         },
     });
-    return .{ .value = slot.current, .access_status = access_status };
+    return .{ .value = access.slot.current, .access_status = access.access_status };
 }
 
 pub fn storeStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
     const storage_key = StorageKey{ .address = address, .key = key };
-    const access_status = try self.accessStorageSlot(storage_key);
-    const slot = try self.getOrPutStorageSlot(storage_key);
+    const access = try self.accessStorageSlot(storage_key);
     self.traceStateRead(.{
         .storage = .{
             .address = address,
             .key = key,
-            .value = slot.current,
+            .value = access.slot.current,
         },
     });
     return .{
-        .storage_status = try self.setStorageSlot(storage_key, slot, value),
-        .access_status = access_status,
+        .storage_status = try self.setStorageSlot(storage_key, access.slot, value),
+        .access_status = access.access_status,
     };
 }
 
-fn accessStorageSlot(self: *Overlay, storage_key: StorageKey) !Host.AccessStatus {
-    if (self.storage_slots.getPtr(storage_key)) |slot| {
-        if (slot.warm) return .warm;
+fn accessStorageSlot(self: *Overlay, storage_key: StorageKey) !StorageSlotAccess {
+    const result = try self.getOrPutStorageSlot(storage_key);
+    if (result.found_existing) {
+        const slot = result.value_ptr;
+        if (slot.warm) return .{ .slot = slot, .access_status = .warm };
         if (self.warm_storage.contains(storage_key)) {
             slot.warm = true;
-            return .warm;
+            return .{ .slot = slot, .access_status = .warm };
         }
-    } else if (self.warm_storage.contains(storage_key)) {
-        return .warm;
+        try self.warmStorageSlot(storage_key, slot);
+        return .{ .slot = slot, .access_status = .cold };
     }
-    try self.warmStorage(storage_key.address, storage_key.key);
-    return .cold;
-}
 
-fn getOrPutStorageSlot(self: *Overlay, storage_key: StorageKey) !*StorageSlot {
-    if (self.storage_slots.getPtr(storage_key)) |slot| return slot;
+    errdefer _ = self.storage_slots.remove(storage_key);
+    const access_status: Host.AccessStatus = if (self.warm_storage.contains(storage_key))
+        .warm
+    else blk: {
+        try self.warmStorageSlot(storage_key, null);
+        break :blk .cold;
+    };
 
     const overlay_value = self.storage_overlay.get(storage_key);
     const current = overlay_value orelse try self.readStorageBacking(storage_key);
     const recorded_original = self.original_storage.get(storage_key);
-    const slot = StorageSlot{
+    result.value_ptr.* = .{
         .original = recorded_original orelse current,
         .current = current,
-        .warm = self.warm_storage.contains(storage_key),
+        .warm = true,
         .overlay_present = overlay_value != null,
         .original_recorded = recorded_original != null,
     };
+    return .{ .slot = result.value_ptr, .access_status = access_status };
+}
+
+fn getOrPutStorageSlot(self: *Overlay, storage_key: StorageKey) !StorageSlotMap.GetOrPutResult {
     if (self.access_resources) |resources| {
-        if (@as(usize, self.storage_slots.count()) >= resources.storage_keys) {
+        const result = self.storage_slots.getOrPutAssumeCapacity(storage_key);
+        if (!result.found_existing and @as(usize, self.storage_slots.count()) > resources.storage_keys) {
+            _ = self.storage_slots.remove(storage_key);
             return error.WarmStorageCapacityExceeded;
         }
-        self.storage_slots.putAssumeCapacity(storage_key, slot);
-    } else {
-        try self.storage_slots.put(storage_key, slot);
+        return result;
     }
-    return self.storage_slots.getPtr(storage_key).?;
+    return try self.storage_slots.getOrPut(storage_key);
 }
 
 pub fn setStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStatus {
@@ -948,18 +958,22 @@ pub fn warmAccount(self: *Overlay, address: Address) !void {
 
 pub fn warmStorage(self: *Overlay, address: Address, key: u256) !void {
     const storage_key = StorageKey{ .address = address, .key = key };
+    try self.warmStorageSlot(storage_key, self.storage_slots.getPtr(storage_key));
+}
+
+fn warmStorageSlot(self: *Overlay, storage_key: StorageKey, slot: ?*StorageSlot) !void {
     if (self.warm_storage.contains(storage_key)) {
-        if (self.storage_slots.getPtr(storage_key)) |slot| slot.warm = true;
+        if (slot) |storage_slot| storage_slot.warm = true;
         return;
     }
     try self.journal.append(self.allocator, .{ .warm_storage = storage_key });
     errdefer self.discardLastJournalEntry();
     try self.putWarmStorage(storage_key);
-    if (self.storage_slots.getPtr(storage_key)) |slot| slot.warm = true;
+    if (slot) |storage_slot| storage_slot.warm = true;
     self.traceStateWrite(.{
         .warm_storage = .{
-            .address = address,
-            .key = key,
+            .address = storage_key.address,
+            .key = storage_key.key,
         },
     });
 }
