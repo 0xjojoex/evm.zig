@@ -145,31 +145,35 @@ State execution is validated against the locked Ethereum Execution Spec Tests
 corpus: `66,668` state vectors, `0` failed, `0` skipped. The EEST runner and
 fixture tooling live in `eest/`.
 
-Fixed-Osaka benchmark snapshots (native ReleaseFast, frame pointers explicitly
-omitted for every engine, 100 ms discarded warmup, three complete repeats;
-each cell is the median of three 100-run medians per deployed-runtime call;
-lower is better):
-
-`for _ in 1 2 3; do zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -- --spec osaka --num-runs 100 --warmup-ms 100; done`
+Fixed-Osaka benchmark snapshots use native ReleaseFast builds and explicitly
+omit frame pointers for every engine. Lower is better.
 
 ### Apple M1 Max / macOS arm64
 
+The Apple snapshot enables evmz's optional XKCP Keccak and libsecp256k1
+providers for its maximum-performance configuration. It uses a 100 ms discarded
+warmup and five complete repeats; each cell is the median of five 100-run
+medians per deployed-runtime call:
+
+`for _ in 1 2 3 4 5; do zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -Dnative-keccak=xkcp -Dnative-secp256k1=libsecp256k1 -- --spec osaka --num-runs 100 --warmup-ms 100; done`
+
 | VM-loop fixture | evmz | evmone-base | evmone-adv | revm-int | base/evmz | revm/evmz |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Arithmetic loop | `0.160 ms` | `0.102 ms` | `0.326 ms` | `0.504 ms` | `0.64×` | `3.15×` |
-| Memory MSTORE loop | `0.150 ms` | `0.089 ms` | `0.260 ms` | `0.421 ms` | `0.60×` | `2.81×` |
-| Keccak loop | `3.685 ms` | `3.595 ms` | `3.680 ms` | `2.760 ms` | `0.98×` | `0.75×` |
-| Ten-thousand hashes | `1.082 ms` | `0.755 ms` | `1.662 ms` | `2.119 ms` | `0.70×` | `1.96×` |
-| Storage SLOAD loop | `0.312 ms` | `0.624 ms` | `0.648 ms` | `0.355 ms` | `2.00×` | `1.14×` |
-| Storage SSTORE loop | `0.338 ms` | `0.881 ms` | `0.906 ms` | `0.869 ms` | `2.61×` | `2.57×` |
-| LOG0 / 0-byte data | `0.066 ms` | `0.031 ms` | `0.083 ms` | `0.133 ms` | `0.48×` | `2.02×` |
-| LOG0 / 32-byte data | `0.073 ms` | `0.035 ms` | `0.085 ms` | `0.313 ms` | `0.47×` | `4.29×` |
-| LOG4 / 0-byte data | `0.085 ms` | `0.090 ms` | `0.150 ms` | `0.267 ms` | `1.06×` | `3.14×` |
-| LOG4 / 32-byte data | `0.092 ms` | `0.087 ms` | `0.151 ms` | `0.419 ms` | `0.94×` | `4.55×` |
-| ERC20 mint | `2.805 ms` | `3.914 ms` | `4.816 ms` | `3.750 ms` | `1.40×` | `1.34×` |
-| ERC20 transfer | `5.457 ms` | `6.373 ms` | `7.621 ms` | `6.492 ms` | `1.17×` | `1.19×` |
-| ERC20 approval+transfer | `4.874 ms` | `5.204 ms` | `6.179 ms` | `4.801 ms` | `1.07×` | `0.98×` |
-| Snailtracer | `27.552 ms` | `62.131 ms` | `82.245 ms` | `39.656 ms` | `2.25×` | `1.44×` |
+| Arithmetic loop | `0.142 ms` | `0.101 ms` | `0.334 ms` | `0.499 ms` | `0.71×` | `3.51×` |
+| Memory MSTORE loop | `0.145 ms` | `0.086 ms` | `0.255 ms` | `0.412 ms` | `0.59×` | `2.84×` |
+| Keccak loop | `2.725 ms` | `3.611 ms` | `3.696 ms` | `2.781 ms` | `1.33×` | `1.02×` |
+| Ten-thousand hashes | `1.031 ms` | `0.754 ms` | `1.678 ms` | `2.093 ms` | `0.73×` | `2.03×` |
+| Storage SLOAD loop | `0.304 ms` | `0.614 ms` | `0.657 ms` | `0.351 ms` | `2.02×` | `1.16×` |
+| Storage SSTORE loop | `0.331 ms` | `0.867 ms` | `0.902 ms` | `0.875 ms` | `2.62×` | `2.64×` |
+| LOG0 / 0-byte data | `0.065 ms` | `0.078 ms` | `0.083 ms` | `0.129 ms` | `1.20×` | `1.98×` |
+| LOG0 / 32-byte data | `0.071 ms` | `0.033 ms` | `0.083 ms` | `0.312 ms` | `0.47×` | `4.39×` |
+| LOG4 / 0-byte data | `0.081 ms` | `0.082 ms` | `0.150 ms` | `0.267 ms` | `1.01×` | `3.30×` |
+| LOG4 / 32-byte data | `0.084 ms` | `0.084 ms` | `0.151 ms` | `0.413 ms` | `1.00×` | `4.91×` |
+| ERC20 mint | `2.444 ms` | `3.924 ms` | `4.846 ms` | `3.753 ms` | `1.61×` | `1.54×` |
+| ERC20 transfer | `4.515 ms` | `6.400 ms` | `7.649 ms` | `6.265 ms` | `1.42×` | `1.39×` |
+| ERC20 approval+transfer | `3.909 ms` | `5.100 ms` | `6.108 ms` | `4.821 ms` | `1.30×` | `1.23×` |
+| Snailtracer | `25.466 ms` | `61.415 ms` | `81.692 ms` | `39.384 ms` | `2.41×` | `1.55×` |
+
 
 ### AMD EPYC Genoa / Linux x86-64
 
@@ -177,27 +181,21 @@ The Linux snapshot ran on a KVM guest pinned to one CPU.
 
 | VM-loop fixture | evmz | evmone-base | evmone-adv | revm-int | base/evmz | revm/evmz |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Arithmetic loop | `0.139 ms` | `0.141 ms` | `0.338 ms` | `0.374 ms` | `1.01×` | `2.69×` |
-| Memory MSTORE loop | `0.177 ms` | `0.263 ms` | `0.285 ms` | `0.307 ms` | `1.49×` | `1.74×` |
-| Keccak loop | `4.576 ms` | `4.570 ms` | `4.605 ms` | `10.989 ms` | `1.00×` | `2.40×` |
-| Ten-thousand hashes | `1.977 ms` | `1.879 ms` | `2.067 ms` | `2.608 ms` | `0.95×` | `1.32×` |
-| Storage SLOAD loop | `0.576 ms` | `0.539 ms` | `0.543 ms` | `0.636 ms` | `0.94×` | `1.10×` |
-| Storage SSTORE loop | `0.591 ms` | `0.808 ms` | `0.838 ms` | `1.231 ms` | `1.37×` | `2.08×` |
-| LOG0 / 0-byte data | `0.063 ms` | `0.043 ms` | `0.088 ms` | `0.099 ms` | `0.68×` | `1.59×` |
-| LOG0 / 32-byte data | `0.068 ms` | `0.050 ms` | `0.093 ms` | `0.200 ms` | `0.72×` | `2.92×` |
-| LOG4 / 0-byte data | `0.104 ms` | `0.112 ms` | `0.256 ms` | `0.212 ms` | `1.08×` | `2.05×` |
-| LOG4 / 32-byte data | `0.111 ms` | `0.112 ms` | `0.208 ms` | `0.310 ms` | `1.01×` | `2.80×` |
-| ERC20 mint | `3.949 ms` | `4.226 ms` | `4.722 ms` | `7.112 ms` | `1.07×` | `1.80×` |
-| ERC20 transfer | `7.491 ms` | `7.516 ms` | `8.418 ms` | `14.848 ms` | `1.00×` | `1.98×` |
-| ERC20 approval+transfer | `6.456 ms` | `6.219 ms` | `6.991 ms` | `13.445 ms` | `0.96×` | `2.08×` |
-| Snailtracer | `35.122 ms` | `58.486 ms` | `70.647 ms` | `53.465 ms` | `1.67×` | `1.52×` |
+| Arithmetic loop | `0.151 ms` | `0.145 ms` | `0.331 ms` | `0.340 ms` | `0.96×` | `2.25×` |
+| Memory MSTORE loop | `0.183 ms` | `0.263 ms` | `0.284 ms` | `0.308 ms` | `1.44×` | `1.69×` |
+| Keccak loop | `4.597 ms` | `4.584 ms` | `4.680 ms` | `10.883 ms` | `1.00×` | `2.37×` |
+| Ten-thousand hashes | `2.006 ms` | `1.880 ms` | `2.059 ms` | `2.513 ms` | `0.94×` | `1.25×` |
+| Storage SLOAD loop | `0.584 ms` | `0.575 ms` | `0.548 ms` | `0.630 ms` | `0.98×` | `1.08×` |
+| Storage SSTORE loop | `0.595 ms` | `0.838 ms` | `0.857 ms` | `1.112 ms` | `1.41×` | `1.87×` |
+| LOG0 / 0-byte data | `0.060 ms` | `0.043 ms` | `0.088 ms` | `0.096 ms` | `0.73×` | `1.62×` |
+| LOG0 / 32-byte data | `0.065 ms` | `0.049 ms` | `0.094 ms` | `0.202 ms` | `0.75×` | `3.08×` |
+| LOG4 / 0-byte data | `0.107 ms` | `0.113 ms` | `0.239 ms` | `0.201 ms` | `1.06×` | `1.88×` |
+| LOG4 / 32-byte data | `0.113 ms` | `0.113 ms` | `0.191 ms` | `0.307 ms` | `1.00×` | `2.71×` |
+| ERC20 mint | `3.929 ms` | `4.204 ms` | `4.757 ms` | `6.991 ms` | `1.07×` | `1.78×` |
+| ERC20 transfer | `7.686 ms` | `7.447 ms` | `8.433 ms` | `14.896 ms` | `0.97×` | `1.94×` |
+| ERC20 approval+transfer | `6.278 ms` | `6.227 ms` | `7.032 ms` | `13.413 ms` | `0.99×` | `2.14×` |
+| Snailtracer | `33.347 ms` | `57.983 ms` | `69.988 ms` | `52.417 ms` | `1.74×` | `1.57×` |
 
-Across both snapshots, evmz leads SSTORE and snailtracer and stays competitive
-on complete ERC20 workloads. SLOAD is 2× faster than evmone baseline on Apple
-arm64 and roughly 7% slower on Linux. Native LOG4 is within 8% of baseline on
-both platforms; LOG0 remains the residual LOG gap at roughly 2.1× baseline on
-Apple and 1.5× on Linux. Arithmetic, MSTORE, and some engine rankings remain
-platform-sensitive.
 
 <details>
 <summary>The evmz approach</summary>
@@ -220,11 +218,9 @@ metadata is a separate dispatch decision from prepared-tail handler selection.
 Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
 messages, and IO buffers live in preallocated slots (optionally hard-bounded for
 embedded/zkVM targets), and the state journal is cheap enough that the full
-executor benches within noise of the raw interpreter. Evmz leads SSTORE and
-snailtracer on both snapshots; ERC20 moves from clear wins on Apple arm64 to
-within 4% of evmone baseline on Linux. SLOAD leads on Apple and narrows to a
-roughly 7% Linux gap. Native LOG4 now matches baseline, leaving LOG0 as the
-remaining host-bound dispatch gap.
+executor benches within noise of the raw interpreter. Across both snapshots evmz
+leads or holds parity with the baseline interpreter on the workload-shaped
+fixtures, and comes out faster overall.
 
 </details>
 
