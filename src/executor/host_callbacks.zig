@@ -5,7 +5,6 @@ const eip7702 = @import("./eip7702.zig");
 
 const Address = evmz.Address;
 const Host = evmz.Host;
-const StorageKey = evmz.state.StorageKey;
 
 pub fn For(comptime Executor: type) type {
     return struct {
@@ -162,10 +161,7 @@ pub fn For(comptime Executor: type) type {
 
         fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            const storage_key = StorageKey{ .address = address, .key = key };
-            if (self.state.warm_storage.contains(storage_key)) return .warm;
-            try self.state.warmStorage(address, key);
-            return .cold;
+            return self.state.accessStorage(address, key);
         }
 
         fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {

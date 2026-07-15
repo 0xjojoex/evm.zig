@@ -12,17 +12,18 @@ const bench_config = zbench.Config{
 const Address = evmz.Address;
 const StorageKey = evmz.state.StorageKey;
 const AccountState = evmz.state.Account;
-const SparseStorageSet = @FieldType(evmz.state.Overlay, "warm_storage");
-const StdStorageSet = std.AutoHashMap(StorageKey, void);
+const SparseStorageSlotMap = @FieldType(evmz.state.Overlay, "storage_slots");
+const StorageSlot = @typeInfo(@FieldType(SparseStorageSlotMap.Entry, "value_ptr")).pointer.child;
+const StdStorageSlotMap = std.AutoHashMap(StorageKey, StorageSlot);
 const SparseStorageMap = @FieldType(evmz.state.Overlay, "storage_overlay");
 const StdStorageMap = std.AutoHashMap(StorageKey, u256);
 const SparseAddressMap = @FieldType(evmz.state.Overlay, "accounts");
 const StdAddressMap = std.AutoHashMap(Address, AccountState);
 
-var sparse_clear_small: []SparseStorageSet = &.{};
-var std_clear_small: []StdStorageSet = &.{};
-var sparse_clear_broad: []SparseStorageSet = &.{};
-var std_clear_broad: []StdStorageSet = &.{};
+var sparse_clear_small: []SparseStorageSlotMap = &.{};
+var std_clear_small: []StdStorageSlotMap = &.{};
+var sparse_clear_broad: []SparseStorageSlotMap = &.{};
+var std_clear_broad: []StdStorageSlotMap = &.{};
 var clear_storage_keys: []const StorageKey = &.{};
 
 test "micro/state/sparse-hash-map/hash" {
@@ -42,7 +43,7 @@ test "micro/state/sparse-hash-map/hash" {
     try bench.run(std.testing.io, .stdout());
 }
 
-test "micro/state/sparse-hash-map/warm-storage-contains" {
+test "micro/state/sparse-hash-map/storage-slot-contains" {
     const cases = [_]StateMapCase{
         .{ .reserve = 64, .live = 64 },
         .{ .reserve = 8 * 1024, .live = 0 },
@@ -58,19 +59,19 @@ test "micro/state/sparse-hash-map/warm-storage-contains" {
     initStorageKeys(&keys, 0);
     initStorageKeys(&misses, 1_000_000);
 
-    var sparse_maps: [cases.len]SparseStorageSet = undefined;
-    var std_maps: [cases.len]StdStorageSet = undefined;
-    for (&sparse_maps) |*map| map.* = SparseStorageSet.init(std.testing.allocator);
-    for (&std_maps) |*map| map.* = StdStorageSet.init(std.testing.allocator);
+    var sparse_maps: [cases.len]SparseStorageSlotMap = undefined;
+    var std_maps: [cases.len]StdStorageSlotMap = undefined;
+    for (&sparse_maps) |*map| map.* = SparseStorageSlotMap.init(std.testing.allocator);
+    for (&std_maps) |*map| map.* = StdStorageSlotMap.init(std.testing.allocator);
     defer for (&sparse_maps) |*map| map.deinit();
     defer for (&std_maps) |*map| map.deinit();
 
     for (cases, 0..) |case, index| {
         try sparse_maps[index].ensureTotalCapacity(@intCast(case.reserve));
         try std_maps[index].ensureTotalCapacity(@intCast(case.reserve));
-        fillStorageSet(&sparse_maps[index], keys[0..case.live]);
-        fillStorageSet(&std_maps[index], keys[0..case.live]);
-        try expectStorageSetParity(&sparse_maps[index], &std_maps[index], keys[0..case.live], &misses);
+        fillStorageSlotMap(&sparse_maps[index], keys[0..case.live]);
+        fillStorageSlotMap(&std_maps[index], keys[0..case.live]);
+        try expectStorageSlotMapParity(&sparse_maps[index], &std_maps[index], keys[0..case.live], &misses);
     }
 
     var contexts = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -83,7 +84,7 @@ test "micro/state/sparse-hash-map/warm-storage-contains" {
     for (cases, 0..) |case, index| {
         const miss_count = @max(case.live, 1);
         try addContainsBench(
-            SparseStorageSet,
+            SparseStorageSlotMap,
             &bench,
             context_allocator,
             "sparse",
@@ -93,7 +94,7 @@ test "micro/state/sparse-hash-map/warm-storage-contains" {
             misses[0..miss_count],
         );
         try addContainsBench(
-            StdStorageSet,
+            StdStorageSlotMap,
             &bench,
             context_allocator,
             "std",
@@ -104,7 +105,7 @@ test "micro/state/sparse-hash-map/warm-storage-contains" {
         );
         if (case.live != 0) {
             try addContainsBench(
-                SparseStorageSet,
+                SparseStorageSlotMap,
                 &bench,
                 context_allocator,
                 "sparse",
@@ -114,7 +115,7 @@ test "micro/state/sparse-hash-map/warm-storage-contains" {
                 keys[0..case.live],
             );
             try addContainsBench(
-                StdStorageSet,
+                StdStorageSlotMap,
                 &bench,
                 context_allocator,
                 "std",
@@ -303,14 +304,14 @@ test "micro/state/sparse-hash-map/clear-retaining-capacity" {
     var keys: [1024]StorageKey = undefined;
     initStorageKeys(&keys, 0);
 
-    var sparse_small: [state_map_clear_ops_per_run]SparseStorageSet = undefined;
-    var std_small: [state_map_clear_ops_per_run]StdStorageSet = undefined;
-    var sparse_broad: [state_map_clear_ops_per_run]SparseStorageSet = undefined;
-    var std_broad: [state_map_clear_ops_per_run]StdStorageSet = undefined;
-    for (&sparse_small) |*map| map.* = SparseStorageSet.init(std.testing.allocator);
-    for (&std_small) |*map| map.* = StdStorageSet.init(std.testing.allocator);
-    for (&sparse_broad) |*map| map.* = SparseStorageSet.init(std.testing.allocator);
-    for (&std_broad) |*map| map.* = StdStorageSet.init(std.testing.allocator);
+    var sparse_small: [state_map_clear_ops_per_run]SparseStorageSlotMap = undefined;
+    var std_small: [state_map_clear_ops_per_run]StdStorageSlotMap = undefined;
+    var sparse_broad: [state_map_clear_ops_per_run]SparseStorageSlotMap = undefined;
+    var std_broad: [state_map_clear_ops_per_run]StdStorageSlotMap = undefined;
+    for (&sparse_small) |*map| map.* = SparseStorageSlotMap.init(std.testing.allocator);
+    for (&std_small) |*map| map.* = StdStorageSlotMap.init(std.testing.allocator);
+    for (&sparse_broad) |*map| map.* = SparseStorageSlotMap.init(std.testing.allocator);
+    for (&std_broad) |*map| map.* = StdStorageSlotMap.init(std.testing.allocator);
     defer for (&sparse_small) |*map| map.deinit();
     defer for (&std_small) |*map| map.deinit();
     defer for (&sparse_broad) |*map| map.deinit();
@@ -455,7 +456,7 @@ fn addContainsBench(
     context.* = .{ .map = map, .keys = keys };
     const name = try std.fmt.allocPrint(
         allocator,
-        "warm-storage-contains/{s}/reserve{d}/live{d}/{s}/1024x",
+        "storage-slot-contains/{s}/reserve{d}/live{d}/{s}/1024x",
         .{ map_name, case.reserve, case.live, result_name },
     );
     try bench.addParam(name, @as(*const Context, context), .{});
@@ -535,8 +536,8 @@ fn mix64(seed: u64) u64 {
     return value ^ (value >> 31);
 }
 
-fn fillStorageSet(map: anytype, keys: []const StorageKey) void {
-    for (keys) |key| map.putAssumeCapacityNoClobber(key, {});
+fn fillStorageSlotMap(map: anytype, keys: []const StorageKey) void {
+    for (keys) |key| map.putAssumeCapacityNoClobber(key, StorageSlot{});
 }
 
 fn fillStorageMap(map: anytype, keys: []const StorageKey) void {
@@ -549,9 +550,9 @@ fn fillAddressMap(map: anytype, keys: []const Address) void {
     }
 }
 
-fn expectStorageSetParity(
-    sparse: *SparseStorageSet,
-    standard: *StdStorageSet,
+fn expectStorageSlotMapParity(
+    sparse: *SparseStorageSlotMap,
+    standard: *StdStorageSlotMap,
     hits: []const StorageKey,
     misses: []const StorageKey,
 ) !void {
@@ -677,16 +678,16 @@ fn prepareStdBroad1024() void {
     prepareStdClear(std_clear_broad, 1024);
 }
 
-fn prepareSparseClear(maps: []SparseStorageSet, live: usize) void {
+fn prepareSparseClear(maps: []SparseStorageSlotMap, live: usize) void {
     for (maps) |*map| {
         std.debug.assert(map.count() == 0);
-        fillStorageSet(map, clear_storage_keys[0..live]);
+        fillStorageSlotMap(map, clear_storage_keys[0..live]);
     }
 }
 
-fn prepareStdClear(maps: []StdStorageSet, live: usize) void {
+fn prepareStdClear(maps: []StdStorageSlotMap, live: usize) void {
     for (maps) |*map| {
         std.debug.assert(map.count() == 0);
-        fillStorageSet(map, clear_storage_keys[0..live]);
+        fillStorageSlotMap(map, clear_storage_keys[0..live]);
     }
 }

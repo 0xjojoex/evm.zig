@@ -2593,8 +2593,8 @@ test "executor begins transaction scope and warms access list" {
     try std.testing.expect(executor.state.warm_accounts.contains(contract));
     try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(executor.state.warm_accounts.contains(access_address));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = access_address, .key = 1 }));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = access_address, .key = 2 }));
+    try std.testing.expect(executor.state.isStorageWarm(access_address, 1));
+    try std.testing.expect(executor.state.isStorageWarm(access_address, 2));
 }
 
 test "protocol definition drives initial coinbase warm access" {

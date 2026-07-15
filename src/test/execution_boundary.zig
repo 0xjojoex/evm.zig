@@ -186,7 +186,7 @@ test "beginMessageScope derives root identity context and neutral warmth" {
     try std.testing.expect(executor.state.warm_accounts.contains(recipient));
     try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(executor.state.warm_accounts.contains(additional));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = additional, .key = 47 }));
+    try std.testing.expect(executor.state.isStorageWarm(additional, 47));
     try std.testing.expect(!executor.state.warm_accounts.contains(cold));
 
     executor.closeTransaction();
@@ -236,7 +236,7 @@ test "beginMessageScope closes scope when initial warming fails" {
     var host = executor.host();
     try std.testing.expectError(error.MissingTxContext, host.getTxContext());
     try std.testing.expectEqual(@as(usize, 0), executor.state.warm_accounts.count());
-    try std.testing.expectEqual(@as(usize, 0), executor.state.warm_storage.count());
+    try std.testing.expectEqual(@as(usize, 0), executor.state.warmStorageCount());
     try std.testing.expectEqual(@as(usize, 0), executor.state.journal.len());
 }
 
@@ -455,7 +455,7 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
     var host = executor.host();
     try std.testing.expectError(error.MissingTxContext, host.getTxContext());
     try std.testing.expectEqual(@as(usize, 0), executor.state.warm_accounts.count());
-    try std.testing.expectEqual(@as(usize, 0), executor.state.warm_storage.count());
+    try std.testing.expectEqual(@as(usize, 0), executor.state.warmStorageCount());
     try std.testing.expectEqual(@as(usize, 0), executor.state.journal.len());
     try std.testing.expectEqualSlices(
         trace.CheckpointKind,
