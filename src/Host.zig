@@ -34,6 +34,16 @@ pub const StorageStatus = enum(u8) {
     modified_restored,
 };
 
+pub const StorageLoadResult = struct {
+    value: u256,
+    access_status: AccessStatus,
+};
+
+pub const StorageStoreResult = struct {
+    storage_status: StorageStatus,
+    access_status: AccessStatus,
+};
+
 pub const Message = struct {
     depth: u16,
     kind: CallKind,
@@ -207,8 +217,7 @@ pub const Log = struct {
 
 const Self = @This();
 
-ptr: *anyopaque,
-vtable: *const struct {
+pub const VTable = struct {
     accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
@@ -226,7 +235,15 @@ vtable: *const struct {
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
-},
+
+    /// Optional native fast paths. The compatibility primitives above remain
+    /// the fallback and the surface used by EVMC adapters.
+    loadStorage: ?*const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!StorageLoadResult = null,
+    storeStorage: ?*const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStoreResult = null,
+};
+
+ptr: *anyopaque,
+vtable: *const VTable,
 
 pub fn accountExists(self: *Self, address: Address) !bool {
     return self.vtable.accountExists(self.ptr, address);
@@ -263,6 +280,24 @@ pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !Storag
 }
 pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
+}
+pub fn loadStorage(self: *Self, address: Address, key: u256) !StorageLoadResult {
+    if (self.vtable.loadStorage) |load_storage| {
+        return load_storage(self.ptr, address, key);
+    }
+    return .{
+        .access_status = try self.accessStorage(address, key),
+        .value = try self.getStorage(address, key),
+    };
+}
+pub fn storeStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStoreResult {
+    if (self.vtable.storeStorage) |store_storage| {
+        return store_storage(self.ptr, address, key, value);
+    }
+    return .{
+        .access_status = try self.accessStorage(address, key),
+        .storage_status = try self.setStorage(address, key, value),
+    };
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
     return self.vtable.emitLog(self.ptr, event_log.address, event_log.topics, event_log.data);

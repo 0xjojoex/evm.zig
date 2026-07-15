@@ -69,6 +69,27 @@ test "snapshot restore drops warm state added after the snapshot" {
     try std.testing.expect(!overlay.warm_storage.contains(.{ .address = warm_after, .key = 2 }));
 }
 
+test "snapshot restore discards derived fused storage slots" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(1);
+    const key = 7;
+    overlay.beginTransaction();
+    try std.testing.expectEqual(Host.AccessStatus.cold, (try overlay.storeStorage(address, key, 1)).access_status);
+
+    var snapshot_state = try overlay.snapshot();
+    defer snapshot_state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(Host.StorageStatus.assigned, (try overlay.storeStorage(address, key, 1)).storage_status);
+    try std.testing.expectEqual(Host.StorageStatus.assigned, (try overlay.storeStorage(address, key, 2)).storage_status);
+    try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
+
+    try overlay.restore(&snapshot_state);
+    try std.testing.expectEqual(@as(usize, 0), overlay.storage_slots.count());
+    try std.testing.expectEqual(@as(u256, 1), try overlay.getStorage(address, key));
+}
+
 test "journal checkpoint reverts storage and preserves original storage" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -180,6 +201,46 @@ test "transaction close clears tx-local state but keeps surviving overlay writes
     overlay.beginTransaction();
     try std.testing.expectEqual(@as(usize, 0), overlay.logs.items.len);
     try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
+}
+
+test "fused storage slots share value warmth and original across rollback and transaction close" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xbeef);
+    const key = 7;
+    const storage_key = StorageKey{ .address = address, .key = key };
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.storage.put(key, 1);
+    try overlay.seedAccount(address, account);
+
+    overlay.beginTransaction();
+    const checkpoint_state = overlay.checkpoint();
+
+    const cold_load = try overlay.loadStorage(address, key);
+    try std.testing.expectEqual(Host.AccessStatus.cold, cold_load.access_status);
+    try std.testing.expectEqual(@as(u256, 1), cold_load.value);
+    try std.testing.expectEqual(Host.AccessStatus.warm, (try overlay.loadStorage(address, key)).access_status);
+
+    const write = try overlay.storeStorage(address, key, 2);
+    try std.testing.expectEqual(Host.AccessStatus.warm, write.access_status);
+    try std.testing.expectEqual(Host.StorageStatus.modified, write.storage_status);
+    try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
+
+    try overlay.revertToCheckpoint(checkpoint_state);
+    try std.testing.expect(!overlay.warm_storage.contains(storage_key));
+    try std.testing.expect(!overlay.storage_slots.contains(storage_key));
+    try std.testing.expectEqual(@as(u256, 1), try overlay.getStorage(address, key));
+
+    try std.testing.expectEqual(Host.AccessStatus.cold, (try overlay.storeStorage(address, key, 2)).access_status);
+    overlay.closeTransaction();
+    try std.testing.expectEqual(@as(usize, 0), overlay.storage_slots.count());
+
+    overlay.beginTransaction();
+    const next_transaction = try overlay.loadStorage(address, key);
+    try std.testing.expectEqual(Host.AccessStatus.cold, next_transaction.access_status);
+    try std.testing.expectEqual(@as(u256, 2), next_transaction.value);
+    try std.testing.expectEqual(@as(u256, 2), overlay.storage_slots.get(storage_key).?.original);
 }
 
 test "journal checkpoint reverts transient storage warm state and logs" {

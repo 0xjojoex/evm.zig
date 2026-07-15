@@ -21,6 +21,8 @@ pub fn For(comptime Executor: type) type {
                 .getCodeHash = getCodeHash,
                 .getStorage = hostGetStorage,
                 .setStorage = setStorage,
+                .loadStorage = loadStorage,
+                .storeStorage = storeStorage,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
                 .selfDestruct = Callbacks().selfDestruct,
@@ -111,6 +113,16 @@ pub fn For(comptime Executor: type) type {
         fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.setStorage(address, key, value);
+        }
+
+        fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.state.loadStorage(address, key);
+        }
+
+        fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.state.storeStorage(address, key, value);
         }
 
         fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {

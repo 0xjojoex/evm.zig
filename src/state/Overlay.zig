@@ -29,6 +29,16 @@ const CodeMap = SparseHashMap([32]u8, CodeEntry);
 const AddressSet = SparseHashMap(Address, void);
 const StorageSet = SparseHashMap(StorageKey, void);
 const StorageMap = SparseHashMap(StorageKey, u256);
+/// Transaction-local fused storage view. Canonical writes remain in
+/// `storage_overlay`; this cache is derived and may be discarded on restore.
+const StorageSlot = struct {
+    original: u256,
+    current: u256,
+    warm: bool,
+    overlay_present: bool,
+    original_recorded: bool,
+};
+const StorageSlotMap = SparseHashMap(StorageKey, StorageSlot);
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 
 pub const LogResources = struct {
@@ -74,6 +84,7 @@ seeded_storage: StorageMap,
 state_resources: ?StateResources,
 warm_accounts: AddressSet,
 warm_storage: StorageSet,
+storage_slots: StorageSlotMap,
 access_resources: ?AccessResources,
 original_storage: StorageMap,
 storage_overlay: StorageMap,
@@ -104,6 +115,7 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .state_resources = null,
         .warm_accounts = AddressSet.init(allocator),
         .warm_storage = StorageSet.init(allocator),
+        .storage_slots = StorageSlotMap.init(allocator),
         .access_resources = null,
         .original_storage = StorageMap.init(allocator),
         .storage_overlay = StorageMap.init(allocator),
@@ -148,6 +160,7 @@ pub fn deinit(self: *Overlay) void {
     self.seeded_storage.deinit();
     self.warm_accounts.deinit();
     self.warm_storage.deinit();
+    self.storage_slots.deinit();
     self.original_storage.deinit();
     self.storage_overlay.deinit();
     self.transient_storage.deinit();
@@ -184,10 +197,13 @@ pub fn configureJournalEntries(self: *Overlay, entries: ?usize) !void {
 }
 
 pub fn configureAccessResources(self: *Overlay, resources: ?AccessResources) !void {
-    if (self.warm_accounts.count() != 0 or self.warm_storage.count() != 0) return error.ActiveAccessState;
+    if (self.warm_accounts.count() != 0 or self.warm_storage.count() != 0 or self.storage_slots.count() != 0) {
+        return error.ActiveAccessState;
+    }
     if (resources) |bounded| {
         try self.warm_accounts.ensureTotalCapacity(try accessHashMapCapacity(bounded.accounts));
         try self.warm_storage.ensureTotalCapacity(try accessHashMapCapacity(bounded.storage_keys));
+        try self.storage_slots.ensureTotalCapacity(try accessHashMapCapacity(bounded.storage_keys));
         self.access_resources = bounded;
     } else {
         self.access_resources = null;
@@ -200,6 +216,7 @@ pub fn reserveAccessHint(self: *Overlay, resources: AccessResources) !void {
     const storage_capacity = std.math.add(usize, self.warm_storage.count(), resources.storage_keys) catch return error.AccessCapacityTooLarge;
     try self.warm_accounts.ensureTotalCapacity(try accessHintCapacity(account_capacity));
     try self.warm_storage.ensureTotalCapacity(try accessHintCapacity(storage_capacity));
+    try self.storage_slots.ensureTotalCapacity(try accessHintCapacity(storage_capacity));
 }
 
 pub fn configureTransientStorageEntries(self: *Overlay, entries: ?usize) !void {
@@ -596,17 +613,27 @@ pub fn clearCode(self: *Overlay, address: Address) !void {
     try self.setCode(address, &.{});
 }
 
-pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
-    const storage_key = StorageKey{ .address = address, .key = key };
+fn readStorageBacking(self: *Overlay, storage_key: StorageKey) !u256 {
     const value = blk: {
-        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address)) break :blk 0;
+        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(storage_key.address)) break :blk 0;
         if (self.storage_overlay.count() != 0) {
             if (self.storage_overlay.get(storage_key)) |overlay_value| break :blk overlay_value;
         }
         if (self.seeded_storage.get(storage_key)) |seeded_value| break :blk seeded_value;
         const state_reader = self.state_reader orelse break :blk 0;
-        break :blk try state_reader.getStorage(address, key);
+        break :blk try state_reader.getStorage(storage_key.address, storage_key.key);
     };
+    return value;
+}
+
+pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const value = if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address))
+        0
+    else if (self.storage_slots.get(storage_key)) |slot|
+        slot.current
+    else
+        try self.readStorageBacking(storage_key);
     self.traceStateRead(.{
         .storage = .{
             .address = address,
@@ -617,8 +644,80 @@ pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
     return value;
 }
 
+pub fn loadStorage(self: *Overlay, address: Address, key: u256) !Host.StorageLoadResult {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const access_status = try self.accessStorageSlot(storage_key);
+    const slot = try self.getOrPutStorageSlot(storage_key);
+    self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = slot.current,
+        },
+    });
+    return .{ .value = slot.current, .access_status = access_status };
+}
+
+pub fn storeStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const access_status = try self.accessStorageSlot(storage_key);
+    const slot = try self.getOrPutStorageSlot(storage_key);
+    self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = slot.current,
+        },
+    });
+    return .{
+        .storage_status = try self.setStorageSlot(storage_key, slot, value),
+        .access_status = access_status,
+    };
+}
+
+fn accessStorageSlot(self: *Overlay, storage_key: StorageKey) !Host.AccessStatus {
+    if (self.storage_slots.getPtr(storage_key)) |slot| {
+        if (slot.warm) return .warm;
+        if (self.warm_storage.contains(storage_key)) {
+            slot.warm = true;
+            return .warm;
+        }
+    } else if (self.warm_storage.contains(storage_key)) {
+        return .warm;
+    }
+    try self.warmStorage(storage_key.address, storage_key.key);
+    return .cold;
+}
+
+fn getOrPutStorageSlot(self: *Overlay, storage_key: StorageKey) !*StorageSlot {
+    if (self.storage_slots.getPtr(storage_key)) |slot| return slot;
+
+    const overlay_value = self.storage_overlay.get(storage_key);
+    const current = overlay_value orelse try self.readStorageBacking(storage_key);
+    const recorded_original = self.original_storage.get(storage_key);
+    const slot = StorageSlot{
+        .original = recorded_original orelse current,
+        .current = current,
+        .warm = self.warm_storage.contains(storage_key),
+        .overlay_present = overlay_value != null,
+        .original_recorded = recorded_original != null,
+    };
+    if (self.access_resources) |resources| {
+        if (@as(usize, self.storage_slots.count()) >= resources.storage_keys) {
+            return error.WarmStorageCapacityExceeded;
+        }
+        self.storage_slots.putAssumeCapacity(storage_key, slot);
+    } else {
+        try self.storage_slots.put(storage_key, slot);
+    }
+    return self.storage_slots.getPtr(storage_key).?;
+}
+
 pub fn setStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStatus {
     const storage_key = StorageKey{ .address = address, .key = key };
+    if (self.storage_slots.getPtr(storage_key)) |slot| {
+        return self.setStorageSlot(storage_key, slot, value);
+    }
     const overlay_prev = self.storage_overlay.get(storage_key);
     if (overlay_prev) |current| {
         if (current == value) return .assigned;
@@ -662,9 +761,56 @@ pub fn setStorage(self: *Overlay, address: Address, key: u256, value: u256) !Hos
     return status;
 }
 
+fn setStorageSlot(self: *Overlay, storage_key: StorageKey, slot: *StorageSlot, value: u256) !Host.StorageStatus {
+    const status = storage.status(slot.original, slot.current, value);
+    if (slot.current == value) return status;
+
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    const had_original = slot.original_recorded;
+    if (!had_original) {
+        try self.putOriginalStorage(storage_key, slot.original);
+        slot.original_recorded = true;
+    }
+    errdefer if (!had_original) {
+        _ = self.original_storage.remove(storage_key);
+        slot.original_recorded = false;
+    };
+
+    _ = try self.getOrCreateAccount(storage_key.address);
+
+    try self.journal.append(self.allocator, .{ .storage = .{
+        .address = storage_key.address,
+        .key = storage_key.key,
+        .overlay_had = slot.overlay_present,
+        .overlay_prev = slot.current,
+    } });
+    errdefer self.discardLastJournalEntry();
+
+    try self.putStorageOverlay(storage_key, value);
+    const previous = slot.current;
+    slot.current = value;
+    slot.overlay_present = true;
+    self.traceStateWrite(.{
+        .storage = .{
+            .address = storage_key.address,
+            .key = storage_key.key,
+            .previous = previous,
+            .value = value,
+        },
+    });
+    return status;
+}
+
 pub fn originalStorage(self: *Overlay, address: Address, key: u256) !u256 {
     const storage_key = StorageKey{ .address = address, .key = key };
     if (self.original_storage.get(storage_key)) |value| return value;
+    if (self.storage_slots.getPtr(storage_key)) |slot| {
+        try self.putOriginalStorage(storage_key, slot.original);
+        slot.original_recorded = true;
+        return slot.original;
+    }
     const value = try self.getStorage(address, key);
     try self.putOriginalStorage(storage_key, value);
     return value;
@@ -768,6 +914,7 @@ pub fn beginTransaction(self: *Overlay) void {
 pub fn closeTransaction(self: *Overlay) void {
     self.warm_accounts.clearRetainingCapacity();
     self.warm_storage.clearRetainingCapacity();
+    self.storage_slots.clearRetainingCapacity();
     self.transient_storage.clearRetainingCapacity();
     self.original_storage.clearRetainingCapacity();
     self.journal.clearRetainingCapacity(self.allocator);
@@ -801,10 +948,14 @@ pub fn warmAccount(self: *Overlay, address: Address) !void {
 
 pub fn warmStorage(self: *Overlay, address: Address, key: u256) !void {
     const storage_key = StorageKey{ .address = address, .key = key };
-    if (self.warm_storage.contains(storage_key)) return;
+    if (self.warm_storage.contains(storage_key)) {
+        if (self.storage_slots.getPtr(storage_key)) |slot| slot.warm = true;
+        return;
+    }
     try self.journal.append(self.allocator, .{ .warm_storage = storage_key });
     errdefer self.discardLastJournalEntry();
     try self.putWarmStorage(storage_key);
+    if (self.storage_slots.getPtr(storage_key)) |slot| slot.warm = true;
     self.traceStateWrite(.{
         .warm_storage = .{
             .address = address,
@@ -1032,6 +1183,10 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
             } else {
                 _ = self.storage_overlay.remove(storage_key);
             }
+            if (self.storage_slots.getPtr(storage_key)) |slot| {
+                slot.current = storage_entry.overlay_prev;
+                slot.overlay_present = storage_entry.overlay_had;
+            }
         },
         .transient_storage => |storage_entry| {
             const storage_key = StorageKey{ .address = storage_entry.address, .key = storage_entry.key };
@@ -1046,6 +1201,7 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
         },
         .warm_storage => |storage_key| {
             _ = self.warm_storage.remove(storage_key);
+            _ = self.storage_slots.remove(storage_key);
         },
         .created_contract => |address| {
             _ = self.created_contracts.remove(address);
@@ -1270,6 +1426,7 @@ fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.clearAccounts();
     self.warm_accounts.clearRetainingCapacity();
     self.warm_storage.clearRetainingCapacity();
+    self.storage_slots.clearRetainingCapacity();
     self.storage_overlay.clearRetainingCapacity();
     self.transient_storage.clearRetainingCapacity();
     self.selfdestructed_accounts.clearRetainingCapacity();
