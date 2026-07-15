@@ -67,6 +67,23 @@ pub fn build(b: *std.Build) void {
         const stateless_block_stf_tests = b.addTest(.{
             .root_module = eestModule(b, "src/stateless_block_stf.zig", target, optimize, evmz_mod),
         });
+        // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
+        // Match the root test lane and compile evmz-backed tests with LLVM.
+        for ([_]*std.Build.Step.Compile{
+            state_tests,
+            state_cli_tests,
+            tx_tests,
+            stateless_tests,
+            stateless_cli_tests,
+            stateless_input_tests,
+            stateless_ere_tests,
+            stateless_ere_bench_tests,
+            block_stf_tests,
+            block_stf_cli_tests,
+            stateless_block_stf_tests,
+        }) |test_artifact| {
+            test_artifact.use_llvm = true;
+        }
         const ssz_conformance_tests = b.addTest(.{
             .root_module = sszConformanceModule(b, "src/ssz_conformance.zig", target, optimize, ssz_mod, snappy_mod),
         });
