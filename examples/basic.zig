@@ -34,15 +34,17 @@ pub fn main(init: std.process.Init) !void {
     });
     defer vm.deinit();
 
-    const result = try vm.transact(.{
+    const outcome = try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = gas_limit,
     });
-    const execution = switch (result) {
-        .executed => |value| value,
+    var pending = switch (outcome) {
+        .pending => |value| value,
         .rejected => return error.ExampleTransactionRejected,
     };
+    defer pending.deinit();
+    const execution = try pending.accept();
     var diff = try vm.changeset();
     defer diff.deinit(allocator);
     const stored = storageValue(&diff, contract, 0);

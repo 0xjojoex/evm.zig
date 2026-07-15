@@ -116,6 +116,38 @@ const RejectingBeforeTransactionDefinition = evmz.eth.define(.{
 });
 const RejectingBeforeTransactionVm = evmz.Vm(evmz.eth.Revision, RejectingBeforeTransactionDefinition, .{});
 
+const EmptyBeforeTransactionBlock = struct {
+    var invocations = std.atomic.Value(usize).init(0);
+
+    fn beforeTransaction(_: evmz.eth.Revision, _: protocol.BeforeTransactionContext) protocol.BlockSystemCalls {
+        _ = invocations.fetchAdd(1, .monotonic);
+        return .{};
+    }
+};
+
+const EmptyBeforeTransactionDefinition = evmz.eth.define(.{
+    .block = .{ .beforeTransaction = EmptyBeforeTransactionBlock.beforeTransaction },
+});
+const EmptyBeforeTransactionVm = evmz.Vm(evmz.eth.Revision, EmptyBeforeTransactionDefinition, .{});
+
+const CheckpointRecorder = struct {
+    events: [8]evmz.trace.CheckpointKind = undefined,
+    len: usize = 0,
+
+    fn sink(self: *CheckpointRecorder) evmz.trace.Sink {
+        return evmz.trace.Sink.init(self, .{
+            .checkpoint = evmz.trace.CheckpointFields.initMany(&.{.kind}),
+        }, &.{ .checkpoint = checkpoint });
+    }
+
+    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) void {
+        const self: *CheckpointRecorder = @ptrCast(@alignCast(ptr));
+        std.debug.assert(self.len < self.events.len);
+        self.events[self.len] = event.kind;
+        self.len += 1;
+    }
+};
+
 const AtomicLifecycleBlock = struct {
     const recipient = evmz.addr(0x2001);
 
@@ -241,6 +273,83 @@ test "BlockSession does not run before-transaction hooks for rejected transactio
             err,
         ),
     }
+}
+
+test "BlockSession empty before-transaction hook skips the full snapshot" {
+    const sender = evmz.addr(0xaaaa);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 10_000_000;
+
+    EmptyBeforeTransactionBlock.invocations.store(0, .monotonic);
+    var recorder = CheckpointRecorder{};
+    var sink = recorder.sink();
+    var vm = EmptyBeforeTransactionVm.init(std.testing.allocator, .{
+        .revision = .amsterdam,
+        .state_reader = memory.reader(),
+        .trace_sink = &sink,
+    });
+    defer vm.deinit();
+
+    var block = try vm.beginBlock(.{ .gas_limit = 1_000_000 });
+    _ = switch (try block.transact(.{
+        .sender = sender,
+        .to = evmz.addr(0xbbbb),
+        .gas_limit = 300_000,
+    })) {
+        .executed => |result| result,
+        .rejected => return error.UnexpectedRejection,
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), EmptyBeforeTransactionBlock.invocations.load(.monotonic));
+    try std.testing.expectEqualSlices(
+        evmz.trace.CheckpointKind,
+        &.{ .checkpoint, .checkpoint, .commit, .commit },
+        recorder.events[0..recorder.len],
+    );
+}
+
+test "BlockSession block rejection restores before-transaction hook and payload writes" {
+    const sender = evmz.addr(0xaaaa);
+    const payload = evmz.addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 10_000_000;
+    var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
+    try hook_account.setCode(&lifecycle_code);
+    var payload_account = try memory.getOrCreateAccount(payload);
+    try payload_account.setCode(&lifecycle_code);
+
+    var vm = LifecycleVm.init(std.testing.allocator, .{
+        .revision = .prague,
+        .state_reader = memory.reader(),
+    });
+    defer vm.deinit();
+
+    var block = try vm.beginBlock(.{
+        .number = 7,
+        .timestamp = 9,
+        .gas_limit = 1_000_000,
+    });
+    block.block_gas = evmz.transaction.BlockGas.legacy(std.math.maxInt(u64));
+
+    var input = [_]u8{0} ** 32;
+    input[31] = 5;
+    try std.testing.expectError(error.BlockGasExceeded, block.transact(.{
+        .sender = sender,
+        .to = payload,
+        .input = &input,
+        .gas_limit = 300_000,
+    }));
+
+    try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(LifecycleBlock.before_transaction_address, 0));
+    try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(payload, 0));
+    try std.testing.expectEqual(@as(u64, 0), block.tx_count);
+    try std.testing.expectEqual(std.math.maxInt(u64), block.block_gas.total);
 }
 
 test "block lifecycle hook batches restore earlier calls when a later call fails" {

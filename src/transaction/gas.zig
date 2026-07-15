@@ -227,6 +227,12 @@ pub fn accessListCounts(access_list: []const AccessListEntry) AccessListCounts {
     return result;
 }
 
+pub fn countZeroBytes(bytes: []const u8) u64 {
+    var count: u64 = 0;
+    for (bytes) |byte| count += @intFromBool(byte == 0);
+    return count;
+}
+
 fn wordCount(len: usize) usize {
     return (len + 31) / 32;
 }

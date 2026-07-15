@@ -19,10 +19,19 @@ pub fn applyBeforeBlock(executor: anytype, tx_context: Host.TxContext, context: 
     try applySystemCalls(executor, tx_context, &calls);
 }
 
-pub fn applyBeforeTransaction(executor: anytype, tx_context: Host.TxContext, context: BeforeTransactionContext) !void {
+/// Produce the before-transaction batch without executing it.
+pub fn beforeTransactionCalls(executor: anytype, context: BeforeTransactionContext) evmz.protocol.BlockSystemCalls {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.beforeTransaction(executor.revision(), context);
-    try applySystemCalls(executor, tx_context, &calls);
+    return Protocol.block.beforeTransaction(executor.revision(), context);
+}
+
+/// Execute one already-produced before-transaction batch.
+pub fn applyBeforeTransactionCalls(
+    executor: anytype,
+    tx_context: Host.TxContext,
+    calls: *const evmz.protocol.BlockSystemCalls,
+) !void {
+    try applySystemCalls(executor, tx_context, calls);
 }
 
 pub fn applyAfterTransaction(executor: anytype, tx_context: Host.TxContext, context: AfterTransactionContext) !void {

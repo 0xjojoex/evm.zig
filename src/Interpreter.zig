@@ -4,7 +4,7 @@ const std = @import("std");
 const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
-const JumpDestMap = @import("./code/JumpDestMap.zig");
+const ExecutionConfig = @import("./ExecutionConfig.zig");
 const evmz = @import("./evm.zig");
 const instruction = @import("./instruction.zig");
 const Stack = @import("./Stack.zig");
@@ -133,8 +133,7 @@ pub fn InitFor(comptime Protocol: type) type {
     return struct {
         host: *Host,
         msg: *const Host.Message,
-        code: []const u8 = &.{},
-        bytecode: ?*Bytecode = null,
+        bytecode: *const Bytecode,
         revision: Protocol.Revision,
         trace_sink: ?*trace.Sink = null,
         memory_allocator: ?std.mem.Allocator = null,
@@ -146,8 +145,7 @@ pub fn InitFor(comptime Protocol: type) type {
 const FrameInit = struct {
     host: *Host,
     msg: *const Host.Message,
-    code: []const u8 = &.{},
-    bytecode: ?*Bytecode = null,
+    bytecode: *const Bytecode,
     revision_id: RevisionId,
     trace_sink: ?*trace.Sink = null,
     memory_allocator: ?std.mem.Allocator = null,
@@ -159,7 +157,6 @@ fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
     return .{
         .host = options.host,
         .msg = options.msg,
-        .code = options.code,
         .bytecode = options.bytecode,
         .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
         .trace_sink = options.trace_sink,
@@ -218,22 +215,12 @@ pub fn For(comptime ProtocolType: type) type {
 
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
-            if (frame.bytecode) |bytecode| {
-                try tail_dispatch.For(Protocol).execute(frame, bytecode.read_bytes);
-            } else {
-                try executeUntracedBounded(frame);
+            if (frame.status == .running) {
+                try tail_dispatch.For(Protocol).execute(frame, frame.bytecode.read_bytes);
             }
 
             if (frame.status == .running) {
                 frame.status = .success;
-            }
-        }
-
-        fn executeUntracedBounded(frame: *CallFrame) Error!void {
-            while (frame.status == .running and frame.pc < frame.code.len) {
-                const opcode_byte = frame.code[frame.pc];
-                frame.pc += 1;
-                try executeOpcode(opcode_byte, frame);
             }
         }
 
@@ -320,7 +307,6 @@ const PendingStepEnd = struct {
 
 pub const CallFrame = struct {
     status: FrameStatus,
-    allocator: std.mem.Allocator,
     host: *Host,
     msg: *Host.Message,
     stack: Stack,
@@ -335,8 +321,7 @@ pub const CallFrame = struct {
     return_data: []u8 = &.{},
     io: *frame_io.Slot = undefined,
     output_data: []u8 = &.{},
-    jumpdests: JumpDestMap = .empty,
-    bytecode: ?*Bytecode = null,
+    bytecode: *const Bytecode = &Bytecode.empty,
     trace_sink: ?*trace.Sink = null,
     revision_id: RevisionId = 0,
     pending_action: ?Action = null,
@@ -368,18 +353,9 @@ pub const CallFrame = struct {
         stack_storage: *Stack.Storage,
         memory_storage: *Memory.Storage,
     ) !void {
-        const code = if (options.bytecode) |bytecode|
-            bytecode.bytes
-        else
-            options.code;
+        const code = options.bytecode.bytes;
         const io = options.io orelse return error.MissingFrameIoStorage;
-        var jumpdests = JumpDestMap.empty;
-        if (options.bytecode == null) {
-            jumpdests = JumpDestMap.init();
-            try jumpdests.analyze(allocator, code);
-        }
 
-        self.allocator = allocator;
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
@@ -400,7 +376,6 @@ pub const CallFrame = struct {
         self.io.clearFrame();
         self.return_data = self.io.return_data.slice();
         self.output_data = self.io.output_data.slice();
-        self.jumpdests = jumpdests;
         self.bytecode = options.bytecode;
         self.trace_sink = options.trace_sink;
         self.status = if (code.len == 0) .success else .running;
@@ -423,7 +398,6 @@ pub const CallFrame = struct {
 
     fn deinitOwnedFields(self: *CallFrame) void {
         self.io.clearFrame();
-        self.jumpdests.deinit(self.allocator);
     }
 
     pub fn replaceReturnData(self: *CallFrame, return_data: []const u8) !void {
@@ -552,10 +526,7 @@ pub const CallFrame = struct {
     }
 
     pub fn isValidJumpDest(self: *CallFrame, target: usize) !bool {
-        if (self.bytecode) |bytecode| {
-            return try bytecode.isValidJumpDest(self.allocator, target);
-        }
-        return try self.jumpdests.isValid(self.allocator, self.code, target);
+        return self.bytecode.isValidJumpDest(target);
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
@@ -724,11 +695,13 @@ test "call frame can execute with externally supplied stack storage" {
     var memory_storage: Memory.Storage = .empty;
     var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
     defer io_storage.deinit();
+    var bytecode = try Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
     var frame: CallFrame = undefined;
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .bytecode = &bytecode,
         .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
         .io = &io_storage,
     }, &msg_storage, &stack_storage, &memory_storage);
@@ -767,11 +740,13 @@ test "call frame can execute with externally supplied memory storage" {
     var memory_storage: Memory.Storage = .empty;
     var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
     defer io_storage.deinit();
+    var bytecode = try Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
     var frame: CallFrame = undefined;
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .bytecode = &bytecode,
         .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
         .io = &io_storage,
     }, &msg_storage, &stack_storage, &memory_storage);
@@ -1027,31 +1002,82 @@ const TraceRecorder = struct {
     }
 };
 
+pub fn OwnedInitFor(comptime Protocol: type) type {
+    return struct {
+        host: *Host,
+        msg: *const Host.Message,
+        /// Convenience byte input. The owned frame prepares it before execution.
+        code: ?[]const u8 = null,
+        /// Borrow an already prepared artifact instead of owning a temporary one.
+        bytecode: ?*const Bytecode = null,
+        revision: Protocol.Revision,
+        config: ExecutionConfig = .base,
+        trace_sink: ?*trace.Sink = null,
+        memory_allocator: ?std.mem.Allocator = null,
+        memory_retain_capacity: bool = false,
+    };
+}
+
 pub fn OwnedCallFrame(comptime ProtocolType: type) type {
     return struct {
         const Self = @This();
 
         pub const Protocol = ProtocolType;
-        pub const Init = InitFor(Protocol);
+        pub const Init = OwnedInitFor(Protocol);
 
         allocator: std.mem.Allocator,
         slot: *CallFrameSlot,
         frame: *CallFrame,
+        owned_bytecode: ?*Bytecode,
 
         pub fn init(allocator: std.mem.Allocator, options: Init) !Self {
+            if (options.code != null and options.bytecode != null) {
+                return error.AmbiguousBytecodeInput;
+            }
+
+            var owned_bytecode: ?*Bytecode = null;
+            errdefer if (owned_bytecode) |bytecode| {
+                bytecode.deinit(allocator);
+                allocator.destroy(bytecode);
+            };
+            const bytecode = options.bytecode orelse prepared: {
+                const code = options.code orelse &.{};
+                if (code.len == 0) break :prepared &Bytecode.empty;
+                const prepared = try allocator.create(Bytecode);
+                prepared.* = Bytecode.prepare(allocator, code, options.config) catch |err| {
+                    allocator.destroy(prepared);
+                    return err;
+                };
+                owned_bytecode = prepared;
+                break :prepared prepared;
+            };
+
             const slot = try allocator.create(CallFrameSlot);
             errdefer allocator.destroy(slot);
-            try slot.initFor(Protocol, allocator, options);
+            try slot.initFor(Protocol, allocator, .{
+                .host = options.host,
+                .msg = options.msg,
+                .bytecode = bytecode,
+                .revision = options.revision,
+                .trace_sink = options.trace_sink,
+                .memory_allocator = options.memory_allocator,
+                .memory_retain_capacity = options.memory_retain_capacity,
+            });
             return .{
                 .allocator = allocator,
                 .slot = slot,
                 .frame = &slot.frame,
+                .owned_bytecode = owned_bytecode,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.slot.deinit();
             self.allocator.destroy(self.slot);
+            if (self.owned_bytecode) |bytecode| {
+                bytecode.deinit(self.allocator);
+                self.allocator.destroy(bytecode);
+            }
             self.* = undefined;
         }
 
@@ -1063,13 +1089,13 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        assertLayout(@sizeOf(CallFrame) == 512, "CallFrame size changed; rerun VM-loop canary benches");
+        assertLayout(@sizeOf(CallFrame) == 480, "CallFrame size changed; rerun VM-loop canary benches");
         assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "stack") == 288, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "memory") == 304, "CallFrame memory moved; rerun memory VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "gas_left") == 352, "CallFrame gas_left moved; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "msg") == 280, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33600, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@offsetOf(CallFrame, "stack") == 272, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "memory") == 288, "CallFrame memory moved; rerun memory VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "gas_left") == 336, "CallFrame gas_left moved; rerun VM-loop canary benches");
+        assertLayout(@offsetOf(CallFrame, "msg") == 264, "CallFrame msg pointer moved; check message ownership layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33568, "CallFrameSlot size changed; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
         assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");
@@ -1111,7 +1137,7 @@ test "interpreter can execute prepared bytecode jumpdest map" {
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expect(!interpreter.call_frame.jumpdests.analyzed);
+    try std.testing.expectEqual(&bytecode, interpreter.call_frame.bytecode);
     try std.testing.expect(bytecode.jumpdests.analyzed);
 }
 

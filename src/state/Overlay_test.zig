@@ -843,6 +843,112 @@ test "journal checkpoint reverts finalized selfdestruct cleanup" {
     try std.testing.expect(overlay.created_contracts.contains(other_created));
 }
 
+test "journal checkpoint restores removed state without allocating" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const deleted_address = evmz.addr(0xd1ed);
+    const destroyed_address = evmz.addr(0xdead);
+    const created_address = evmz.addr(0xbeef);
+    const key = StorageKey{ .address = destroyed_address, .key = 7 };
+
+    try overlay.deleted_accounts.put(deleted_address, {});
+    var account = MemoryAccount.init(std.testing.allocator);
+    account.balance = 5;
+    try account.storage.put(key.key, 9);
+    try overlay.seedAccount(destroyed_address, account);
+    try overlay.storage_overlay.put(key, 10);
+    try overlay.markSelfdestructed(destroyed_address);
+    try overlay.markCreatedContract(created_address);
+
+    const checkpoint_state = overlay.checkpoint();
+    _ = try overlay.getOrCreateAccount(deleted_address);
+    try overlay.finalizeTransaction(ethereumFinalizer(.london));
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    overlay.allocator = failing_allocator.allocator();
+    try overlay.revertToCheckpoint(checkpoint_state);
+
+    try std.testing.expect(!failing_allocator.has_induced_failure);
+    try std.testing.expect(overlay.getAccount(deleted_address) == null);
+    try std.testing.expect(overlay.deleted_accounts.contains(deleted_address));
+    try std.testing.expect(overlay.getAccount(destroyed_address) != null);
+    try std.testing.expectEqual(@as(u256, 10), overlay.storage_overlay.get(key).?);
+    try std.testing.expect(overlay.selfdestructed_accounts.contains(destroyed_address));
+    try std.testing.expect(overlay.created_contracts.contains(created_address));
+}
+
+test "journal rollback removes transaction cache loads before restoring accounts" {
+    const destroyed_address = evmz.addr(0xdead);
+    const fee_recipient = evmz.addr(0xfee);
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    (try store.getOrCreateAccount(destroyed_address)).balance = 5;
+    (try store.getOrCreateAccount(fee_recipient)).balance = 7;
+
+    var overlay = Overlay.initWithStateReader(std.testing.allocator, store.reader());
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(16);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .selfdestructed_accounts = 1,
+        .deleted_accounts = 1,
+    });
+
+    try std.testing.expect((try overlay.getAccountOrLoad(destroyed_address)) != null);
+    overlay.beginTransaction();
+    const checkpoint_state = overlay.checkpoint();
+    try overlay.markSelfdestructed(destroyed_address);
+    try overlay.finalizeTransaction(ethereumFinalizer(.london));
+    try std.testing.expect((try overlay.getAccountOrLoad(fee_recipient)) != null);
+    try std.testing.expectEqual(@as(usize, 1), overlay.accounts.count());
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    overlay.allocator = failing_allocator.allocator();
+    try overlay.revertToCheckpoint(checkpoint_state);
+
+    try std.testing.expect(!failing_allocator.has_induced_failure);
+    try std.testing.expect(overlay.getAccount(destroyed_address) != null);
+    try std.testing.expect(overlay.getAccount(fee_recipient) == null);
+    try std.testing.expectEqual(@as(usize, 1), overlay.accounts.count());
+    try std.testing.expect(!overlay.deleted_accounts.contains(destroyed_address));
+    try std.testing.expect(!overlay.selfdestructed_accounts.contains(destroyed_address));
+}
+
+test "finalization error rolls back mutations into the enclosing journal" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(6);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .created_contracts = 1,
+        .selfdestructed_accounts = 1,
+        .dirty_accounts = 1,
+    });
+
+    const address = evmz.addr(0xdead);
+    var account = MemoryAccount.init(std.testing.allocator);
+    account.nonce = 9;
+    try account.setCode(&.{0xaa});
+    try overlay.seedAccount(address, account);
+
+    overlay.beginTransaction();
+    try overlay.markSelfdestructed(address);
+    try overlay.markCreatedContract(address);
+    const journal_len = overlay.journal.len();
+
+    try std.testing.expectError(
+        error.JournalCapacityExceeded,
+        overlay.finalizeTransaction(ethereumFinalizer(.amsterdam)),
+    );
+
+    try std.testing.expectEqual(journal_len, overlay.journal.len());
+    try std.testing.expectEqual(@as(u64, 9), overlay.getAccount(address).?.nonce);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, try overlay.getCode(address));
+    try std.testing.expect(overlay.selfdestructed_accounts.contains(address));
+    try std.testing.expect(overlay.created_contracts.contains(address));
+}
+
 test "journal checkpoint reverts Cancun skipped selfdestruct marker clearing" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();

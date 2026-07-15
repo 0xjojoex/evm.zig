@@ -133,6 +133,31 @@ test "Amsterdam prepare reads sender code only after nonce and funds checks" {
     try probe.expectReads(&.{ .account_summary, .code });
 }
 
+test "Amsterdam prepare skips sender code read for canonical empty code hash" {
+    var probe = PreparationReadProbe{
+        .summary = .{
+            .nonce = 0,
+            .balance = 30_000,
+            .code_hash = evmz.crypto.keccak256_empty,
+        },
+        .fail_code = true,
+    };
+
+    const result = try prepare(&probe, .{
+        .sender = evmz.addr(0xaaaa),
+        .nonce = 0,
+        .to = evmz.addr(0xbbbb),
+        .gas_limit = 30_000,
+        .gas_price = 1,
+    }, .{});
+
+    switch (result) {
+        .executable => {},
+        .rejected => return error.UnexpectedRejection,
+    }
+    try probe.expectReads(&.{.account_summary});
+}
+
 test "prepare accepts delegation-shaped sender code only after EIP-7702 activates" {
     var delegation_code: [evmz.eth.eip7702.delegation_code_len]u8 = undefined;
     evmz.eip7702.writeDelegationCode(&delegation_code, evmz.addr(0xdddd));

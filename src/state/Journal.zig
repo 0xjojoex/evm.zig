@@ -19,6 +19,7 @@ pub const Checkpoint = struct {
 };
 
 pub const Entry = union(enum) {
+    account_loaded: Address,
     account_created: Address,
     deleted_account_revived: Address,
     dirty_account: Address,

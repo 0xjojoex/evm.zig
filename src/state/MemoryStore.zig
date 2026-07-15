@@ -91,6 +91,7 @@ pub fn putAccount(self: *MemoryStore, address: Address, account: *const MemoryAc
 
     var owned = try account.clone(self.allocator);
     errdefer owned.deinit();
+    owned.code_hash = code_hash;
 
     if (!self.accounts.contains(address)) try self.accounts.ensureUnusedCapacity(1);
     if (owned.code.len != 0) try self.putCode(code_hash, owned.code);
@@ -407,6 +408,20 @@ test "memory store copies a borrowed account" {
     const loaded = (try state_reader.loadAccount(address)).?;
     try std.testing.expectEqualSlices(u8, &.{0x5f}, try state_reader.loadCode(loaded.code_hash));
     try std.testing.expectEqual(@as(u256, 2), try state_reader.getStorage(address, 1));
+}
+
+test "memory store retains a code hash derived during account insertion" {
+    const address = addr(0xc0de);
+    const code = [_]u8{ 0x60, 0x00 };
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    var account = MemoryAccount.init(std.testing.allocator);
+    defer account.deinit();
+    try account.setCode(&code);
+    try memory.putAccount(address, &account);
+
+    try std.testing.expectEqual(mpt.codeHash(&code), memory.getAccount(address).?.code_hash.?);
 }
 
 test "memory store rejects empty code with non-empty explicit hash" {

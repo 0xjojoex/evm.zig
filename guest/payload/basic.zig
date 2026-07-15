@@ -105,12 +105,13 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     });
     defer vm.deinit();
 
-    const result = switch (try vm.transact(.{
+    const outcome = try vm.transact(.{
         .sender = sender,
         .to = contract,
         .gas_limit = gas_limit,
-    })) {
-        .executed => |executed| executed,
+    });
+    var pending = switch (outcome) {
+        .pending => |value| value,
         .rejected => return .{
             .status = .rejected,
             .gas_used = 0,
@@ -119,6 +120,8 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
             .storage_slot0_low = 0,
         },
     };
+    defer pending.deinit();
+    const result = try pending.accept();
     var diff = try vm.changeset();
     defer diff.deinit(allocator);
 
