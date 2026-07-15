@@ -20,6 +20,25 @@ const bench_config = zbench.Config{
     .time_budget_ns = 50 * std.time.ns_per_ms,
 };
 
+var ecrecover_message_hash = [_]u8{
+    0x18, 0xc5, 0x47, 0xe4, 0xf7, 0xb0, 0xf3, 0x25,
+    0xad, 0x1e, 0x56, 0xf5, 0x7e, 0x26, 0xc7, 0x45,
+    0xb0, 0x9a, 0x3e, 0x50, 0x3d, 0x86, 0xe0, 0x0e,
+    0x52, 0x55, 0xff, 0x7f, 0x71, 0x5d, 0x3d, 0x1c,
+};
+var ecrecover_r = [_]u8{
+    0x73, 0xb1, 0x69, 0x38, 0x92, 0x21, 0x9d, 0x73,
+    0x6c, 0xab, 0xa5, 0x5b, 0xdb, 0x67, 0x21, 0x6e,
+    0x48, 0x55, 0x57, 0xea, 0x6b, 0x6a, 0xf7, 0x5f,
+    0x37, 0x09, 0x6c, 0x9a, 0xa6, 0xa5, 0xa7, 0x5f,
+};
+var ecrecover_s = [_]u8{
+    0xee, 0xb9, 0x40, 0xb1, 0xd0, 0x3b, 0x21, 0xe3,
+    0x6b, 0x0e, 0x47, 0xe7, 0x97, 0x69, 0xf0, 0x95,
+    0xfe, 0x2a, 0xb8, 0x55, 0xbd, 0x91, 0xe3, 0xa3,
+    0x87, 0x56, 0xb7, 0xd7, 0x5a, 0x9c, 0x45, 0x49,
+};
+
 var raw_mask_bytes: [raw_mask_sample_len]u8 = undefined;
 var jumpdest_small_bytes: [jumpdest_small_len]u8 = undefined;
 var jumpdest_large_bytes: [jumpdest_large_len]u8 = undefined;
@@ -94,6 +113,36 @@ test "micro/code/jumpdest-map" {
     try bench.add("jumpdest-map/simd-4096b", benchJumpDestMapSimdLarge, .{});
 
     try bench.run(std.testing.io, .stdout());
+}
+
+test "micro/crypto/ecrecover" {
+    var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
+    defer bench.deinit();
+
+    try bench.add(
+        "ecrecover/" ++ evmz.crypto.secp256k1_provider_name,
+        benchEcrecover,
+        .{},
+    );
+    try bench.run(std.testing.io, .stdout());
+}
+
+fn benchEcrecover(_: std.mem.Allocator) void {
+    std.mem.doNotOptimizeAway(&ecrecover_message_hash);
+    std.mem.doNotOptimizeAway(&ecrecover_r);
+    std.mem.doNotOptimizeAway(&ecrecover_s);
+
+    var accumulator: u8 = 0;
+    for (0..8) |i| {
+        const public_key = evmz.crypto.ecrecoverPublicKey(
+            ecrecover_message_hash,
+            ecrecover_r,
+            ecrecover_s,
+            1,
+        ) orelse unreachable;
+        accumulator ^= public_key[i];
+    }
+    std.mem.doNotOptimizeAway(&accumulator);
 }
 
 fn benchSdivSmallMixed(_: std.mem.Allocator) void {

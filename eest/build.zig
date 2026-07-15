@@ -10,12 +10,14 @@ pub fn build(b: *std.Build) void {
     ) orelse .ReleaseFast;
     const profile = buildProfileOption(b);
     const native_keccak = nativeKeccakOption(b, profile);
+    const native_secp256k1 = nativeSecp256k1Option(b, profile);
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
         .profile = profile,
         .@"native-keccak" = native_keccak,
+        .@"native-secp256k1" = native_secp256k1,
     });
     const evmz_mod = evmz_dep.module("evmz");
     const ssz_mod = evmz_dep.module("ssz");
@@ -29,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .profile = profile,
         .@"native-keccak" = native_keccak,
+        .@"native-secp256k1" = native_secp256k1,
     });
     const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
@@ -264,6 +267,18 @@ fn nativeKeccakOption(b: *std.Build, profile: []const u8) []const u8 {
     const backend = b.option([]const u8, "native-keccak", "Native Keccak backend: std or xkcp") orelse "std";
     if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "xkcp")) {
         std.debug.panic("unsupported native Keccak backend '{s}' (expected std or xkcp)", .{backend});
+    }
+    return if (std.mem.eql(u8, profile, "native")) backend else "std";
+}
+
+fn nativeSecp256k1Option(b: *std.Build, profile: []const u8) []const u8 {
+    const backend = b.option(
+        []const u8,
+        "native-secp256k1",
+        "Native secp256k1 backend: std or libsecp256k1",
+    ) orelse "std";
+    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "libsecp256k1")) {
+        std.debug.panic("unsupported native secp256k1 backend '{s}' (expected std or libsecp256k1)", .{backend});
     }
     return if (std.mem.eql(u8, profile, "native")) backend else "std";
 }

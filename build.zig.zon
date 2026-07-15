@@ -25,6 +25,11 @@
             .hash = "N-V-__8AAGMY2QG5Ku-5NI36wI2cqcZmaHbh-im2Pj0r0bb_",
             .lazy = true,
         },
+        .libsecp256k1 = .{
+            .url = "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz",
+            .hash = "N-V-__8AAO1SWwCbwhTAU7t6L3XQtTy6TzE8CiOGHjENn_rl",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

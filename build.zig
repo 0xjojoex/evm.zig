@@ -3,6 +3,7 @@ const std = @import("std");
 const EvmzBuildConfig = struct {
     profile: []const u8,
     native_keccak: []const u8,
+    native_secp256k1: []const u8,
 };
 
 pub fn build(b: *std.Build) void {
@@ -12,7 +13,13 @@ pub fn build(b: *std.Build) void {
     const is_native_profile = std.mem.eql(u8, profile, "native");
     const requested_native_keccak = nativeKeccakOption(b);
     const native_keccak = resolveNativeKeccak(profile, target, requested_native_keccak);
-    const evmz_build = EvmzBuildConfig{ .profile = profile, .native_keccak = native_keccak };
+    const requested_native_secp256k1 = nativeSecp256k1Option(b);
+    const native_secp256k1 = resolveNativeSecp256k1(profile, target, requested_native_secp256k1);
+    const evmz_build = EvmzBuildConfig{
+        .profile = profile,
+        .native_keccak = native_keccak,
+        .native_secp256k1 = native_secp256k1,
+    };
     const use_xkcp = std.mem.eql(u8, native_keccak, "xkcp");
     const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
     if (use_xkcp and xkcp_dep == null) return;
@@ -28,7 +35,25 @@ pub fn build(b: *std.Build) void {
         const install_license = b.addInstallFile(dep.path("LICENSE"), "share/licenses/evmz/XKCP.txt");
         b.getInstallStep().dependOn(&install_license.step);
     }
-    const build_options = buildOptions(b, profile, native_keccak);
+    const use_libsecp256k1 = std.mem.eql(u8, native_secp256k1, "libsecp256k1");
+    const libsecp256k1_dep = if (use_libsecp256k1)
+        b.lazyDependency("libsecp256k1", .{})
+    else
+        null;
+    if (use_libsecp256k1 and libsecp256k1_dep == null) return;
+    const libsecp256k1_object = if (libsecp256k1_dep) |dep|
+        buildLibsecp256k1Object(b, target, optimize, dep, "libsecp256k1", null)
+    else
+        null;
+    const libsecp256k1_pic_object = if (libsecp256k1_dep) |dep|
+        buildLibsecp256k1Object(b, target, optimize, dep, "libsecp256k1-pic", true)
+    else
+        null;
+    if (libsecp256k1_dep) |dep| {
+        const install_license = b.addInstallFile(dep.path("COPYING"), "share/licenses/evmz/libsecp256k1.txt");
+        b.getInstallStep().dependOn(&install_license.step);
+    }
+    const build_options = buildOptions(b, profile, native_keccak, native_secp256k1);
     const bench_optimize = b.option(
         std.builtin.OptimizeMode,
         "bench-optimize",
@@ -67,6 +92,7 @@ pub fn build(b: *std.Build) void {
         addPrecompileNative(b, evmz_mod, deps, evmone_dep);
     }
     addNativeKeccak(evmz_mod, xkcp_object);
+    addNativeSecp256k1(evmz_mod, libsecp256k1_object);
 
     const ssz_mod = b.addModule("ssz", .{
         .root_source_file = b.path("pkg/ssz/src/lib.zig"),
@@ -89,6 +115,7 @@ pub fn build(b: *std.Build) void {
         c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
         addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
         addNativeKeccak(c_lib_mod, xkcp_pic_object);
+        addNativeSecp256k1(c_lib_mod, libsecp256k1_pic_object);
 
         const static_c_lib = b.addLibrary(.{
             .name = "evmz",
@@ -135,6 +162,7 @@ pub fn build(b: *std.Build) void {
             addPrecompileNative(b, lib_unit_tests_mod, deps, evmone_dep);
         }
         addNativeKeccak(lib_unit_tests_mod, xkcp_object);
+        addNativeSecp256k1(lib_unit_tests_mod, libsecp256k1_object);
         const lib_unit_tests = b.addTest(.{
             .root_module = lib_unit_tests_mod,
             .filters = b.args orelse &.{},
@@ -171,6 +199,7 @@ pub fn build(b: *std.Build) void {
             c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
             addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
             addNativeKeccak(c_api_tests_mod, xkcp_object);
+            addNativeSecp256k1(c_api_tests_mod, libsecp256k1_object);
             const c_api_tests = b.addTest(.{
                 .root_module = c_api_tests_mod,
                 .filters = b.args orelse &.{},
@@ -280,6 +309,7 @@ pub fn build(b: *std.Build) void {
                 addPrecompileNative(b, example_mod, deps, evmone_dep);
             }
             addNativeKeccak(example_mod, xkcp_object);
+            addNativeSecp256k1(example_mod, libsecp256k1_object);
             const example = b.addExecutable(.{
                 .name = example_exe_name,
                 .root_module = b.createModule(.{
@@ -361,6 +391,18 @@ fn nativeKeccakOption(b: *std.Build) []const u8 {
     return backend;
 }
 
+fn nativeSecp256k1Option(b: *std.Build) []const u8 {
+    const backend = b.option(
+        []const u8,
+        "native-secp256k1",
+        "Native secp256k1 backend: std or libsecp256k1 (ignored by profile=zkvm)",
+    ) orelse "std";
+    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "libsecp256k1")) {
+        std.debug.panic("unsupported native secp256k1 backend '{s}' (expected std or libsecp256k1)", .{backend});
+    }
+    return backend;
+}
+
 fn resolveNativeKeccak(
     profile: []const u8,
     target: std.Build.ResolvedTarget,
@@ -373,10 +415,28 @@ fn resolveNativeKeccak(
     };
 }
 
-fn buildOptions(b: *std.Build, profile: []const u8, native_keccak: []const u8) *std.Build.Step.Options {
+fn resolveNativeSecp256k1(
+    profile: []const u8,
+    target: std.Build.ResolvedTarget,
+    requested: []const u8,
+) []const u8 {
+    if (!std.mem.eql(u8, profile, "native") or !std.mem.eql(u8, requested, "libsecp256k1")) return "std";
+    return switch (target.result.cpu.arch) {
+        .x86_64, .aarch64, .riscv64 => "libsecp256k1",
+        else => "std",
+    };
+}
+
+fn buildOptions(
+    b: *std.Build,
+    profile: []const u8,
+    native_keccak: []const u8,
+    native_secp256k1: []const u8,
+) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption([]const u8, "profile", profile);
     options.addOption([]const u8, "native_keccak", native_keccak);
+    options.addOption([]const u8, "native_secp256k1", native_secp256k1);
     return options;
 }
 
@@ -578,7 +638,7 @@ fn addGuestZisk(
     };
 
     const target = guestZiskTarget(b);
-    const build_options = buildOptions(b, "zkvm", "std");
+    const build_options = buildOptions(b, "zkvm", "std", "std");
     const guest_options = guestOptions(b, true);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guestPayloadSource(guest_payload) catch unreachable;
@@ -886,6 +946,7 @@ fn addBenchMicroDelegate(
 fn addEvmzBuildArgs(run: *std.Build.Step.Run, b: *std.Build, config: EvmzBuildConfig) void {
     run.addArg(b.fmt("-Dprofile={s}", .{config.profile}));
     run.addArg(b.fmt("-Dnative-keccak={s}", .{config.native_keccak}));
+    run.addArg(b.fmt("-Dnative-secp256k1={s}", .{config.native_secp256k1}));
 }
 
 const XkcpLane = enum {
@@ -1008,10 +1069,68 @@ fn buildXkcpObject(
     return b.addObject(.{ .name = name, .root_module = module });
 }
 
+fn buildLibsecp256k1Object(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    dep: *std.Build.Dependency,
+    name: []const u8,
+    pic: ?bool,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = pic,
+    });
+    const common_flags = [_][]const u8{
+        // Match upstream's language baseline and keep dependency warnings visible.
+        "-std=c90",
+        "-Wall",
+        "-Wextra",
+
+        // Keep upstream's public C API internal to evmz; only our one-shot adapter
+        // overrides this visibility and becomes linkable from Zig.
+        "-fvisibility=hidden",
+        "-DSECP256K1_NO_API_VISIBILITY_ATTRIBUTES=1",
+
+        // Recovery is optional upstream. Keep its desktop verification window, but
+        // use the smallest supported signing table because evmz never signs here.
+        "-DENABLE_MODULE_RECOVERY=1",
+        "-DECMULT_WINDOW_SIZE=15",
+        "-DCOMB_BLOCKS=2",
+        "-DCOMB_TEETH=5",
+    };
+    const x86_64_flags = common_flags ++ [_][]const u8{
+        // Upstream enables this after an assembler capability check. Zig's Clang
+        // supports it on the non-Windows x86-64 targets selected below.
+        "-DUSE_ASM_X86_64=1",
+    };
+    const flags: []const []const u8 = if (target.result.cpu.arch == .x86_64 and target.result.os.tag != .windows)
+        &x86_64_flags
+    else
+        &common_flags;
+
+    module.addIncludePath(dep.path("include"));
+    module.addIncludePath(dep.path("src"));
+    module.addCSourceFile(.{ .file = dep.path("src/secp256k1.c"), .flags = flags });
+    module.addCSourceFile(.{ .file = dep.path("src/precomputed_ecmult.c"), .flags = flags });
+    module.addCSourceFile(.{ .file = dep.path("src/precomputed_ecmult_gen.c"), .flags = flags });
+    module.addCSourceFile(.{ .file = b.path("src/crypto/libsecp256k1.c"), .flags = flags });
+
+    return b.addObject(.{ .name = name, .root_module = module });
+}
+
 fn addNativeKeccak(module: *std.Build.Module, xkcp_object: ?*std.Build.Step.Compile) void {
     const object = xkcp_object orelse return;
     module.link_libc = true;
     module.addObject(object);
+}
+
+fn addNativeSecp256k1(module: *std.Build.Module, object: ?*std.Build.Step.Compile) void {
+    const libsecp256k1 = object orelse return;
+    module.link_libc = true;
+    module.addObject(libsecp256k1);
 }
 
 fn addPrecompileNative(
