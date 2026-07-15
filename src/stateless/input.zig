@@ -4,7 +4,7 @@
 //! schema ids, fixture fields, and runtime framing are adapter concerns.
 
 const address = @import("../address.zig");
-const mpt = @import("../mpt.zig");
+const Withdrawal = @import("../eth/Withdrawal.zig");
 const transaction = @import("../transaction.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 
@@ -30,7 +30,7 @@ pub const Block = struct {
     base_fee_per_gas: u256,
     block_hash: [32]u8,
     transactions: []const []const u8 = &.{},
-    withdrawals: []const mpt.Withdrawal = &.{},
+    withdrawals: []const Withdrawal = &.{},
     blob_gas_used: ?u64 = null,
     excess_blob_gas: ?u64 = null,
     versioned_hashes: []const [32]u8 = &.{},

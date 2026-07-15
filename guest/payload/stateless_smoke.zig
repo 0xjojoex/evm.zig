@@ -75,8 +75,8 @@ pub fn runStatelessSmoke(allocator: std.mem.Allocator) !StatelessProof {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const account_key = evmz.mpt.hashedAddressKey(sender);
-    const pre_account_value = try evmz.mpt.accountValueFrom(scratch, .{
+    const account_key = evmz.eth.trie.hashedAddressKey(sender);
+    const pre_account_value = try evmz.eth.trie.accountValueFrom(scratch, .{
         .balance = starting_balance,
     });
     const state_node = try leafNode(scratch, &account_key, pre_account_value);
@@ -91,16 +91,16 @@ pub fn runStatelessSmoke(allocator: std.mem.Allocator) !StatelessProof {
         .encoded = "stateless-smoke-tx0",
     }};
 
-    const post_account_value = try evmz.mpt.accountValueFrom(scratch, .{
+    const post_account_value = try evmz.eth.trie.accountValueFrom(scratch, .{
         .nonce = 1,
         .balance = starting_balance,
     });
-    const post_state_pairs = [_]evmz.mpt.Pair{.{ .key = &account_key, .value = post_account_value }};
-    const expected_state_root = try evmz.mpt.root(scratch, &post_state_pairs);
+    const post_state_pairs = [_]evmz.eth.trie.Pair{.{ .key = &account_key, .value = post_account_value }};
+    const expected_state_root = try evmz.eth.trie.root(scratch, &post_state_pairs);
     const first = try block_stf.apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = gas_limit },
-        .state_backend = evmz.state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = .{
             .payload_header = .{
@@ -114,7 +114,7 @@ pub fn runStatelessSmoke(allocator: std.mem.Allocator) !StatelessProof {
     return proofFrom(try block_stf.apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = gas_limit },
-        .state_backend = evmz.state.Backend.fromWitness(pre_state_root, &nodes, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = .{
             .payload_header = .{

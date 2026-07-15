@@ -10,7 +10,6 @@ const StorageKey = storage.Key;
 const StateReader = @import("./Reader.zig");
 const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
-const mpt = @import("../mpt.zig");
 
 const EthereumFinalizer = struct {
     revision: evmz.Evm.Protocol.Revision,
@@ -1087,13 +1086,13 @@ test "balance-only changeset preserves non-materialized code hash" {
     try std.testing.expectEqual(@as(u64, 0), update.nonce);
     try std.testing.expectEqual(@as(u256, 7), update.balance);
     try std.testing.expectEqual(@as(usize, 0), delta.code_inserts.items.len);
-    try std.testing.expectEqualSlices(u8, &mpt.codeHash(&code), &update.code_hash);
+    try std.testing.expectEqualSlices(u8, &evmz.crypto.keccak256(&code), &update.code_hash);
 }
 
 test "code hash accessors preserve non-materialized account code" {
     const address = evmz.addr(0xabc);
     const code = [_]u8{0x5f};
-    const code_hash = mpt.codeHash(&code);
+    const code_hash = evmz.crypto.keccak256(&code);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
@@ -1212,13 +1211,13 @@ const TestStateReader = struct {
         self.load_count += 1;
         return .{
             .balance = self.balance,
-            .code_hash = mpt.codeHash(&.{0x5f}),
+            .code_hash = evmz.crypto.keccak256(&.{0x5f}),
         };
     }
 
     fn readerLoadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
         _ = ptr;
-        if (!std.mem.eql(u8, &hash, &mpt.codeHash(&.{0x5f}))) return error.MissingCode;
+        if (!std.mem.eql(u8, &hash, &evmz.crypto.keccak256(&.{0x5f}))) return error.MissingCode;
         return &.{0x5f};
     }
 

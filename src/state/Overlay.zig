@@ -16,7 +16,6 @@ const StorageKey = storage.Key;
 const StateReader = @import("./Reader.zig");
 const Changeset = @import("./Changeset.zig");
 const Journal = @import("./Journal.zig");
-const mpt = @import("../mpt.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Overlay = @This();
@@ -335,8 +334,8 @@ pub fn seedAccount(
     var account = account_value;
     defer account.deinit();
 
-    const code_hash = account.code_hash orelse mpt.codeHash(account.code);
-    if (!std.mem.eql(u8, &mpt.codeHash(account.code), &code_hash)) return error.CodeHashMismatch;
+    const code_hash = account.code_hash orelse evmz.crypto.keccak256(account.code);
+    if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &code_hash)) return error.CodeHashMismatch;
 
     if (!self.accounts.contains(address)) {
         if (self.state_resources) |resources| {
@@ -375,15 +374,15 @@ pub fn seedAccount(
 }
 
 fn codeByHash(self: *Overlay, code_hash: [32]u8) ![]const u8 {
-    if (std.mem.eql(u8, &code_hash, &mpt.empty_code_hash)) return &.{};
+    if (std.mem.eql(u8, &code_hash, &evmz.crypto.keccak256_empty)) return &.{};
     if (self.code_cache.get(code_hash)) |entry| return entry.bytes;
     const state_reader = self.state_reader orelse return error.CodeUnavailable;
     return try self.cacheCode(code_hash, try state_reader.loadCode(code_hash), false);
 }
 
 fn cacheCode(self: *Overlay, code_hash: [32]u8, code: []const u8, introduced: bool) ![]const u8 {
-    std.debug.assert(std.mem.eql(u8, &mpt.codeHash(code), &code_hash));
-    if (std.mem.eql(u8, &code_hash, &mpt.empty_code_hash)) return &.{};
+    std.debug.assert(std.mem.eql(u8, &evmz.crypto.keccak256(code), &code_hash));
+    if (std.mem.eql(u8, &code_hash, &evmz.crypto.keccak256_empty)) return &.{};
     if (self.code_cache.get(code_hash)) |entry| {
         return entry.bytes;
     }
@@ -448,7 +447,7 @@ pub fn getCodeView(self: *Overlay, address: Address) !CodeView {
         }
     else
         .{
-            .code_hash = mpt.empty_code_hash,
+            .code_hash = evmz.crypto.keccak256_empty,
             .bytes = &.{},
         };
     self.traceStateRead(.{
@@ -474,7 +473,7 @@ pub fn getCodeHash(self: *Overlay, address: Address) !u256 {
 
 pub fn accountHasCode(self: *Overlay, address: Address) !bool {
     const account = try self.getAccountOrLoad(address) orelse return false;
-    return !std.mem.eql(u8, &account.code_hash, &mpt.empty_code_hash);
+    return !std.mem.eql(u8, &account.code_hash, &evmz.crypto.keccak256_empty);
 }
 
 pub fn getBalance(self: *Overlay, address: Address) !u256 {
@@ -581,7 +580,7 @@ pub fn setCode(self: *Overlay, address: Address, code: []const u8) !void {
     const newly_dirty = try self.markAccountDirty(address);
     errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
 
-    const code_hash = mpt.codeHash(code);
+    const code_hash = evmz.crypto.keccak256(code);
     _ = try self.cacheCode(code_hash, code, true);
     account.code_hash = code_hash;
     self.traceStateWrite(.{
@@ -1610,7 +1609,7 @@ test "code view returns the canonical hash and preserves code-read tracing" {
     overlay.trace_depth = 3;
 
     const view = try overlay.getCodeView(address);
-    try std.testing.expectEqualSlices(u8, &mpt.codeHash(&code), &view.code_hash);
+    try std.testing.expectEqualSlices(u8, &evmz.crypto.keccak256(&code), &view.code_hash);
     try std.testing.expectEqualSlices(u8, &code, view.bytes);
     try std.testing.expectEqual(@as(usize, 1), recorder.reads);
     try std.testing.expectEqual(@as(u16, 3), recorder.last.depth);
@@ -1621,7 +1620,7 @@ test "code view returns the canonical hash and preserves code-read tracing" {
     try std.testing.expectEqual(@as(usize, 2), recorder.reads);
 
     const empty_view = try overlay.getCodeView(evmz.addr(0xdef));
-    try std.testing.expectEqualSlices(u8, &mpt.empty_code_hash, &empty_view.code_hash);
+    try std.testing.expectEqualSlices(u8, &evmz.crypto.keccak256_empty, &empty_view.code_hash);
     try std.testing.expectEqual(@as(usize, 0), empty_view.bytes.len);
 }
 

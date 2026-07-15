@@ -6,7 +6,7 @@ const ExecutionHeader = @import("../../eth/header.zig").ExecutionHeader;
 const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const crypto = @import("../../crypto.zig");
-const mpt = @import("../../mpt.zig");
+const trie = @import("../../eth/trie.zig");
 const rlp = @import("rlp");
 const t = @import("../../t.zig");
 const wire = @import("./v1.zig");
@@ -34,8 +34,8 @@ fn smokeInputWithHeaders(
         .parent_hash = parent_hash,
         .coinbase = address.addr(0),
         .state_root = smoke_parent_state_root,
-        .transactions_root = mpt.empty_root_hash,
-        .receipts_root = mpt.empty_root_hash,
+        .transactions_root = trie.empty_root_hash,
+        .receipts_root = trie.empty_root_hash,
         .logs_bloom = block_stf.empty_logs_bloom,
         .number = 1,
         .gas_limit = 30_000_000,
@@ -53,7 +53,7 @@ fn smokeInputWithHeaders(
             .parent_hash = parent_hash,
             .fee_recipient = address.addr(0),
             .state_root = smoke_parent_state_root,
-            .receipts_root = mpt.empty_root_hash,
+            .receipts_root = trie.empty_root_hash,
             .logs_bloom = block_stf.empty_logs_bloom,
             .prev_randao = [_]u8{0x22} ** 32,
             .block_number = 1,
@@ -90,8 +90,8 @@ pub fn pragueSmokeInput(
         .parent_hash = parent_hash,
         .coinbase = address.addr(0),
         .state_root = smoke_parent_state_root,
-        .transactions_root = mpt.empty_root_hash,
-        .receipts_root = mpt.empty_root_hash,
+        .transactions_root = trie.empty_root_hash,
+        .receipts_root = trie.empty_root_hash,
         .logs_bloom = block_stf.empty_logs_bloom,
         .number = 0,
         .gas_limit = 30_000_000,
@@ -100,7 +100,7 @@ pub fn pragueSmokeInput(
         .extra_data = &.{},
         .prev_randao = [_]u8{0x22} ** 32,
         .base_fee_per_gas = 0,
-        .withdrawals_root = mpt.empty_root_hash,
+        .withdrawals_root = trie.empty_root_hash,
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
         .parent_beacon_block_root = [_]u8{0} ** 32,
@@ -118,7 +118,7 @@ pub fn pragueSmokeInput(
                         .parent_hash = parent_hash,
                         .fee_recipient = address.addr(0),
                         .state_root = smoke_parent_state_root,
-                        .receipts_root = mpt.empty_root_hash,
+                        .receipts_root = trie.empty_root_hash,
                         .logs_bloom = block_stf.empty_logs_bloom,
                         .prev_randao = [_]u8{0x22} ** 32,
                         .block_number = 0,

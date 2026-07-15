@@ -24,6 +24,7 @@ pub const settlement = @import("eth/settlement.zig");
 pub const precompile = @import("eth/precompile.zig");
 pub const system = @import("eth/system.zig");
 pub const header = @import("eth/header.zig");
+pub const trie = @import("eth/trie.zig");
 pub const block_stf = @import("eth/block_stf.zig");
 pub const eip6110 = @import("eth/eip/6110.zig");
 pub const eip7002 = @import("eth/eip/7002.zig");
@@ -53,6 +54,7 @@ pub const definition = define(.{});
 const Definition = definition_mod.Bound(definition);
 
 pub const ExecutionHeader = header.ExecutionHeader;
+pub const Withdrawal = @import("eth/Withdrawal.zig");
 pub const BlockSTF = block_stf;
 /// The Ethereum protocol bound across every supported revision.
 pub const Protocol = protocol(.all);

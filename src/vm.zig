@@ -901,7 +901,7 @@ fn Typed(
             // Reader implementations own missing/malformed-state errors. The
             // expected hash came from the same metadata read, so a mismatch here
             // is a generic preparation contract error, not a witness diagnosis.
-            if (!std.mem.eql(u8, &evmz.mpt.codeHash(code), &expected_hash)) {
+            if (!std.mem.eql(u8, &evmz.crypto.keccak256(code), &expected_hash)) {
                 return error.CodeHashMismatch;
             }
             return code;
@@ -1084,7 +1084,7 @@ test "Vm account code remains overlay-owned and traced with a prepared backend e
     });
     defer vm.deinit();
 
-    const code_hash = evmz.mpt.codeHash(&code);
+    const code_hash = evmz.crypto.keccak256(&code);
     const prepared = try prepared_pool.getOrPrepare(vm.executor.preparedCodeKey(), code_hash, &code);
     const view = (try vm.getAccount(contract)).?;
 

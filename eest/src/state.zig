@@ -54,6 +54,7 @@ pub const FailReason = enum(u8) {
     transaction_nonce_mismatch,
     balance_mismatch,
     nonce_mismatch,
+    state_root_mismatch,
     unsupported_fixture_key,
 };
 
@@ -479,6 +480,18 @@ fn finishPostAssertions(
         }
     }
 
+    if (post_obj.get("hash")) |expected_hash_value| {
+        const expected_hash = try parseBytesFromValue(allocator, expected_hash_value);
+        defer allocator.free(expected_hash);
+        if (expected_hash.len != 32) return error.MalformedFixture;
+        const actual_hash = try host.stateRoot(allocator);
+        compared_fields += 1;
+        if (!std.mem.eql(u8, &actual_hash, expected_hash)) {
+            summary.countFail(.state_root_mismatch);
+            return;
+        }
+    }
+
     const state_value = post_obj.get("state") orelse {
         if (compared_fields > 0) {
             summary.passed += 1;
@@ -505,7 +518,7 @@ fn finishPostAssertions(
 }
 
 fn hasUnsupportedPostAssertions(post_obj: *const std.json.ObjectMap) bool {
-    return post_obj.get("hash") != null or post_obj.get("logs") != null or post_obj.get("receipt") != null or post_obj.get("txbytes") != null;
+    return post_obj.get("logs") != null or post_obj.get("receipt") != null or post_obj.get("txbytes") != null;
 }
 
 fn selectedAccessList(tx: *const std.json.ObjectMap, index: usize) !?std.json.Array {
@@ -740,6 +753,12 @@ const FixtureHost = struct {
         defer pending.deinit();
         return .{ .executed = try pending.accept() };
     }
+
+    fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
+        var changeset = try self.vm.changeset();
+        defer changeset.deinit(self.vm.executor.allocator);
+        return self.store.stateRootAfterChangeset(allocator, &changeset);
+    }
 };
 
 fn ExactFixtureHost(comptime gas_limit: u64) type {
@@ -817,6 +836,12 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         fn transact(self: *Self, tx: evmz.Transaction) !evmz.TxResult {
             var block = try self.vm.beginBlock(self.env);
             return block.transact(tx);
+        }
+
+        fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
+            var changeset = try self.vm.changeset();
+            defer changeset.deinit(self.vm.executor.allocator);
+            return self.store.stateRootAfterChangeset(allocator, &changeset);
         }
     };
 }
@@ -1138,7 +1163,45 @@ test "EEST unsupported assertion fields do not block comparable post state" {
         "",
         "0x0186a0",
         "0x",
-        ",\"hash\":\"0x00\",\"logs\":\"0x00\",\"receipt\":{},\"txbytes\":\"0x00\"",
+        ",\"logs\":\"0x00\",\"receipt\":{},\"txbytes\":\"0x00\"",
+        "\"storage\":{\"0x00\":\"0x2a\"}",
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
+}
+
+test "EEST post hash compares the canonical MPT state root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const storage_key = evmz.eth.trie.hashedStorageKey(0);
+    const storage_value = try evmz.eth.trie.storageValue(scratch, 42);
+    const storage_root = try evmz.eth.trie.root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
+
+    const contract_key = evmz.eth.trie.hashedAddressKey(evmz.addr(0x1000));
+    const contract_value = try evmz.eth.trie.accountValueFrom(scratch, .{
+        .storage_root = storage_root,
+        .code_hash = evmz.crypto.keccak256(&.{ 0x60, 0x2a, 0x60, 0x00, 0x55 }),
+    });
+    const sender_key = evmz.eth.trie.hashedAddressKey(evmz.addr(0xaaaa));
+    const sender_value = try evmz.eth.trie.accountValueFrom(scratch, .{
+        .nonce = 1,
+        .balance = 0xffff,
+    });
+    const expected_root = try evmz.eth.trie.root(scratch, &.{
+        .{ .key = &contract_key, .value = contract_value },
+        .{ .key = &sender_key, .value = sender_value },
+    });
+    const root_hex = std.fmt.bytesToHex(expected_root, .lower);
+    const post_extra = try std.fmt.allocPrint(scratch, ",\"hash\":\"0x{s}\"", .{&root_hex});
+
+    const summary = try runMinimalStateFixture(
+        "",
+        "0x0186a0",
+        "0x",
+        post_extra,
         "\"storage\":{\"0x00\":\"0x2a\"}",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
@@ -1177,7 +1240,6 @@ test "EEST unsupported-only assertion fields are unchecked" {
         \\    "post": {
         \\      "Cancun": [{
         \\        "indexes": {"data": 0, "gas": 0, "value": 0},
-        \\        "hash": "0x00",
         \\        "logs": "0x00",
         \\        "receipt": {},
         \\        "txbytes": "0x00"

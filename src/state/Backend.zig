@@ -6,7 +6,7 @@ const Changeset = @import("Changeset.zig");
 const Committer = @import("Committer.zig");
 const Reader = @import("Reader.zig");
 const WitnessStateReader = @import("WitnessStateReader.zig");
-const mpt = @import("../mpt.zig");
+const trie = @import("../eth/trie.zig");
 
 pub const RootProvider = struct {
     ptr: *anyopaque,
@@ -31,8 +31,15 @@ pub const Backend = union(enum) {
         committer: ?Committer = null,
     };
 
-    pub fn fromWitness(state_root: [32]u8, nodes: []const []const u8, codes: []const WitnessStateReader.Code) Backend {
-        return .{ .witness = WitnessStateReader.init(state_root, nodes, codes) };
+    /// `allocator` and witness byte slices must outlive the returned block-lifetime backend.
+    pub fn fromWitness(
+        allocator: std.mem.Allocator,
+        state_root: [32]u8,
+        nodes: []const []const u8,
+        codes: []const WitnessStateReader.Code,
+    ) !Backend {
+        const indexed = try trie.indexNodes(allocator, nodes);
+        return .{ .witness = WitnessStateReader.init(state_root, indexed, codes) };
     }
 
     pub fn fromExternal(reader_value: Reader, root_provider: RootProvider, committer: ?Committer) Backend {
@@ -41,6 +48,14 @@ pub const Backend = union(enum) {
             .root_provider = root_provider,
             .committer = committer,
         } };
+    }
+
+    pub fn deinit(self: *Backend) void {
+        switch (self.*) {
+            .witness => |*witness| witness.deinit(),
+            .external => {},
+        }
+        self.* = undefined;
     }
 
     pub fn reader(self: *Backend) Reader {
@@ -52,8 +67,31 @@ pub const Backend = union(enum) {
 
     pub fn stateRootAfterChangeset(self: *Backend, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
         return switch (self.*) {
-            .witness => |witness| mpt.stateRootAfterChangeset(allocator, witness.state_root, witness.nodes, changeset) catch |err| switch (err) {
-                error.MissingNode, error.InvalidNode, error.InvalidNodeReference, error.InvalidCompactPath => error.InvalidWitness,
+            .witness => |witness| trie.stateRootAfterChangesetIndexed(
+                allocator,
+                witness.state_root,
+                witness.indexed,
+                changeset,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.ResourceLimitExceeded => error.ResourceLimitExceeded,
+                error.MissingNode,
+                error.ConflictingNode,
+                error.InvalidCompactPath,
+                error.InvalidNode,
+                error.InvalidNodeReference,
+                error.NonCanonicalNode,
+                error.ExpectedBytes,
+                error.ExpectedList,
+                error.InputTooShort,
+                error.IntTooLarge,
+                error.LengthOverflow,
+                error.NonCanonicalInteger,
+                error.NonCanonicalLength,
+                error.NonCanonicalSingleByte,
+                error.TrailingBytes,
+                error.UnexpectedLength,
+                => error.InvalidWitness,
                 else => err,
             },
             .external => |external| external.root_provider.afterChangeset(allocator, changeset),
@@ -67,3 +105,14 @@ pub const Backend = union(enum) {
         }
     }
 };
+
+test "witness backend releases its owned node index" {
+    const nodes = [_][]const u8{"encoded witness node"};
+    var backend = try Backend.fromWitness(
+        std.testing.allocator,
+        [_]u8{0} ** 32,
+        &nodes,
+        &.{},
+    );
+    backend.deinit();
+}

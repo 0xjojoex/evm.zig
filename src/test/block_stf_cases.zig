@@ -8,7 +8,7 @@ const JsonValue = std.json.Value;
 const address = evmz.address;
 const bal = evmz.eth.bal;
 const block_stf = evmz.eth.block_stf;
-const mpt = evmz.mpt;
+const mpt = evmz.eth.trie;
 
 const cases_json = @embedFile("fixtures/block_stf/cases.json");
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
@@ -91,7 +91,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
 
     const valid = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, mpt.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
         .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
@@ -108,7 +108,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
     wrong_requests_hash[31] ^= 1;
     const mismatch = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, mpt.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
         .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
@@ -129,7 +129,7 @@ test "BlockSTF semantic case smoke: provided BAL is structurally validated first
 
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, mpt.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
         .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
@@ -149,7 +149,7 @@ test "BlockSTF semantic case smoke: BAL size excess maps to status" {
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
         .env = .{ .gas_limit = bal.item_cost - 1 },
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, mpt.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = claim,
         .root_checks = testRootChecks(mpt.empty_root_hash, mpt.empty_root_hash, mpt.empty_root_hash),
@@ -166,7 +166,7 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
 
     const recipient_a = address.addr(0x7777);
     const recipient_b = address.addr(0x8888);
-    const withdrawals = [_]mpt.Withdrawal{
+    const withdrawals = [_]evmz.eth.Withdrawal{
         .{ .index = 0, .validator_index = 1, .address = recipient_a, .amount = 0 },
         .{ .index = 1, .validator_index = 2, .address = recipient_a, .amount = 3 },
         .{ .index = 2, .validator_index = 3, .address = recipient_b, .amount = 0 },
@@ -191,7 +191,7 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
 
     const result = try block_stf.apply(scratch, .{
         .revision = .amsterdam,
-        .state_backend = evmz.state.Backend.fromWitness(mpt.empty_root_hash, &.{}, &.{}),
+        .state_backend = try evmz.state.Backend.fromWitness(scratch, mpt.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .block_access_list = claimed_bal,
