@@ -505,6 +505,60 @@ test "bounded fused storage write respects accepted overlay capacity" {
     try std.testing.expectEqual(@as(u256, 0), try overlay.getStorage(evmz.addr(1), 1));
 }
 
+test "failed shared slot reservation does not publish bounded policy" {
+    var access_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var access_overlay = Overlay.init(access_allocator.allocator());
+    defer access_overlay.deinit();
+    try access_overlay.warm_accounts.ensureTotalCapacity(1);
+
+    access_allocator.fail_index = access_allocator.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        access_overlay.configureAccessResources(.{ .accounts = 0, .storage_keys = 1 }),
+    );
+    try std.testing.expect(access_overlay.access_resources == null);
+
+    var state_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var state_overlay = Overlay.init(state_allocator.allocator());
+    defer state_overlay.deinit();
+    try state_overlay.configureStateResources(.{});
+
+    state_allocator.fail_index = state_allocator.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state_overlay.configureStateResources(.{ .original_storage_entries = 2 }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state_overlay.state_resources.?.original_storage_entries);
+}
+
+test "shared slot map remains growable when only one storage policy is bounded" {
+    var access_bounded = Overlay.init(std.testing.allocator);
+    defer access_bounded.deinit();
+    try access_bounded.configureAccessResources(.{ .accounts = 0, .storage_keys = 1 });
+    access_bounded.beginTransaction();
+
+    _ = try access_bounded.originalStorage(evmz.addr(1), 1);
+    _ = try access_bounded.originalStorage(evmz.addr(1), 2);
+    const access_bounded_capacity = access_bounded.storage_slots.capacity();
+    try access_bounded.warmStorage(evmz.addr(1), 3);
+    try std.testing.expect(access_bounded.storage_slots.capacity() > access_bounded_capacity);
+    try std.testing.expectEqual(@as(usize, 1), access_bounded.warmStorageCount());
+    try std.testing.expectEqual(@as(usize, 2), access_bounded.originalStorageCount());
+
+    var state_bounded = Overlay.init(std.testing.allocator);
+    defer state_bounded.deinit();
+    try state_bounded.configureStateResources(.{ .original_storage_entries = 1 });
+    state_bounded.beginTransaction();
+
+    try state_bounded.warmStorage(evmz.addr(2), 1);
+    try state_bounded.warmStorage(evmz.addr(2), 2);
+    const state_bounded_capacity = state_bounded.storage_slots.capacity();
+    _ = try state_bounded.originalStorage(evmz.addr(2), 3);
+    try std.testing.expect(state_bounded.storage_slots.capacity() > state_bounded_capacity);
+    try std.testing.expectEqual(@as(usize, 2), state_bounded.warmStorageCount());
+    try std.testing.expectEqual(@as(usize, 1), state_bounded.originalStorageCount());
+}
+
 test "warm access reserve hint does not enable capacity errors" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
@@ -1204,6 +1258,43 @@ test "storage clear discards transaction-local dirty slots and rolls back" {
     overlay.closeTransaction();
     try std.testing.expect(!overlay.storage_overlay.contains(key));
     try std.testing.expectEqual(@as(u256, 0), try overlay.getStorage(address, key.key));
+}
+
+test "partial storage clear failure restores all transaction-local slots" {
+    const ClearStorageFinalizer = struct {
+        pub fn selfDestructFinalization(_: @This(), _: bool) evmz.protocol.SelfDestructFinalization {
+            return .{ .clear_storage = true };
+        }
+    };
+
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xc1ea);
+    const first = StorageKey{ .address = address, .key = 1 };
+    const second = StorageKey{ .address = address, .key = 2 };
+    overlay.beginTransaction();
+    try std.testing.expectEqual(Host.StorageStatus.added, try overlay.setStorage(address, first.key, 9));
+    try std.testing.expectEqual(Host.StorageStatus.added, try overlay.setStorage(address, second.key, 10));
+    try overlay.markSelfdestructed(address);
+
+    const setup_journal_len = overlay.journal.len();
+    const journal_limit = setup_journal_len + 2;
+    try overlay.journal.items.ensureTotalCapacityPrecise(std.testing.allocator, journal_limit);
+    overlay.journal.capacity_limit = journal_limit;
+
+    try std.testing.expectError(
+        error.JournalCapacityExceeded,
+        overlay.finalizeTransaction(ClearStorageFinalizer{}),
+    );
+
+    try std.testing.expectEqual(setup_journal_len, overlay.journal.len());
+    try std.testing.expectEqual(@as(u256, 9), try overlay.getStorage(address, first.key));
+    try std.testing.expectEqual(@as(u256, 10), try overlay.getStorage(address, second.key));
+    try std.testing.expect(overlay.storage_slots.get(first).?.dirty);
+    try std.testing.expect(overlay.storage_slots.get(second).?.dirty);
+    try std.testing.expectEqual(@as(usize, 2), overlay.pending_storage_overlay_entries);
+    try std.testing.expect(overlay.selfdestructed_accounts.contains(address));
 }
 
 test "changeset emits sorted account updates and storage writes" {
