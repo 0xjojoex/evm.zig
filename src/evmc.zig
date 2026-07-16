@@ -275,6 +275,8 @@ const ToHost = struct {
                 .accountExists = accountExists,
                 .getStorage = getStorage,
                 .setStorage = setStorage,
+                .loadStorage = loadStorage,
+                .storeStorage = storeStorage,
                 .getBalance = getBalance,
                 .getCodeSize = getCodeSize,
                 .getCodeHash = getCodeHash,
@@ -315,6 +317,20 @@ const ToHost = struct {
         const status = self.host_interfcace.*.set_storage.?(self.context, &evmc_address, &evmc_key, &evmc_value);
 
         return storageStatusFromEvmc(status);
+    }
+
+    fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !evmz.Host.StorageLoadResult {
+        return .{
+            .access_status = try accessStorage(ptr, address, key),
+            .value = try getStorage(ptr, address, key),
+        };
+    }
+
+    fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !evmz.Host.StorageStoreResult {
+        return .{
+            .access_status = try accessStorage(ptr, address, key),
+            .storage_status = try setStorage(ptr, address, key, value),
+        };
     }
 
     fn getBalance(ptr: *anyopaque, address: Address) !u256 {
@@ -593,6 +609,82 @@ test "EVMC execute carries blob hashes through tx context" {
     try std.testing.expectEqual(@as(usize, 32), result.output_size);
     try std.testing.expect(result.output_data != null);
     try std.testing.expectEqualSlices(u8, &blob_hashes[0].bytes, result.output_data[0..32]);
+}
+
+test "EVMC host wrapper provides required fused storage callbacks" {
+    const StorageHostContext = struct {
+        const Event = enum { access, get, set };
+
+        events: [4]Event = undefined,
+        events_len: usize = 0,
+        value: u256 = 7,
+
+        fn fromContext(context: ?*evmc.evmc_host_context) *@This() {
+            return @ptrCast(@alignCast(context.?));
+        }
+
+        fn record(self: *@This(), event: Event) void {
+            self.events[self.events_len] = event;
+            self.events_len += 1;
+        }
+
+        fn accessStorage(
+            context: ?*evmc.evmc_host_context,
+            _: [*c]const evmc.evmc_address,
+            _: [*c]const evmc.evmc_bytes32,
+        ) callconv(.c) evmc.evmc_access_status {
+            const self = fromContext(context);
+            self.record(.access);
+            return evmc.EVMC_ACCESS_COLD;
+        }
+
+        fn getStorage(
+            context: ?*evmc.evmc_host_context,
+            _: [*c]const evmc.evmc_address,
+            _: [*c]const evmc.evmc_bytes32,
+        ) callconv(.c) evmc.evmc_bytes32 {
+            const self = fromContext(context);
+            self.record(.get);
+            return toEvmcBytes32(self.value);
+        }
+
+        fn setStorage(
+            context: ?*evmc.evmc_host_context,
+            _: [*c]const evmc.evmc_address,
+            _: [*c]const evmc.evmc_bytes32,
+            value: [*c]const evmc.evmc_bytes32,
+        ) callconv(.c) evmc.evmc_storage_status {
+            const self = fromContext(context);
+            self.record(.set);
+            self.value = fromEvmcBytes32(value.*);
+            return evmc.EVMC_STORAGE_MODIFIED;
+        }
+    };
+
+    var context = StorageHostContext{};
+    const host_context: ?*evmc.evmc_host_context = @ptrCast(&context);
+    const interface = evmc.evmc_host_interface{
+        .get_storage = StorageHostContext.getStorage,
+        .set_storage = StorageHostContext.setStorage,
+        .access_storage = StorageHostContext.accessStorage,
+    };
+
+    var wrapper = ToHost.init(&interface, host_context);
+    defer wrapper.deinit();
+    var host = wrapper.toHost();
+
+    const address = evmz.addr(0xbeef);
+    const loaded = try host.loadStorage(address, 3);
+    try std.testing.expectEqual(evmz.Host.AccessStatus.cold, loaded.access_status);
+    try std.testing.expectEqual(@as(u256, 7), loaded.value);
+    try std.testing.expectEqualSlices(StorageHostContext.Event, &.{ .access, .get }, context.events[0..context.events_len]);
+
+    context.events_len = 0;
+    const stored = try host.storeStorage(address, 3, 9);
+    try std.testing.expectEqual(evmz.Host.AccessStatus.cold, stored.access_status);
+    try std.testing.expectEqual(evmz.Host.StorageStatus.modified, stored.storage_status);
+    try std.testing.expectEqual(@as(u256, 9), context.value);
+    try std.testing.expectEqualSlices(StorageHostContext.Event, &.{ .access, .set }, context.events[0..context.events_len]);
 }
 
 test "EVMC host wrapper resolves delegated target and owns call output" {

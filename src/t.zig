@@ -88,6 +88,8 @@ pub const MockHost = struct {
     removed_account: std.AutoHashMap(Address, bool),
     storage_reads: u64,
     access_storage_reads: u64,
+    storage_loads: u64,
+    storage_stores: u64,
     block_hash_reads: u64,
     last_block_hash_number: ?u256,
     tx_context_error: ?anyerror,
@@ -105,6 +107,8 @@ pub const MockHost = struct {
             .tx_context_reads = 0,
             .storage_reads = 0,
             .access_storage_reads = 0,
+            .storage_loads = 0,
+            .storage_stores = 0,
             .block_hash_reads = 0,
             .last_block_hash_number = null,
             .tx_context_error = null,
@@ -185,6 +189,26 @@ pub const MockHost = struct {
         _ = address;
         self.storage_reads += 1;
         return self.store.get(key) orelse 0;
+    }
+
+    fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        _ = address;
+        self.storage_loads += 1;
+        return .{
+            .access_status = if (self.store.contains(key)) .warm else .cold,
+            .value = self.store.get(key) orelse 0,
+        };
+    }
+
+    fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.storage_stores += 1;
+        const access_status: Host.AccessStatus = if (self.store.contains(key)) .warm else .cold;
+        return .{
+            .access_status = access_status,
+            .storage_status = try setStorage(ptr, address, key, value),
+        };
     }
 
     fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {
@@ -385,6 +409,8 @@ pub const MockHost = struct {
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,
+            .loadStorage = loadStorage,
+            .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
             .selfDestruct = selfDestruct,

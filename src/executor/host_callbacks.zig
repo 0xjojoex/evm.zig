@@ -5,7 +5,6 @@ const eip7702 = @import("./eip7702.zig");
 
 const Address = evmz.Address;
 const Host = evmz.Host;
-const StorageKey = evmz.state.StorageKey;
 
 pub fn For(comptime Executor: type) type {
     return struct {
@@ -21,6 +20,8 @@ pub fn For(comptime Executor: type) type {
                 .getCodeHash = getCodeHash,
                 .getStorage = hostGetStorage,
                 .setStorage = setStorage,
+                .loadStorage = loadStorage,
+                .storeStorage = storeStorage,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
                 .selfDestruct = Callbacks().selfDestruct,
@@ -113,6 +114,16 @@ pub fn For(comptime Executor: type) type {
             return self.state.setStorage(address, key, value);
         }
 
+        fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.state.loadStorage(address, key);
+        }
+
+        fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.state.storeStorage(address, key, value);
+        }
+
         fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return (try self.getCode(address)).len;
@@ -150,10 +161,7 @@ pub fn For(comptime Executor: type) type {
 
         fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            const storage_key = StorageKey{ .address = address, .key = key };
-            if (self.state.warm_storage.contains(storage_key)) return .warm;
-            try self.state.warmStorage(address, key);
-            return .cold;
+            return self.state.accessStorage(address, key);
         }
 
         fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {

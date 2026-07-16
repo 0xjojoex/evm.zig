@@ -74,14 +74,27 @@ pub fn For(comptime ProtocolType: type) type {
                 }
             }
 
-            if (Protocol.storage.sstoreStorageAccessGas(revision, .warm) != null) {
-                const access_status = accountAccessStatus(try host.accessStorage(recipient, key));
-                const access_gas = Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0;
-                frame.trackGas(access_gas);
-                if (frame.status != .running) return;
-            }
+            const host_status = blk: {
+                if (Protocol.storage.sstoreStorageAccessGas(revision, .warm)) |warm_access_gas| {
+                    const cold_access_gas = Protocol.storage.sstoreStorageAccessGas(revision, .cold) orelse warm_access_gas;
+                    if (frame.gas_left >= @max(warm_access_gas, cold_access_gas)) {
+                        const result = try host.storeStorage(recipient, key, value);
+                        const access_status = accountAccessStatus(result.access_status);
+                        frame.trackGas(Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0);
+                        if (frame.status != .running) return;
+                        break :blk result.storage_status;
+                    }
 
-            const status = storageStatus(try host.setStorage(recipient, key, value));
+                    const access_status = accountAccessStatus(try host.accessStorage(recipient, key));
+                    const access_gas = Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0;
+                    frame.trackGas(access_gas);
+                    if (frame.status != .running) return;
+                }
+
+                break :blk try host.setStorage(recipient, key, value);
+            };
+
+            const status = storageStatus(host_status);
 
             const cost = Protocol.storage.sstoreGas(revision, status);
 
@@ -106,6 +119,15 @@ pub fn For(comptime ProtocolType: type) type {
             const revision = Self.frameRevision(frame);
 
             if (Protocol.storage.sloadColdStorageAccessGas(revision)) |cold_storage_access_gas| {
+                if (frame.gas_left >= cold_storage_access_gas) {
+                    const result = try host.loadStorage(recipient, key);
+                    if (result.access_status == .cold) {
+                        frame.trackGas(cold_storage_access_gas);
+                        if (frame.status != .running) return null;
+                    }
+                    return result.value;
+                }
+
                 if (try host.accessStorage(recipient, key) == .cold) {
                     frame.trackGas(cold_storage_access_gas);
                     if (frame.status != .running) return null;
@@ -172,8 +194,9 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_989), frame.frame.gas_left);
-    try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
-    try std.testing.expectEqual(@as(u64, 1), mock_host.storage_reads);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.storage_loads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 
@@ -264,6 +287,8 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
 }
 
 test "Amsterdam cold new SSTORE charges state gas from reservoir" {
@@ -299,6 +324,41 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas)), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
+}
+
+test "prepared cold Amsterdam SSTORE out of access gas stops before storage write" {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .sender = evmz.addr(0),
+        .gas = 3 + 3 + 2_500,
+        .kind = Host.CallKind.call,
+        .recipient = evmz.addr(0),
+        .value = 0,
+        .input_data = &.{},
+    };
+    const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+        .revision = .amsterdam,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = try interpreter.execute();
+    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
+    try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
 }
 
 test "prepared SSTORE rejects static context before host access" {
@@ -323,6 +383,7 @@ test "prepared SSTORE rejects static context before host access" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
 }
 
@@ -356,4 +417,5 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
     try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_loads);
 }
