@@ -339,6 +339,15 @@ pub fn getOrCreateAccount(self: *Overlay, address: Address) !*Account {
     return self.accounts.getPtr(address).?;
 }
 
+/// Materialize account existence as a state change without altering metadata.
+pub fn touchAccount(self: *Overlay, address: Address) !void {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    _ = try self.getOrCreateAccount(address);
+    _ = try self.markAccountDirty(address);
+}
+
 fn putAccount(self: *Overlay, address: Address, account: Account) !void {
     if (self.state_resources) |resources| {
         if (self.accounts.getPtr(address)) |slot| {
@@ -599,9 +608,10 @@ pub fn setCode(self: *Overlay, address: Address, code: []const u8) !void {
     errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
 
     const account = try self.getOrCreateAccount(address);
+    const previous_hash = account.code_hash;
     try self.journal.append(self.allocator, .{ .code = .{
         .address = address,
-        .prev = account.code_hash,
+        .prev = previous_hash,
     } });
     _ = try self.markAccountDirty(address);
 
@@ -614,6 +624,7 @@ pub fn setCode(self: *Overlay, address: Address, code: []const u8) !void {
     try self.traceStateWrite(.{
         .code = .{
             .address = address,
+            .previous_hash = previous_hash,
             .size = code.len,
             .code = code,
         },

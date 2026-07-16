@@ -83,6 +83,8 @@ pub fn For(comptime Executor: type) type {
                         if (policy.clear_balance) {
                             try self.state.setBalance(address, 0);
                         }
+                    } else if (!same_address and Protocol.self_destruct.touchesBeneficiaryOnZeroTransfer(self.revision())) {
+                        try self.state.touchAccount(beneficiary);
                     }
                     if (policy.reset_nonce) {
                         try self.state.setNonce(address, 0);

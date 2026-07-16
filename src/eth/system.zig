@@ -472,6 +472,7 @@ pub const SelfDestruct = struct {
         const PatchType = struct {
             selfDestructPolicy: ?*const fn (R, types.SelfDestructPolicyInput) types.SelfDestructPolicy = null,
             selfDestructFinalization: ?*const fn (R, bool) types.SelfDestructFinalization = null,
+            touchesBeneficiaryOnZeroTransfer: ?*const fn (R) bool = null,
             selfDestructNewAccountGas: ?*const fn (R, types.SelfDestructNewAccountInput) types.CallNewAccountGas = null,
             selfDestructColdAccountAccessGas: ?*const fn (R) ?i64 = null,
             selfDestructRefundGas: ?*const fn (R) i64 = null,
@@ -485,6 +486,7 @@ pub const SelfDestruct = struct {
         return .{
             .selfDestructPolicy = @This().selfDestructPolicy,
             .selfDestructFinalization = @This().selfDestructFinalization,
+            .touchesBeneficiaryOnZeroTransfer = @This().touchesBeneficiaryOnZeroTransfer,
             .selfDestructNewAccountGas = @This().selfDestructNewAccountGas,
             .selfDestructColdAccountAccessGas = @This().selfDestructColdAccountAccessGas,
             .selfDestructRefundGas = @This().selfDestructRefundGas,
@@ -514,6 +516,10 @@ pub const SelfDestruct = struct {
             .delete_account = true,
             .clear_storage = true,
         };
+    }
+
+    pub fn touchesBeneficiaryOnZeroTransfer(revision: Revision) bool {
+        return !revision.isImpl(.spurious_dragon);
     }
 
     pub fn selfDestructNewAccountGas(

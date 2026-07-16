@@ -425,6 +425,16 @@ pub fn Executor(comptime ProtocolType: type) type {
                 return self.executor.getBalance(account_address);
             }
 
+            pub fn accountAccess(self: TransactionAttempt, account_address: Address) !void {
+                try self.requireActive();
+                try self.executor.traceAccountAccess(account_address, 0);
+            }
+
+            pub fn touchAccount(self: TransactionAttempt, account_address: Address) !void {
+                try self.requireActive();
+                try self.executor.state.touchAccount(account_address);
+            }
+
             pub fn addBalance(self: TransactionAttempt, account_address: Address, value: u256) !void {
                 try self.requireActive();
                 try self.executor.state.addBalance(account_address, value);

@@ -980,7 +980,7 @@ pub fn For(comptime Executor: type) type {
 
         fn touchEmptyCallRecipient(self: *Executor, msg: Host.Message) !void {
             if (msg.kind != .call or !Protocol.call.touchesEmptyCallRecipient(self.revision())) return;
-            _ = try self.getOrCreateAccount(msg.recipient);
+            try self.state.touchAccount(msg.recipient);
         }
 
         pub fn resolveCode(self: *Executor, address: Address) !ResolvedCode {

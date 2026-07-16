@@ -156,6 +156,7 @@ pub const NonceWrite = struct {
 pub const CodeWrite = struct {
     depth: u16 = 0,
     address: Address,
+    previous_hash: [32]u8,
     size: usize,
     code: []const u8 = &.{},
 };

@@ -701,6 +701,7 @@ const FixtureHost = struct {
     store: *evmz.state.MemoryStore,
     executor: Evm.Executor,
     env: evmz.Env,
+    revision: evmz.eth.Revision,
 
     const Self = @This();
 
@@ -729,6 +730,7 @@ const FixtureHost = struct {
             .store = store,
             .executor = executor,
             .env = env,
+            .revision = revision,
         };
     }
 
@@ -765,7 +767,9 @@ const FixtureHost = struct {
     fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
         var changeset = try self.executor.changeset();
         defer changeset.deinit(self.executor.allocator);
-        return self.store.stateRootAfterChangeset(allocator, &changeset);
+        return self.store.stateRootAfterChangesetWithOptions(allocator, &changeset, .{
+            .empty_accounts = if (self.revision.isImpl(.spurious_dragon)) .omit else .include,
+        });
     }
 };
 
@@ -777,6 +781,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         store: *evmz.state.MemoryStore,
         executor: ExactEvm.Executor,
         env: evmz.Env,
+        revision: evmz.eth.Revision,
 
         const Self = @This();
 
@@ -807,6 +812,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
                 .store = store,
                 .executor = executor,
                 .env = env,
+                .revision = spec,
             };
         }
 
@@ -831,6 +837,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
                 .block_hash_source = EestStateBlockHashSource.source(),
             });
             self.env = env;
+            self.revision = spec;
         }
 
         fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
@@ -860,7 +867,9 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
             var changeset = try self.executor.changeset();
             defer changeset.deinit(self.executor.allocator);
-            return self.store.stateRootAfterChangeset(allocator, &changeset);
+            return self.store.stateRootAfterChangesetWithOptions(allocator, &changeset, .{
+                .empty_accounts = if (self.revision.isImpl(.spurious_dragon)) .omit else .include,
+            });
         }
     };
 }

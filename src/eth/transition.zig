@@ -278,7 +278,16 @@ pub fn Program(
                         .state_gas_spent = result.state_gas_spent,
                     });
                     try attempt.addBalance(settlement.payer orelse sender, costs.payer_refund);
-                    try attempt.addBalance(settlement.fee_recipient, costs.fee_payment);
+                    if (costs.fee_payment == 0) {
+                        try attempt.accountAccess(settlement.fee_recipient);
+                    }
+                    if (costs.fee_payment == 0 and
+                        context.policy().settlement.touchesFeeRecipientOnZeroPayment(context.revision()))
+                    {
+                        try attempt.touchAccount(settlement.fee_recipient);
+                    } else {
+                        try attempt.addBalance(settlement.fee_recipient, costs.fee_payment);
+                    }
                     return settlement_planner.planGas(costs);
                 }
 

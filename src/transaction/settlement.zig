@@ -215,6 +215,7 @@ pub fn Runtime(
                 result,
                 self.policy.settlement.usesStateGasAccounting(revision),
                 self.policy.settlement.gasRefundCapDivisor(revision),
+                self.policy.settlement.appliesCalldataFloorToBlockRegularGas(revision),
             );
         }
     };
@@ -267,6 +268,7 @@ fn calculateDefaultCosts(
     result: ExecutionGasResult,
     uses_state_gas_accounting: bool,
     refund_cap_divisor: u64,
+    applies_calldata_floor_to_block_regular_gas: bool,
 ) !DefaultCosts {
     const gas_left = positiveGas(result.gas_left);
     const gas_reservoir = if (uses_state_gas_accounting) positiveGas(result.gas_reservoir) else 0;
@@ -290,7 +292,10 @@ fn calculateDefaultCosts(
         0;
     const block_regular_before_floor = pre_refund_gas_used - @min(pre_refund_gas_used, block_state_gas_used);
     const block_regular_gas_used = if (uses_state_gas_accounting)
-        @max(block_regular_before_floor, settlement.floor_gas)
+        if (applies_calldata_floor_to_block_regular_gas)
+            @max(block_regular_before_floor, settlement.floor_gas)
+        else
+            block_regular_before_floor
     else
         gas_used;
     const block_gas = if (uses_state_gas_accounting)
@@ -411,7 +416,7 @@ test "settlement costs cap gas refund by fork" {
     try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
 }
 
-test "settlement costs use comptime gas accounting policy" {
+test "settlement costs use runtime gas accounting policy" {
     const CustomRevision = enum(u8) { custom };
     const CustomSettlementProtocol = struct {
         pub const Revision = CustomRevision;
@@ -452,6 +457,61 @@ test "settlement costs use comptime gas accounting policy" {
     try std.testing.expectEqual(@as(u64, 62), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 310), costs.payer_refund);
     try std.testing.expectEqual(@as(u256, 76), costs.fee_payment);
+}
+
+test "settlement policy selects calldata floor contribution to dimensional block gas" {
+    const CustomRevision = enum(u8) { custom };
+    const WithoutBlockFloor = struct {
+        pub const Revision = CustomRevision;
+        pub const settlement = struct {
+            pub fn gasRefundCapDivisor(_: Revision) u64 {
+                return 5;
+            }
+            pub fn usesStateGasAccounting(_: Revision) bool {
+                return true;
+            }
+            pub fn appliesCalldataFloorToBlockRegularGas(_: Revision) bool {
+                return false;
+            }
+        };
+    };
+    const WithBlockFloor = struct {
+        pub const Revision = CustomRevision;
+        pub const settlement = struct {
+            pub fn gasRefundCapDivisor(_: Revision) u64 {
+                return 5;
+            }
+            pub fn usesStateGasAccounting(_: Revision) bool {
+                return true;
+            }
+            pub fn appliesCalldataFloorToBlockRegularGas(_: Revision) bool {
+                return true;
+            }
+        };
+    };
+    const settlement = DefaultPlan{
+        .revision_id = definition_support.revisionId(CustomRevision.custom),
+        .gas_limit = 100,
+        .intrinsic_gas = 20,
+        .intrinsic_state_gas = 0,
+        .floor_gas = 30,
+        .gas_price = 5,
+        .priority_fee = 2,
+        .fee_recipient = address.addr(0xbeef),
+    };
+    const result = ExecutionGasResult{
+        .gas_left = 80,
+        .gas_refund = 0,
+        .gas_reservoir = 0,
+        .state_gas_spent = 0,
+    };
+
+    const without_floor = try For(WithoutBlockFloor).defaultCosts(settlement, result);
+    const with_floor = try For(WithBlockFloor).defaultCosts(settlement, result);
+
+    try std.testing.expectEqual(@as(u64, 30), without_floor.gas.used);
+    try std.testing.expectEqual(@as(u64, 20), without_floor.gas.block.regular);
+    try std.testing.expectEqual(@as(u64, 30), with_floor.gas.block.regular);
 }
 
 test "settlement costs enforce Prague calldata floor after refunds" {
@@ -552,7 +612,9 @@ test "Amsterdam failed create refills state gas before floor charge" {
     });
 
     try std.testing.expectEqual(@as(u64, 271_776), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 271_776), costs.gas.block.total);
+    try std.testing.expectEqual(@as(u64, 88_198), costs.gas.block.total);
+    try std.testing.expectEqual(@as(u64, 88_198), costs.gas.block.regular);
+    try std.testing.expectEqual(@as(u64, 0), costs.gas.block.state);
     try std.testing.expectEqual(@as(u64, 22), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 220), costs.payer_refund);
     try std.testing.expectEqual(@as(u256, 815_328), costs.fee_payment);

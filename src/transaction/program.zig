@@ -209,6 +209,14 @@ fn AttemptType(
             return (try self.token()).balance(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
+        pub fn accountAccess(self: @This(), account_address: Address) Error!void {
+            return (try self.token()).accountAccess(account_address) catch |err| return ExecutorType.normalizeError(err);
+        }
+
+        pub fn touchAccount(self: @This(), account_address: Address) Error!void {
+            return (try self.token()).touchAccount(account_address) catch |err| return ExecutorType.normalizeError(err);
+        }
+
         pub fn addBalance(self: @This(), account_address: Address, value: u256) Error!void {
             return (try self.token()).addBalance(account_address, value) catch |err| return ExecutorType.normalizeError(err);
         }

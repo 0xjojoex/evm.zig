@@ -19,6 +19,15 @@ const trie = @import("../eth/trie.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Address = evmz.Address;
+
+pub const EmptyAccountPolicy = enum {
+    omit,
+    include,
+};
+
+pub const StateRootOptions = struct {
+    empty_accounts: EmptyAccountPolicy = .omit,
+};
 const addr = evmz.addr;
 
 const MemoryStore = @This();
@@ -145,6 +154,10 @@ pub fn clone(self: *MemoryStore, allocator: std.mem.Allocator) !MemoryStore {
 }
 
 pub fn stateRoot(self: *MemoryStore, allocator: std.mem.Allocator) ![32]u8 {
+    return self.stateRootWithOptions(allocator, .{});
+}
+
+pub fn stateRootWithOptions(self: *MemoryStore, allocator: std.mem.Allocator, options: StateRootOptions) ![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -162,7 +175,7 @@ pub fn stateRoot(self: *MemoryStore, allocator: std.mem.Allocator) ![32]u8 {
             .storage_root = storage_root,
             .code_hash = code_hash,
         };
-        if (account.isEmpty()) continue;
+        if (options.empty_accounts == .omit and account.isEmpty()) continue;
 
         const key = try scratch.alloc(u8, 32);
         const hashed_key = trie.hashedAddressKey(entry.key_ptr.*);
@@ -178,11 +191,20 @@ pub fn stateRoot(self: *MemoryStore, allocator: std.mem.Allocator) ![32]u8 {
 }
 
 pub fn stateRootAfterChangeset(self: *MemoryStore, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
+    return self.stateRootAfterChangesetWithOptions(allocator, changeset, .{});
+}
+
+pub fn stateRootAfterChangesetWithOptions(
+    self: *MemoryStore,
+    allocator: std.mem.Allocator,
+    changeset: *const Changeset,
+    options: StateRootOptions,
+) ![32]u8 {
     var next = try self.clone(allocator);
     defer next.deinit();
 
     try next.applyChangesetInPlace(changeset);
-    return try next.stateRoot(allocator);
+    return try next.stateRootWithOptions(allocator, options);
 }
 
 pub fn applyChangeset(self: *MemoryStore, changeset: *const Changeset) !void {
@@ -359,6 +381,27 @@ test "memory store computes full state root" {
     const expected = try trie.root(scratch, &.{.{ .key = &account_key, .value = account_value }});
     const actual = try memory.stateRoot(std.testing.allocator);
 
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "memory store state root retains an explicit empty account" {
+    const address = addr(0x2345);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    _ = try memory.getOrCreateAccount(address);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const account_key = trie.hashedAddressKey(address);
+    const account_value = try trie.accountValueFrom(scratch, .{});
+    const expected = try trie.root(scratch, &.{.{ .key = &account_key, .value = account_value }});
+    const default_root = try memory.stateRoot(std.testing.allocator);
+    const actual = try memory.stateRootWithOptions(std.testing.allocator, .{ .empty_accounts = .include });
+
+    try std.testing.expectEqualSlices(u8, &trie.empty_root_hash, &default_root);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 

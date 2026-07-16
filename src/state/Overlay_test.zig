@@ -922,6 +922,21 @@ test "bounded state resources report marker capacity exhaustion" {
     try std.testing.expectEqual(@as(usize, 1), overlay.dirty_accounts.count());
 }
 
+test "bounded account touch rolls back materialization when dirty capacity is exhausted" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.configureJournalEntries(4);
+    try overlay.configureStateResources(.{
+        .accounts = 1,
+        .dirty_accounts = 0,
+    });
+
+    const address = evmz.addr(0xc01d);
+    try std.testing.expectError(error.DirtyAccountCapacityExceeded, overlay.touchAccount(address));
+    try std.testing.expect(overlay.getAccount(address) == null);
+    try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
+}
+
 test "bounded state resources report deleted account capacity exhaustion" {
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();

@@ -222,6 +222,10 @@ pub fn SettlementConfig(comptime R: type) type {
         gasRefundCapDivisor: *const fn (R) u64 = legacyRefundCapDivisor,
         /// Whether settlement accounts for separate regular and state gas pools.
         usesStateGasAccounting: *const fn (R) bool = inactive,
+        /// Whether calldata floor gas also floors the regular block-gas dimension.
+        appliesCalldataFloorToBlockRegularGas: *const fn (R) bool = inactive,
+        /// Whether a zero-value fee payment still touches its recipient.
+        touchesFeeRecipientOnZeroPayment: *const fn (R) bool = inactive,
 
         fn inactive(_: R) bool {
             return false;
@@ -695,6 +699,8 @@ pub fn SelfDestructConfig(comptime R: type) type {
         selfDestructPolicy: *const fn (R, types.SelfDestructPolicyInput) types.SelfDestructPolicy = noPolicy,
         /// Transaction-end account/storage deletion policy.
         selfDestructFinalization: *const fn (R, bool) types.SelfDestructFinalization = noFinalization,
+        /// Whether a zero-value SELFDESTRUCT still touches its beneficiary.
+        touchesBeneficiaryOnZeroTransfer: *const fn (R) bool = inactive,
         /// Regular/state gas charged when the beneficiary account is created.
         selfDestructNewAccountGas: *const fn (R, types.SelfDestructNewAccountInput) types.CallNewAccountGas = noNewAccountGas,
         /// Additional gas for a cold beneficiary account.
@@ -707,6 +713,9 @@ pub fn SelfDestructConfig(comptime R: type) type {
         }
         fn noFinalization(_: R, _: bool) types.SelfDestructFinalization {
             return .{};
+        }
+        fn inactive(_: R) bool {
+            return false;
         }
         fn noNewAccountGas(_: R, _: types.SelfDestructNewAccountInput) types.CallNewAccountGas {
             return .{};

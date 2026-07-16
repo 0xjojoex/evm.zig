@@ -284,6 +284,11 @@ fn runFixture(
                     result.requests_hash,
                     result.block_access_list_hash,
                 });
+                std.debug.print("    gas_used={} block_gas_used={} block_state_gas_used={}\n", .{
+                    result.gas_used,
+                    result.block_gas_used,
+                    result.block_state_gas_used,
+                });
             }
             summary.countFail(.unexpected_status);
             continue;

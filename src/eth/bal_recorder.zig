@@ -5,6 +5,7 @@ const bal = @import("bal.zig");
 const trace = @import("../trace.zig");
 const address = @import("../address.zig");
 const CaptureStateTarget = @import("../executor/capture_context.zig").StateTarget;
+const crypto = @import("../crypto.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -139,6 +140,7 @@ pub const Recorder = struct {
         try self.append(.{ .code_write = .{
             .block_access_index = self.block_access_index,
             .address = event.address,
+            .previous_hash = event.previous_hash,
             .new_code = new_code,
             .sequence = self.nextSequence(),
         } });
@@ -306,6 +308,7 @@ const NonceWrite = struct {
 const CodeWrite = struct {
     block_access_index: bal.BlockAccessIndex,
     address: bal.Address,
+    previous_hash: [32]u8,
     new_code: []const u8,
     sequence: usize,
     active: bool = true,
@@ -510,12 +513,16 @@ const AccountBuilder = struct {
         var index: usize = 0;
         while (index < self.code_writes.items.len) {
             const block_access_index = self.code_writes.items[index].block_access_index;
+            const first = self.code_writes.items[index];
             var last = self.code_writes.items[index];
             index += 1;
             while (index < self.code_writes.items.len and self.code_writes.items[index].block_access_index == block_access_index) {
                 last = self.code_writes.items[index];
                 index += 1;
             }
+            const final_hash = crypto.keccak256(last.new_code);
+            if (std.mem.eql(u8, &final_hash, &first.previous_hash)) continue;
+
             const new_code = try allocator.dupe(u8, last.new_code);
             errdefer allocator.free(new_code);
             try changes.append(allocator, .{
@@ -599,15 +606,32 @@ test "BAL recorder owns and coalesces code changes per block access index" {
     const changed = address.addr(6);
     var first_code = [_]u8{ 0x60, 0x00 };
     var final_code = [_]u8{ 0x60, 0x01 };
+    const first_hash = crypto.keccak256(&first_code);
+    const final_hash = crypto.keccak256(&final_code);
 
     recorder.setBlockAccessIndex(1);
-    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = first_code.len, .code = &first_code } });
-    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = final_code.len, .code = &final_code } });
+    try recorder.stateWrite(.{ .code = .{
+        .address = changed,
+        .previous_hash = crypto.keccak256_empty,
+        .size = first_code.len,
+        .code = &first_code,
+    } });
+    try recorder.stateWrite(.{ .code = .{
+        .address = changed,
+        .previous_hash = first_hash,
+        .size = final_code.len,
+        .code = &final_code,
+    } });
     @memset(&first_code, 0xff);
     @memset(&final_code, 0xff);
 
     recorder.setBlockAccessIndex(2);
-    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = 1, .code = &.{0x00} } });
+    try recorder.stateWrite(.{ .code = .{
+        .address = changed,
+        .previous_hash = final_hash,
+        .size = 1,
+        .code = &.{0x00},
+    } });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);
@@ -619,6 +643,33 @@ test "BAL recorder owns and coalesces code changes per block access index" {
     try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x01 }, observed.accounts[0].code_changes[0].new_code);
     try std.testing.expectEqual(@as(bal.BlockAccessIndex, 2), observed.accounts[0].code_changes[1].block_access_index);
     try std.testing.expectEqualSlices(u8, &.{0x00}, observed.accounts[0].code_changes[1].new_code);
+}
+
+test "BAL recorder omits same-index no-op code writes" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+
+    const changed = address.addr(7);
+    recorder.setBlockAccessIndex(1);
+    try recorder.stateWrite(.{ .code = .{
+        .address = changed,
+        .previous_hash = crypto.keccak256_empty,
+        .size = 0,
+        .code = &.{},
+    } });
+    try recorder.stateWrite(.{ .code = .{
+        .address = changed,
+        .previous_hash = crypto.keccak256_empty,
+        .size = 0,
+        .code = &.{},
+    } });
+
+    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
+    defer observed.deinit(std.testing.allocator);
+
+    try bal.validate(observed.accounts, .{ .transaction_count = 1 });
+    try std.testing.expectEqual(@as(usize, 1), observed.accounts.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].code_changes.len);
 }
 
 test "BAL recorder builds canonical observed storage balance and nonce changes" {
@@ -734,7 +785,12 @@ test "BAL recorder discards reverted writes but preserves accesses" {
     try recorder.checkpoint(.{ .kind = .checkpoint, .depth = 1, .journal_len = 2, .logs_len = 0 });
     try recorder.stateWrite(.{ .storage = .{ .address = accessed, .key = 8, .previous = 0, .value = 1 } });
     try recorder.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 6 } });
-    try recorder.stateWrite(.{ .code = .{ .address = accessed, .size = 2, .code = &.{ 0x60, 0x00 } } });
+    try recorder.stateWrite(.{ .code = .{
+        .address = accessed,
+        .previous_hash = crypto.keccak256_empty,
+        .size = 2,
+        .code = &.{ 0x60, 0x00 },
+    } });
     try recorder.checkpoint(.{ .kind = .revert, .depth = 1, .journal_len = 2, .logs_len = 0 });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
