@@ -25,6 +25,8 @@ var std_clear_small: []StdStorageSlotMap = &.{};
 var sparse_clear_broad: []SparseStorageSlotMap = &.{};
 var std_clear_broad: []StdStorageSlotMap = &.{};
 var clear_storage_keys: []const StorageKey = &.{};
+var accepted_hit_load_overlay: ?*evmz.state.Overlay = null;
+var accepted_miss_load_overlay: ?*evmz.state.Overlay = null;
 
 test "micro/state/sparse-hash-map/hash" {
     var keys: [state_map_ops_per_run]StorageKey = undefined;
@@ -215,6 +217,47 @@ test "micro/state/sparse-hash-map/storage-overlay-get" {
     }
 
     try bench.run(std.testing.io, .stdout());
+}
+
+test "micro/state/overlay/cold-storage-load" {
+    var keys: [state_map_ops_per_run]StorageKey = undefined;
+    var misses: [state_map_ops_per_run]StorageKey = undefined;
+    initStorageKeys(&keys, 0);
+    initStorageKeys(&misses, 1_000_000);
+
+    var accepted_hit = evmz.state.Overlay.init(std.testing.allocator);
+    defer accepted_hit.deinit();
+    try configureStorageLoadOverlay(&accepted_hit, &keys, &.{});
+
+    var accepted_miss = evmz.state.Overlay.init(std.testing.allocator);
+    defer accepted_miss.deinit();
+    try configureStorageLoadOverlay(&accepted_miss, &misses, &keys);
+
+    accepted_hit_load_overlay = &accepted_hit;
+    accepted_miss_load_overlay = &accepted_miss;
+    defer {
+        accepted_hit_load_overlay = null;
+        accepted_miss_load_overlay = null;
+    }
+
+    var accepted_hit_context = OverlayStorageLoadBench{ .overlay = &accepted_hit, .keys = &keys };
+    var accepted_miss_context = OverlayStorageLoadBench{ .overlay = &accepted_miss, .keys = &keys };
+    var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
+    defer bench.deinit();
+    try bench.addParam(
+        "overlay/cold-storage-load/accepted-hit/1024x",
+        @as(*const OverlayStorageLoadBench, &accepted_hit_context),
+        .{ .hooks = .{ .before_each = prepareAcceptedHitStorageLoads } },
+    );
+    try bench.addParam(
+        "overlay/cold-storage-load/accepted-miss/1024x",
+        @as(*const OverlayStorageLoadBench, &accepted_miss_context),
+        .{ .hooks = .{ .before_each = prepareAcceptedMissStorageLoads } },
+    );
+
+    try bench.run(std.testing.io, .stdout());
+    accepted_hit.closeTransaction();
+    accepted_miss.closeTransaction();
 }
 
 test "micro/state/sparse-hash-map/account-get-ptr" {
@@ -441,6 +484,20 @@ fn StorageGetBench(comptime Map: type) type {
     };
 }
 
+const OverlayStorageLoadBench = struct {
+    overlay: *evmz.state.Overlay,
+    keys: []const StorageKey,
+
+    pub fn run(self: *OverlayStorageLoadBench, _: std.mem.Allocator) void {
+        var acc: u256 = 0;
+        for (self.keys) |key| {
+            const result = self.overlay.loadStorage(key.address, key.key) catch unreachable;
+            acc +%= result.value;
+        }
+        std.mem.doNotOptimizeAway(acc);
+    }
+};
+
 fn addContainsBench(
     comptime Map: type,
     bench: *zbench.Benchmark,
@@ -591,6 +648,27 @@ fn expectStorageMapParity(
     try std.testing.expectEqual(@as(usize, sparse.count()), standard.count());
     for (hits) |key| try std.testing.expectEqual(sparse.get(key), standard.get(key));
     for (misses) |key| try std.testing.expectEqual(sparse.get(key), standard.get(key));
+}
+
+fn configureStorageLoadOverlay(
+    overlay: *evmz.state.Overlay,
+    accepted_keys: []const StorageKey,
+    seeded_keys: []const StorageKey,
+) !void {
+    try overlay.configureJournalEntries(state_map_ops_per_run);
+    try overlay.reserveAccessHint(.{ .accounts = 0, .storage_keys = state_map_ops_per_run });
+    try overlay.storage_overlay.ensureTotalCapacity(@intCast(accepted_keys.len));
+    try overlay.seeded_storage.ensureTotalCapacity(@intCast(seeded_keys.len));
+    fillStorageMap(&overlay.storage_overlay, accepted_keys);
+    fillStorageMap(&overlay.seeded_storage, seeded_keys);
+}
+
+fn prepareAcceptedHitStorageLoads() void {
+    accepted_hit_load_overlay.?.beginTransaction();
+}
+
+fn prepareAcceptedMissStorageLoads() void {
+    accepted_miss_load_overlay.?.beginTransaction();
 }
 
 const ClearHooks = struct {

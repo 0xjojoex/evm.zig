@@ -57,6 +57,7 @@ zig build micro -Dmicro-filter=sdiv
 zig build micro -Dmicro-filter=mulmod
 zig build micro -Dmicro-filter=sparse-hash-map
 zig build micro -Dmicro-filter=sparse-hash-map/storage-slot-contains
+zig build micro -Dmicro-filter=overlay/cold-storage-load
 ```
 
 Micro benchmarks default to `ReleaseFast` even when the sidecar build default is
@@ -73,8 +74,10 @@ hooks refill maps outside the timed window. `storage-slot-contains` models the
 fused transaction-local `StorageKey -> StorageSlot` map, `storage-overlay-get`
 models accepted-overlay `StorageKey -> u256` lookups, `account-get-ptr` uses the real
 `Address -> Account` map type, and `clear-retaining-capacity` times only
-clearing. Reserve/live counts are part of each row name. These rows diagnose
-executor state layout; they are not VM-core scoreboard rows.
+clearing. `overlay/cold-storage-load` exercises real slot creation, warmth,
+journaling, and both accepted-storage hits and misses. Reserve/live counts are part
+of each row name. These rows diagnose executor state layout; they are not VM-core
+scoreboard rows.
 
 ## VM-loop Runners
 
