@@ -6,6 +6,7 @@ const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
+const arithmetic_instruction = @import("../instruction/arithmetic.zig");
 const storage_instruction = @import("../instruction/storage.zig");
 
 const CallFrame = Interpreter.CallFrame;
@@ -82,9 +83,15 @@ pub fn For(comptime ProtocolType: type) type {
             handler: *const Handler,
         };
 
+        const JumpDestMaskInt = std.DynamicBitSetUnmanaged.MaskInt;
+
         const Context = struct {
             frame: *CallFrame,
             code_base: [*]const u8,
+            // Jumpdest state flattened from frame.bytecode so JUMP/JUMPI avoid
+            // the ctx -> frame -> bytecode -> bits pointer chase per jump.
+            code_len: usize,
+            jumpdest_masks: [*]const JumpDestMaskInt,
             stack_base: [*]u256,
             stack_limit: [*]u256,
             final_ip: [*]const u8 = undefined,
@@ -94,6 +101,13 @@ pub fn For(comptime ProtocolType: type) type {
 
             inline fn pcOf(self: *const Context, ip: [*]const u8) usize {
                 return @intFromPtr(ip) - @intFromPtr(self.code_base);
+            }
+
+            inline fn isValidJumpTarget(self: *const Context, target: usize) bool {
+                if (target >= self.code_len) return false;
+                if (self.code_base[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+                const shift: std.math.Log2Int(JumpDestMaskInt) = @truncate(target);
+                return (self.jumpdest_masks[target / @bitSizeOf(JumpDestMaskInt)] & (@as(JumpDestMaskInt, 1) << shift)) != 0;
             }
 
             inline fn finish(self: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: TailStatus) TailStatus {
@@ -164,6 +178,10 @@ pub fn For(comptime ProtocolType: type) type {
         // Reverse emission makes the final entry the stable edge nearest the
         // accepted direct block. Prepend later promotions to preserve addresses.
         const promoted_entries = [_]Entry{
+            .{ .opcode = .EXP, .handler = &tailExp },
+            .{ .opcode = .MCOPY, .handler = &tailMcopy },
+            .{ .opcode = .TSTORE, .handler = &tailTstore },
+            .{ .opcode = .TLOAD, .handler = &tailTload },
             .{ .opcode = .LOG4, .handler = &LogHandler(.LOG4, 4).run },
             .{ .opcode = .LOG3, .handler = &LogHandler(.LOG3, 3).run },
             .{ .opcode = .LOG2, .handler = &LogHandler(.LOG2, 2).run },
@@ -246,10 +264,13 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
+            std.debug.assert(frame.bytecode.jumpdests.analyzed);
             const stack_base: [*]u256 = frame.stack.slots;
             var ctx = Context{
                 .frame = frame,
                 .code_base = code_base,
+                .code_len = frame.code.len,
+                .jumpdest_masks = frame.bytecode.jumpdests.bits.masks,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
             };
@@ -280,6 +301,7 @@ pub fn For(comptime ProtocolType: type) type {
         inline fn charge(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             const cost = Instructions.staticGasForFrame(ctx.frame, opcode);
             if (cost > gas) {
+                @branchHint(.unlikely);
                 _ = ctx.finish(ip, sp, gas, .out_of_gas);
                 return null;
             }
@@ -288,6 +310,7 @@ pub fn For(comptime ProtocolType: type) type {
 
         inline fn chargeGas(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, cost: i64) ?i64 {
             if (cost > gas) {
+                @branchHint(.unlikely);
                 _ = ctx.finish(ip, sp, gas, .out_of_gas);
                 return null;
             }
@@ -309,7 +332,12 @@ pub fn For(comptime ProtocolType: type) type {
             };
         }
 
-        inline fn fail(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: TailStatus) TailStatus {
+        // All fail() exits are exceptional (invalid opcode/stack/static, OOG).
+        // noinline + cold marks every call site unlikely, so LLVM sinks the
+        // exit blocks below each handler's fall-through fast path; an inline
+        // @branchHint does not propagate to the caller's branch.
+        noinline fn fail(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: TailStatus) TailStatus {
+            @branchHint(.cold);
             return ctx.finish(ip, sp, gas, status);
         }
 
@@ -391,6 +419,77 @@ pub fn For(comptime ProtocolType: type) type {
             return tailNext(ip, next_sp, ctx.frame.gas_left, ctx);
         }
 
+        fn tailTload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (requireOpcode(.TLOAD, ip, sp, gas, ctx)) |status| return status;
+            const next_gas = charge(.TLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+            const slot = sp - 1;
+            const value = ctx.frame.host.getTransientStorage(ctx.frame.msg.recipient, slot[0]) catch |err| {
+                ctx.spill(ip, slot, next_gas);
+                ctx.err = err;
+                return .thrown;
+            };
+            slot[0] = value;
+            return tailNext(ip, sp, next_gas, ctx);
+        }
+
+        fn tailTstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (requireOpcode(.TSTORE, ip, sp, gas, ctx)) |status| return status;
+            const next_gas = charge(.TSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+            const nsp = sp - 2;
+            const key = (sp - 1)[0];
+            ctx.frame.host.setTransientStorage(ctx.frame.msg.recipient, key, nsp[0]) catch |err| {
+                ctx.spill(ip, nsp, next_gas);
+                ctx.err = err;
+                return .thrown;
+            };
+            return tailNext(ip, nsp, next_gas, ctx);
+        }
+
+        fn tailMcopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (requireOpcode(.MCOPY, ip, sp, gas, ctx)) |status| return status;
+            const next_gas = charge(.MCOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+            const nsp = sp - 3;
+            const dest_word = (sp - 1)[0];
+            const source_word = (sp - 2)[0];
+            const size_word = nsp[0];
+            if (size_word == 0) return tailNext(ip, nsp, next_gas, ctx);
+
+            const dest = wordToUsizeOrOog(dest_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+            const source = wordToUsizeOrOog(source_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+            const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+
+            // Canonical MCOPY expands the source range before the destination.
+            const source_gas = expandMemory(source, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+            const dest_gas = expandMemory(dest, size, ip, nsp, source_gas, ctx) orelse return .out_of_gas;
+            const copy_gas = copyWordGas(size, ip, nsp, dest_gas, ctx) orelse return .out_of_gas;
+            const final_gas = chargeGas(ip, nsp, dest_gas, ctx, copy_gas) orelse return .out_of_gas;
+
+            ctx.frame.memory.copy(dest, source, size);
+            return tailNext(ip, nsp, final_gas, ctx);
+        }
+
+        fn tailExp(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (requireOpcode(.EXP, ip, sp, gas, ctx)) |status| return status;
+            const next_gas = charge(.EXP, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+
+            const base = (sp - 1)[0];
+            const exponent = (sp - 2)[0];
+            const nsp = sp - 1;
+            const byte_gas = Protocol.Instruction.expByteGas(Instructions.frameRevision(ctx.frame));
+            const dynamic_gas = byte_gas * arithmetic_instruction.countSignificantBytesSize(exponent);
+            const final_gas = chargeGas(ip, nsp - 1, next_gas, ctx, dynamic_gas) orelse return .out_of_gas;
+            (nsp - 1)[0] = expOutlined(base, exponent);
+            return tailNext(ip, nsp, final_gas, ctx);
+        }
+
         fn BinaryHandler(comptime opcode: Opcode, comptime op: BinaryOp) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -403,10 +502,10 @@ pub fn For(comptime ProtocolType: type) type {
                         .add => a +% b,
                         .mul => a *% b,
                         .sub => a -% b,
-                        .div => uint256.div(a, b),
-                        .sdiv => uint256.sdiv(a, b),
-                        .mod => uint256.mod(a, b),
-                        .smod => uint256.smod(a, b),
+                        .div => divOutlined(a, b),
+                        .sdiv => sdivOutlined(a, b),
+                        .mod => modOutlined(a, b),
+                        .smod => smodOutlined(a, b),
                         .lt => @intFromBool(a < b),
                         .gt => @intFromBool(a > b),
                         .slt => @intFromBool(@as(i256, @bitCast(a)) < @as(i256, @bitCast(b))),
@@ -637,7 +736,7 @@ pub fn For(comptime ProtocolType: type) type {
                     const value = (sp - 2)[0];
                     const nsp = sp - 1;
                     (nsp - 1)[0] = switch (op) {
-                        .left => if (shift > std.math.maxInt(u8)) 0 else value << @as(u8, @intCast(shift)),
+                        .left => if (shift > std.math.maxInt(u8)) 0 else uint256.shl(value, @as(u8, @intCast(shift))),
                         .right => if (shift > std.math.maxInt(u8)) 0 else value >> @as(u8, @intCast(shift)),
                         .arithmetic => arithmeticShiftRight(value, shift),
                     };
@@ -659,7 +758,7 @@ pub fn For(comptime ProtocolType: type) type {
             if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
             const nsp = sp - 1;
             const target = std.math.cast(usize, nsp[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid);
-            if (validateJumpTarget(ip, target, nsp, next_gas, ctx)) |status| return status;
+            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
         }
 
@@ -669,17 +768,8 @@ pub fn For(comptime ProtocolType: type) type {
             const nsp = sp - 2;
             if (nsp[0] == 0) return tailNext(ip, nsp, next_gas, ctx);
             const target = std.math.cast(usize, (nsp + 1)[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid);
-            if (validateJumpTarget(ip, target, nsp, next_gas, ctx)) |status| return status;
+            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
-        }
-
-        fn validateJumpTarget(ip: [*]const u8, target: usize, sp: [*]u256, gas: i64, ctx: *Context) ?TailStatus {
-            const valid = ctx.frame.isValidJumpDest(target) catch |err| {
-                ctx.err = err;
-                return .thrown;
-            };
-            if (!valid) return fail(ctx, ip, sp, gas, .invalid);
-            return null;
         }
 
         fn tailPc(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -764,7 +854,8 @@ pub fn For(comptime ProtocolType: type) type {
             const mem_gas = expandMemory(offset, size, ip, sp, next_gas, ctx) orelse return .out_of_gas;
             const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .out_of_gas;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
-            const result = evmz.crypto.keccak256(ctx.frame.memory.readBytes(offset, size));
+            const input = ctx.frame.memory.readBytes(offset, size);
+            const result = if (input.len == 0) evmz.crypto.keccak256_empty else evmz.crypto.keccak256(input);
             const nsp = sp - 1;
             (nsp - 1)[0] = evmz.uint256.fromBytes32(&result);
             return tailNext(ip, nsp, final_gas, ctx);
@@ -854,6 +945,28 @@ pub fn For(comptime ProtocolType: type) type {
             return source[offset..];
         }
     };
+}
+
+// Division lowerings are 2KB+ of code each; outlined they keep the contiguous
+// handler region small (icache) while the work itself dwarfs the call overhead.
+noinline fn divOutlined(a: u256, b: u256) u256 {
+    return uint256.div(a, b);
+}
+
+noinline fn sdivOutlined(a: u256, b: u256) u256 {
+    return uint256.sdiv(a, b);
+}
+
+noinline fn modOutlined(a: u256, b: u256) u256 {
+    return uint256.mod(a, b);
+}
+
+noinline fn smodOutlined(a: u256, b: u256) u256 {
+    return uint256.smod(a, b);
+}
+
+noinline fn expOutlined(base: u256, exponent: u256) u256 {
+    return arithmetic_instruction.wrapExp(base, exponent);
 }
 
 fn invalidStatusError(err: anyerror) bool {

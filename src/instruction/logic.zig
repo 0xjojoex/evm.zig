@@ -83,7 +83,7 @@ pub fn shl(frame: *CallFrame) !void {
         return;
     }
     const b_u8: u8 = @intCast(b);
-    frame.stack.pushUnchecked(a << b_u8);
+    frame.stack.pushUnchecked(evmz.uint256.shl(a, b_u8));
 }
 
 pub fn shr(frame: *CallFrame) !void {

@@ -80,10 +80,15 @@ pub fn build(b: *std.Build) void {
     else
         null;
 
+    // Frame pointers cost ~3 instructions per tail-dispatch handler; bench
+    // builds already omit them, so keep shipped release artifacts identical.
+    const omit_frame_pointer = optimize != .Debug;
+
     const evmz_mod = b.addModule("evmz", .{
         .root_source_file = b.path("src/evm.zig"),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
     });
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
@@ -121,6 +126,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .link_libcpp = true,
+            .omit_frame_pointer = omit_frame_pointer,
         });
         c_lib_mod.addOptions("build_options", build_options);
         c_lib_mod.addImport("ssz", ssz_mod);

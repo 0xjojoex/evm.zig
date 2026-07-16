@@ -237,6 +237,96 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
     }
 }
 
+test "prepared tail dispatch executes promoted transient storage, mcopy, and exp" {
+    // TSTORE then TLOAD; MockHost transient storage is canned (get always
+    // returns 1), so this checks handler plumbing/gas, not value round-trip.
+    const transient_code = evmz.t.bytecode(.{
+        .PUSH1,  42,     .PUSH1, 7,
+        .TSTORE, .PUSH1, 7,      .TLOAD,
+    });
+    // Store 0xaa..bb word at 0, MCOPY 2 bytes from offset 30 to 64, MLOAD 64.
+    const mcopy_code = evmz.t.bytecode(.{
+        .PUSH2, 0xaa,    0xbb,   .PUSH1,
+        0x00,   .MSTORE, .PUSH1, 2,
+        .PUSH1, 30,      .PUSH1, 64,
+        .MCOPY, .PUSH1,  64,     .MLOAD,
+    });
+    const exp_code = evmz.t.bytecode(.{ .PUSH1, 5, .PUSH1, 3, .EXP });
+
+    const cases = [_]struct {
+        code: []const u8,
+        expected: u256,
+    }{
+        .{ .code = &transient_code, .expected = 1 },
+        .{ .code = &mcopy_code, .expected = @as(u256, 0xaabb) << 240 },
+        .{ .code = &exp_code, .expected = 243 },
+    };
+
+    for (cases) |case| {
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, case.code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .bytecode = &bytecode,
+            .revision = .latest,
+        });
+        defer frame.deinit();
+        var interpreter = frame.interpreter();
+
+        const result = try interpreter.execute();
+
+        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(@as(usize, 1), interpreter.call_frame.stack.len);
+        try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
+    }
+}
+
+test "prepared tail dispatch gates promoted Cancun opcodes and static TSTORE" {
+    const tstore_code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH1, 0, .TSTORE });
+    const mcopy_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY });
+    const cases = [_]struct {
+        code: []const u8,
+        revision: evmz.eth.Revision,
+        is_static: bool,
+        expected_status: Interpreter.Status,
+    }{
+        .{ .code = &tstore_code, .revision = .shanghai, .is_static = false, .expected_status = .invalid },
+        .{ .code = &tstore_code, .revision = .cancun, .is_static = true, .expected_status = .invalid },
+        .{ .code = &tstore_code, .revision = .cancun, .is_static = false, .expected_status = .success },
+        .{ .code = &mcopy_code, .revision = .shanghai, .is_static = false, .expected_status = .invalid },
+        .{ .code = &mcopy_code, .revision = .cancun, .is_static = false, .expected_status = .success },
+    };
+
+    for (cases) |case| {
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, case.code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        msg.is_static = case.is_static;
+        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .bytecode = &bytecode,
+            .revision = case.revision,
+        });
+        defer frame.deinit();
+        var interpreter = frame.interpreter();
+
+        const result = try interpreter.execute();
+
+        try std.testing.expectEqual(case.expected_status, result.status);
+    }
+}
+
 test "prepared tail dispatch rejects SAR before Constantinople" {
     const code = [_]u8{ @intFromEnum(Opcode.SAR), @intFromEnum(Opcode.STOP) };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);

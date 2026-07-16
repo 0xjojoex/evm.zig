@@ -129,7 +129,7 @@ test "KECCAK256 of empty input returns the empty hash" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH0, .PUSH0, .KECCAK256 }, evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty));
 }
 
-inline fn wrapExp(a: u256, expo: u256) u256 {
+pub inline fn wrapExp(a: u256, expo: u256) u256 {
     if (expo == 0) return 1;
     if (a == 0) return 0;
     if (a == 1) return 1;
@@ -209,7 +209,7 @@ test "EXP byte gas comes from comptime protocol" {
 }
 
 /// Returns how many bytes are needed to represent the significant part of a 256-bit integer.
-inline fn countSignificantBytesSize(value: u256) i64 {
+pub inline fn countSignificantBytesSize(value: u256) i64 {
     return @divFloor(256 - @as(i64, @intCast(@clz(value))) + 7, 8);
 }
 

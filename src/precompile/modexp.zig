@@ -7,10 +7,11 @@ const std = @import("std");
 
 pub fn into(allocator: std.mem.Allocator, output: []u8, base_bytes: []const u8, exponent_bytes: []const u8, modulus_bytes: []const u8) std.mem.Allocator.Error!void {
     if (modexpSmallInto(output, base_bytes, exponent_bytes, modulus_bytes)) return;
+    if (try modexpMontgomeryLimbsInto(allocator, output, base_bytes, exponent_bytes, modulus_bytes)) return;
     try modexpBigIntInto(allocator, output, base_bytes, exponent_bytes, modulus_bytes);
 }
 
-fn modexpBigIntInto(allocator: std.mem.Allocator, output: []u8, base_bytes: []const u8, exponent_bytes: []const u8, modulus_bytes: []const u8) std.mem.Allocator.Error!void {
+pub fn modexpBigIntInto(allocator: std.mem.Allocator, output: []u8, base_bytes: []const u8, exponent_bytes: []const u8, modulus_bytes: []const u8) std.mem.Allocator.Error!void {
     const BigInt = std.math.big.int.Managed;
     var modulus = try managedFromBytes(allocator, modulus_bytes);
     defer modulus.deinit();
@@ -228,6 +229,180 @@ fn montMul(comptime T: type, a: T, b: T, modulus: T, neg_inverse: T) T {
     return @intCast(reduced);
 }
 
+/// Cap for the limb-array Montgomery path: 64 limbs = 512-byte moduli covers
+/// RSA-4096; anything larger falls back to the arbitrary-precision path.
+const max_montgomery_limbs = 64;
+
+/// Fast modexp for odd moduli of 33..512 significant bytes.
+///
+/// The per-exponent-bit work is a pure u64-limb CIOS Montgomery multiply;
+/// the big-int machinery is used only for two one-time precomputes (R^2 mod m
+/// and the initial base reduction), replacing the big-int path's divTrunc per
+/// exponent bit. Even moduli and larger sizes return false and take the
+/// arbitrary-precision path.
+fn modexpMontgomeryLimbsInto(
+    allocator: std.mem.Allocator,
+    output: []u8,
+    base_bytes: []const u8,
+    exponent_bytes: []const u8,
+    modulus_bytes: []const u8,
+) std.mem.Allocator.Error!bool {
+    const sig_mod = stripLeadingZeroBytes(modulus_bytes);
+    if (sig_mod.len <= 32 or sig_mod.len > max_montgomery_limbs * 8) return false;
+    if (sig_mod[sig_mod.len - 1] & 1 == 0) return false;
+
+    const limb_count = (sig_mod.len + 7) / 8;
+    var m_limbs = [_]u64{0} ** max_montgomery_limbs;
+    limbsFromBytes(m_limbs[0..limb_count], sig_mod);
+
+    // -m^-1 mod 2^64 via Newton iteration; m is odd so the inverse exists.
+    var inverse: u64 = 1;
+    for (0..8) |_| inverse *%= 2 -% m_limbs[0] *% inverse;
+    const n0 = 0 -% inverse;
+
+    // One-time big-int precomputes, both < m so they fit limb_count limbs.
+    var r2_limbs = [_]u64{0} ** max_montgomery_limbs;
+    var base_limbs = [_]u64{0} ** max_montgomery_limbs;
+    {
+        var modulus_big = try managedFromBytes(allocator, sig_mod);
+        defer modulus_big.deinit();
+        var scratch: [max_montgomery_limbs * 8]u8 = undefined;
+        const reduced = scratch[0 .. limb_count * 8];
+
+        // R^2 mod m with R = 2^(64 * limb_count).
+        var r2_big = try std.math.big.int.Managed.initSet(allocator, 1);
+        defer r2_big.deinit();
+        try r2_big.shiftLeft(&r2_big, 128 * limb_count);
+        try reduceManaged(&r2_big, &modulus_big);
+        r2_big.toConst().writeTwosComplement(reduced, .big);
+        limbsFromBytes(r2_limbs[0..limb_count], reduced);
+
+        var base_big = try managedFromBytes(allocator, base_bytes);
+        defer base_big.deinit();
+        try reduceManaged(&base_big, &modulus_big);
+        base_big.toConst().writeTwosComplement(reduced, .big);
+        limbsFromBytes(base_limbs[0..limb_count], reduced);
+    }
+
+    var one = [_]u64{0} ** max_montgomery_limbs;
+    one[0] = 1;
+    var base_mont = [_]u64{0} ** max_montgomery_limbs;
+    var result_mont = [_]u64{0} ** max_montgomery_limbs;
+    montMulLimbs(limb_count, &base_limbs, &r2_limbs, &m_limbs, n0, &base_mont);
+    // R mod m, the Montgomery form of 1.
+    montMulLimbs(limb_count, &one, &r2_limbs, &m_limbs, n0, &result_mont);
+
+    var started = false;
+    for (exponent_bytes) |byte| {
+        if (!started and byte == 0) continue;
+        var bit: u8 = 0x80;
+        while (bit != 0) : (bit >>= 1) {
+            if (started) montMulLimbs(limb_count, &result_mont, &result_mont, &m_limbs, n0, &result_mont);
+            if (byte & bit != 0) {
+                if (started) {
+                    montMulLimbs(limb_count, &result_mont, &base_mont, &m_limbs, n0, &result_mont);
+                } else {
+                    result_mont = base_mont;
+                    started = true;
+                }
+            }
+        }
+    }
+    montMulLimbs(limb_count, &result_mont, &one, &m_limbs, n0, &result_mont);
+
+    @memset(output, 0);
+    bytesFromLimbs(output, result_mont[0..limb_count]);
+    return true;
+}
+
+/// Big-endian bytes into little-endian u64 limbs; limbs must cover bytes.
+fn limbsFromBytes(limbs: []u64, bytes: []const u8) void {
+    @memset(limbs, 0);
+    var end = bytes.len;
+    for (limbs) |*limb| {
+        if (end == 0) break;
+        const start = end -| 8;
+        limb.* = readWordBytes(u64, bytes[start..end]);
+        end = start;
+    }
+}
+
+/// Little-endian u64 limbs into big-endian bytes, right-aligned; the output
+/// prefix must be pre-zeroed and the value must fit the output.
+fn bytesFromLimbs(output: []u8, limbs: []const u64) void {
+    var end = output.len;
+    for (limbs) |limb| {
+        if (end == 0) {
+            std.debug.assert(limb == 0);
+            continue;
+        }
+        const start = end -| 8;
+        var word: [8]u8 = undefined;
+        std.mem.writeInt(u64, &word, limb, .big);
+        const len = end - start;
+        @memcpy(output[start..end], word[8 - len ..]);
+        end = start;
+    }
+}
+
+/// CIOS Montgomery multiply: out = a * b * R^-1 mod m with R = 2^(64 * limb_count).
+/// Inputs must be < m; the output is < m. `out` may alias `a` or `b`.
+fn montMulLimbs(
+    limb_count: usize,
+    a: *const [max_montgomery_limbs]u64,
+    b: *const [max_montgomery_limbs]u64,
+    m: *const [max_montgomery_limbs]u64,
+    n0: u64,
+    out: *[max_montgomery_limbs]u64,
+) void {
+    var t = [_]u64{0} ** (max_montgomery_limbs + 2);
+    for (0..limb_count) |i| {
+        const bi = b[i];
+        var carry: u64 = 0;
+        for (0..limb_count) |j| {
+            const product = @as(u128, a[j]) * bi + t[j] + carry;
+            t[j] = @truncate(product);
+            carry = @intCast(product >> 64);
+        }
+        var sum = @as(u128, t[limb_count]) + carry;
+        t[limb_count] = @truncate(sum);
+        t[limb_count + 1] = @intCast(sum >> 64);
+
+        const factor = t[0] *% n0;
+        // t[0] + factor * m[0] ≡ 0 mod 2^64 by construction; keep the carry.
+        carry = @intCast((@as(u128, factor) * m[0] + t[0]) >> 64);
+        for (1..limb_count) |j| {
+            const product = @as(u128, factor) * m[j] + t[j] + carry;
+            t[j - 1] = @truncate(product);
+            carry = @intCast(product >> 64);
+        }
+        sum = @as(u128, t[limb_count]) + carry;
+        t[limb_count - 1] = @truncate(sum);
+        t[limb_count] = t[limb_count + 1] +% @as(u64, @intCast(sum >> 64));
+    }
+
+    // t < 2m, so at most one subtraction is needed.
+    var borrow: u64 = 0;
+    if (t[limb_count] != 0 or !limbsLessThan(t[0..limb_count], m[0..limb_count])) {
+        for (0..limb_count) |j| {
+            const lhs = @as(i128, t[j]) - m[j] - borrow;
+            t[j] = @truncate(@as(u128, @bitCast(lhs)));
+            borrow = @intFromBool(lhs < 0);
+        }
+    }
+    @memcpy(out[0..limb_count], t[0..limb_count]);
+    @memset(out[limb_count..], 0);
+}
+
+fn limbsLessThan(a: []const u64, b: []const u64) bool {
+    var index = a.len;
+    while (index > 0) {
+        index -= 1;
+        if (a[index] != b[index]) return a[index] < b[index];
+    }
+    return false;
+}
+
 fn managedFromBytes(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!std.math.big.int.Managed {
     var value = try std.math.big.int.Managed.init(allocator);
     errdefer value.deinit();
@@ -261,31 +436,51 @@ fn mulMod(
     target.swap(remainder);
 }
 
-test "modexp small-modulus fast path matches big-int path" {
+test "modexp limb Montgomery boundary sizes match big-int path" {
+    const allocator = std.testing.allocator;
+    const base = [_]u8{0xa5} ** (max_montgomery_limbs * 8 + 1);
+    const exponent = [_]u8{3};
+    const modulus = [_]u8{0xff} ** (max_montgomery_limbs * 8);
+    var fast_out: [max_montgomery_limbs * 8]u8 = undefined;
+    var slow_out: [max_montgomery_limbs * 8]u8 = undefined;
+
+    for ([_]usize{ 33, max_montgomery_limbs * 8 }) |len| {
+        const fast = fast_out[0..len];
+        const slow = slow_out[0..len];
+        try std.testing.expect(try modexpMontgomeryLimbsInto(allocator, fast, &base, &exponent, modulus[0..len]));
+        try modexpBigIntInto(allocator, slow, &base, &exponent, modulus[0..len]);
+        try std.testing.expectEqualSlices(u8, slow, fast);
+    }
+}
+
+test "modexp fast paths match big-int path" {
     const Fuzz = struct {
         // Seed the corpus with the shapes the oracle biases toward so the
         // default (non-fuzzing) test runner still exercises them: large
-        // operands, even moduli, powers of two, and tiny exponents.
+        // operands, even moduli, powers of two, tiny exponents, and odd
+        // moduli on both sides of the small/limb boundary.
         const corpus = [_][]const u8{
             &[_]u8{0} ** 4,
             &[_]u8{0xff} ** 48,
             &[_]u8{ 0x01, 0x21, 0x21, 0x11, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x03 },
             &[_]u8{ 0x02, 0x08, 0x02, 0x04, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xff, 0xfe },
             &[_]u8{ 0x03, 0x10, 0x30, 0x20, 0x00, 0x01, 0x00, 0x80 },
+            &([_]u8{ 0x00, 0x01, 0x01, 0x20, 0x02, 0x03 } ++ [_]u8{0xff} ** 33),
+            &([_]u8{ 0x00, 0x01, 0x01, 0x5f, 0x02, 0x03 } ++ [_]u8{0xff} ** 96),
         };
 
         fn oracle(_: void, smith: *std.testing.Smith) anyerror!void {
             const allocator = std.testing.allocator;
-            var base_buf: [40]u8 = undefined;
+            var base_buf: [96]u8 = undefined;
             var exponent_buf: [48]u8 = undefined;
-            var modulus_buf: [40]u8 = undefined;
-            var fast_out: [40]u8 = undefined;
-            var slow_out: [40]u8 = undefined;
+            var modulus_buf: [96]u8 = undefined;
+            var fast_out: [96]u8 = undefined;
+            var slow_out: [96]u8 = undefined;
 
             const shape = smith.value(u8);
-            const base_len: usize = smith.value(u8) % 34;
+            const base_len: usize = smith.value(u8) % (base_buf.len + 1);
             const exponent_len: usize = smith.value(u8) % (exponent_buf.len + 1);
-            const modulus_len: usize = 1 + @as(usize, smith.value(u8) % 33);
+            const modulus_len: usize = 1 + @as(usize, smith.value(u8) % modulus_buf.len);
 
             const base = base_buf[0..base_len];
             const exponent = exponent_buf[0..exponent_len];
@@ -312,10 +507,18 @@ test "modexp small-modulus fast path matches big-int path" {
             const slow = slow_out[0..modulus_len];
             @memset(fast, 0);
             @memset(slow, 0);
-            if (!modexpSmallInto(fast, base, exponent, modulus)) {
-                // The fast path only declines oversized significant operands.
+            if (!modexpSmallInto(fast, base, exponent, modulus) and
+                !(try modexpMontgomeryLimbsInto(allocator, fast, base, exponent, modulus)))
+            {
+                // The small path declines oversized significant operands; the
+                // limb path additionally declines only even moduli at these
+                // buffer sizes.
+                const sig_modulus = stripLeadingZeroBytes(modulus);
                 try std.testing.expect(stripLeadingZeroBytes(base).len > 32 or
-                    stripLeadingZeroBytes(modulus).len > 32);
+                    sig_modulus.len > 32);
+                if (sig_modulus.len > 32) {
+                    try std.testing.expect(sig_modulus[sig_modulus.len - 1] & 1 == 0);
+                }
                 return;
             }
             try modexpBigIntInto(allocator, slow, base, exponent, modulus);

@@ -156,20 +156,20 @@ medians per deployed-runtime call:
 
 | VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
 | ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
-| Arithmetic loop         |  0.142 ms |    0.101 ms |   0.334 ms |  0.499 ms |     0.71× |     3.51× |
-| Memory MSTORE loop      |  0.145 ms |    0.086 ms |   0.255 ms |  0.412 ms |     0.59× |     2.84× |
-| Keccak loop             |  2.725 ms |    3.611 ms |   3.696 ms |  2.781 ms |     1.33× |     1.02× |
-| Ten-thousand hashes     |  1.031 ms |    0.754 ms |   1.678 ms |  2.093 ms |     0.73× |     2.03× |
-| Storage SLOAD loop      |  0.304 ms |    0.614 ms |   0.657 ms |  0.351 ms |     2.02× |     1.16× |
-| Storage SSTORE loop     |  0.331 ms |    0.867 ms |   0.902 ms |  0.875 ms |     2.62× |     2.64× |
-| LOG0 / 0-byte data      |  0.065 ms |    0.078 ms |   0.083 ms |  0.129 ms |     1.20× |     1.98× |
-| LOG0 / 32-byte data     |  0.071 ms |    0.033 ms |   0.083 ms |  0.312 ms |     0.47× |     4.39× |
-| LOG4 / 0-byte data      |  0.081 ms |    0.082 ms |   0.150 ms |  0.267 ms |     1.01× |     3.30× |
-| LOG4 / 32-byte data     |  0.084 ms |    0.084 ms |   0.151 ms |  0.413 ms |     1.00× |     4.91× |
-| ERC20 mint              |  2.444 ms |    3.924 ms |   4.846 ms |  3.753 ms |     1.61× |     1.54× |
-| ERC20 transfer          |  4.515 ms |    6.400 ms |   7.649 ms |  6.265 ms |     1.42× |     1.39× |
-| ERC20 approval+transfer |  3.909 ms |    5.100 ms |   6.108 ms |  4.821 ms |     1.30× |     1.23× |
-| Snailtracer             | 25.466 ms |   61.415 ms |  81.692 ms | 39.384 ms |     2.41× |     1.55× |
+| Arithmetic loop         |  0.120 ms |    0.102 ms |   0.325 ms |  0.489 ms |     0.85× |     4.08× |
+| Memory MSTORE loop      |  0.136 ms |    0.083 ms |   0.251 ms |  0.400 ms |     0.61× |     2.94× |
+| Keccak loop             |  2.656 ms |    3.505 ms |   3.587 ms |  2.697 ms |     1.32× |     1.02× |
+| Ten-thousand hashes     |  0.882 ms |    0.740 ms |   1.629 ms |  2.034 ms |     0.84× |     2.31× |
+| Storage SLOAD loop      |  0.300 ms |    0.585 ms |   0.644 ms |  0.350 ms |     1.95× |     1.17× |
+| Storage SSTORE loop     |  0.330 ms |    0.848 ms |   0.898 ms |  0.858 ms |     2.57× |     2.60× |
+| LOG0 / 0-byte data      |  0.045 ms |    0.030 ms |   0.081 ms |  0.127 ms |     0.66× |     2.81× |
+| LOG0 / 32-byte data     |  0.050 ms |    0.033 ms |   0.083 ms |  0.285 ms |     0.66× |     5.70× |
+| LOG4 / 0-byte data      |  0.086 ms |    0.069 ms |   0.147 ms |  0.264 ms |     0.81× |     3.09× |
+| LOG4 / 32-byte data     |  0.103 ms |    0.082 ms |   0.148 ms |  0.408 ms |     0.80× |     3.96× |
+| ERC20 mint              |  2.183 ms |    3.798 ms |   4.690 ms |  3.630 ms |     1.74× |     1.66× |
+| ERC20 transfer          |  4.235 ms |    6.207 ms |   7.391 ms |  6.094 ms |     1.47× |     1.44× |
+| ERC20 approval+transfer |  3.670 ms |    4.936 ms |   5.956 ms |  4.665 ms |     1.35× |     1.27× |
+| Snailtracer             | 22.349 ms |   59.465 ms |  78.832 ms | 37.814 ms |     2.66× |     1.69× |
 
 ### AMD EPYC Genoa / Linux x86-64
 

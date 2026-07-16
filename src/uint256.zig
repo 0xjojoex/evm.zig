@@ -89,6 +89,42 @@ pub inline fn ceilDiv(value: u256, denominator: u256) u256 {
     return @divFloor(value, denominator) + @intFromBool(value % denominator != 0);
 }
 
+/// Left shift via a u128 limb funnel. LLVM lowers a variable-amount u256 `<<`
+/// to ~2KB of generic wide-shift code (4x fatter than `>>`); this form stays
+/// compact enough to inline into interpreter opcode handlers.
+pub fn shl(value: u256, shift: u8) u256 {
+    const lo: u128 = @truncate(value);
+    if (shift >= 128) {
+        // shift - 128 == the low 7 bits of shift when bit 7 is set.
+        const upper = lo << @as(u7, @truncate(shift));
+        return @as(u256, upper) << 128;
+    }
+    if (shift == 0) return value;
+    const s: u7 = @intCast(shift);
+    const hi: u128 = @intCast(value >> 128);
+    const carry = lo >> @as(u7, @intCast(128 - @as(u8, s)));
+    return (@as(u256, (hi << s) | carry) << 128) | (lo << s);
+}
+
+test shl {
+    const patterns = [_]u256{
+        0,
+        1,
+        std.math.maxInt(u256),
+        std.math.maxInt(u128),
+        @as(u256, std.math.maxInt(u128)) << 128,
+        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+        @as(u256, 1) << 127,
+        @as(u256, 1) << 255,
+    };
+    for (patterns) |value| {
+        for (0..256) |shift_usize| {
+            const shift: u8 = @intCast(shift_usize);
+            try std.testing.expectEqual(value << shift, shl(value, shift));
+        }
+    }
+}
+
 inline fn signedMagnitude(value: i256) u256 {
     const bits: u256 = @bitCast(value);
     if (value >= 0) return @intCast(value);
