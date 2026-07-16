@@ -56,7 +56,8 @@ zig build micro -Dmicro-filter=micro/arithmetic
 zig build micro -Dmicro-filter=sdiv
 zig build micro -Dmicro-filter=mulmod
 zig build micro -Dmicro-filter=sparse-hash-map
-zig build micro -Dmicro-filter=sparse-hash-map/warm-storage-contains
+zig build micro -Dmicro-filter=sparse-hash-map/storage-slot-contains
+zig build micro -Dmicro-filter=overlay/cold-storage-load
 ```
 
 Micro benchmarks default to `ReleaseFast` even when the sidecar build default is
@@ -69,12 +70,14 @@ The sparse-map microscope compares the executor's internal `SparseHashMap`
 against `std.AutoHashMap` with the same generated keys and preallocation. Lookup
 rows batch 1,024 operations per reported zBench run; divide `time/run` by 1,024
 for per-operation cost. Clear rows end in `/8x`; divide those by eight. Setup
-hooks refill maps outside the timed window. `warm-storage-contains` models the
-warm-storage `StorageKey -> void` set, `storage-overlay-get` models overlay
-`StorageKey -> u256` lookups, `account-get-ptr` uses the real
+hooks refill maps outside the timed window. `storage-slot-contains` models the
+fused transaction-local `StorageKey -> StorageSlot` map, `storage-overlay-get`
+models accepted-overlay `StorageKey -> u256` lookups, `account-get-ptr` uses the real
 `Address -> Account` map type, and `clear-retaining-capacity` times only
-clearing. Reserve/live counts are part of each row name. These rows diagnose
-executor state layout; they are not VM-core scoreboard rows.
+clearing. `overlay/cold-storage-load` exercises real slot creation, warmth,
+journaling, and both accepted-storage hits and misses. Reserve/live counts are part
+of each row name. These rows diagnose executor state layout; they are not VM-core
+scoreboard rows.
 
 ## VM-loop Runners
 

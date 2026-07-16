@@ -8,6 +8,8 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const Host = @import("../Host.zig");
 const trace = @import("../trace.zig");
+const capture_runtime = @import("../executor/capture_context.zig");
+const CaptureContext = capture_runtime.Context;
 const Address = evmz.Address;
 const Account = @import("./Account.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
@@ -27,8 +29,24 @@ const CodeEntry = struct {
 };
 const CodeMap = SparseHashMap([32]u8, CodeEntry);
 const AddressSet = SparseHashMap(Address, void);
-const StorageSet = SparseHashMap(StorageKey, void);
 const StorageMap = SparseHashMap(StorageKey, u256);
+/// Transaction-local fused storage view. During a transaction this is the
+/// authoritative value path; dirty slots fold into `storage_overlay` when the
+/// transaction closes.
+const StorageSlot = struct {
+    original: u256 = 0,
+    current: u256 = 0,
+    loaded: bool = false,
+    warm: bool = false,
+    dirty: bool = false,
+    overlay_present: bool = false,
+    original_recorded: bool = false,
+};
+const StorageSlotMap = SparseHashMap(StorageKey, StorageSlot);
+const StorageSlotAccess = struct {
+    slot: *StorageSlot,
+    access_status: Host.AccessStatus,
+};
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 
 pub const LogResources = struct {
@@ -73,9 +91,11 @@ code_bytes_used: usize,
 seeded_storage: StorageMap,
 state_resources: ?StateResources,
 warm_accounts: AddressSet,
-warm_storage: StorageSet,
+storage_slots: StorageSlotMap,
+warm_storage_count: usize,
+original_storage_count: usize,
+pending_storage_overlay_entries: usize,
 access_resources: ?AccessResources,
-original_storage: StorageMap,
 storage_overlay: StorageMap,
 transient_storage: TransientStorageMap,
 transient_storage_entries: ?usize,
@@ -89,7 +109,7 @@ bounded_log_data: std.ArrayList(u8),
 log_resources: ?LogResources,
 journal: Journal,
 transaction_open: bool,
-trace_sink: ?*trace.Sink,
+capture_context: ?*CaptureContext,
 trace_depth: u16,
 
 pub fn init(allocator: std.mem.Allocator) Overlay {
@@ -103,9 +123,11 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .seeded_storage = StorageMap.init(allocator),
         .state_resources = null,
         .warm_accounts = AddressSet.init(allocator),
-        .warm_storage = StorageSet.init(allocator),
+        .storage_slots = StorageSlotMap.init(allocator),
+        .warm_storage_count = 0,
+        .original_storage_count = 0,
+        .pending_storage_overlay_entries = 0,
         .access_resources = null,
-        .original_storage = StorageMap.init(allocator),
         .storage_overlay = StorageMap.init(allocator),
         .transient_storage = TransientStorageMap.init(allocator),
         .transient_storage_entries = null,
@@ -119,7 +141,7 @@ pub fn init(allocator: std.mem.Allocator) Overlay {
         .log_resources = null,
         .journal = Journal.init(),
         .transaction_open = false,
-        .trace_sink = null,
+        .capture_context = null,
         .trace_depth = 0,
     };
 }
@@ -131,10 +153,9 @@ pub fn initWithStateReader(allocator: std.mem.Allocator, state_reader: StateRead
 }
 
 /// Clear all semantic overlay state while keeping configured backing capacity.
-pub fn reset(self: *Overlay, state_reader: ?StateReader, trace_sink: ?*trace.Sink) void {
+pub fn reset(self: *Overlay, state_reader: ?StateReader) void {
     self.discardChanges();
     self.state_reader = state_reader;
-    self.trace_sink = trace_sink;
     self.trace_depth = 0;
 }
 
@@ -147,8 +168,7 @@ pub fn deinit(self: *Overlay) void {
     self.bounded_code_data.deinit(self.allocator);
     self.seeded_storage.deinit();
     self.warm_accounts.deinit();
-    self.warm_storage.deinit();
-    self.original_storage.deinit();
+    self.storage_slots.deinit();
     self.storage_overlay.deinit();
     self.transient_storage.deinit();
     self.selfdestructed_accounts.deinit();
@@ -184,22 +204,22 @@ pub fn configureJournalEntries(self: *Overlay, entries: ?usize) !void {
 }
 
 pub fn configureAccessResources(self: *Overlay, resources: ?AccessResources) !void {
-    if (self.warm_accounts.count() != 0 or self.warm_storage.count() != 0) return error.ActiveAccessState;
+    if (self.warm_accounts.count() != 0 or self.storage_slots.count() != 0) {
+        return error.ActiveAccessState;
+    }
     if (resources) |bounded| {
         try self.warm_accounts.ensureTotalCapacity(try accessHashMapCapacity(bounded.accounts));
-        try self.warm_storage.ensureTotalCapacity(try accessHashMapCapacity(bounded.storage_keys));
-        self.access_resources = bounded;
-    } else {
-        self.access_resources = null;
     }
+    try self.reserveConfiguredStorageSlots(resources, self.state_resources);
+    self.access_resources = resources;
 }
 
 pub fn reserveAccessHint(self: *Overlay, resources: AccessResources) !void {
     if (self.access_resources != null) return;
     const account_capacity = std.math.add(usize, self.warm_accounts.count(), resources.accounts) catch return error.AccessCapacityTooLarge;
-    const storage_capacity = std.math.add(usize, self.warm_storage.count(), resources.storage_keys) catch return error.AccessCapacityTooLarge;
+    const storage_capacity = std.math.add(usize, self.storage_slots.count(), resources.storage_keys) catch return error.AccessCapacityTooLarge;
     try self.warm_accounts.ensureTotalCapacity(try accessHintCapacity(account_capacity));
-    try self.warm_storage.ensureTotalCapacity(try accessHintCapacity(storage_capacity));
+    try self.storage_slots.ensureTotalCapacity(try accessHintCapacity(storage_capacity));
 }
 
 pub fn configureTransientStorageEntries(self: *Overlay, entries: ?usize) !void {
@@ -220,7 +240,7 @@ pub fn configureStateResources(self: *Overlay, resources: ?StateResources) !void
         if (self.accounts.count() != 0 or
             self.code_cache.count() != 0 or
             self.seeded_storage.count() != 0 or
-            self.original_storage.count() != 0 or
+            self.storage_slots.count() != 0 or
             self.storage_overlay.count() != 0 or
             self.selfdestructed_accounts.count() != 0 or
             self.created_contracts.count() != 0 or
@@ -237,19 +257,30 @@ pub fn configureStateResources(self: *Overlay, resources: ?StateResources) !void
         if (bounded.code_bytes) |bytes| {
             try self.bounded_code_data.ensureTotalCapacityPrecise(self.allocator, bytes);
         }
-        try self.original_storage.ensureTotalCapacity(try hashMapCapacity(bounded.original_storage_entries));
         try self.storage_overlay.ensureTotalCapacity(try hashMapCapacity(bounded.storage_overlay_entries));
         try self.selfdestructed_accounts.ensureTotalCapacity(try hashMapCapacity(bounded.selfdestructed_accounts));
         try self.created_contracts.ensureTotalCapacity(try hashMapCapacity(bounded.created_contracts));
         try self.deleted_accounts.ensureTotalCapacity(try hashMapCapacity(bounded.deleted_accounts));
         try self.dirty_accounts.ensureTotalCapacity(try hashMapCapacity(bounded.dirty_accounts));
-        self.state_resources = bounded;
     } else {
         if (self.code_cache.count() != 0) return error.ActiveStateOverlay;
-        self.state_resources = null;
         self.bounded_code_data.deinit(self.allocator);
         self.bounded_code_data = .empty;
     }
+    try self.reserveConfiguredStorageSlots(self.access_resources, resources);
+    self.state_resources = resources;
+}
+
+fn reserveConfiguredStorageSlots(
+    self: *Overlay,
+    access_resources: ?AccessResources,
+    state_resources: ?StateResources,
+) !void {
+    const access_entries = if (access_resources) |resources| resources.storage_keys else 0;
+    const original_entries = if (state_resources) |resources| resources.original_storage_entries else 0;
+    const entries = std.math.add(usize, access_entries, original_entries) catch return error.StateCapacityTooLarge;
+    if (entries == 0 and access_resources == null and state_resources == null) return;
+    try self.storage_slots.ensureTotalCapacity(try hashMapCapacity(entries));
 }
 
 fn hashMapCapacity(capacity: usize) !u32 {
@@ -430,7 +461,7 @@ pub fn accountExists(self: *Overlay, address: Address) !bool {
         const state_reader = self.state_reader orelse break :blk false;
         break :blk try state_reader.accountExists(address);
     };
-    self.traceStateRead(.{
+    try self.traceStateRead(.{
         .account_exists = .{
             .address = address,
             .exists = result,
@@ -450,7 +481,7 @@ pub fn getCodeView(self: *Overlay, address: Address) !CodeView {
             .code_hash = evmz.crypto.keccak256_empty,
             .bytes = &.{},
         };
-    self.traceStateRead(.{
+    try self.traceStateRead(.{
         .code = .{
             .address = address,
             .size = view.bytes.len,
@@ -478,7 +509,7 @@ pub fn accountHasCode(self: *Overlay, address: Address) !bool {
 
 pub fn getBalance(self: *Overlay, address: Address) !u256 {
     const balance = if (try self.getAccountOrLoad(address)) |account| account.balance else 0;
-    self.traceStateRead(.{
+    try self.traceStateRead(.{
         .balance = .{
             .address = address,
             .value = balance,
@@ -497,12 +528,10 @@ pub fn setBalance(self: *Overlay, address: Address, value: u256) !void {
         .address = address,
         .prev = previous,
     } });
-    errdefer self.discardLastJournalEntry();
-    const newly_dirty = try self.markAccountDirty(address);
-    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+    _ = try self.markAccountDirty(address);
 
     account.balance = value;
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .balance = .{
             .address = address,
             .previous = previous,
@@ -521,19 +550,19 @@ pub fn addBalance(self: *Overlay, address: Address, value: u256) !void {
 
 pub fn subtractBalance(self: *Overlay, address: Address, value: u256) !bool {
     if (value == 0) return true;
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     const account = try self.getAccountOrLoad(address) orelse return false;
     if (account.balance < value) return false;
     try self.journal.append(self.allocator, .{ .balance = .{
         .address = address,
         .prev = account.balance,
     } });
-    errdefer self.discardLastJournalEntry();
-    const newly_dirty = try self.markAccountDirty(address);
-    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+    _ = try self.markAccountDirty(address);
 
     const previous = account.balance;
     account.balance -= value;
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .balance = .{
             .address = address,
             .previous = previous,
@@ -552,13 +581,11 @@ pub fn setNonce(self: *Overlay, address: Address, value: u64) !void {
         .address = address,
         .prev = account.nonce,
     } });
-    errdefer self.discardLastJournalEntry();
-    const newly_dirty = try self.markAccountDirty(address);
-    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+    _ = try self.markAccountDirty(address);
 
     const previous = account.nonce;
     account.nonce = value;
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .nonce = .{
             .address = address,
             .previous = previous,
@@ -576,14 +603,15 @@ pub fn setCode(self: *Overlay, address: Address, code: []const u8) !void {
         .address = address,
         .prev = account.code_hash,
     } });
-    errdefer self.discardLastJournalEntry();
-    const newly_dirty = try self.markAccountDirty(address);
-    errdefer if (newly_dirty) self.undoAccountDirtyMark(address);
+    _ = try self.markAccountDirty(address);
 
     const code_hash = evmz.crypto.keccak256(code);
+    const inserted_code = !std.mem.eql(u8, &code_hash, &evmz.crypto.keccak256_empty) and
+        !self.code_cache.contains(code_hash);
     _ = try self.cacheCode(code_hash, code, true);
+    errdefer if (inserted_code) self.removeCachedCode(code_hash);
     account.code_hash = code_hash;
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .code = .{
             .address = address,
             .size = code.len,
@@ -596,18 +624,30 @@ pub fn clearCode(self: *Overlay, address: Address) !void {
     try self.setCode(address, &.{});
 }
 
-pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
-    const storage_key = StorageKey{ .address = address, .key = key };
+fn readStorageBacking(self: *Overlay, storage_key: StorageKey) !u256 {
     const value = blk: {
-        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address)) break :blk 0;
+        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(storage_key.address)) break :blk 0;
         if (self.storage_overlay.count() != 0) {
             if (self.storage_overlay.get(storage_key)) |overlay_value| break :blk overlay_value;
         }
         if (self.seeded_storage.get(storage_key)) |seeded_value| break :blk seeded_value;
         const state_reader = self.state_reader orelse break :blk 0;
-        break :blk try state_reader.getStorage(address, key);
+        break :blk try state_reader.getStorage(storage_key.address, storage_key.key);
     };
-    self.traceStateRead(.{
+    return value;
+}
+
+pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const value = blk: {
+        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address)) break :blk 0;
+        if (self.storage_slots.getPtr(storage_key)) |slot| {
+            try self.loadStorageSlot(storage_key, slot);
+            break :blk slot.current;
+        }
+        break :blk try self.readStorageBacking(storage_key);
+    };
+    try self.traceStateRead(.{
         .storage = .{
             .address = address,
             .key = key,
@@ -617,119 +657,258 @@ pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
     return value;
 }
 
+pub fn loadStorage(self: *Overlay, address: Address, key: u256) !Host.StorageLoadResult {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const access = try self.accessStorageSlot(storage_key);
+    try self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = access.slot.current,
+        },
+    });
+    return .{ .value = access.slot.current, .access_status = access.access_status };
+}
+
+pub fn storeStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const access = try self.accessStorageSlot(storage_key);
+    try self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = access.slot.current,
+        },
+    });
+    return .{
+        .storage_status = try self.setStorageSlot(storage_key, access.slot, value),
+        .access_status = access.access_status,
+    };
+}
+
+fn accessStorageSlot(self: *Overlay, storage_key: StorageKey) !StorageSlotAccess {
+    const result = try self.getOrPutStorageSlotForAccess(storage_key);
+    if (!result.found_existing) result.value_ptr.* = .{};
+    const slot = result.value_ptr;
+    if (slot.warm and slot.loaded) {
+        return .{ .slot = slot, .access_status = .warm };
+    }
+
+    const status = try self.markStorageSlotAccessed(storage_key, result);
+    if (!slot.loaded) try self.loadStorageSlot(storage_key, slot);
+    return .{ .slot = slot, .access_status = status };
+}
+
+pub fn accessStorage(self: *Overlay, address: Address, key: u256) !Host.AccessStatus {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const result = try self.getOrPutStorageSlotForAccess(storage_key);
+    if (!result.found_existing) result.value_ptr.* = .{};
+    return self.markStorageSlotAccessed(storage_key, result);
+}
+
+fn markStorageSlotAccessed(
+    self: *Overlay,
+    storage_key: StorageKey,
+    result: StorageSlotMap.GetOrPutResult,
+) !Host.AccessStatus {
+    if (!result.value_ptr.warm) {
+        self.warmStorageSlot(storage_key, result) catch |err| {
+            if (!result.found_existing) _ = self.storage_slots.remove(storage_key);
+            return err;
+        };
+        return .cold;
+    }
+    return .warm;
+}
+
+fn getOrPutStorageSlotForAccess(self: *Overlay, storage_key: StorageKey) !StorageSlotMap.GetOrPutResult {
+    if (self.access_resources != null and self.state_resources != null) {
+        return self.storage_slots.getOrPutAssumeCapacity(storage_key);
+    }
+    return try self.storage_slots.getOrPut(storage_key);
+}
+
+fn getOrPutStorageSlotForOriginal(self: *Overlay, storage_key: StorageKey) !StorageSlotMap.GetOrPutResult {
+    if (self.access_resources != null and self.state_resources != null) {
+        return self.storage_slots.getOrPutAssumeCapacity(storage_key);
+    }
+    return try self.storage_slots.getOrPut(storage_key);
+}
+
+fn loadStorageSlot(self: *Overlay, storage_key: StorageKey, slot: *StorageSlot) !void {
+    if (slot.loaded) return;
+    const overlay_value = self.storage_overlay.get(storage_key);
+    const current = overlay_value orelse try self.readStorageBacking(storage_key);
+    slot.original = current;
+    slot.current = current;
+    slot.loaded = true;
+    slot.overlay_present = overlay_value != null;
+}
+
 pub fn setStorage(self: *Overlay, address: Address, key: u256, value: u256) !Host.StorageStatus {
     const storage_key = StorageKey{ .address = address, .key = key };
-    const overlay_prev = self.storage_overlay.get(storage_key);
-    if (overlay_prev) |current| {
-        if (current == value) return .assigned;
+    const result = try self.getOrPutStorageSlotForOriginal(storage_key);
+    if (!result.found_existing) result.value_ptr.* = .{};
+    errdefer {
+        if (!result.found_existing and !result.value_ptr.warm and !result.value_ptr.dirty) {
+            _ = self.storage_slots.remove(storage_key);
+        }
     }
+    try self.loadStorageSlot(storage_key, result.value_ptr);
+    try self.traceStateRead(.{
+        .storage = .{
+            .address = address,
+            .key = key,
+            .value = result.value_ptr.current,
+        },
+    });
+
+    const had_original = result.value_ptr.original_recorded;
+    if (!had_original) try self.recordOriginalStorage(result.value_ptr);
+    errdefer if (!had_original) self.unrecordOriginalStorage(result.value_ptr);
+
+    return self.setStorageSlot(storage_key, result.value_ptr, value);
+}
+
+fn setStorageSlot(self: *Overlay, storage_key: StorageKey, slot: *StorageSlot, value: u256) !Host.StorageStatus {
+    if (slot.current == value) return .assigned;
+    const status = storage.status(slot.original, slot.current, value);
 
     const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
     errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
 
-    const original_entry = try self.getOrPutOriginalStorage(storage_key);
-    const had_original = original_entry.found_existing;
+    const had_original = slot.original_recorded;
     if (!had_original) {
-        original_entry.value_ptr.* = try self.getStorage(address, key);
+        try self.recordOriginalStorage(slot);
+    }
+    errdefer if (!had_original) self.unrecordOriginalStorage(slot);
+
+    _ = try self.getOrCreateAccount(storage_key.address);
+
+    const reserved_overlay_entry = !slot.dirty and !slot.overlay_present;
+    if (reserved_overlay_entry) {
+        try self.reservePendingStorageOverlayEntry();
     }
     errdefer {
-        if (!had_original) _ = self.original_storage.remove(storage_key);
+        if (reserved_overlay_entry) self.pending_storage_overlay_entries -= 1;
     }
-    const original = original_entry.value_ptr.*;
-    const current = if (had_original) overlay_prev orelse try self.getStorage(address, key) else original;
-    const status = storage.status(original, current, value);
-    if (current == value) return status;
 
-    _ = try self.getOrCreateAccount(address);
-
-    try self.journal.append(self.allocator, .{ .storage = .{
-        .address = address,
-        .key = key,
-        .overlay_had = overlay_prev != null,
-        .overlay_prev = overlay_prev orelse 0,
+    try self.journal.append(self.allocator, .{ .storage_slot = .{
+        .key = storage_key,
+        .prev = slot.current,
+        .dirty = slot.dirty,
     } });
-    errdefer self.discardLastJournalEntry();
 
-    try self.putStorageOverlay(storage_key, value);
-    self.traceStateWrite(.{
+    const previous = slot.current;
+    slot.current = value;
+    slot.dirty = true;
+    try self.traceStateWrite(.{
         .storage = .{
-            .address = address,
-            .key = key,
-            .previous = current,
+            .address = storage_key.address,
+            .key = storage_key.key,
+            .previous = previous,
             .value = value,
         },
     });
     return status;
 }
 
-pub fn originalStorage(self: *Overlay, address: Address, key: u256) !u256 {
-    const storage_key = StorageKey{ .address = address, .key = key };
-    if (self.original_storage.get(storage_key)) |value| return value;
-    const value = try self.getStorage(address, key);
-    try self.putOriginalStorage(storage_key, value);
-    return value;
-}
-
-fn getOrPutOriginalStorage(self: *Overlay, storage_key: StorageKey) !StorageMap.GetOrPutResult {
+fn recordOriginalStorage(self: *Overlay, slot: *StorageSlot) !void {
+    std.debug.assert(slot.loaded);
+    std.debug.assert(!slot.original_recorded);
     if (self.state_resources) |resources| {
-        assertBoundedMapSlack(&self.original_storage, resources.original_storage_entries);
-        const result = self.original_storage.getOrPutAssumeCapacity(storage_key);
-        if (!result.found_existing and @as(usize, self.original_storage.count()) > resources.original_storage_entries) {
-            _ = self.original_storage.remove(storage_key);
+        if (self.original_storage_count >= resources.original_storage_entries) {
             return error.OriginalStorageCapacityExceeded;
         }
-        return result;
     }
-    return try self.original_storage.getOrPut(storage_key);
+    self.original_storage_count += 1;
+    slot.original_recorded = true;
 }
 
-fn putOriginalStorage(self: *Overlay, storage_key: StorageKey, value: u256) !void {
+fn unrecordOriginalStorage(self: *Overlay, slot: *StorageSlot) void {
+    std.debug.assert(slot.original_recorded);
+    std.debug.assert(self.original_storage_count > 0);
+    self.original_storage_count -= 1;
+    slot.original_recorded = false;
+}
+
+fn reservePendingStorageOverlayEntry(self: *Overlay) !void {
+    const next_pending = std.math.add(
+        usize,
+        self.pending_storage_overlay_entries,
+        1,
+    ) catch return error.StateCapacityTooLarge;
+
     if (self.state_resources) |resources| {
-        try putBoundedStorageMap(
-            &self.original_storage,
-            storage_key,
-            value,
-            resources.original_storage_entries,
-            error.OriginalStorageCapacityExceeded,
+        const accepted_and_pending = std.math.add(
+            usize,
+            self.storage_overlay.count(),
+            next_pending,
+        ) catch return error.StateCapacityTooLarge;
+        if (accepted_and_pending > resources.storage_overlay_entries) {
+            return error.StorageOverlayCapacityExceeded;
+        }
+    } else {
+        try self.storage_overlay.ensureUnusedCapacity(
+            std.math.cast(u32, next_pending) orelse return error.StateCapacityTooLarge,
         );
-        return;
     }
-    try self.original_storage.put(storage_key, value);
+    self.pending_storage_overlay_entries = next_pending;
+}
+
+pub fn originalStorage(self: *Overlay, address: Address, key: u256) !u256 {
+    const storage_key = StorageKey{ .address = address, .key = key };
+    const result = try self.getOrPutStorageSlotForOriginal(storage_key);
+    if (!result.found_existing) result.value_ptr.* = .{};
+    errdefer {
+        if (!result.found_existing and !result.value_ptr.warm and !result.value_ptr.dirty) {
+            _ = self.storage_slots.remove(storage_key);
+        }
+    }
+    try self.loadStorageSlot(storage_key, result.value_ptr);
+    if (!result.value_ptr.original_recorded) try self.recordOriginalStorage(result.value_ptr);
+    return result.value_ptr.original;
 }
 
 fn putStorageOverlay(self: *Overlay, storage_key: StorageKey, value: u256) !void {
-    if (self.state_resources) |resources| {
-        try putBoundedStorageMap(
-            &self.storage_overlay,
-            storage_key,
-            value,
-            resources.storage_overlay_entries,
-            error.StorageOverlayCapacityExceeded,
-        );
+    if (self.storage_overlay.getPtr(storage_key)) |existing| {
+        existing.* = value;
         return;
     }
-    try self.storage_overlay.put(storage_key, value);
-}
 
-fn putBoundedStorageMap(
-    map: *StorageMap,
-    storage_key: StorageKey,
-    value: u256,
-    entry_limit: usize,
-    comptime capacity_error: anyerror,
-) !void {
-    assertBoundedMapSlack(map, entry_limit);
-    const result = map.getOrPutAssumeCapacity(storage_key);
-    if (!result.found_existing and @as(usize, map.count()) > entry_limit) {
-        _ = map.remove(storage_key);
-        return capacity_error;
+    if (self.state_resources) |resources| {
+        const accepted_and_pending = std.math.add(
+            usize,
+            self.storage_overlay.count(),
+            self.pending_storage_overlay_entries,
+        ) catch return error.StateCapacityTooLarge;
+        if (accepted_and_pending >= resources.storage_overlay_entries) {
+            return error.StorageOverlayCapacityExceeded;
+        }
+        self.storage_overlay.putAssumeCapacityNoClobber(storage_key, value);
+        return;
     }
-    result.value_ptr.* = value;
+
+    const needed = std.math.add(
+        usize,
+        self.pending_storage_overlay_entries,
+        1,
+    ) catch return error.StateCapacityTooLarge;
+    try self.storage_overlay.ensureUnusedCapacity(
+        std.math.cast(u32, needed) orelse return error.StateCapacityTooLarge,
+    );
+    self.storage_overlay.putAssumeCapacityNoClobber(storage_key, value);
 }
 
 pub fn accountHasStorage(self: *Overlay, address: Address) !bool {
     const result = try self.accountHasStorageInner(address);
-    self.traceStateRead(.{
+    try self.traceStateRead(.{
         .account_has_storage = .{
             .address = address,
             .exists = result,
@@ -740,15 +919,35 @@ pub fn accountHasStorage(self: *Overlay, address: Address) !bool {
 
 fn accountHasStorageInner(self: *Overlay, address: Address) !bool {
     if (self.deleted_accounts.contains(address)) return false;
+
+    var slot_it = self.storage_slots.iterator();
+    while (slot_it.next()) |entry| {
+        if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+        if (entry.value_ptr.loaded and entry.value_ptr.current != 0) return true;
+    }
+
     var overlay_it = self.storage_overlay.iterator();
     while (overlay_it.next()) |entry| {
-        if (entry.value_ptr.* != 0 and std.mem.eql(u8, &entry.key_ptr.address, &address)) return true;
+        if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+        if (self.storage_slots.get(entry.key_ptr.*)) |slot| {
+            if ((if (slot.loaded) slot.current else entry.value_ptr.*) != 0) return true;
+        } else if (entry.value_ptr.* != 0) {
+            return true;
+        }
     }
     var seeded_it = self.seeded_storage.iterator();
     while (seeded_it.next()) |entry| {
         if (std.mem.eql(u8, &entry.key_ptr.address, &address)) {
             if (entry.value_ptr.* == 0) continue;
-            if (self.storage_overlay.get(entry.key_ptr.*)) |overlay_value| {
+            if (self.storage_slots.get(entry.key_ptr.*)) |slot| {
+                if (slot.loaded) {
+                    if (slot.current != 0) return true;
+                } else if (self.storage_overlay.get(entry.key_ptr.*)) |overlay_value| {
+                    if (overlay_value != 0) return true;
+                } else {
+                    return true;
+                }
+            } else if (self.storage_overlay.get(entry.key_ptr.*)) |overlay_value| {
                 if (overlay_value != 0) return true;
             } else {
                 return true;
@@ -766,12 +965,30 @@ pub fn beginTransaction(self: *Overlay) void {
 }
 
 pub fn closeTransaction(self: *Overlay) void {
+    self.mergeDirtyStorageSlots();
     self.warm_accounts.clearRetainingCapacity();
-    self.warm_storage.clearRetainingCapacity();
+    self.storage_slots.clearRetainingCapacity();
+    self.warm_storage_count = 0;
+    self.original_storage_count = 0;
+    self.pending_storage_overlay_entries = 0;
     self.transient_storage.clearRetainingCapacity();
-    self.original_storage.clearRetainingCapacity();
     self.journal.clearRetainingCapacity(self.allocator);
     self.transaction_open = false;
+}
+
+fn mergeDirtyStorageSlots(self: *Overlay) void {
+    var it = self.storage_slots.iterator();
+    while (it.next()) |entry| {
+        const slot = entry.value_ptr;
+        if (!slot.dirty) continue;
+        if (self.deleted_accounts.contains(entry.key_ptr.address)) continue;
+
+        if (self.storage_overlay.getPtr(entry.key_ptr.*)) |accepted| {
+            accepted.* = slot.current;
+        } else {
+            self.storage_overlay.putAssumeCapacityNoClobber(entry.key_ptr.*, slot.current);
+        }
+    }
 }
 
 pub fn discardChanges(self: *Overlay) void {
@@ -789,10 +1006,11 @@ pub fn discardChanges(self: *Overlay) void {
 
 pub fn warmAccount(self: *Overlay, address: Address) !void {
     if (self.warm_accounts.contains(address)) return;
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     try self.journal.append(self.allocator, .{ .warm_account = address });
-    errdefer self.discardLastJournalEntry();
     try self.putWarmAccount(address);
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .warm_account = .{
             .address = address,
         },
@@ -801,14 +1019,48 @@ pub fn warmAccount(self: *Overlay, address: Address) !void {
 
 pub fn warmStorage(self: *Overlay, address: Address, key: u256) !void {
     const storage_key = StorageKey{ .address = address, .key = key };
-    if (self.warm_storage.contains(storage_key)) return;
-    try self.journal.append(self.allocator, .{ .warm_storage = storage_key });
-    errdefer self.discardLastJournalEntry();
-    try self.putWarmStorage(storage_key);
-    self.traceStateWrite(.{
+    const result = try self.getOrPutStorageSlotForAccess(storage_key);
+    if (!result.found_existing) result.value_ptr.* = .{};
+    self.warmStorageSlot(storage_key, result) catch |err| {
+        if (!result.found_existing) _ = self.storage_slots.remove(storage_key);
+        return err;
+    };
+}
+
+pub fn isStorageWarm(self: *const Overlay, address: Address, key: u256) bool {
+    const slot = self.storage_slots.get(.{ .address = address, .key = key }) orelse return false;
+    return slot.warm;
+}
+
+pub fn warmStorageCount(self: *const Overlay) usize {
+    return self.warm_storage_count;
+}
+
+pub fn originalStorageCount(self: *const Overlay) usize {
+    return self.original_storage_count;
+}
+
+fn warmStorageSlot(self: *Overlay, storage_key: StorageKey, result: StorageSlotMap.GetOrPutResult) !void {
+    const slot = result.value_ptr;
+    if (slot.warm) return;
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    if (self.access_resources) |resources| {
+        if (self.warm_storage_count >= resources.storage_keys) {
+            return error.WarmStorageCapacityExceeded;
+        }
+    }
+    try self.journal.append(self.allocator, .{ .warm_storage = .{
+        .key = storage_key,
+        .slot_created = !result.found_existing,
+    } });
+    self.warm_storage_count += 1;
+    slot.warm = true;
+    try self.traceStateWrite(.{
         .warm_storage = .{
-            .address = address,
-            .key = key,
+            .address = storage_key.address,
+            .key = storage_key.key,
         },
     });
 }
@@ -821,17 +1073,9 @@ fn putWarmAccount(self: *Overlay, address: Address) !void {
     try self.warm_accounts.put(address, {});
 }
 
-fn putWarmStorage(self: *Overlay, storage_key: StorageKey) !void {
-    if (self.access_resources) |resources| {
-        try putBoundedStorageSet(&self.warm_storage, storage_key, resources.storage_keys, error.WarmStorageCapacityExceeded);
-        return;
-    }
-    try self.warm_storage.put(storage_key, {});
-}
-
-pub fn getTransientStorage(self: *Overlay, address: Address, key: u256) u256 {
+pub fn getTransientStorage(self: *Overlay, address: Address, key: u256) !u256 {
     const value = self.transient_storage.get(.{ .address = address, .key = key }) orelse 0;
-    self.traceStateRead(.{
+    try self.traceStateRead(.{
         .transient_storage = .{
             .address = address,
             .key = key,
@@ -842,6 +1086,8 @@ pub fn getTransientStorage(self: *Overlay, address: Address, key: u256) u256 {
 }
 
 pub fn setTransientStorage(self: *Overlay, address: Address, key: u256, value: u256) !void {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     const storage_key = StorageKey{ .address = address, .key = key };
     const prev = self.transient_storage.get(storage_key);
 
@@ -867,7 +1113,7 @@ pub fn setTransientStorage(self: *Overlay, address: Address, key: u256, value: u
     } else {
         self.putTransientStorageAssumeCapacity(storage_key, value);
     }
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .transient_storage = .{
             .address = address,
             .key = key,
@@ -882,21 +1128,27 @@ fn putTransientStorageAssumeCapacity(self: *Overlay, storage_key: StorageKey, va
 }
 
 pub fn emitLog(self: *Overlay, event_log: Host.Log) !void {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     if (self.log_resources != null) {
         try self.emitBoundedLog(event_log);
         return;
     }
 
     const topics = try self.allocator.dupe(u256, event_log.topics);
-    errdefer self.allocator.free(topics);
+    var topics_owned = true;
+    errdefer if (topics_owned) self.allocator.free(topics);
     const data = try self.allocator.dupe(u8, event_log.data);
-    errdefer self.allocator.free(data);
+    var data_owned = true;
+    errdefer if (data_owned) self.allocator.free(data);
     try self.logs.append(self.allocator, .{
         .address = event_log.address,
         .topics = topics,
         .data = data,
     });
-    self.traceStateWrite(.{
+    topics_owned = false;
+    data_owned = false;
+    try self.traceStateWrite(.{
         .log = .{
             .address = event_log.address,
             .topics_len = event_log.topics.len,
@@ -927,7 +1179,7 @@ fn emitBoundedLog(self: *Overlay, event_log: Host.Log) !void {
         .topics = self.bounded_log_topics.items[index][0..event_log.topics.len],
         .data = self.bounded_log_data.items[data_start..data_end],
     });
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .log = .{
             .address = event_log.address,
             .topics_len = event_log.topics.len,
@@ -938,10 +1190,11 @@ fn emitBoundedLog(self: *Overlay, event_log: Host.Log) !void {
 
 pub fn markCreatedContract(self: *Overlay, address: Address) !void {
     if (self.created_contracts.contains(address)) return;
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     try self.journal.append(self.allocator, .{ .created_contract = address });
-    errdefer self.discardLastJournalEntry();
     try self.putCreatedContract(address);
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .created_contract = .{
             .address = address,
         },
@@ -950,34 +1203,30 @@ pub fn markCreatedContract(self: *Overlay, address: Address) !void {
 
 pub fn markSelfdestructed(self: *Overlay, address: Address) !void {
     if (self.selfdestructed_accounts.contains(address)) return;
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
     try self.journal.append(self.allocator, .{ .selfdestruct = address });
-    errdefer self.discardLastJournalEntry();
     try self.putSelfdestructedAccount(address);
-    self.traceStateWrite(.{
+    try self.traceStateWrite(.{
         .selfdestruct = .{
             .address = address,
         },
     });
 }
 
-pub fn checkpoint(self: *const Overlay) Journal.Checkpoint {
+pub fn checkpoint(self: *const Overlay) !Journal.Checkpoint {
     const checkpoint_state = self.journal.checkpoint(self.logs.items.len);
-    self.traceCheckpoint(.checkpoint, checkpoint_state);
+    try self.traceCheckpoint(.checkpoint, checkpoint_state);
     return checkpoint_state;
 }
 
-pub fn commitCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) void {
-    self.traceCheckpoint(.commit, checkpoint_state);
+pub fn commitCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) !void {
+    try self.traceCheckpoint(.commit, checkpoint_state);
 }
 
 pub fn revertToCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) !void {
-    while (self.journal.len() > checkpoint_state.journal_len) {
-        var entry = self.journal.pop().?;
-        defer entry.deinit(self.allocator);
-        self.revertJournalEntry(&entry);
-    }
-    self.truncateLogs(checkpoint_state.logs_len);
-    self.traceCheckpoint(.revert, checkpoint_state);
+    self.rollbackInternalCheckpoint(checkpoint_state);
+    try self.traceCheckpoint(.revert, checkpoint_state);
 }
 
 fn rollbackInternalCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) void {
@@ -1025,12 +1274,20 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
                 removed.prev = null;
             }
         },
-        .storage => |storage_entry| {
-            const storage_key = StorageKey{ .address = storage_entry.address, .key = storage_entry.key };
-            if (storage_entry.overlay_had) {
-                restoreMapValueAssumeCapacity(&self.storage_overlay, storage_key, storage_entry.overlay_prev);
-            } else {
-                _ = self.storage_overlay.remove(storage_key);
+        .storage_slot => |storage_entry| {
+            if (self.storage_slots.getPtr(storage_entry.key)) |slot| {
+                if (!slot.overlay_present) {
+                    const current_pending = slot.dirty;
+                    const restored_pending = storage_entry.dirty;
+                    if (current_pending and !restored_pending) {
+                        std.debug.assert(self.pending_storage_overlay_entries > 0);
+                        self.pending_storage_overlay_entries -= 1;
+                    } else if (!current_pending and restored_pending) {
+                        self.pending_storage_overlay_entries += 1;
+                    }
+                }
+                slot.current = storage_entry.prev;
+                slot.dirty = storage_entry.dirty;
             }
         },
         .transient_storage => |storage_entry| {
@@ -1044,8 +1301,15 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
         .warm_account => |address| {
             _ = self.warm_accounts.remove(address);
         },
-        .warm_storage => |storage_key| {
-            _ = self.warm_storage.remove(storage_key);
+        .warm_storage => |storage_entry| {
+            const slot = self.storage_slots.getPtr(storage_entry.key) orelse return;
+            std.debug.assert(slot.warm);
+            std.debug.assert(self.warm_storage_count > 0);
+            slot.warm = false;
+            self.warm_storage_count -= 1;
+            if (storage_entry.slot_created and !slot.original_recorded and !slot.dirty) {
+                _ = self.storage_slots.remove(storage_entry.key);
+            }
         },
         .created_contract => |address| {
             _ = self.created_contracts.remove(address);
@@ -1137,51 +1401,28 @@ fn putBoundedAddressSet(
     result.value_ptr.* = {};
 }
 
-fn putBoundedStorageSet(
-    set: *StorageSet,
-    storage_key: StorageKey,
-    entry_limit: usize,
-    comptime capacity_error: anyerror,
-) !void {
-    assertBoundedMapSlack(set, entry_limit);
-    const result = set.getOrPutAssumeCapacity(storage_key);
-    if (!result.found_existing and @as(usize, set.count()) > entry_limit) {
-        _ = set.remove(storage_key);
-        return capacity_error;
-    }
-    result.value_ptr.* = {};
-}
-
 fn assertBoundedMapSlack(map: anytype, entry_limit: usize) void {
     std.debug.assert(@as(usize, map.capacity()) > entry_limit);
 }
 
-fn undoAccountDirtyMark(self: *Overlay, address: Address) void {
-    _ = self.dirty_accounts.remove(address);
-    self.discardLastJournalEntry();
+fn traceStateRead(self: *const Overlay, event: trace.StateRead) !void {
+    const event_with_depth = event.withDepth(self.trace_depth);
+    if (self.capture_context) |context| try context.stateRead(event_with_depth);
 }
 
-fn traceStateRead(self: *const Overlay, event: trace.StateRead) void {
-    const sink = self.trace_sink orelse return;
-    if (!sink.wantsStateReadKind(event.kind())) return;
-    sink.stateRead(event.withDepth(self.trace_depth));
+fn traceStateWrite(self: *const Overlay, event: trace.StateWrite) !void {
+    const event_with_depth = event.withDepth(self.trace_depth);
+    if (self.capture_context) |context| try context.stateWrite(event_with_depth);
 }
 
-fn traceStateWrite(self: *const Overlay, event: trace.StateWrite) void {
-    const sink = self.trace_sink orelse return;
-    if (!sink.wantsStateWriteKind(event.kind())) return;
-    sink.stateWrite(event.withDepth(self.trace_depth));
-}
-
-fn traceCheckpoint(self: *const Overlay, kind: trace.CheckpointKind, checkpoint_state: Journal.Checkpoint) void {
-    const sink = self.trace_sink orelse return;
-    if (!sink.wantsCheckpoint()) return;
-    sink.checkpoint(.{
+fn traceCheckpoint(self: *const Overlay, kind: trace.CheckpointKind, checkpoint_state: Journal.Checkpoint) !void {
+    const event: trace.Checkpoint = .{
         .kind = kind,
         .depth = self.trace_depth,
         .journal_len = checkpoint_state.journal_len,
         .logs_len = checkpoint_state.logs_len,
-    });
+    };
+    if (self.capture_context) |context| try context.checkpoint(event);
 }
 
 fn discardLastJournalEntry(self: *Overlay) void {
@@ -1193,7 +1434,10 @@ pub fn snapshot(self: *Overlay) !Snapshot {
     var result = Snapshot{
         .accounts = AccountMap.init(self.allocator),
         .warm_accounts = AddressSet.init(self.allocator),
-        .warm_storage = StorageSet.init(self.allocator),
+        .storage_slots = StorageSlotMap.init(self.allocator),
+        .warm_storage_count = self.warm_storage_count,
+        .original_storage_count = self.original_storage_count,
+        .pending_storage_overlay_entries = self.pending_storage_overlay_entries,
         .storage_overlay = StorageMap.init(self.allocator),
         .transient_storage = TransientStorageMap.init(self.allocator),
         .selfdestructed_accounts = AddressSet.init(self.allocator),
@@ -1215,9 +1459,9 @@ pub fn snapshot(self: *Overlay) !Snapshot {
         try result.warm_accounts.put(address.*, {});
     }
 
-    var warm_storage_it = self.warm_storage.keyIterator();
-    while (warm_storage_it.next()) |key| {
-        try result.warm_storage.put(key.*, {});
+    var storage_slot_it = self.storage_slots.iterator();
+    while (storage_slot_it.next()) |entry| {
+        try result.storage_slots.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
     var storage_overlay_it = self.storage_overlay.iterator();
@@ -1259,8 +1503,8 @@ pub fn restore(self: *Overlay, snapshot_state: *Snapshot) !void {
 
 /// Emit lifecycle for snapshot-backed rollback paths that do not use journal
 /// checkpoint methods directly.
-pub fn traceSnapshotLifecycle(self: *const Overlay, kind: trace.CheckpointKind, snapshot_state: *const Snapshot) void {
-    self.traceCheckpoint(kind, .{
+pub fn traceSnapshotLifecycle(self: *const Overlay, kind: trace.CheckpointKind, snapshot_state: *const Snapshot) !void {
+    try self.traceCheckpoint(kind, .{
         .journal_len = snapshot_state.journal_len,
         .logs_len = snapshot_state.logs_len,
     });
@@ -1269,7 +1513,10 @@ pub fn traceSnapshotLifecycle(self: *const Overlay, kind: trace.CheckpointKind, 
 fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.clearAccounts();
     self.warm_accounts.clearRetainingCapacity();
-    self.warm_storage.clearRetainingCapacity();
+    self.storage_slots.clearRetainingCapacity();
+    self.warm_storage_count = 0;
+    self.original_storage_count = 0;
+    self.pending_storage_overlay_entries = 0;
     self.storage_overlay.clearRetainingCapacity();
     self.transient_storage.clearRetainingCapacity();
     self.selfdestructed_accounts.clearRetainingCapacity();
@@ -1289,10 +1536,13 @@ fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
         try self.putWarmAccount(address.*);
     }
 
-    var warm_storage_it = snapshot_state.warm_storage.keyIterator();
-    while (warm_storage_it.next()) |key| {
-        try self.putWarmStorage(key.*);
+    var storage_slot_it = snapshot_state.storage_slots.iterator();
+    while (storage_slot_it.next()) |entry| {
+        try self.storage_slots.put(entry.key_ptr.*, entry.value_ptr.*);
     }
+    self.warm_storage_count = snapshot_state.warm_storage_count;
+    self.original_storage_count = snapshot_state.original_storage_count;
+    self.pending_storage_overlay_entries = snapshot_state.pending_storage_overlay_entries;
 
     var storage_overlay_it = snapshot_state.storage_overlay.iterator();
     while (storage_overlay_it.next()) |entry| {
@@ -1376,6 +1626,20 @@ fn clearCodeCache(self: *Overlay) void {
     self.code_bytes_used = 0;
 }
 
+fn removeCachedCode(self: *Overlay, code_hash: [32]u8) void {
+    const removed = self.code_cache.fetchRemove(code_hash) orelse unreachable;
+    self.code_bytes_used -= removed.value.bytes.len;
+    if (removed.value.owned) {
+        self.allocator.free(@constCast(removed.value.bytes));
+        return;
+    }
+
+    const bytes = removed.value.bytes;
+    const bounded_end = self.bounded_code_data.items.ptr + self.bounded_code_data.items.len;
+    std.debug.assert(bytes.ptr + bytes.len == bounded_end);
+    self.bounded_code_data.items.len -= bytes.len;
+}
+
 pub fn finalizeTransaction(self: *Overlay, finalizer: anytype) !void {
     var finalized_accounts: std.ArrayList(Address) = .empty;
     defer finalized_accounts.deinit(self.allocator);
@@ -1394,6 +1658,7 @@ pub fn finalizeTransaction(self: *Overlay, finalizer: anytype) !void {
             finalizer.selfDestructFinalization(self.created_contracts.contains(address.*));
         if (policy.clear_storage) {
             try self.journalStorageOverlayRemovedForAddress(address.*, &removed_storage_keys);
+            try self.journalStorageSlotsClearedForAddress(address.*);
         }
         if (policy.reset_account) {
             if (self.accounts.contains(address.*)) {
@@ -1427,7 +1692,7 @@ pub fn finalizeTransaction(self: *Overlay, finalizer: anytype) !void {
 
     for (finalized_accounts.items) |address| {
         _ = self.accounts.remove(address);
-        self.traceStateWrite(.{
+        try self.traceStateWrite(.{
             .account_deleted = .{
                 .address = address,
             },
@@ -1486,10 +1751,26 @@ pub fn changeset(self: *Overlay) !Changeset {
     var storage_it = self.storage_overlay.iterator();
     while (storage_it.next()) |entry| {
         if (self.deleted_accounts.contains(entry.key_ptr.address)) continue;
+        const value = if (self.storage_slots.get(entry.key_ptr.*)) |slot|
+            if (slot.dirty) slot.current else entry.value_ptr.*
+        else
+            entry.value_ptr.*;
         try result.storage_writes.append(self.allocator, .{
             .address = entry.key_ptr.address,
             .key = entry.key_ptr.key,
-            .value = entry.value_ptr.*,
+            .value = value,
+        });
+    }
+
+    var slot_it = self.storage_slots.iterator();
+    while (slot_it.next()) |entry| {
+        if (!entry.value_ptr.dirty) continue;
+        if (self.deleted_accounts.contains(entry.key_ptr.address)) continue;
+        if (self.storage_overlay.contains(entry.key_ptr.*)) continue;
+        try result.storage_writes.append(self.allocator, .{
+            .address = entry.key_ptr.address,
+            .key = entry.key_ptr.key,
+            .value = entry.value_ptr.current,
         });
     }
 
@@ -1536,6 +1817,27 @@ fn journalStorageOverlayRemovedForAddress(
     }
 }
 
+fn journalStorageSlotsClearedForAddress(self: *Overlay, address: Address) !void {
+    var it = self.storage_slots.iterator();
+    while (it.next()) |entry| {
+        if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+        const slot = entry.value_ptr;
+        if (!slot.loaded) continue;
+
+        try self.journal.append(self.allocator, .{ .storage_slot = .{
+            .key = entry.key_ptr.*,
+            .prev = slot.current,
+            .dirty = slot.dirty,
+        } });
+        if (slot.dirty and !slot.overlay_present) {
+            std.debug.assert(self.pending_storage_overlay_entries > 0);
+            self.pending_storage_overlay_entries -= 1;
+        }
+        slot.current = 0;
+        slot.dirty = false;
+    }
+}
+
 pub fn snapshotTransient(self: *Overlay) !TransientSnapshot {
     var result = TransientSnapshot{
         .transient_storage = TransientStorageMap.init(self.allocator),
@@ -1562,7 +1864,10 @@ pub fn restoreTransient(self: *Overlay, snapshot_state: *TransientSnapshot) !voi
 pub const Snapshot = struct {
     accounts: AccountMap,
     warm_accounts: AddressSet,
-    warm_storage: StorageSet,
+    storage_slots: StorageSlotMap,
+    warm_storage_count: usize,
+    original_storage_count: usize,
+    pending_storage_overlay_entries: usize,
     storage_overlay: StorageMap,
     transient_storage: TransientStorageMap,
     selfdestructed_accounts: AddressSet,
@@ -1576,7 +1881,7 @@ pub const Snapshot = struct {
         _ = allocator;
         self.accounts.deinit();
         self.warm_accounts.deinit();
-        self.warm_storage.deinit();
+        self.storage_slots.deinit();
         self.storage_overlay.deinit();
         self.transient_storage.deinit();
         self.selfdestructed_accounts.deinit();
@@ -1605,7 +1910,14 @@ test "code view returns the canonical hash and preserves code-read tracing" {
 
     var recorder = CodeReadRecorder{};
     var sink = recorder.sink();
-    overlay.trace_sink = &sink;
+    var context = CaptureContext.init(std.testing.allocator, null, capture_runtime.stateTargetForSink(&sink));
+    defer context.deinit();
+    overlay.capture_context = &context;
+    try context.begin();
+    defer {
+        if (context.isActive()) context.abort() catch {};
+        overlay.capture_context = null;
+    }
     overlay.trace_depth = 3;
 
     const view = try overlay.getCodeView(address);
@@ -1622,6 +1934,7 @@ test "code view returns the canonical hash and preserves code-read tracing" {
     const empty_view = try overlay.getCodeView(evmz.addr(0xdef));
     try std.testing.expectEqualSlices(u8, &evmz.crypto.keccak256_empty, &empty_view.code_hash);
     try std.testing.expectEqual(@as(usize, 0), empty_view.bytes.len);
+    _ = try context.finish();
 }
 
 const CodeReadRecorder = struct {

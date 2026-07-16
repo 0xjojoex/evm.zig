@@ -59,10 +59,10 @@ pub fn applyFinalizeBlock(
 
     var phase_start = try executor.snapshot();
     defer phase_start.deinit(executor.allocator);
-    executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
+    try executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
     var phase_open = true;
     errdefer if (phase_open) {
-        executor.traceSnapshotLifecycle(.revert, &phase_start);
+        executor.traceSnapshotLifecycle(.revert, &phase_start) catch {};
         executor.restore(&phase_start) catch {};
     };
 
@@ -83,7 +83,11 @@ pub fn applyFinalizeBlock(
     }
 
     const owned = try out.toOwnedSlice(allocator);
-    executor.traceSnapshotLifecycle(.commit, &phase_start);
+    errdefer {
+        for (owned) |request| allocator.free(request);
+        allocator.free(owned);
+    }
+    try executor.traceSnapshotLifecycle(.commit, &phase_start);
     phase_open = false;
     return owned;
 }
@@ -93,10 +97,10 @@ fn applySystemCalls(executor: anytype, tx_context: Host.TxContext, calls: *const
 
     var phase_start = try executor.snapshot();
     defer phase_start.deinit(executor.allocator);
-    executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
+    try executor.traceSnapshotLifecycle(.checkpoint, &phase_start);
     var phase_open = true;
     errdefer if (phase_open) {
-        executor.traceSnapshotLifecycle(.revert, &phase_start);
+        executor.traceSnapshotLifecycle(.revert, &phase_start) catch {};
         executor.restore(&phase_start) catch {};
     };
 
@@ -112,7 +116,7 @@ fn applySystemCalls(executor: anytype, tx_context: Host.TxContext, calls: *const
         );
     }
 
-    executor.traceSnapshotLifecycle(.commit, &phase_start);
+    try executor.traceSnapshotLifecycle(.commit, &phase_start);
     phase_open = false;
 }
 

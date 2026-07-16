@@ -6,7 +6,6 @@ const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
 const ExecutionConfig = @import("./ExecutionConfig.zig");
 const evmz = @import("./evm.zig");
-const instruction = @import("./instruction.zig");
 const Stack = @import("./Stack.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
@@ -135,7 +134,6 @@ pub fn InitFor(comptime Protocol: type) type {
         msg: *const Host.Message,
         bytecode: *const Bytecode,
         revision: Protocol.Revision,
-        trace_sink: ?*trace.Sink = null,
         memory_allocator: ?std.mem.Allocator = null,
         memory_retain_capacity: bool = false,
         io: ?*frame_io.Slot = null,
@@ -147,7 +145,6 @@ const FrameInit = struct {
     msg: *const Host.Message,
     bytecode: *const Bytecode,
     revision_id: RevisionId,
-    trace_sink: ?*trace.Sink = null,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
     io: ?*frame_io.Slot = null,
@@ -159,7 +156,6 @@ fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
         .msg = options.msg,
         .bytecode = options.bytecode,
         .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
-        .trace_sink = options.trace_sink,
         .memory_allocator = options.memory_allocator,
         .memory_retain_capacity = options.memory_retain_capacity,
         .io = options.io,
@@ -171,10 +167,13 @@ pub fn For(comptime ProtocolType: type) type {
 
     return struct {
         const Self = @This();
-        const Instructions = instruction.For(Protocol);
 
         pub const Protocol = ProtocolType;
         pub const Status = StatusType;
+        pub const CapturedResult = struct {
+            result: Result,
+            span: trace.TraceSpan,
+        };
 
         call_frame: *CallFrame,
 
@@ -198,15 +197,72 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
-        pub fn executeUntilAction(self: *Self) Error!RunResult {
-            if (self.call_frame.wantsStepTracing()) {
-                while (self.call_frame.status == .running) {
-                    try self.stepTraced();
+        /// Execute this standalone frame through the protocol's fixed capture
+        /// table and return a replay-only span. The consumer type never enters
+        /// the interpreter type graph.
+        pub fn capture(self: *Self, tape: *trace.TraceTape) Error!CapturedResult {
+            const mark = try tape.begin();
+            errdefer tape.abort(mark) catch {};
+
+            var frame_capture = try trace.TraceCapture.init(tape, .{
+                .frame_id = 0,
+                .parent_frame_id = null,
+                .depth = self.call_frame.msg.depth,
+                .kind = .root,
+            });
+            while (true) {
+                switch (try self.executeCapturedUntilAction(&frame_capture)) {
+                    .finished => |result| {
+                        try frame_capture.finishFrame(.{
+                            .outcome = traceFrameOutcome(result.status),
+                            .stack = self.call_frame.stack.asSlice(),
+                            .memory_size = self.call_frame.memory.len(),
+                            .return_data_size = self.call_frame.return_data.len,
+                        });
+                        return .{
+                            .result = result,
+                            .span = try tape.finish(mark),
+                        };
+                    },
+                    .action => |action| try self.resolveHostAction(action),
                 }
-            } else {
-                try self.executeUntraced();
+            }
+        }
+
+        /// Compatibility helper for runtime-selected step consumers. Capture
+        /// remains fixed; only completed rows are dispatched through `Sink`.
+        pub fn executeWithTrace(self: *Self, tape: *trace.TraceTape, sink: *trace.Sink) Error!Result {
+            const captured = try self.capture(tape);
+            trace.replaySteps(sink, captured.span);
+            try tape.resolve(captured.span);
+            try tape.reset();
+            return captured.result;
+        }
+
+        pub fn executeUntilAction(self: *Self) Error!RunResult {
+            try self.executeUntraced();
+
+            if (self.call_frame.takePendingAction()) |action| {
+                return .{ .action = action };
+            }
+            return .{ .finished = self.call_frame.getResult() };
+        }
+
+        /// Execute one captured segment through the protocol's fixed trace
+        /// tail table. A CALL/CREATE suspension leaves its step open until the
+        /// captured runtime applies the child result and resumes this frame.
+        pub fn executeCapturedUntilAction(self: *Self, frame_capture: *trace.TraceCapture) Error!RunResult {
+            if (self.call_frame.status == .running or frame_capture.pending_step != null) {
+                try tail_dispatch.TraceFor(Protocol).executeTraced(
+                    frame_capture,
+                    self.call_frame,
+                    self.call_frame.bytecode.read_bytes,
+                );
             }
 
+            if (self.call_frame.status == .running) {
+                self.call_frame.status = .success;
+            }
             if (self.call_frame.takePendingAction()) |action| {
                 return .{ .action = action };
             }
@@ -224,18 +280,6 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
-        inline fn executeOpcode(opcode_byte: u8, frame: *CallFrame) Error!void {
-            Instructions.execute(opcode_byte, frame) catch |err| {
-                if (invalidStatusError(err)) {
-                    if (frame.status == .running) {
-                        frame.failWithStatus(.invalid);
-                    }
-                    return;
-                }
-                return err;
-            };
-        }
-
         fn resolveHostAction(self: *Self, action: Action) Error!void {
             switch (action) {
                 .call => |call_action| {
@@ -248,62 +292,8 @@ pub fn For(comptime ProtocolType: type) type {
                 },
             }
         }
-
-        fn stepTraced(self: *Self) Error!void {
-            if (self.call_frame.pc >= self.call_frame.code.len) {
-                self.call_frame.status = .success;
-                return;
-            }
-
-            const pc = self.call_frame.pc;
-            const opcode_byte = self.call_frame.code[pc];
-            const sink = self.call_frame.trace_sink.?;
-            const trace_flags = sink.flags();
-            const wants_start = trace_flags.wants_step_start;
-            const wants_end = trace_flags.wants_step_end;
-            const decoded_opcode = if (trace_flags.wants_decoded_opcode) instruction.decode(opcode_byte) else null;
-            const gas_before = if (wants_end and sink.events.step_end.contains(.gas_cost)) self.call_frame.gas_left else 0;
-            if (wants_start) self.call_frame.traceStepStart(pc, opcode_byte, decoded_opcode);
-            self.call_frame.pc += 1;
-
-            try executeOpcode(opcode_byte, self.call_frame);
-            if (self.call_frame.pc >= self.call_frame.code.len and self.call_frame.status == .running) {
-                self.call_frame.status = .success;
-            }
-            if (self.call_frame.pending_action != null) {
-                if (wants_end) {
-                    self.call_frame.pending_step_end = .{
-                        .pc = pc,
-                        .opcode_byte = opcode_byte,
-                        .decoded_opcode = decoded_opcode,
-                        .gas_before = gas_before,
-                    };
-                }
-            } else if (wants_end) {
-                self.call_frame.traceStepEnd(pc, opcode_byte, decoded_opcode, gas_before);
-            }
-        }
     };
 }
-
-fn invalidStatusError(err: anyerror) bool {
-    return switch (err) {
-        error.StackOverflow,
-        error.StackUnderflow,
-        error.StaticCallViolation,
-        error.UnknownOpcode,
-        error.UnsupportedInstruction,
-        => true,
-        else => false,
-    };
-}
-
-const PendingStepEnd = struct {
-    pc: usize,
-    opcode_byte: u8,
-    decoded_opcode: ?instruction.Instruction,
-    gas_before: i64,
-};
 
 pub const CallFrame = struct {
     status: FrameStatus,
@@ -322,10 +312,8 @@ pub const CallFrame = struct {
     io: *frame_io.Slot = undefined,
     output_data: []u8 = &.{},
     bytecode: *const Bytecode = &Bytecode.empty,
-    trace_sink: ?*trace.Sink = null,
     revision_id: RevisionId = 0,
     pending_action: ?Action = null,
-    pending_step_end: ?PendingStepEnd = null,
 
     pub fn initFor(
         self: *CallFrame,
@@ -377,11 +365,9 @@ pub const CallFrame = struct {
         self.return_data = self.io.return_data.slice();
         self.output_data = self.io.output_data.slice();
         self.bytecode = options.bytecode;
-        self.trace_sink = options.trace_sink;
         self.status = if (code.len == 0) .success else .running;
         self.revision_id = options.revision_id;
         self.pending_action = null;
-        self.pending_step_end = null;
     }
 
     pub fn deinit(self: *CallFrame) void {
@@ -435,7 +421,6 @@ pub const CallFrame = struct {
             self.refillStateGas(continuation.state_gas_charged);
         }
         if (self.status != .running) {
-            self.finishPendingStepEndTrace();
             return;
         }
         if (result.status == .success) {
@@ -448,7 +433,6 @@ pub const CallFrame = struct {
 
         try self.replaceReturnData(result.output_data);
         self.stack.pushUnchecked(if (result.status == .success) 1 else 0);
-        self.finishPendingStepEndTrace();
     }
 
     pub fn resumeCreateResult(self: *CallFrame, continuation: CreateResume, result: Host.CreateResult) !void {
@@ -462,7 +446,6 @@ pub const CallFrame = struct {
             self.refillStateGas(continuation.state_gas_charged);
         }
         if (self.status != .running) {
-            self.finishPendingStepEndTrace();
             return;
         }
         if (result.status == .success) {
@@ -477,7 +460,6 @@ pub const CallFrame = struct {
             try self.replaceReturnData(result.output_data);
             self.stack.pushUnchecked(0);
         }
-        self.finishPendingStepEndTrace();
     }
 
     pub fn trackGas(self: *CallFrame, gas: i64) void {
@@ -587,56 +569,8 @@ pub const CallFrame = struct {
         return result;
     }
 
-    fn wantsStepTracing(self: *const CallFrame) bool {
-        const sink = self.trace_sink orelse return false;
-        return sink.wantsSteps();
-    }
-
-    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) void {
-        const sink = self.trace_sink orelse return;
-        if (!sink.wantsAccountAccess()) return;
-        const fields = sink.events.account_access;
-        sink.accountAccess(.{
-            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
-            .address = if (fields.contains(.address)) account_address else std.mem.zeroes(evmz.Address),
-        });
-    }
-
-    fn traceStepStart(self: *CallFrame, pc: usize, opcode_byte: u8, decoded_opcode: ?instruction.Instruction) void {
-        const fields = self.trace_sink.?.events.step_start;
-        self.trace_sink.?.stepStart(.{
-            .pc = if (fields.contains(.pc)) pc else 0,
-            .opcode = if (fields.contains(.opcode)) opcode_byte else 0,
-            .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(decoded_opcode) else null,
-            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
-            .gas_left = if (fields.contains(.gas_left)) self.gas_left else 0,
-            .stack = if (fields.contains(.stack)) self.stack.asSlice() else &.{},
-            .memory_size = if (fields.contains(.memory_size)) self.memory.len() else 0,
-            .return_data_size = if (fields.contains(.return_data_size)) self.return_data.len else 0,
-        });
-    }
-
-    fn traceStepEnd(self: *CallFrame, pc: usize, opcode_byte: u8, decoded_opcode: ?instruction.Instruction, gas_before: i64) void {
-        const fields = self.trace_sink.?.events.step_end;
-        self.trace_sink.?.stepEnd(.{
-            .pc = if (fields.contains(.pc)) pc else 0,
-            .pc_next = if (fields.contains(.pc_next)) self.pc else 0,
-            .opcode = if (fields.contains(.opcode)) opcode_byte else 0,
-            .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(decoded_opcode) else null,
-            .depth = if (fields.contains(.depth)) self.msg.depth else 0,
-            .status = if (fields.contains(.status)) traceStatus(self.status) else .running,
-            .gas_left = if (fields.contains(.gas_left)) self.gas_left else 0,
-            .gas_cost = if (fields.contains(.gas_cost)) gasCost(gas_before, self.gas_left) else 0,
-            .stack = if (fields.contains(.stack)) self.stack.asSlice() else &.{},
-            .memory_size = if (fields.contains(.memory_size)) self.memory.len() else 0,
-            .return_data_size = if (fields.contains(.return_data_size)) self.return_data.len else 0,
-        });
-    }
-
-    fn finishPendingStepEndTrace(self: *CallFrame) void {
-        const pending = self.pending_step_end orelse return;
-        self.pending_step_end = null;
-        self.traceStepEnd(pending.pc, pending.opcode_byte, pending.decoded_opcode, pending.gas_before);
+    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) !void {
+        try self.host.observeAccountAccess(account_address, self.msg.depth);
     }
 };
 
@@ -761,13 +695,8 @@ test "call frame can execute with externally supplied memory storage" {
     try std.testing.expectEqual(@as(u8, 0x2a), memory_storage.items[31]);
 }
 
-fn decodedOpcode(decoded: ?instruction.Instruction) ?Opcode {
-    return if (decoded) |item| item.opcode else null;
-}
-
-fn traceStatus(status: FrameStatus) trace.StepStatus {
+pub fn traceFrameOutcome(status: Status) trace.TraceFrameOutcome {
     return switch (status) {
-        .running, .suspended => .running,
         .success => .success,
         .invalid => .invalid,
         .revert => .revert,
@@ -775,12 +704,8 @@ fn traceStatus(status: FrameStatus) trace.StepStatus {
     };
 }
 
-fn gasCost(before: i64, after: i64) i64 {
-    return if (before > after) before - after else 0;
-}
-
 test "interpreter trace sink records step start and end" {
-    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
+    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.POP) };
     var host: Host = undefined;
     const msg = Host.Message{
         .depth = 7,
@@ -799,12 +724,13 @@ test "interpreter trace sink records step start and end" {
         .msg = &msg,
         .code = &code,
         .revision = .latest,
-        .trace_sink = &sink,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
 
-    const result = try interpreter.execute();
+    const result = try interpreter.executeWithTrace(&tape, &sink);
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(u8, 2), recorder.starts);
@@ -824,6 +750,124 @@ test "interpreter trace sink records step start and end" {
     try std.testing.expectEqual(@as(usize, 2), recorder.last_end_pc);
     try std.testing.expectEqual(@as(usize, 3), recorder.last_end_pc_next);
     try std.testing.expectEqual(trace.StepStatus.success, recorder.last_end_status);
+    try std.testing.expectEqual(@as(usize, 0), recorder.last_end_stack_len);
+}
+
+test "interpreter captured tail table records a replay span" {
+    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    const mark = try tape.begin();
+    var capture = try trace.TraceCapture.init(&tape, .{
+        .frame_id = 0,
+        .parent_frame_id = null,
+        .depth = 0,
+        .kind = .root,
+    });
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const run_result = try interpreter.executeCapturedUntilAction(&capture);
+    const result = switch (run_result) {
+        .finished => |finished| finished,
+        .action => unreachable,
+    };
+    try capture.finishFrame(.{
+        .outcome = .success,
+        .stack = interpreter.call_frame.stack.asSlice(),
+        .memory_size = interpreter.call_frame.memory.len(),
+        .return_data_size = interpreter.call_frame.return_data.len,
+    });
+    const span = try tape.finish(mark);
+    defer tape.resolve(span) catch unreachable;
+
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(usize, 2), span.steps.len);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), span.steps[0].opcode);
+    try std.testing.expectEqual(@as(u32, 2), span.steps[0].pc_next);
+    try std.testing.expectEqual(@as(usize, 0), span.stackFor(span.steps[0]).len);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.STOP)), span.steps[1].opcode);
+    try std.testing.expectEqualSlices(u256, &.{0x2a}, span.stackFor(span.steps[1]));
+}
+
+test "interpreter captured tail table preserves terminal and fault outcomes" {
+    const explicit_success = [_]u8{@intFromEnum(Opcode.STOP)};
+    const revert = [_]u8{
+        @intFromEnum(Opcode.PUSH0),
+        @intFromEnum(Opcode.PUSH0),
+        @intFromEnum(Opcode.REVERT),
+    };
+    const invalid = [_]u8{0xfe};
+    const stack_fault = [_]u8{@intFromEnum(Opcode.POP)};
+    const out_of_gas = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a };
+    const Case = struct {
+        code: []const u8,
+        gas: i64,
+        status: Status,
+        outcome: trace.TraceFrameOutcome,
+        step_outcome: ?trace.TraceStepOutcome,
+    };
+    const cases = [_]Case{
+        .{ .code = &.{}, .gas = 100, .status = .success, .outcome = .success, .step_outcome = null },
+        .{ .code = &explicit_success, .gas = 100, .status = .success, .outcome = .success, .step_outcome = .success },
+        .{ .code = &revert, .gas = 100, .status = .revert, .outcome = .revert, .step_outcome = .revert },
+        .{ .code = &invalid, .gas = 100, .status = .invalid, .outcome = .invalid, .step_outcome = .invalid },
+        .{ .code = &stack_fault, .gas = 100, .status = .invalid, .outcome = .invalid, .step_outcome = .invalid },
+        .{ .code = &out_of_gas, .gas = 2, .status = .out_of_gas, .outcome = .out_of_gas, .step_outcome = .out_of_gas },
+    };
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    for (cases) |case| {
+        var host: Host = undefined;
+        const msg = Host.Message{
+            .depth = 0,
+            .kind = .call,
+            .gas = case.gas,
+            .recipient = evmz.addr(0),
+            .sender = evmz.addr(0),
+            .input_data = &.{},
+            .value = 0,
+        };
+        var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .code = case.code,
+            .revision = .latest,
+        });
+        defer frame.deinit();
+        var interpreter = frame.interpreter();
+
+        const captured = try interpreter.capture(&tape);
+        try std.testing.expectEqual(case.status, captured.result.status);
+        try std.testing.expectEqual(@as(usize, 1), captured.span.frames.len);
+        try std.testing.expectEqual(case.outcome, captured.span.frames[0].outcome);
+        if (case.step_outcome) |expected| {
+            try std.testing.expect(captured.span.steps.len != 0);
+            try std.testing.expectEqual(expected, captured.span.steps[captured.span.steps.len - 1].outcome);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), captured.span.steps.len);
+        }
+        try tape.resolve(captured.span);
+        try tape.reset();
+    }
 }
 
 test "interpreter state gas charges reservoir before gas left and refills LIFO" {
@@ -924,12 +968,13 @@ test "interpreter trace schema controls step emission" {
         .msg = &msg,
         .code = &code,
         .revision = .latest,
-        .trace_sink = &sink,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
 
-    const result = try interpreter.execute();
+    const result = try interpreter.executeWithTrace(&tape, &sink);
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(u8, 0), recorder.starts);
@@ -954,6 +999,7 @@ const TraceRecorder = struct {
     last_end_pc: usize = 0,
     last_end_pc_next: usize = 0,
     last_end_status: trace.StepStatus = .running,
+    last_end_stack_len: usize = 0,
 
     fn sink(self: *TraceRecorder) trace.Sink {
         return trace.Sink.init(self, .{
@@ -998,6 +1044,7 @@ const TraceRecorder = struct {
         self.last_end_pc = event.pc;
         self.last_end_pc_next = event.pc_next;
         self.last_end_status = event.status;
+        self.last_end_stack_len = event.stack.len;
         self.ends += 1;
     }
 };
@@ -1012,7 +1059,6 @@ pub fn OwnedInitFor(comptime Protocol: type) type {
         bytecode: ?*const Bytecode = null,
         revision: Protocol.Revision,
         config: ExecutionConfig = .base,
-        trace_sink: ?*trace.Sink = null,
         memory_allocator: ?std.mem.Allocator = null,
         memory_retain_capacity: bool = false,
     };
@@ -1059,7 +1105,6 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
                 .msg = options.msg,
                 .bytecode = bytecode,
                 .revision = options.revision,
-                .trace_sink = options.trace_sink,
                 .memory_allocator = options.memory_allocator,
                 .memory_retain_capacity = options.memory_retain_capacity,
             });
@@ -1089,13 +1134,13 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        assertLayout(@sizeOf(CallFrame) == 480, "CallFrame size changed; rerun VM-loop canary benches");
+        assertLayout(@sizeOf(CallFrame) == 432, "CallFrame size changed; rerun VM-loop canary benches");
         assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
         assertLayout(@offsetOf(CallFrame, "stack") == 272, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
         assertLayout(@offsetOf(CallFrame, "memory") == 288, "CallFrame memory moved; rerun memory VM-loop bench");
         assertLayout(@offsetOf(CallFrame, "gas_left") == 336, "CallFrame gas_left moved; rerun VM-loop canary benches");
         assertLayout(@offsetOf(CallFrame, "msg") == 264, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33568, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33520, "CallFrameSlot size changed; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
         assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");

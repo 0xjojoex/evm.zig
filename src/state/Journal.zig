@@ -39,11 +39,10 @@ pub const Entry = union(enum) {
         address: Address,
         prev: ?Account,
     },
-    storage: struct {
-        address: Address,
-        key: u256,
-        overlay_had: bool,
-        overlay_prev: u256,
+    storage_slot: struct {
+        key: StorageKey,
+        prev: u256,
+        dirty: bool,
     },
     transient_storage: struct {
         address: Address,
@@ -52,7 +51,10 @@ pub const Entry = union(enum) {
         prev: u256,
     },
     warm_account: Address,
-    warm_storage: StorageKey,
+    warm_storage: struct {
+        key: StorageKey,
+        slot_created: bool,
+    },
     created_contract: Address,
     selfdestruct: Address,
     deleted_account_marked: Address,

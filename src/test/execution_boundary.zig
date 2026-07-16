@@ -186,7 +186,7 @@ test "beginMessageScope derives root identity context and neutral warmth" {
     try std.testing.expect(executor.state.warm_accounts.contains(recipient));
     try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(executor.state.warm_accounts.contains(additional));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = additional, .key = 47 }));
+    try std.testing.expect(executor.state.isStorageWarm(additional, 47));
     try std.testing.expect(!executor.state.warm_accounts.contains(cold));
 
     executor.closeTransaction();
@@ -236,7 +236,7 @@ test "beginMessageScope closes scope when initial warming fails" {
     var host = executor.host();
     try std.testing.expectError(error.MissingTxContext, host.getTxContext());
     try std.testing.expectEqual(@as(usize, 0), executor.state.warm_accounts.count());
-    try std.testing.expectEqual(@as(usize, 0), executor.state.warm_storage.count());
+    try std.testing.expectEqual(@as(usize, 0), executor.state.warmStorageCount());
     try std.testing.expectEqual(@as(usize, 0), executor.state.journal.len());
 }
 
@@ -269,9 +269,20 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     var sink = recorder.sink();
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .berlin,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
+    var capture = evmz.executor.CaptureContext.init(
+        std.testing.allocator,
+        null,
+        evmz.executor.capture_context.stateTargetForSink(&sink),
+    );
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    try capture.begin();
+    defer {
+        if (capture.isActive()) capture.abort() catch {};
+        executor.setCaptureContext(null);
+    }
     try executor.beginTransaction(evmz.t.defaultTxContext(sender, 100_000), sender, contract);
     defer executor.closeTransaction();
 
@@ -294,6 +305,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         .data = &.{0x42},
     });
     try reverted.restore();
+    _ = try capture.finish();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.warm_accounts.contains(additional));
@@ -367,12 +379,18 @@ test "checkpoint revert balances the block access recorder" {
     var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     recorder.setBlockAccessIndex(1);
-    var sink = recorder.sink();
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .amsterdam,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
+    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null, recorder.stateTarget());
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    try capture.begin();
+    defer {
+        if (capture.isActive()) capture.abort() catch {};
+        executor.setCaptureContext(null);
+    }
     try executor.beginTransaction(evmz.t.defaultTxContext(sender, 100_000), sender, contract);
     defer executor.closeTransaction();
 
@@ -380,6 +398,7 @@ test "checkpoint revert balances the block access recorder" {
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(contract, 8, 1);
     try checkpoint.restore();
+    _ = try capture.finish();
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);
@@ -434,13 +453,24 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
     var sink = recorder.sink();
     var executor = try Executor.initWithRuntimeResources(std.testing.allocator, .{
         .revision = .cancun,
-        .trace_sink = &sink,
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .result_bytes = input.len - 1,
     } });
     defer executor.deinit();
     try executor.state.seedAccount(sender, evmz.state.MemoryAccount.init(std.testing.allocator));
+    var capture = evmz.executor.CaptureContext.init(
+        std.testing.allocator,
+        null,
+        evmz.executor.capture_context.stateTargetForSink(&sink),
+    );
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    try capture.begin();
+    defer {
+        if (capture.isActive()) capture.abort() catch {};
+        executor.setCaptureContext(null);
+    }
 
     try std.testing.expectError(error.ResultOutputCapacityExceeded, executor.runStandaloneRequest(.{
         .context = context(sender),
@@ -451,17 +481,59 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
             .gas = 1_000,
         } },
     }, .{}));
+    _ = try capture.finish();
 
     var host = executor.host();
     try std.testing.expectError(error.MissingTxContext, host.getTxContext());
     try std.testing.expectEqual(@as(usize, 0), executor.state.warm_accounts.count());
-    try std.testing.expectEqual(@as(usize, 0), executor.state.warm_storage.count());
+    try std.testing.expectEqual(@as(usize, 0), executor.state.warmStorageCount());
     try std.testing.expectEqual(@as(usize, 0), executor.state.journal.len());
     try std.testing.expectEqualSlices(
         trace.CheckpointKind,
         &.{ .checkpoint, .revert },
         recorder.events[0..recorder.len],
     );
+}
+
+test "bounded trace capture failure rolls back the standalone operation" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
+    var step_storage: [3]trace.tape.StepRow = undefined;
+    var frame_storage: [1]trace.tape.FrameRow = undefined;
+    var stack_storage: [3]u256 = undefined;
+    var capture_frame_storage: [1]trace.TraceCapture = undefined;
+    var tape = trace.TraceTape.initBounded(.{
+        .steps = &step_storage,
+        .frames = &frame_storage,
+        .stack_words = &stack_storage,
+    });
+    defer tape.deinit();
+
+    var executor = Executor.init(std.testing.allocator, .{ .revision = .shanghai });
+    defer executor.deinit();
+    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&code);
+    try executor.state.seedAccount(contract, account);
+
+    var capture = evmz.executor.CaptureContext.initBounded(&capture_frame_storage, &tape, null);
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    defer executor.setCaptureContext(null);
+    try capture.begin();
+    defer if (capture.isActive()) capture.abort() catch {};
+
+    try std.testing.expectError(
+        error.TraceCapacityExceeded,
+        executor.runStandaloneRequest(request(sender, contract), .{}),
+    );
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+    var host = executor.host();
+    try std.testing.expectError(error.MissingTxContext, host.getTxContext());
+
+    try capture.abort();
+    try std.testing.expectEqual(@as(usize, 0), tape.stepCount());
+    try std.testing.expectEqual(@as(usize, 0), tape.frameCount());
 }
 
 fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExecutionRequest {

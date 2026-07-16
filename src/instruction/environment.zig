@@ -54,7 +54,7 @@ pub fn For(comptime ProtocolType: type) type {
                     if (frame.status != .running) return;
                 }
             }
-            frame.traceAccountAccess(target_address);
+            try frame.traceAccountAccess(target_address);
             const address_balance = try frame.host.getBalance(target_address);
             frame.stack.pushUnchecked(address_balance);
         }
@@ -63,7 +63,7 @@ pub fn For(comptime ProtocolType: type) type {
             const target_address_word = try frame.stack.pop();
             const target_address = evmz.address.fromWord(target_address_word);
             if (!try Self.trackCodeAccountAccessGas(frame, target_address)) return;
-            frame.traceAccountAccess(target_address);
+            try frame.traceAccountAccess(target_address);
             const size = try frame.host.getCodeSize(target_address);
             frame.stack.pushUnchecked(size);
         }
@@ -78,7 +78,7 @@ pub fn For(comptime ProtocolType: type) type {
 
             if (!try frame.expandMemory(dest_offset, size)) return;
             if (!trackCopyGas(frame, size)) return;
-            frame.traceAccountAccess(target_address);
+            try frame.traceAccountAccess(target_address);
 
             const dest = frame.memory.writeSlice(dest_offset, size);
             var copied: usize = 0;
@@ -99,7 +99,7 @@ pub fn For(comptime ProtocolType: type) type {
                     if (frame.status != .running) return;
                 }
             }
-            frame.traceAccountAccess(target_address);
+            try frame.traceAccountAccess(target_address);
             const code_hash = try frame.host.getCodeHash(target_address);
             frame.stack.pushUnchecked(code_hash);
         }

@@ -15,6 +15,7 @@ const runtime_frames = @import("./runtime_frames.zig");
 const transaction = @import("../transaction.zig");
 const call_scratch_storage = @import("./call_scratch.zig");
 const context_adapter = @import("./context.zig");
+const CaptureContext = executor_module.CaptureContext;
 
 pub fn For(comptime Executor: type) type {
     return struct {
@@ -56,12 +57,14 @@ pub fn For(comptime Executor: type) type {
             executor: *Executor,
             host_iface: Host,
             frames: *std.ArrayList(RuntimeFrame),
+            capture_context: ?*CaptureContext,
 
             fn init(executor: *Executor) CallRuntime {
                 return .{
                     .executor = executor,
                     .host_iface = executor.host(),
                     .frames = &executor.runtime_frames,
+                    .capture_context = executor.capture_context,
                 };
             }
 
@@ -134,15 +137,30 @@ pub fn For(comptime Executor: type) type {
                     if (self.frames.items.len >= max_live_frames) return error.FrameCapacityExceeded;
                     if (self.frames.items.len >= self.frames.capacity) return error.FrameCapacityExceeded;
                     self.frames.appendAssumeCapacity(frame);
-                    return;
+                } else {
+                    try self.frames.append(self.executor.allocator, frame);
                 }
-                try self.frames.append(self.executor.allocator, frame);
+                errdefer self.frames.items.len -= 1;
+
+                if (self.stepCaptureContext()) |context| {
+                    const runtime_frame = &self.frames.items[self.frames.items.len - 1];
+                    try context.pushFrame(
+                        runtime_frame.frame.callFrame().msg.depth,
+                        traceFrameKind(runtime_frame),
+                    );
+                }
             }
 
             fn popFrame(self: *CallRuntime) void {
                 const index = self.frames.items.len - 1;
+                if (self.stepCaptureContext()) |context| context.popFrame();
                 deinitRuntimeFrame(&self.frames.items[index]);
                 self.frames.items.len = index;
+            }
+
+            inline fn stepCaptureContext(self: *CallRuntime) ?*CaptureContext {
+                const context = self.capture_context orelse return null;
+                return if (context.capturesSteps()) context else null;
             }
 
             fn run(self: *CallRuntime) !Host.Result {
@@ -151,7 +169,14 @@ pub fn For(comptime Executor: type) type {
                     const runtime_frame = &self.frames.items[index];
                     var interpreter = runtime_frame.frame.interpreter(Protocol);
                     const depth = runtime_frame.frame.callFrame().msg.depth;
-                    const run_result: Interpreter.RunResult = if (runtime_frame.frame.callFrame().bytecode.needs_action_loop)
+                    const run_result: Interpreter.RunResult = if (self.stepCaptureContext()) |context|
+                        try executeCapturedInterpreterUntilAction(
+                            self.executor,
+                            &interpreter,
+                            depth,
+                            context.currentFrame(),
+                        )
+                    else if (runtime_frame.frame.callFrame().bytecode.needs_action_loop)
                         try executeInterpreterUntilAction(self.executor, &interpreter, depth)
                     else
                         .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
@@ -257,8 +282,17 @@ pub fn For(comptime Executor: type) type {
             }
 
             fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
+                const call_frame = self.frames.items[frame_index].frame.callFrame();
                 var stable_result = result;
-                stable_result.output_data = try self.frames.items[frame_index].frame.callFrame().stabilizeOutputData();
+                stable_result.output_data = try call_frame.stabilizeOutputData();
+                if (self.stepCaptureContext()) |context| {
+                    try context.finishCurrentFrame(.{
+                        .outcome = Interpreter.traceFrameOutcome(stable_result.status),
+                        .stack = call_frame.stack.asSlice(),
+                        .memory_size = call_frame.memory.len(),
+                        .return_data_size = call_frame.return_data.len,
+                    });
+                }
 
                 return switch (self.frames.items[frame_index].kind) {
                     .root_call => Host.Result.fromCall(.{
@@ -286,6 +320,24 @@ pub fn For(comptime Executor: type) type {
                 };
             }
         };
+
+        fn traceFrameKind(frame: *const RuntimeFrame) evmz.trace.TraceFrameKind {
+            return switch (frame.kind) {
+                .root_call => .root,
+                .call => switch (frame.frame.callFrame().msg.kind) {
+                    .call => if (frame.frame.callFrame().msg.is_static) .staticcall else .call,
+                    .callcode => .callcode,
+                    .delegatecall => .delegatecall,
+                    .create => .create,
+                    .create2 => .create2,
+                },
+                .create => |child| switch (child.kind) {
+                    .create => .create,
+                    .create2 => .create2,
+                    else => unreachable,
+                },
+            };
+        }
 
         fn deinitRuntimeFrame(frame: *RuntimeFrame) void {
             frame.frame.deinit();
@@ -632,6 +684,21 @@ pub fn For(comptime Executor: type) type {
             return interpreter.executeUntilAction();
         }
 
+        fn executeCapturedInterpreterUntilAction(
+            self: *Executor,
+            interpreter: *BoundInterpreter,
+            depth: u16,
+            capture: *evmz.trace.TraceCapture,
+        ) !Interpreter.RunResult {
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
+
+            const previous_depth = self.state.trace_depth;
+            self.state.trace_depth = depth;
+            defer self.state.trace_depth = previous_depth;
+            return interpreter.executeCapturedUntilAction(capture);
+        }
+
         pub fn currentTxContext(self: *const Executor) !Host.TxContext {
             const context = self.execution_context orelse return error.MissingTxContext;
             return context_adapter.toHost(context);
@@ -654,7 +721,6 @@ pub fn For(comptime Executor: type) type {
                 .msg = msg,
                 .bytecode = bytecode,
                 .revision = self.revision(),
-                .trace_sink = self.trace_sink,
             });
         }
 
@@ -738,7 +804,7 @@ pub fn For(comptime Executor: type) type {
                 }) };
             }
 
-            const checkpoint_state = self.state.checkpoint();
+            const checkpoint_state = try self.state.checkpoint();
             var checkpoint_open = true;
             errdefer {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
@@ -777,7 +843,7 @@ pub fn For(comptime Executor: type) type {
             const code = try resolvedCodeView(self, resolved);
             if (code.bytes.len == 0) {
                 try touchEmptyCallRecipient(self, msg);
-                self.state.commitCheckpoint(checkpoint_state);
+                try self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
                 return .{ .immediate = Host.Result.fromCall(.{
                     .status = .success,
@@ -863,7 +929,7 @@ pub fn For(comptime Executor: type) type {
             if (status != .success) {
                 try self.state.revertToCheckpoint(checkpoint_state);
             } else {
-                self.state.commitCheckpoint(checkpoint_state);
+                try self.state.commitCheckpoint(checkpoint_state);
             }
         }
 
@@ -985,18 +1051,18 @@ pub fn For(comptime Executor: type) type {
             if (Protocol.create.createWarmsCreatedAddress(self.revision())) {
                 try self.warmAccount(create_address);
             }
-            self.traceAccountAccess(create_address, msg.depth);
+            try self.traceAccountAccess(create_address, msg.depth);
             const account_pre_existing = try self.state.accountExists(create_address);
 
             try self.state.setNonce(msg.sender, next_nonce);
-            const checkpoint_state = self.state.checkpoint();
+            const checkpoint_state = try self.state.checkpoint();
             var checkpoint_open = true;
             errdefer {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
             }
 
             if (try createCollision(self, create_address)) {
-                self.state.commitCheckpoint(checkpoint_state);
+                try self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
                 return .{ .immediate = createFailure(self, create_address, 0, msg.gas_reservoir, .invalid) };
             }
@@ -1029,6 +1095,7 @@ pub fn For(comptime Executor: type) type {
                 .checkpoint_state = checkpoint_state,
                 .address = create_address,
                 .account_pre_existing = account_pre_existing,
+                .kind = msg.kind,
                 .msg = child_msg,
                 .init_code = msg.input_data,
             } };
@@ -1081,7 +1148,7 @@ pub fn For(comptime Executor: type) type {
             };
             if (result.gas_left < deposit_regular_cost) {
                 if (Protocol.create.createDepositRegularGasOogCommits(self.revision())) {
-                    self.state.commitCheckpoint(child.checkpoint_state);
+                    try self.state.commitCheckpoint(child.checkpoint_state);
                     checkpoint_open = false;
                     return Host.Result.fromCreate(child.address, .{
                         .status = .success,
@@ -1114,7 +1181,7 @@ pub fn For(comptime Executor: type) type {
             }
 
             try self.state.setCode(child.address, output);
-            self.state.commitCheckpoint(child.checkpoint_state);
+            try self.state.commitCheckpoint(child.checkpoint_state);
             checkpoint_open = false;
 
             return Host.Result.fromCreate(child.address, .{

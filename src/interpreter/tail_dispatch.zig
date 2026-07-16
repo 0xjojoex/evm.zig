@@ -8,6 +8,7 @@ const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
 const arithmetic_instruction = @import("../instruction/arithmetic.zig");
 const storage_instruction = @import("../instruction/storage.zig");
+const trace = @import("../trace.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -69,6 +70,18 @@ const TerminalStatus = enum {
 };
 
 pub fn For(comptime ProtocolType: type) type {
+    return DispatchFor(ProtocolType, false);
+}
+
+/// The one concrete replay-capture table for a protocol.
+///
+/// This type varies only with the protocol, never with the eventual trace
+/// consumer. Captured spans are replayed after execution.
+pub fn TraceFor(comptime ProtocolType: type) type {
+    return DispatchFor(ProtocolType, true);
+}
+
+fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
     return struct {
         const Self = @This();
         const Protocol = ProtocolType;
@@ -98,6 +111,7 @@ pub fn For(comptime ProtocolType: type) type {
             final_sp: [*]u256 = undefined,
             final_gas: i64 = 0,
             err: ?anyerror = null,
+            capture: if (traced) *trace.TraceCapture else void = if (traced) undefined else {},
 
             inline fn pcOf(self: *const Context, ip: [*]const u8) usize {
                 return @intFromPtr(ip) - @intFromPtr(self.code_base);
@@ -133,6 +147,10 @@ pub fn For(comptime ProtocolType: type) type {
 
             inline fn hasStack(self: *const Context, sp: [*]u256, needed: usize) bool {
                 return (@intFromPtr(sp) - @intFromPtr(self.stack_base)) >= needed * @sizeOf(u256);
+            }
+
+            inline fn stackSlice(self: *const Context, sp: [*]u256) []const u256 {
+                return self.stack_base[0..self.stackLen(sp)];
             }
         };
 
@@ -249,6 +267,68 @@ pub fn For(comptime ProtocolType: type) type {
             break :blk handlers;
         };
 
+        // Captured rows wrap the selected core handler, then the core handler's
+        // tail edge returns to this table. There is no generic one-op loop.
+        const traced_table: [256]*const Handler = if (traced) blk: {
+            var handlers: [256]*const Handler = undefined;
+            for (0..handlers.len) |opcode_byte| {
+                handlers[opcode_byte] = &TracedHandler(@intCast(opcode_byte)).run;
+            }
+            break :blk handlers;
+        } else undefined;
+
+        fn TracedHandler(comptime opcode_byte: u8) type {
+            if (!traced) @compileError("traced handlers require tail_dispatch.TraceFor");
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    const opcode_ip = ip - 1;
+                    const pc = ctx.pcOf(opcode_ip);
+
+                    // Prepared bytecode has trailing zero padding. Complete the
+                    // real final step at the logical boundary and never record
+                    // the padded STOP.
+                    if (pc >= ctx.frame.code.len) {
+                        ctx.frame.status = .success;
+                        ctx.capture.finishStep(.{
+                            .pc_next = pc,
+                            .gas_after = gas,
+                            .outcome = tapeStepOutcome(ctx.frame.status),
+                        }) catch |err| {
+                            ctx.spill(opcode_ip, sp, gas);
+                            ctx.err = err;
+                            return .thrown;
+                        };
+                        return ctx.finish(opcode_ip, sp, gas, .done);
+                    }
+
+                    ctx.capture.finishStep(.{
+                        .pc_next = pc,
+                        .gas_after = gas,
+                        .outcome = tapeStepOutcome(ctx.frame.status),
+                    }) catch |err| {
+                        ctx.spill(opcode_ip, sp, gas);
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    ctx.capture.beginStep(.{
+                        .frame_id = undefined,
+                        .pc = pc,
+                        .opcode = opcode_byte,
+                        .gas_before = gas,
+                        .refund_before = ctx.frame.gas_refund,
+                        .stack = ctx.stackSlice(sp),
+                        .memory_size = ctx.frame.memory.len(),
+                        .return_data_size = ctx.frame.return_data.len,
+                    }) catch |err| {
+                        ctx.spill(opcode_ip, sp, gas);
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    return @call(.always_tail, table[opcode_byte], .{ ip, sp, gas, ctx });
+                }
+            };
+        }
+
         inline fn tailFastPathAlways(comptime opcode: Opcode) bool {
             const availability = comptime Instructions.tailFastPathBuiltin(opcode) orelse return false;
             return availability == .always;
@@ -260,6 +340,7 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         pub fn execute(frame: *CallFrame, read_bytes: []const u8) anyerror!void {
+            if (comptime traced) @compileError("use executeTraced with tail_dispatch.TraceFor");
             return executeAt(frame, read_bytes.ptr);
         }
 
@@ -291,11 +372,68 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
+        pub fn executeTraced(capture: *trace.TraceCapture, frame: *CallFrame, read_bytes: []const u8) anyerror!void {
+            if (comptime !traced) @compileError("executeTraced requires tail_dispatch.TraceFor");
+
+            // A resumed CALL/CREATE completes its parent step before its next
+            // opcode begins. Suspended frames retain the pending step until the
+            // runtime applies the child result.
+            if (frame.status != .suspended) {
+                try capture.finishStep(.{
+                    .pc_next = frame.pc,
+                    .gas_after = frame.gas_left,
+                    .outcome = tapeStepOutcome(frame.status),
+                });
+            }
+            if (frame.status != .running) return;
+            if (frame.pc >= frame.code.len) {
+                frame.status = .success;
+                return;
+            }
+
+            const code_base = read_bytes.ptr;
+            std.debug.assert(frame.bytecode.jumpdests.analyzed);
+            const stack_base: [*]u256 = frame.stack.slots;
+            var ctx = Context{
+                .frame = frame,
+                .code_base = code_base,
+                .code_len = frame.code.len,
+                .jumpdest_masks = frame.bytecode.jumpdests.bits.masks,
+                .stack_base = stack_base,
+                .stack_limit = stack_base + Stack.capacity,
+                .capture = capture,
+            };
+
+            const ip = code_base + frame.pc;
+            const status = traced_table[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx);
+            switch (status) {
+                .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
+                .invalid => {
+                    ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
+                    frame.failWithStatus(.invalid);
+                },
+                .out_of_gas => {
+                    ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
+                    frame.failWithStatus(.out_of_gas);
+                },
+                .thrown => return ctx.err.?,
+            }
+
+            if (frame.status != .suspended) {
+                try capture.finishStep(.{
+                    .pc_next = frame.pc,
+                    .gas_after = frame.gas_left,
+                    .outcome = tapeStepOutcome(frame.status),
+                });
+            }
+        }
+
         // Zig requires .always_tail caller/callee signatures to match, so call this
         // only from opcode handlers with the Handler signature. `ip` must point at
         // the opcode byte to execute next.
         inline fn tailNext(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            return @call(.always_tail, table[ip[0]], .{ ip + 1, sp, gas, ctx });
+            const next_table = if (traced) traced_table else table;
+            return @call(.always_tail, next_table[ip[0]], .{ ip + 1, sp, gas, ctx });
         }
 
         inline fn charge(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
@@ -967,6 +1105,15 @@ noinline fn smodOutlined(a: u256, b: u256) u256 {
 
 noinline fn expOutlined(base: u256, exponent: u256) u256 {
     return arithmetic_instruction.wrapExp(base, exponent);
+}
+
+fn tapeStepOutcome(status: Interpreter.FrameStatus) trace.TraceStepOutcome {
+    return switch (status) {
+        .running, .suspended, .success => .success,
+        .invalid => .invalid,
+        .revert => .revert,
+        .out_of_gas => .out_of_gas,
+    };
 }
 
 fn invalidStatusError(err: anyerror) bool {

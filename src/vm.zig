@@ -405,7 +405,6 @@ fn Typed(
             committer: ?Committer = null,
             env: Env = .{},
             config: evmz.ExecutionConfig = .base,
-            trace_sink: ?*evmz.trace.Sink = null,
         };
 
         pub const RuntimeResources = executor_module.RuntimeResources;
@@ -475,11 +474,19 @@ fn Typed(
 
                         var pre_tx = try self.vm.executor.snapshot();
                         defer pre_tx.deinit(self.vm.executor.allocator);
-                        self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_tx);
+                        try self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_tx);
+                        const previous_gas_used = self.gas_used;
+                        const previous_block_gas = self.block_gas;
+                        const previous_tx_count = self.tx_count;
+                        const previous_after_hook = self.accepted_for_after_hook;
                         var trace_checkpoint_open = true;
                         errdefer if (trace_checkpoint_open) {
-                            self.vm.executor.traceSnapshotLifecycle(.revert, &pre_tx);
+                            self.vm.executor.traceSnapshotLifecycle(.revert, &pre_tx) catch {};
                             self.vm.executor.restore(&pre_tx) catch {};
+                            self.gas_used = previous_gas_used;
+                            self.block_gas = previous_block_gas;
+                            self.tx_count = previous_tx_count;
+                            self.accepted_for_after_hook = previous_after_hook;
                         };
 
                         try executor_module.system_contracts.applyBeforeTransactionCalls(
@@ -492,7 +499,7 @@ fn Typed(
                             trace_checkpoint_open = false;
                             return self.drop(&pre_tx);
                         };
-                        self.vm.executor.traceSnapshotLifecycle(.commit, &pre_tx);
+                        try self.vm.executor.traceSnapshotLifecycle(.commit, &pre_tx);
                         trace_checkpoint_open = false;
                         return .{ .executed = result };
                     },
@@ -560,38 +567,24 @@ fn Typed(
                 try self.flushAfterTransaction();
                 var pre_call = try self.vm.executor.snapshot();
                 defer pre_call.deinit(self.vm.executor.allocator);
-                self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_call);
+                try self.vm.executor.traceSnapshotLifecycle(.checkpoint, &pre_call);
                 var trace_checkpoint_open = true;
                 errdefer if (trace_checkpoint_open) {
-                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
+                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call) catch {};
+                    self.vm.executor.restore(&pre_call) catch {};
                 };
 
                 const result = try self.vm.executeSystemCall(call);
                 const spent = systemCallGasUsed(call.gas, result.gasLeft());
-                const next_block_gas = self.block_gas.add(transaction.BlockGas.legacy(spent)) catch {
-                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
-                    trace_checkpoint_open = false;
-                    try self.vm.executor.restore(&pre_call);
-                    return error.GasAllowanceExceeded;
-                };
-                const next_gas_used = std.math.add(u64, self.gas_used, spent) catch {
-                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
-                    trace_checkpoint_open = false;
-                    try self.vm.executor.restore(&pre_call);
-                    return error.GasAllowanceExceeded;
-                };
+                const next_block_gas = self.block_gas.add(transaction.BlockGas.legacy(spent)) catch return error.GasAllowanceExceeded;
+                const next_gas_used = std.math.add(u64, self.gas_used, spent) catch return error.GasAllowanceExceeded;
                 const env = self.vm.runtimeEnv();
-                if (!next_block_gas.withinLimit(env.gas_limit)) {
-                    self.vm.executor.traceSnapshotLifecycle(.revert, &pre_call);
-                    trace_checkpoint_open = false;
-                    try self.vm.executor.restore(&pre_call);
-                    return error.GasAllowanceExceeded;
-                }
+                if (!next_block_gas.withinLimit(env.gas_limit)) return error.GasAllowanceExceeded;
 
+                try self.vm.executor.traceSnapshotLifecycle(.commit, &pre_call);
+                trace_checkpoint_open = false;
                 self.gas_used = next_gas_used;
                 self.block_gas = next_block_gas;
-                self.vm.executor.traceSnapshotLifecycle(.commit, &pre_call);
-                trace_checkpoint_open = false;
                 return result;
             }
 
@@ -614,19 +607,19 @@ fn Typed(
                 defer pending.deinit();
                 const candidate = pending.result();
                 const next_gas_used = std.math.add(u64, self.gas_used, candidate.gas.used) catch {
-                    pending.reject() catch |err| @panic(@errorName(err));
+                    try pending.reject();
                     return error.BlockGasExceeded;
                 };
                 const next_block_gas = self.block_gas.add(candidate.gas.block) catch {
-                    pending.reject() catch |err| @panic(@errorName(err));
+                    try pending.reject();
                     return error.BlockGasExceeded;
                 };
                 if (!next_block_gas.withinLimit(self.vm.runtimeEnv().gas_limit)) {
-                    pending.reject() catch |err| @panic(@errorName(err));
+                    try pending.reject();
                     return error.BlockGasExceeded;
                 }
 
-                const result = pending.accept() catch |err| @panic(@errorName(err));
+                const result = try pending.accept();
                 self.gas_used = next_gas_used;
                 self.block_gas = next_block_gas;
                 self.tx_count += 1;
@@ -639,7 +632,10 @@ fn Typed(
             }
 
             fn drop(self: *BlockSession, pre_tx: *Executor.Snapshot) !Self.TxResult {
-                self.vm.executor.traceSnapshotLifecycle(.revert, pre_tx);
+                self.vm.executor.traceSnapshotLifecycle(.revert, pre_tx) catch |err| {
+                    try self.vm.executor.restore(pre_tx);
+                    return err;
+                };
                 try self.vm.executor.restore(pre_tx);
                 return error.BlockGasExceeded;
             }
@@ -659,7 +655,6 @@ fn Typed(
                     .block_hash_source = options.block_hash_source,
                     .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
-                    .trace_sink = options.trace_sink,
                 }),
                 .env = options.env,
                 .committer = options.committer,
@@ -691,7 +686,6 @@ fn Typed(
                     .block_hash_source = options.block_hash_source,
                     .precompile_runtime = options.precompile_runtime,
                     .config = options.config,
-                    .trace_sink = options.trace_sink,
                 }, runtime_resources),
                 .env = options.env,
                 .committer = options.committer,
@@ -722,7 +716,6 @@ fn Typed(
                 .block_hash_source = options.block_hash_source,
                 .precompile_runtime = options.precompile_runtime,
                 .config = options.config,
-                .trace_sink = options.trace_sink,
             });
             self.env = options.env;
             self.committer = options.committer;
@@ -1080,13 +1073,25 @@ test "Vm account code remains overlay-owned and traced with a prepared backend e
         .revision = .osaka,
         .state_reader = memory.reader(),
         .prepared_code_backend = prepared_pool.backend(),
-        .trace_sink = &sink,
     });
     defer vm.deinit();
 
     const code_hash = evmz.crypto.keccak256(&code);
     const prepared = try prepared_pool.getOrPrepare(vm.executor.preparedCodeKey(), code_hash, &code);
+    var context = executor_module.CaptureContext.init(
+        std.testing.allocator,
+        null,
+        executor_module.capture_context.stateTargetForSink(&sink),
+    );
+    defer context.deinit();
+    vm.executor.setCaptureContext(&context);
+    try context.begin();
+    defer {
+        if (context.isActive()) context.abort() catch {};
+        vm.executor.setCaptureContext(null);
+    }
     const view = (try vm.getAccount(contract)).?;
+    _ = try context.finish();
 
     try std.testing.expect(view.code.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view.code);

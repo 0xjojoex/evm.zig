@@ -34,6 +34,16 @@ pub const StorageStatus = enum(u8) {
     modified_restored,
 };
 
+pub const StorageLoadResult = struct {
+    value: u256,
+    access_status: AccessStatus,
+};
+
+pub const StorageStoreResult = struct {
+    storage_status: StorageStatus,
+    access_status: AccessStatus,
+};
+
 pub const Message = struct {
     depth: u16,
     kind: CallKind,
@@ -207,8 +217,7 @@ pub const Log = struct {
 
 const Self = @This();
 
-ptr: *anyopaque,
-vtable: *const struct {
+pub const VTable = struct {
     accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
@@ -222,11 +231,20 @@ vtable: *const struct {
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?AccessStatus,
+    observeAccountAccess: ?*const fn (ptr: *anyopaque, address: Address, depth: u16) anyerror!void = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
-},
+
+    /// Native fused storage operations. Split access/get/set primitives remain
+    /// required for gas-ordering paths and compatibility adapters.
+    loadStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!StorageLoadResult,
+    storeStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStoreResult,
+};
+
+ptr: *anyopaque,
+vtable: *const VTable,
 
 pub fn accountExists(self: *Self, address: Address) !bool {
     return self.vtable.accountExists(self.ptr, address);
@@ -246,6 +264,10 @@ pub fn accessStorage(self: *Self, address: Address, key: u256) !AccessStatus {
 pub fn accessDelegatedAccount(self: *Self, address: Address) !?AccessStatus {
     return self.vtable.accessDelegatedAccount(self.ptr, address);
 }
+pub fn observeAccountAccess(self: *Self, address: Address, depth: u16) !void {
+    const callback = self.vtable.observeAccountAccess orelse return;
+    return callback(self.ptr, address, depth);
+}
 pub fn copyCode(self: *Self, address: Address, code_offset: usize, buffer_data: []u8) !usize {
     return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);
 }
@@ -263,6 +285,12 @@ pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !Storag
 }
 pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
+}
+pub fn loadStorage(self: *Self, address: Address, key: u256) !StorageLoadResult {
+    return self.vtable.loadStorage(self.ptr, address, key);
+}
+pub fn storeStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStoreResult {
+    return self.vtable.storeStorage(self.ptr, address, key, value);
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
     return self.vtable.emitLog(self.ptr, event_log.address, event_log.topics, event_log.data);

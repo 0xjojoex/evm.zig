@@ -115,7 +115,7 @@ pub fn For(comptime ProtocolType: type) type {
             frame.trackGas(value_transfer_gas);
             if (frame.status != .running) return;
 
-            frame.traceAccountAccess(address);
+            try frame.traceAccountAccess(address);
 
             var account_state_gas: i64 = 0;
 
@@ -276,7 +276,7 @@ pub fn For(comptime ProtocolType: type) type {
                     if (frame.status != .running) return;
                 }
             }
-            frame.traceAccountAccess(address);
+            try frame.traceAccountAccess(address);
 
             const new_account_gas = Protocol.self_destruct.selfDestructNewAccountGas(
                 revision,

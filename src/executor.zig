@@ -53,6 +53,7 @@ const RootFrameType = RootFrame;
 const SnapshotType = Snapshot;
 const TransientSnapshotType = TransientSnapshot;
 const call_runtime = @import("./executor/call_runtime.zig");
+pub const capture_context = @import("./executor/capture_context.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
 const context_adapter = @import("./executor/context.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
@@ -64,7 +65,6 @@ pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
-const TraceSink = trace.Sink;
 const tx_gas = @import("./transaction/gas.zig");
 const uint256 = @import("./uint256.zig");
 
@@ -103,8 +103,8 @@ pub const code_deposit_gas: i64 = 200;
 ///
 /// `state_reader` is optional so tests and ephemeral executors can run purely
 /// from the in-memory overlay. `block_hash_source` is separate because native
-/// BLOCKHASH reads chain history, not account/trie state. `trace_sink` is
-/// threaded through state and interpreter frames when tracing is enabled.
+/// BLOCKHASH reads chain history, not account/trie state. Capture is bound for
+/// an operation through `setCaptureContext`, not construction.
 fn InitFor(comptime Protocol: type) type {
     return struct {
         revision: Protocol.Revision,
@@ -115,7 +115,6 @@ fn InitFor(comptime Protocol: type) type {
         block_hash_source: ?BlockHashSource = null,
         precompile_runtime: ?execution_values.PrecompileRuntime = null,
         config: evmz.ExecutionConfig = .base,
-        trace_sink: ?*TraceSink = null,
     };
 }
 
@@ -270,6 +269,8 @@ const code_deposit_gas_value = code_deposit_gas;
 const default_max_live_frames_value = default_max_live_frames;
 const RuntimeResourcesType = RuntimeResources;
 const BoundedRuntimeResourcesType = BoundedRuntimeResources;
+pub const CaptureContext = capture_context.Context;
+pub const CaptureStateTarget = capture_context.StateTarget;
 
 /// The execution engine bound to a concrete `ProtocolType`.
 ///
@@ -323,7 +324,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
         prepared_code_admission: bool = true,
-        trace_sink: ?*TraceSink = null,
+        capture_context: ?*CaptureContext = null,
         last_call_output: frame_io.ByteSlot,
 
         /// Parameters that belong to transaction settlement rather than bytecode
@@ -385,20 +386,22 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             pub fn accept(self: *PendingTopLevelTransaction) !TopLevelTransactionResult {
                 const result_value = self.result_value;
+                defer self.checkpoint.executor.closeTransaction();
                 try self.checkpoint.commit();
-                self.checkpoint.executor.closeTransaction();
                 return result_value;
             }
 
             pub fn reject(self: *PendingTopLevelTransaction) !void {
+                defer {
+                    self.checkpoint.executor.clearLastOutput();
+                    self.checkpoint.executor.closeTransaction();
+                }
                 try self.checkpoint.restore();
-                self.checkpoint.executor.clearLastOutput();
-                self.checkpoint.executor.closeTransaction();
             }
 
             pub fn deinit(self: *PendingTopLevelTransaction) void {
                 if (self.checkpoint.open) {
-                    self.reject() catch |err| @panic(@errorName(err));
+                    self.reject() catch {};
                 }
                 self.* = undefined;
             }
@@ -465,19 +468,28 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             pub fn commit(self: *ExecutionCheckpoint) !void {
                 try self.validateClose();
-                self.executor.state.commitCheckpoint(self.journal_checkpoint);
+                self.executor.state.commitCheckpoint(self.journal_checkpoint) catch |err| {
+                    self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch {};
+                    self.finishClose();
+                    return err;
+                };
                 self.finishClose();
             }
 
             pub fn restore(self: *ExecutionCheckpoint) !void {
                 try self.validateClose();
-                try self.executor.state.revertToCheckpoint(self.journal_checkpoint);
+                self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch |err| {
+                    self.finishClose();
+                    return err;
+                };
                 self.finishClose();
             }
 
             pub fn deinit(self: *ExecutionCheckpoint) void {
                 if (self.open) {
-                    self.restore() catch |err| @panic(@errorName(err));
+                    std.debug.assert(self.executor.checkpoint_top == self.id);
+                    self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch {};
+                    self.finishClose();
                 }
                 self.* = undefined;
             }
@@ -503,13 +515,20 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             fn commit(self: *TransactionCheckpoint) !void {
                 try self.validateClose();
-                self.executor.state.commitCheckpoint(self.journal_checkpoint);
+                self.executor.state.commitCheckpoint(self.journal_checkpoint) catch |err| {
+                    self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch {};
+                    self.finishClose();
+                    return err;
+                };
                 self.finishClose();
             }
 
             fn restore(self: *TransactionCheckpoint) !void {
                 try self.validateClose();
-                try self.executor.state.revertToCheckpoint(self.journal_checkpoint);
+                self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch |err| {
+                    self.finishClose();
+                    return err;
+                };
                 self.finishClose();
             }
 
@@ -534,7 +553,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             else
                 StateOverlay.init(allocator);
 
-            var executor: Self = .{
+            const executor: Self = .{
                 .allocator = allocator,
                 .state = state,
                 .frame_store = .{},
@@ -547,10 +566,9 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .precompile_runtime = options.precompile_runtime,
                 .config = options.config,
                 .prepared_code_backend = options.prepared_code_backend,
-                .trace_sink = null,
+                .capture_context = null,
                 .last_call_output = frame_io.ByteSlot.initGrowable(allocator),
             };
-            executor.setTraceSink(options.trace_sink);
             return executor;
         }
 
@@ -562,20 +580,23 @@ pub fn Executor(comptime ProtocolType: type) type {
             return executor;
         }
 
-        pub fn setTraceSink(self: *Self, trace_sink: ?*TraceSink) void {
-            if (self.checkpoint_top != 0) @panic("cannot replace trace sink while a checkpoint is open");
-            if (self.active_transaction_checkpoint_id != 0) @panic("cannot replace trace sink while a transaction is pending");
-            self.trace_sink = trace_sink;
-            self.state.trace_sink = trace_sink;
+        /// Bind the one concrete captured runtime. The context may remain
+        /// bound while callers opt individual operations in through
+        /// `CaptureContext.begin` and `finish`/`abort`.
+        pub fn setCaptureContext(self: *Self, context: ?*CaptureContext) void {
+            if (self.runtime_frames.items.len != 0) @panic("cannot replace capture context while runtime frames are active");
+            if (self.prepared_code_execution_depth != 0) @panic("cannot replace capture context during prepared-code execution");
+            if (self.capture_context) |current| {
+                if (current.isActive()) @panic("cannot replace an active capture context");
+            }
+            self.capture_context = context;
+            self.state.capture_context = context;
         }
 
-        pub fn traceAccountAccess(self: *Self, account_address: Address, depth: u16) void {
-            const sink = self.trace_sink orelse return;
-            if (!sink.wantsAccountAccess()) return;
-            const fields = sink.events.account_access;
-            sink.accountAccess(.{
-                .depth = if (fields.contains(.depth)) depth else 0,
-                .address = if (fields.contains(.address)) account_address else std.mem.zeroes(Address),
+        pub fn traceAccountAccess(self: *Self, account_address: Address, depth: u16) !void {
+            if (self.capture_context) |context| try context.accountAccess(.{
+                .depth = depth,
+                .address = account_address,
             });
         }
 
@@ -590,7 +611,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             if (self.runtime_resources_locked and self.revision_id != next_revision_id) {
                 return error.RuntimeResourcesLocked;
             }
-            self.state.reset(options.state_reader, options.trace_sink);
+            self.state.reset(options.state_reader);
             self.execution_context = null;
             self.scope_root = null;
             self.block_hash_source = options.block_hash_source;
@@ -598,7 +619,6 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.revision_id = next_revision_id;
             self.config = options.config;
             self.prepared_code_backend = options.prepared_code_backend;
-            self.setTraceSink(options.trace_sink);
             self.clearLastOutput();
         }
 
@@ -734,6 +754,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             std.debug.assert(self.active_transaction_checkpoint_id == 0);
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
+            if (self.capture_context) |context| std.debug.assert(!context.isActive());
             self.state.deinit();
             self.runtime_frames.deinit(self.allocator);
             self.frame_store.deinit(self.allocator);
@@ -950,8 +971,8 @@ pub fn Executor(comptime ProtocolType: type) type {
             return self.state.snapshot();
         }
 
-        pub fn traceSnapshotLifecycle(self: *Self, kind: trace.CheckpointKind, snapshot_state: *const Self.Snapshot) void {
-            self.state.traceSnapshotLifecycle(kind, snapshot_state);
+        pub fn traceSnapshotLifecycle(self: *Self, kind: trace.CheckpointKind, snapshot_state: *const Self.Snapshot) !void {
+            try self.state.traceSnapshotLifecycle(kind, snapshot_state);
         }
 
         /// Open one journal-backed checkpoint inside the active execution scope.
@@ -959,11 +980,12 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.requireTransactionScope();
             const id = std.math.add(usize, self.next_checkpoint_id, 1) catch return error.CheckpointIdExhausted;
             const parent_id = self.checkpoint_top;
+            const journal_checkpoint = try self.state.checkpoint();
             self.next_checkpoint_id = id;
             self.checkpoint_top = id;
             return .{
                 .executor = self,
-                .journal_checkpoint = self.state.checkpoint(),
+                .journal_checkpoint = journal_checkpoint,
                 .id = id,
                 .parent_id = parent_id,
             };
@@ -974,11 +996,12 @@ pub fn Executor(comptime ProtocolType: type) type {
             if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
             const id = std.math.add(usize, self.next_transaction_checkpoint_id, 1) catch return error.CheckpointIdExhausted;
+            const journal_checkpoint = try self.state.checkpoint();
             self.next_transaction_checkpoint_id = id;
             self.active_transaction_checkpoint_id = id;
             return .{
                 .executor = self,
-                .journal_checkpoint = self.state.checkpoint(),
+                .journal_checkpoint = journal_checkpoint,
                 .id = id,
             };
         }
@@ -1170,7 +1193,7 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         fn executeTransactionRequestTrusted(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
             switch (request.message) {
-                .call => |call| self.traceAccountAccess(call.recipient, 0),
+                .call => |call| try self.traceAccountAccess(call.recipient, 0),
                 .create => {},
             }
             const result = try self.executeMessage(request.message);
@@ -1270,11 +1293,9 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.validateScopeRoot(.fromTransactionRoot(root));
             try self.validateSettlementRevision(run.settlement);
 
+            errdefer self.closeTransaction();
             var shell_checkpoint = try self.transactionCheckpoint();
-            errdefer {
-                shell_checkpoint.restore() catch |err| @panic(@errorName(err));
-                self.closeTransaction();
-            }
+            errdefer shell_checkpoint.restore() catch {};
 
             const sender = root.sender();
             var execution_gas = run.gas();
@@ -1373,7 +1394,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             errdefer self.closeTransaction();
 
             self.clearLastOutput();
-            const checkpoint_state = self.state.checkpoint();
+            const checkpoint_state = try self.state.checkpoint();
             var checkpoint_open = true;
             errdefer {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
@@ -1382,7 +1403,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             const resolved = try runtime.resolveCode(self, recipient);
             const bytecode = try runtime.resolveExecutionCodeView(self, try runtime.resolvedCodeView(self, resolved));
             var host_iface = self.host();
-            self.traceAccountAccess(recipient, 0);
+            try self.traceAccountAccess(recipient, 0);
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
@@ -1405,7 +1426,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 checkpoint_open = false;
                 self.closeTransaction();
             } else {
-                self.state.commitCheckpoint(checkpoint_state);
+                try self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
                 try self.commitTransaction();
             }
@@ -1748,7 +1769,7 @@ test "CREATE initcode preparation remains execution-local" {
 
 const CacheInvalidatingTrace = struct {
     pool: *evmz.prepared_code.InMemoryPreparedPool,
-    invalidation_rejected: bool = false,
+    replay_cleared: bool = false,
 
     fn sink(self: *@This()) trace.Sink {
         return trace.Sink.init(self, .{
@@ -1759,17 +1780,13 @@ const CacheInvalidatingTrace = struct {
     fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         _ = event;
-        if (self.invalidation_rejected) return;
-        self.pool.clearRetainingCapacity() catch |err| {
-            std.debug.assert(err == error.ActivePreparedCodeExecution);
-            self.invalidation_rejected = true;
-            return;
-        };
-        @panic("prepared-code cache invalidated during execution");
+        if (self.replay_cleared) return;
+        self.pool.clearRetainingCapacity() catch |err| @panic(@errorName(err));
+        self.replay_cleared = true;
     }
 };
 
-test "trace reentrancy cannot invalidate prepared code used by a live frame" {
+test "trace replay runs after prepared code leaves the live frame" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{.STOP});
@@ -1795,15 +1812,30 @@ test "trace reentrancy cannot invalidate prepared code used by a live frame" {
 
     var recorder = CacheInvalidatingTrace{ .pool = &pool };
     var sink = recorder.sink();
-    executor.setTraceSink(&sink);
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    try capture.begin();
+    var capture_open = true;
+    defer {
+        if (capture_open) capture.abort() catch {};
+        executor.setCaptureContext(null);
+    }
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     executor.closeTransaction();
 
+    const span = (try capture.finish()).?;
+    capture_open = false;
+    trace.replaySteps(&sink, span);
+    try tape.resolve(span);
+
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expect(recorder.invalidation_rejected);
-    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expect(recorder.replay_cleared);
+    try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
 test "reset retains caller backend and isolates preparation configurations" {
@@ -2198,7 +2230,6 @@ test "top-level call code resolution reuses one traced view" {
     var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .prague,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -2206,12 +2237,16 @@ test "top-level call code resolution reuses one traced view" {
     var recipient_account = MemoryAccount.init(std.testing.allocator);
     try recipient_account.setCode(&.{evmz.Opcode.STOP.toByte()});
     try executor.state.seedAccount(recipient, recipient_account);
+    var capture: TestCapture(Default) = undefined;
+    try capture.initSink(&executor, &sink);
+    defer capture.deinit();
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .gas = 100_000,
     } })).expectCall();
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 1), recorder.count);
@@ -2240,7 +2275,6 @@ test "top-level delegated access failure does not read target code" {
     var sink = recorder.sink();
     var executor = ExpensiveExecutor.init(std.testing.allocator, .{
         .revision = .prague,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -2254,12 +2288,16 @@ test "top-level delegated access failure does not read target code" {
     var target_account = MemoryAccount.init(std.testing.allocator);
     try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
     try executor.state.seedAccount(target, target_account);
+    var capture: TestCapture(ExpensiveExecutor) = undefined;
+    try capture.initSink(&executor, &sink);
+    defer capture.deinit();
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = authority,
         .gas = 100_000,
     } })).expectCall();
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
     try std.testing.expectEqual(@as(usize, 1), recorder.count);
@@ -2593,8 +2631,8 @@ test "executor begins transaction scope and warms access list" {
     try std.testing.expect(executor.state.warm_accounts.contains(contract));
     try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(executor.state.warm_accounts.contains(access_address));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = access_address, .key = 1 }));
-    try std.testing.expect(executor.state.warm_storage.contains(.{ .address = access_address, .key = 2 }));
+    try std.testing.expect(executor.state.isStorageWarm(access_address, 1));
+    try std.testing.expect(executor.state.isStorageWarm(access_address, 2));
 }
 
 test "protocol definition drives initial coinbase warm access" {
@@ -3410,10 +3448,8 @@ test "BAL recorder keeps reverted root storage as an access" {
     var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     recorder.setBlockAccessIndex(1);
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .osaka,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
 
@@ -3424,6 +3460,9 @@ test "BAL recorder keeps reverted root storage as an access" {
     var contract_account = MemoryAccount.init(std.testing.allocator);
     try contract_account.setCode(&.{ 0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xfd });
     try executor.state.seedAccount(contract, contract_account);
+    var capture: TestCapture(Default) = undefined;
+    try capture.init(&executor, recorder.stateTarget());
+    defer capture.deinit();
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -3445,6 +3484,7 @@ test "BAL recorder keeps reverted root storage as an access" {
             .fee_recipient = tx_context.coinbase,
         },
     });
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status);
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
@@ -3502,12 +3542,13 @@ test "zero-price top-level transaction materializes missing sender" {
     var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     recorder.setBlockAccessIndex(1);
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .frontier,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
+    var capture: TestCapture(Default) = undefined;
+    try capture.init(&executor, recorder.stateTarget());
+    defer capture.deinit();
 
     const root = RootFrame{ .call = .{
         .sender = sender,
@@ -3529,6 +3570,7 @@ test "zero-price top-level transaction materializes missing sender" {
             .fee_recipient = tx_context.coinbase,
         },
     });
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
@@ -4118,7 +4160,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
     try std.testing.expect(!executor.state.warm_accounts.contains(create2_address));
 }
 
-test "iterative trace ends call and create steps after child resume" {
+test "captured runtime records nested call and create frames without generic stepping" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const child = evmz.addr(0x1234);
@@ -4130,13 +4172,15 @@ test "iterative trace ends call and create steps after child resume" {
         0x01,   .PUSH0, .RETURN, .PUSH0, .MSTORE, .PUSH1, 0x07,     .PUSH1,
         0x19,   .PUSH0, .CREATE, .STOP,
     });
-    var recorder = StepOrderRecorder{};
-    var sink = recorder.sink();
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .cancun,
-        .trace_sink = &sink,
-    });
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    defer capture.deinit();
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
     defer executor.deinit();
+    executor.setCaptureContext(&capture);
+    defer executor.setCaptureContext(null);
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000_000_000_000_000;
@@ -4154,6 +4198,8 @@ test "iterative trace ends call and create steps after child resume" {
     defer bytecode.deinit(std.testing.allocator);
 
     try executor.beginTransaction(tx_context, sender, contract);
+    try capture.begin();
+    errdefer capture.abort() catch {};
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = &bytecode,
         .sender = sender,
@@ -4161,19 +4207,100 @@ test "iterative trace ends call and create steps after child resume" {
         .gas = 300_000,
         .value = 0,
     });
+    const span = (try capture.finish()).?;
+    defer tape.resolve(span) catch unreachable;
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    const call_start = recorder.firstIndex(.start, .CALL, 0).?;
-    const call_end = recorder.firstIndex(.end, .CALL, 0).?;
-    try std.testing.expect(call_start < call_end);
-    try std.testing.expect(recorder.hasDepthStartBetween(1, call_start, call_end));
-    try std.testing.expectEqual(@as(u256, 1), recorder.events[call_end].stack_top.?);
+    try std.testing.expectEqual(@as(usize, 3), span.frames.len);
+    try std.testing.expectEqual(trace.TraceFrameKind.root, span.frames[0].kind);
+    try std.testing.expectEqual(@as(?u32, 0), span.frames[1].parent_frame_id);
+    try std.testing.expectEqual(trace.TraceFrameKind.call, span.frames[1].kind);
+    try std.testing.expectEqual(@as(?u32, 0), span.frames[2].parent_frame_id);
+    try std.testing.expectEqual(trace.TraceFrameKind.create, span.frames[2].kind);
+    for (span.frames) |frame_row| {
+        try std.testing.expectEqual(trace.TraceFrameOutcome.success, frame_row.outcome);
+    }
 
-    const create_start = recorder.firstIndex(.start, .CREATE, 0).?;
-    const create_end = recorder.firstIndex(.end, .CREATE, 0).?;
-    try std.testing.expect(create_start < create_end);
-    try std.testing.expect(recorder.hasDepthStartBetween(1, create_start, create_end));
-    try std.testing.expectEqual(evmz.address.toU256(create_address), recorder.events[create_end].stack_top.?);
+    var call_index: ?usize = null;
+    var call_child_index: ?usize = null;
+    var create_index: ?usize = null;
+    var create_child_index: ?usize = null;
+    for (span.steps, 0..) |step, index| {
+        if (step.frame_id == 0 and step.opcode == @intFromEnum(evmz.Opcode.CALL)) call_index = index;
+        if (step.frame_id == 1) call_child_index = index;
+        if (step.frame_id == 0 and step.opcode == @intFromEnum(evmz.Opcode.CREATE)) create_index = index;
+        if (step.frame_id == 2) create_child_index = index;
+    }
+    try std.testing.expect(call_index.? < call_child_index.?);
+    try std.testing.expect(create_index.? < create_child_index.?);
+    try std.testing.expect(span.steps[call_index.?].pc_next > span.steps[call_index.?].pc);
+    try std.testing.expect(span.steps[create_index.?].pc_next > span.steps[create_index.?].pc);
+
+    var replay = StepOrderRecorder{};
+    var replay_sink = replay.sink();
+    trace.replaySteps(&replay_sink, span);
+    const replay_call_start = replay.firstIndex(.start, .CALL, 0).?;
+    const replay_call_end = replay.firstIndex(.end, .CALL, 0).?;
+    try std.testing.expect(replay.hasDepthStartBetween(1, replay_call_start, replay_call_end));
+    try std.testing.expectEqual(@as(u256, 1), replay.events[replay_call_end].stack_top.?);
+    const replay_create_start = replay.firstIndex(.start, .CREATE, 0).?;
+    const replay_create_end = replay.firstIndex(.end, .CREATE, 0).?;
+    try std.testing.expect(replay.hasDepthStartBetween(1, replay_create_start, replay_create_end));
+    try std.testing.expectEqual(evmz.address.toU256(create_address), replay.events[replay_create_end].stack_top.?);
+}
+
+test "captured span is inspectable before pending transaction resolution" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const tx_context = testTxContext(sender, 100_000);
+    var executor = Default.init(std.testing.allocator, .{ .revision = .osaka });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.balance = 1_000_000;
+    try executor.state.seedAccount(sender, sender_account);
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
+    try executor.state.seedAccount(contract, contract_account);
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    defer executor.setCaptureContext(null);
+
+    const root = RootFrame{ .call = .{
+        .sender = sender,
+        .recipient = contract,
+        .gas_limit = 100_000,
+    } };
+    const scope = Default.transactionScope(tx_context, .{});
+    try executor.beginTransactionScope(scope, root);
+    try capture.begin();
+    var pending = try executor.runTopLevelTransactionPending(scope, root, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .fee_recipient = tx_context.coinbase,
+        },
+    });
+    defer pending.deinit();
+
+    const span = (try capture.finish()).?;
+    try std.testing.expect(span.steps.len > 0);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(evmz.Opcode.SSTORE)), span.steps[2].opcode);
+    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
+
+    try pending.reject();
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+    try tape.resolve(span);
 }
 
 test "top-level transaction execution requires begin tx context" {
@@ -4824,7 +4951,6 @@ test "callcode with insufficient balance fails without executing target code" {
     var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
 
@@ -4835,6 +4961,9 @@ test "callcode with insufficient balance fails without executing target code" {
     var target_account = MemoryAccount.init(std.testing.allocator);
     try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
     try executor.state.seedAccount(target, target_account);
+    var capture: TestCapture(Default) = undefined;
+    try capture.initSink(&executor, &sink);
+    defer capture.deinit();
 
     try executor.beginTransaction(tx_context, caller, caller);
     const result = (try executeHostCall(&executor, .{
@@ -4847,6 +4976,7 @@ test "callcode with insufficient balance fails without executing target code" {
         .value = 1,
         .code_address = target,
     })).expectCall();
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(i64, 100_000), result.gas_left);
@@ -4863,7 +4993,6 @@ test "create address collision closes checkpoint without rolling back nonce or w
     var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
 
@@ -4875,10 +5004,14 @@ test "create address collision closes checkpoint without rolling back nonce or w
     var existing_account = MemoryAccount.init(std.testing.allocator);
     existing_account.nonce = 1;
     try executor.state.seedAccount(create_address, existing_account);
+    var capture: TestCapture(Default) = undefined;
+    try capture.initSink(&executor, &sink);
+    defer capture.deinit();
 
     try executor.beginCreateTransaction(tx_context, sender);
 
     const result = (try executor.executeCreateTransaction(sender, &.{0x00}, .legacy(100_000), 1)).expectCreate();
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
@@ -4886,6 +5019,79 @@ test "create address collision closes checkpoint without rolling back nonce or w
     try std.testing.expectEqual(@as(u8, 2), recorder.checkpoints);
     try std.testing.expectEqual(trace.CheckpointKind.checkpoint, recorder.first);
     try std.testing.expectEqual(trace.CheckpointKind.commit, recorder.last);
+}
+
+test "checkpoint observation failures restore state and release ownership" {
+    const caller = evmz.addr(0xaaaa);
+    const tx_context = testTxContext(caller, 100_000);
+    var executor = Default.init(std.testing.allocator, .{
+        .revision = .berlin,
+    });
+    defer executor.deinit();
+    try executor.state.setBalance(caller, 5);
+    try executor.beginTransaction(tx_context, caller, caller);
+
+    var failing = FailingCheckpointTarget{};
+    var capture: TestCapture(Default) = undefined;
+    try capture.init(&executor, failing.target());
+    defer capture.deinit();
+
+    failing.fail_kind = .checkpoint;
+    try std.testing.expectError(error.TestCaptureFailure, executor.checkpoint());
+    try std.testing.expectEqual(@as(usize, 0), executor.checkpoint_top);
+    try std.testing.expectError(error.TestCaptureFailure, executor.transactionCheckpoint());
+    try std.testing.expect(!executor.hasPendingTransaction());
+
+    failing.fail_kind = null;
+    var commit_checkpoint = try executor.checkpoint();
+    try executor.state.setBalance(caller, 9);
+    failing.fail_kind = .commit;
+    try std.testing.expectError(error.TestCaptureFailure, commit_checkpoint.commit());
+    try std.testing.expectEqual(@as(u256, 5), try executor.getBalance(caller));
+    try std.testing.expectEqual(@as(usize, 0), executor.checkpoint_top);
+
+    failing.fail_kind = null;
+    var revert_checkpoint = try executor.checkpoint();
+    try executor.state.setBalance(caller, 11);
+    failing.fail_kind = .revert;
+    try std.testing.expectError(error.TestCaptureFailure, revert_checkpoint.restore());
+    try std.testing.expectEqual(@as(u256, 5), try executor.getBalance(caller));
+    try std.testing.expectEqual(@as(usize, 0), executor.checkpoint_top);
+
+    failing.fail_kind = null;
+    var reusable_checkpoint = try executor.checkpoint();
+    try reusable_checkpoint.restore();
+    var transaction_checkpoint = try executor.transactionCheckpoint();
+    try transaction_checkpoint.restore();
+    try std.testing.expect(!executor.hasPendingTransaction());
+    executor.closeTransaction();
+
+    const root = RootFrame{ .call = .{
+        .sender = caller,
+        .recipient = caller,
+        .gas_limit = 100_000,
+    } };
+    const scope = Default.transactionScope(tx_context, .{});
+    try executor.beginTransactionScope(scope, root);
+    failing.fail_kind = .checkpoint;
+    try std.testing.expectError(error.TestCaptureFailure, executor.runTopLevelTransaction(scope, root, .{
+        .execution_gas = 100_000,
+        .settlement = .{
+            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.berlin),
+            .gas_limit = 100_000,
+            .intrinsic_gas = 21_000,
+            .intrinsic_state_gas = 0,
+            .floor_gas = 21_000,
+            .gas_price = 0,
+            .priority_fee = 0,
+            .fee_recipient = tx_context.coinbase,
+        },
+    }));
+    try std.testing.expectEqual(@as(?execution_values.ExecutionContext, null), executor.execution_context);
+    try std.testing.expect(!executor.hasPendingTransaction());
+
+    failing.fail_kind = null;
+    try capture.finish();
 }
 
 test "call-like message at max depth still executes in recipient storage" {
@@ -5285,7 +5491,6 @@ test "state-only trace sink records state without step tracing" {
     var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
-        .trace_sink = &sink,
     });
     defer executor.deinit();
 
@@ -5301,9 +5506,13 @@ test "state-only trace sink records state without step tracing" {
         0x00, // STOP
     });
     try executor.state.seedAccount(contract, contract_account);
+    var capture: TestCapture(Default) = undefined;
+    try capture.initSink(&executor, &sink);
+    defer capture.deinit();
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
+    try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u8, 0), recorder.step_starts);
@@ -5450,6 +5659,67 @@ const CheckpointTraceRecorder = struct {
         self.checkpoints += 1;
     }
 };
+
+const FailingCheckpointTarget = struct {
+    fail_kind: ?trace.CheckpointKind = null,
+
+    fn target(self: *FailingCheckpointTarget) CaptureStateTarget {
+        return CaptureStateTarget.init(self, &.{ .checkpoint = checkpointEvent });
+    }
+
+    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) !void {
+        const self: *FailingCheckpointTarget = @ptrCast(@alignCast(ptr));
+        if (self.fail_kind == event.kind) return error.TestCaptureFailure;
+    }
+};
+
+fn TestCapture(comptime ExecutorType: type) type {
+    return struct {
+        const Self = @This();
+
+        executor: *ExecutorType = undefined,
+        context: CaptureContext = undefined,
+        open: bool = false,
+        bound: bool = false,
+
+        fn init(self: *Self, executor: *ExecutorType, state_target: ?CaptureStateTarget) !void {
+            self.* = .{
+                .executor = executor,
+                .context = CaptureContext.init(executor.allocator, null, state_target),
+            };
+            executor.setCaptureContext(&self.context);
+            self.bound = true;
+            errdefer {
+                executor.setCaptureContext(null);
+                self.bound = false;
+                self.context.deinit();
+            }
+            try self.context.begin();
+            self.open = true;
+        }
+
+        fn initSink(self: *Self, executor: *ExecutorType, sink: *trace.Sink) !void {
+            try self.init(executor, capture_context.stateTargetForSink(sink));
+        }
+
+        fn finish(self: *Self) !void {
+            _ = try self.context.finish();
+            self.open = false;
+            self.executor.setCaptureContext(null);
+            self.bound = false;
+        }
+
+        fn deinit(self: *Self) void {
+            if (self.open) {
+                self.context.abort() catch |err| @panic(@errorName(err));
+                self.open = false;
+            }
+            if (self.bound) self.executor.setCaptureContext(null);
+            self.context.deinit();
+            self.* = undefined;
+        }
+    };
+}
 
 fn executeHostCall(executor: anytype, msg: Host.Message) !Host.Result {
     var host_iface = executor.host();

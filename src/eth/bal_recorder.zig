@@ -1,9 +1,10 @@
-//! Observed BAL recorder fed by state trace events.
+//! BAL recorder fed by the captured runtime's fallible state target.
 
 const std = @import("std");
 const bal = @import("bal.zig");
 const trace = @import("../trace.zig");
 const address = @import("../address.zig");
+const CaptureStateTarget = @import("../executor/capture_context.zig").StateTarget;
 
 const Allocator = std.mem.Allocator;
 
@@ -30,18 +31,52 @@ pub const Recorder = struct {
         self.block_access_index = block_access_index;
     }
 
-    pub fn sink(self: *Recorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .account_access = trace.AccountAccessFields.full,
-            .state_read = trace.StateReadKinds.initMany(&.{.storage}),
-            .state_write = trace.StateWriteKinds.initMany(&.{ .balance, .nonce, .code, .storage }),
-            .checkpoint = trace.CheckpointFields.full,
-        }, &.{
-            .accountAccess = accountAccess,
-            .stateRead = stateRead,
-            .stateWrite = stateWrite,
-            .checkpoint = checkpointEvent,
+    pub fn stateTarget(self: *Recorder) CaptureStateTarget {
+        return CaptureStateTarget.init(self, &.{
+            .account_access = captureAccountAccess,
+            .state_read = captureStateRead,
+            .state_write = captureStateWrite,
+            .checkpoint = captureCheckpoint,
         });
+    }
+
+    pub fn accountAccess(self: *Recorder, event: trace.AccountAccess) !void {
+        self.recordAccountAccess(event.address) catch |err| return self.captureFailure(err);
+    }
+
+    pub fn stateRead(self: *Recorder, event: trace.StateRead) !void {
+        switch (event) {
+            .storage => |storage_read| self.recordStorageRead(storage_read) catch |err| {
+                return self.captureFailure(err);
+            },
+            else => {},
+        }
+    }
+
+    pub fn stateWrite(self: *Recorder, event: trace.StateWrite) !void {
+        switch (event) {
+            .storage => |storage_write| self.recordStorageWrite(storage_write) catch |err| {
+                return self.captureFailure(err);
+            },
+            .balance => |balance_write| self.recordBalanceWrite(balance_write) catch |err| {
+                return self.captureFailure(err);
+            },
+            .nonce => |nonce_write| self.recordNonceWrite(nonce_write) catch |err| {
+                return self.captureFailure(err);
+            },
+            .code => |code_write| self.recordCodeWrite(code_write) catch |err| {
+                return self.captureFailure(err);
+            },
+            else => {},
+        }
+    }
+
+    pub fn checkpoint(self: *Recorder, event: trace.Checkpoint) !void {
+        self.recordCheckpoint(event) catch |err| return self.captureFailure(err);
+    }
+
+    pub fn failureCause(self: *const Recorder) ?anyerror {
+        return self.failure;
     }
 
     pub fn recordAccountAccess(self: *Recorder, account_address: bal.Address) !void {
@@ -209,47 +244,29 @@ pub const Recorder = struct {
         for (self.events.items[marker.event_start..]) |*recorded| recorded.deactivateWrite();
     }
 
-    fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.recordAccountAccess(event.address) catch |err| {
-            self.failure = err;
-        };
+    fn captureFailure(self: *Recorder, err: anyerror) anyerror {
+        self.failure = err;
+        return err;
     }
 
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+    fn captureAccountAccess(ptr: *anyopaque, event: trace.AccountAccess) !void {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
-        switch (event) {
-            .storage => |storage_read| self.recordStorageRead(storage_read) catch |err| {
-                self.failure = err;
-            },
-            else => {},
-        }
+        try self.accountAccess(event);
     }
 
-    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
+    fn captureStateRead(ptr: *anyopaque, event: trace.StateRead) !void {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
-        switch (event) {
-            .storage => |storage_write| self.recordStorageWrite(storage_write) catch |err| {
-                self.failure = err;
-            },
-            .balance => |balance_write| self.recordBalanceWrite(balance_write) catch |err| {
-                self.failure = err;
-            },
-            .nonce => |nonce_write| self.recordNonceWrite(nonce_write) catch |err| {
-                self.failure = err;
-            },
-            .code => |code_write| self.recordCodeWrite(code_write) catch |err| {
-                self.failure = err;
-            },
-            else => {},
-        }
+        try self.stateRead(event);
     }
 
-    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) void {
+    fn captureStateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.recordCheckpoint(event) catch |err| {
-            self.failure = err;
-        };
+        try self.stateWrite(event);
+    }
+
+    fn captureCheckpoint(ptr: *anyopaque, event: trace.Checkpoint) !void {
+        const self: *Recorder = @ptrCast(@alignCast(ptr));
+        try self.checkpoint(event);
     }
 };
 
@@ -566,37 +583,31 @@ fn u256LessThan(_: void, lhs: u256, rhs: u256) bool {
     return lhs < rhs;
 }
 
-test "BAL recorder sink declares only materializable state events" {
+test "BAL recorder exposes one fallible captured state target" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
 
-    var sink = recorder.sink();
-    try std.testing.expect(sink.wantsAccountAccess());
-    try std.testing.expect(sink.wantsStateReadKind(.storage));
-    try std.testing.expect(sink.wantsStateWriteKind(.storage));
-    try std.testing.expect(sink.wantsStateWriteKind(.balance));
-    try std.testing.expect(sink.wantsStateWriteKind(.nonce));
-    try std.testing.expect(sink.wantsStateWriteKind(.code));
-    try std.testing.expect(sink.wantsCheckpoint());
+    const target = recorder.stateTarget();
+    try target.accountAccess(.{ .address = address.addr(1) });
+    try std.testing.expectEqual(@as(usize, 1), recorder.events.items.len);
 }
 
 test "BAL recorder owns and coalesces code changes per block access index" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    var sink = recorder.sink();
 
     const changed = address.addr(6);
     var first_code = [_]u8{ 0x60, 0x00 };
     var final_code = [_]u8{ 0x60, 0x01 };
 
     recorder.setBlockAccessIndex(1);
-    sink.stateWrite(.{ .code = .{ .address = changed, .size = first_code.len, .code = &first_code } });
-    sink.stateWrite(.{ .code = .{ .address = changed, .size = final_code.len, .code = &final_code } });
+    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = first_code.len, .code = &first_code } });
+    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = final_code.len, .code = &final_code } });
     @memset(&first_code, 0xff);
     @memset(&final_code, 0xff);
 
     recorder.setBlockAccessIndex(2);
-    sink.stateWrite(.{ .code = .{ .address = changed, .size = 1, .code = &.{0x00} } });
+    try recorder.stateWrite(.{ .code = .{ .address = changed, .size = 1, .code = &.{0x00} } });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);
@@ -613,42 +624,41 @@ test "BAL recorder owns and coalesces code changes per block access index" {
 test "BAL recorder builds canonical observed storage balance and nonce changes" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    var sink = recorder.sink();
 
     const written = address.addr(1);
     const read_only = address.addr(2);
 
     recorder.setBlockAccessIndex(1);
-    sink.stateWrite(.{ .storage = .{
+    try recorder.stateWrite(.{ .storage = .{
         .address = written,
         .key = 1,
         .previous = 0,
         .value = 2,
     } });
-    sink.stateWrite(.{ .storage = .{
+    try recorder.stateWrite(.{ .storage = .{
         .address = written,
         .key = 1,
         .previous = 2,
         .value = 3,
     } });
-    sink.stateWrite(.{ .balance = .{
+    try recorder.stateWrite(.{ .balance = .{
         .address = written,
         .previous = 0,
         .value = 9,
     } });
-    sink.stateRead(.{ .storage = .{
+    try recorder.stateRead(.{ .storage = .{
         .address = written,
         .key = 1,
         .value = 3,
     } });
-    sink.stateRead(.{ .storage = .{
+    try recorder.stateRead(.{ .storage = .{
         .address = read_only,
         .key = 4,
         .value = 5,
     } });
 
     recorder.setBlockAccessIndex(2);
-    sink.stateWrite(.{ .nonce = .{
+    try recorder.stateWrite(.{ .nonce = .{
         .address = written,
         .previous = 0,
         .value = 7,
@@ -675,10 +685,9 @@ test "BAL recorder builds canonical observed storage balance and nonce changes" 
 test "BAL recorder preserves access-only accounts" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    var sink = recorder.sink();
 
     const accessed = address.addr(3);
-    sink.accountAccess(.{ .address = accessed });
+    try recorder.accountAccess(.{ .address = accessed });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);
@@ -695,16 +704,15 @@ test "BAL recorder preserves access-only accounts" {
 test "BAL recorder collapses net-zero writes to accesses" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    var sink = recorder.sink();
 
     const accessed = address.addr(4);
     recorder.setBlockAccessIndex(1);
-    sink.stateWrite(.{ .storage = .{ .address = accessed, .key = 7, .previous = 0, .value = 1 } });
-    sink.stateWrite(.{ .storage = .{ .address = accessed, .key = 7, .previous = 1, .value = 0 } });
-    sink.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 9 } });
-    sink.stateWrite(.{ .balance = .{ .address = accessed, .previous = 9, .value = 5 } });
-    sink.stateWrite(.{ .nonce = .{ .address = accessed, .previous = 2, .value = 3 } });
-    sink.stateWrite(.{ .nonce = .{ .address = accessed, .previous = 3, .value = 2 } });
+    try recorder.stateWrite(.{ .storage = .{ .address = accessed, .key = 7, .previous = 0, .value = 1 } });
+    try recorder.stateWrite(.{ .storage = .{ .address = accessed, .key = 7, .previous = 1, .value = 0 } });
+    try recorder.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 9 } });
+    try recorder.stateWrite(.{ .balance = .{ .address = accessed, .previous = 9, .value = 5 } });
+    try recorder.stateWrite(.{ .nonce = .{ .address = accessed, .previous = 2, .value = 3 } });
+    try recorder.stateWrite(.{ .nonce = .{ .address = accessed, .previous = 3, .value = 2 } });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);
@@ -720,15 +728,14 @@ test "BAL recorder collapses net-zero writes to accesses" {
 test "BAL recorder discards reverted writes but preserves accesses" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    var sink = recorder.sink();
 
     const accessed = address.addr(5);
     recorder.setBlockAccessIndex(1);
-    sink.checkpoint(.{ .kind = .checkpoint, .depth = 1, .journal_len = 2, .logs_len = 0 });
-    sink.stateWrite(.{ .storage = .{ .address = accessed, .key = 8, .previous = 0, .value = 1 } });
-    sink.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 6 } });
-    sink.stateWrite(.{ .code = .{ .address = accessed, .size = 2, .code = &.{ 0x60, 0x00 } } });
-    sink.checkpoint(.{ .kind = .revert, .depth = 1, .journal_len = 2, .logs_len = 0 });
+    try recorder.checkpoint(.{ .kind = .checkpoint, .depth = 1, .journal_len = 2, .logs_len = 0 });
+    try recorder.stateWrite(.{ .storage = .{ .address = accessed, .key = 8, .previous = 0, .value = 1 } });
+    try recorder.stateWrite(.{ .balance = .{ .address = accessed, .previous = 5, .value = 6 } });
+    try recorder.stateWrite(.{ .code = .{ .address = accessed, .size = 2, .code = &.{ 0x60, 0x00 } } });
+    try recorder.checkpoint(.{ .kind = .revert, .depth = 1, .journal_len = 2, .logs_len = 0 });
 
     var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
     defer observed.deinit(std.testing.allocator);

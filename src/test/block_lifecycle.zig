@@ -148,6 +148,22 @@ const CheckpointRecorder = struct {
     }
 };
 
+const FailingCheckpointTarget = struct {
+    fail_commit_at: usize,
+    commit_count: usize = 0,
+
+    fn target(self: *FailingCheckpointTarget) evmz.executor.CaptureStateTarget {
+        return evmz.executor.CaptureStateTarget.init(self, &.{ .checkpoint = checkpoint });
+    }
+
+    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) !void {
+        const self: *FailingCheckpointTarget = @ptrCast(@alignCast(ptr));
+        if (event.kind != .commit) return;
+        self.commit_count += 1;
+        if (self.commit_count == self.fail_commit_at) return error.TestCaptureFailure;
+    }
+};
+
 const AtomicLifecycleBlock = struct {
     const recipient = evmz.addr(0x2001);
 
@@ -289,9 +305,20 @@ test "BlockSession empty before-transaction hook skips the full snapshot" {
     var vm = EmptyBeforeTransactionVm.init(std.testing.allocator, .{
         .revision = .amsterdam,
         .state_reader = memory.reader(),
-        .trace_sink = &sink,
     });
     defer vm.deinit();
+    var capture = evmz.executor.CaptureContext.init(
+        std.testing.allocator,
+        null,
+        evmz.executor.capture_context.stateTargetForSink(&sink),
+    );
+    defer capture.deinit();
+    vm.executor.setCaptureContext(&capture);
+    try capture.begin();
+    defer {
+        if (capture.isActive()) capture.abort() catch {};
+        vm.executor.setCaptureContext(null);
+    }
 
     var block = try vm.beginBlock(.{ .gas_limit = 1_000_000 });
     _ = switch (try block.transact(.{
@@ -302,6 +329,7 @@ test "BlockSession empty before-transaction hook skips the full snapshot" {
         .executed => |result| result,
         .rejected => return error.UnexpectedRejection,
     };
+    _ = try capture.finish();
 
     try std.testing.expectEqual(@as(usize, 1), EmptyBeforeTransactionBlock.invocations.load(.monotonic));
     try std.testing.expectEqualSlices(
@@ -350,6 +378,84 @@ test "BlockSession block rejection restores before-transaction hook and payload 
     try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(payload, 0));
     try std.testing.expectEqual(@as(u64, 0), block.tx_count);
     try std.testing.expectEqual(std.math.maxInt(u64), block.block_gas.total);
+}
+
+test "BlockSession restores a system call when outer commit observation fails" {
+    const recipient = evmz.addr(0x2201);
+    var vm = LifecycleVm.init(std.testing.allocator, .{ .revision = .prague });
+    defer vm.deinit();
+    try vm.executor.state.setCode(recipient, &lifecycle_code);
+
+    var failing = FailingCheckpointTarget{ .fail_commit_at = 2 };
+    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null, failing.target());
+    defer capture.deinit();
+    vm.executor.setCaptureContext(&capture);
+    defer vm.executor.setCaptureContext(null);
+    try capture.begin();
+    defer if (capture.isActive()) capture.abort() catch {};
+
+    var block = try vm.beginBlock(.{ .gas_limit = 1_000_000 });
+    var input = [_]u8{0} ** 32;
+    input[31] = 5;
+    try std.testing.expectError(
+        error.TestCaptureFailure,
+        block.systemCall(.{
+            .sender = evmz.eth.system_address,
+            .recipient = recipient,
+            .input = &input,
+            .gas = 100_000,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), failing.commit_count);
+    try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(recipient, 0));
+    const summary = try block.finish();
+    try std.testing.expectEqual(@as(u64, 0), summary.gas_used);
+    try std.testing.expectEqual(@as(u64, 0), summary.block_gas.total);
+    try std.testing.expectEqual(@as(u64, 0), summary.tx_count);
+    _ = try capture.finish();
+}
+
+test "BlockSession restores accepted transaction progress when outer observation fails" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    var sender_account = try memory.getOrCreateAccount(sender);
+    sender_account.balance = 10_000_000;
+
+    var vm = LifecycleVm.init(std.testing.allocator, .{
+        .revision = .prague,
+        .state_reader = memory.reader(),
+    });
+    defer vm.deinit();
+    try vm.executor.state.setCode(LifecycleBlock.before_transaction_address, &lifecycle_code);
+
+    var failing = FailingCheckpointTarget{ .fail_commit_at = 4 };
+    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null, failing.target());
+    defer capture.deinit();
+    vm.executor.setCaptureContext(&capture);
+    defer vm.executor.setCaptureContext(null);
+    try capture.begin();
+    defer if (capture.isActive()) capture.abort() catch {};
+
+    var block = try vm.beginBlock(.{
+        .number = 7,
+        .timestamp = 9,
+        .gas_limit = 1_000_000,
+    });
+    try std.testing.expectError(error.TestCaptureFailure, block.transact(.{
+        .sender = sender,
+        .to = recipient,
+        .gas_limit = 300_000,
+    }));
+    try std.testing.expectEqual(@as(usize, 4), failing.commit_count);
+    try std.testing.expectEqual(@as(u256, 0), try vm.getStorage(LifecycleBlock.before_transaction_address, 0));
+    try std.testing.expectEqual(@as(u64, 0), vm.executor.getAccount(sender).?.nonce);
+    const summary = try block.finish();
+    try std.testing.expectEqual(@as(u64, 0), summary.gas_used);
+    try std.testing.expectEqual(@as(u64, 0), summary.block_gas.total);
+    try std.testing.expectEqual(@as(u64, 0), summary.tx_count);
+    _ = try capture.finish();
 }
 
 test "block lifecycle hook batches restore earlier calls when a later call fails" {

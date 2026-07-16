@@ -40,6 +40,8 @@ pub const HostCounters = struct {
     copy_code: u64 = 0,
     storage_read: u64 = 0,
     storage_write: u64 = 0,
+    storage_load: u64 = 0,
+    storage_store: u64 = 0,
     log: u64 = 0,
     block_hash: u64 = 0,
     tx_context: u64 = 0,
@@ -122,6 +124,8 @@ pub const CountingHost = struct {
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,
+            .loadStorage = loadStorage,
+            .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
             .selfDestruct = selfDestruct,
@@ -192,6 +196,44 @@ pub const CountingHost = struct {
         if (previous == 0 and value != 0) return .added;
         if (previous != 0 and value == 0) return .deleted;
         return .modified;
+    }
+
+    noinline fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+        const self: *CountingHost = @ptrCast(@alignCast(ptr));
+        self.counters.storage_load += 1;
+        const result = try self.storage.getOrPut(.{ .address = address, .key = key });
+        if (!result.found_existing) result.value_ptr.* = .{};
+        const was_warm = result.value_ptr.warm;
+        result.value_ptr.warm = true;
+        return .{
+            .access_status = if (was_warm) .warm else .cold,
+            .value = result.value_ptr.value,
+        };
+    }
+
+    noinline fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+        const self: *CountingHost = @ptrCast(@alignCast(ptr));
+        self.counters.storage_store += 1;
+
+        const result = try self.storage.getOrPut(.{ .address = address, .key = key });
+        if (!result.found_existing) result.value_ptr.* = .{};
+        const previous = result.value_ptr.value;
+        const was_warm = result.value_ptr.warm;
+        result.value_ptr.value = value;
+        result.value_ptr.warm = true;
+
+        const storage_status: Host.StorageStatus = if (previous == value)
+            .assigned
+        else if (previous == 0 and value != 0)
+            .added
+        else if (previous != 0 and value == 0)
+            .deleted
+        else
+            .modified;
+        return .{
+            .access_status = if (was_warm) .warm else .cold,
+            .storage_status = storage_status,
+        };
     }
 
     noinline fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
