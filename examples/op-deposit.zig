@@ -155,7 +155,6 @@ pub const Vm = struct {
         state_reader: ?evmz.StateReader = null,
         block_hash_source: ?evmz.BlockHashSource = null,
         config: evmz.ExecutionConfig = .base,
-        trace_sink: ?*evmz.trace.Sink = null,
     };
 
     /// One concrete Ethereum engine and overlay shared by sequenced Ethereum
@@ -170,7 +169,6 @@ pub const Vm = struct {
                 .block_hash_source = options.block_hash_source,
                 .env = .{ .chain_id = options.chain_id },
                 .config = options.config,
-                .trace_sink = options.trace_sink,
             }),
         };
     }

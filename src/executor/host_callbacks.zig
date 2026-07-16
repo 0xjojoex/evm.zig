@@ -28,6 +28,7 @@ pub fn For(comptime Executor: type) type {
                 .accessStorage = accessStorage,
                 .accessDelegatedAccount = Callbacks().accessDelegatedAccount,
                 .accessAccount = Callbacks().accessAccount,
+                .observeAccountAccess = observeAccountAccess,
                 .getTxContext = call_runtime.getTxContext,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
@@ -97,6 +98,11 @@ pub fn For(comptime Executor: type) type {
         fn accountExists(ptr: *anyopaque, address: Address) !bool {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.accountExists(address);
+        }
+
+        fn observeAccountAccess(ptr: *anyopaque, address: Address, depth: u16) !void {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            try self.traceAccountAccess(address, depth);
         }
 
         fn getBalance(ptr: *anyopaque, address: Address) !u256 {

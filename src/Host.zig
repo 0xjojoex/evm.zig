@@ -231,6 +231,7 @@ pub const VTable = struct {
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?AccessStatus,
+    observeAccountAccess: ?*const fn (ptr: *anyopaque, address: Address, depth: u16) anyerror!void = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
@@ -262,6 +263,10 @@ pub fn accessStorage(self: *Self, address: Address, key: u256) !AccessStatus {
 }
 pub fn accessDelegatedAccount(self: *Self, address: Address) !?AccessStatus {
     return self.vtable.accessDelegatedAccount(self.ptr, address);
+}
+pub fn observeAccountAccess(self: *Self, address: Address, depth: u16) !void {
+    const callback = self.vtable.observeAccountAccess orelse return;
+    return callback(self.ptr, address, depth);
 }
 pub fn copyCode(self: *Self, address: Address, code_offset: usize, buffer_data: []u8) !usize {
     return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);

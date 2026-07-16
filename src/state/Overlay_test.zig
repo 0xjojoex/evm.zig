@@ -2,6 +2,8 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const Host = @import("../Host.zig");
 const trace = @import("../trace.zig");
+const capture_context = @import("../executor/capture_context.zig");
+const CaptureContext = capture_context.Context;
 const Address = evmz.Address;
 const AccountState = @import("./Account.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
@@ -103,7 +105,7 @@ test "journal checkpoint reverts storage and preserves original storage" {
     try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try std.testing.expectEqual(Host.StorageStatus.modified, try overlay.setStorage(address, key, 2));
     try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
@@ -223,7 +225,7 @@ test "fused storage slots share value warmth and original across rollback and tr
     try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     const cold_load = try overlay.loadStorage(address, key);
     try std.testing.expectEqual(Host.AccessStatus.cold, cold_load.access_status);
@@ -286,7 +288,7 @@ test "reverted fused storage write releases pending overlay reservation" {
     const storage_key = StorageKey{ .address = address, .key = key };
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     _ = try overlay.storeStorage(address, key, 2);
     try std.testing.expectEqual(@as(usize, 1), overlay.pending_storage_overlay_entries);
 
@@ -327,7 +329,7 @@ test "journal checkpoint reverts transient storage warm state and logs" {
 
     overlay.beginTransaction();
     try overlay.warmAccount(warm_before);
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.warmAccount(warm_before);
     try overlay.warmAccount(warm_after);
@@ -341,14 +343,14 @@ test "journal checkpoint reverts transient storage warm state and logs" {
 
     try std.testing.expect(overlay.warm_accounts.contains(warm_after));
     try std.testing.expect(overlay.isStorageWarm(storage_key.address, storage_key.key));
-    try std.testing.expectEqual(@as(u256, 99), overlay.getTransientStorage(warm_after, storage_key.key));
+    try std.testing.expectEqual(@as(u256, 99), try overlay.getTransientStorage(warm_after, storage_key.key));
     try std.testing.expectEqual(@as(usize, 1), overlay.logs.items.len);
 
     try overlay.revertToCheckpoint(checkpoint_state);
     try std.testing.expect(overlay.warm_accounts.contains(warm_before));
     try std.testing.expect(!overlay.warm_accounts.contains(warm_after));
     try std.testing.expect(!overlay.isStorageWarm(storage_key.address, storage_key.key));
-    try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(warm_after, storage_key.key));
+    try std.testing.expectEqual(@as(u256, 0), try overlay.getTransientStorage(warm_after, storage_key.key));
     try std.testing.expectEqual(@as(usize, 0), overlay.logs.items.len);
 }
 
@@ -367,7 +369,7 @@ test "transient storage allocation failure leaves journal and state unchanged" {
     try std.testing.expect(failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), overlay.journal.len());
     try std.testing.expectEqual(@as(usize, 0), overlay.transient_storage.count());
-    try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(evmz.addr(1), 1));
+    try std.testing.expectEqual(@as(u256, 0), try overlay.getTransientStorage(evmz.addr(1), 1));
 }
 
 test "bounded logs copy into fixed storage and rollback" {
@@ -380,7 +382,7 @@ test "bounded logs copy into fixed storage and rollback" {
     const data = [_]u8{ 0xaa, 0xbb };
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.emitLog(.{
         .address = address,
         .topics = &topics,
@@ -633,7 +635,7 @@ test "bounded transient storage reports unique-entry capacity exhaustion" {
     try overlay.setTransientStorage(evmz.addr(1), 1, 11);
     try overlay.setTransientStorage(evmz.addr(1), 1, 12);
     try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
-    try std.testing.expectEqual(@as(u256, 12), overlay.getTransientStorage(evmz.addr(1), 1));
+    try std.testing.expectEqual(@as(u256, 12), try overlay.getTransientStorage(evmz.addr(1), 1));
     const journal_len = overlay.journal.len();
     try std.testing.expectError(
         error.TransientStorageCapacityExceeded,
@@ -641,8 +643,8 @@ test "bounded transient storage reports unique-entry capacity exhaustion" {
     );
     try std.testing.expectEqual(journal_len, overlay.journal.len());
     try std.testing.expectEqual(@as(usize, 1), overlay.transient_storage.count());
-    try std.testing.expectEqual(@as(u256, 12), overlay.getTransientStorage(evmz.addr(1), 1));
-    try std.testing.expectEqual(@as(u256, 0), overlay.getTransientStorage(evmz.addr(1), 2));
+    try std.testing.expectEqual(@as(u256, 12), try overlay.getTransientStorage(evmz.addr(1), 1));
+    try std.testing.expectEqual(@as(u256, 0), try overlay.getTransientStorage(evmz.addr(1), 2));
 
     overlay.closeTransaction();
     try overlay.setTransientStorage(evmz.addr(2), 1, 33);
@@ -915,7 +917,7 @@ test "journal checkpoint restores existing account fields" {
     try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.setBalance(address, 9);
     try overlay.setNonce(address, 2);
@@ -938,7 +940,7 @@ test "journal checkpoint restores code without allocating" {
     try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.setCode(address, &.{ 0xbb, 0xcc });
 
@@ -961,7 +963,7 @@ test "reverted code change restores hash and keeps immutable cache entry" {
     try overlay.seedAccount(address, account);
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.setCode(address, &.{0xbb});
     try overlay.revertToCheckpoint(checkpoint_state);
 
@@ -980,7 +982,7 @@ test "journal checkpoint removes newly created account and markers" {
 
     const address = evmz.addr(0xcafe);
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.addBalance(address, 10);
     try overlay.setNonce(address, 3);
@@ -1017,7 +1019,7 @@ test "journal checkpoint restores deleted-account marker on revived account" {
     try overlay.deleted_accounts.put(address, {});
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     _ = try overlay.getOrCreateAccount(address);
     try std.testing.expect(overlay.getAccount(address) != null);
@@ -1045,7 +1047,7 @@ test "journal checkpoint reverts finalized selfdestruct cleanup" {
     try overlay.markSelfdestructed(address);
     try overlay.markCreatedContract(other_created);
 
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.finalizeTransaction(ethereumFinalizer(.london));
 
     try std.testing.expect(overlay.getAccount(address) == null);
@@ -1084,7 +1086,7 @@ test "journal checkpoint restores removed state without allocating" {
     try overlay.markSelfdestructed(destroyed_address);
     try overlay.markCreatedContract(created_address);
 
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     _ = try overlay.getOrCreateAccount(deleted_address);
     try overlay.finalizeTransaction(ethereumFinalizer(.london));
 
@@ -1120,7 +1122,7 @@ test "journal rollback removes transaction cache loads before restoring accounts
 
     try std.testing.expect((try overlay.getAccountOrLoad(destroyed_address)) != null);
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.markSelfdestructed(destroyed_address);
     try overlay.finalizeTransaction(ethereumFinalizer(.london));
     try std.testing.expect((try overlay.getAccountOrLoad(fee_recipient)) != null);
@@ -1180,7 +1182,7 @@ test "journal checkpoint reverts Cancun skipped selfdestruct marker clearing" {
     _ = try overlay.getOrCreateAccount(address);
     try overlay.markSelfdestructed(address);
 
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.finalizeTransaction(ethereumFinalizer(.cancun));
 
     try std.testing.expect(overlay.getAccount(address) != null);
@@ -1242,7 +1244,7 @@ test "storage clear discards transaction-local dirty slots and rolls back" {
     try std.testing.expectEqual(Host.StorageStatus.added, try overlay.setStorage(address, key.key, 9));
     try overlay.markSelfdestructed(address);
 
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try overlay.finalizeTransaction(ethereumFinalizer(.amsterdam));
 
     try std.testing.expectEqual(@as(u256, 0), try overlay.getStorage(address, key.key));
@@ -1413,7 +1415,7 @@ test "checkpoint reverts dirty account marker introduced after checkpoint" {
 
     overlay.beginTransaction();
     try std.testing.expectEqual(@as(u256, 5), try overlay.getBalance(address));
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.setBalance(address, 7);
     try std.testing.expect(overlay.dirty_accounts.contains(address));
@@ -1436,7 +1438,7 @@ test "checkpoint preserves dirty account marker that predates checkpoint" {
     overlay.beginTransaction();
     try overlay.setBalance(address, 5);
     try std.testing.expect(overlay.dirty_accounts.contains(address));
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
 
     try overlay.setNonce(address, 7);
     try overlay.revertToCheckpoint(checkpoint_state);
@@ -1619,14 +1621,21 @@ test "trace sink receives state and checkpoint events" {
 
     var recorder = StateEventRecorder{};
     var sink = recorder.sink();
-    overlay.trace_sink = &sink;
+    var context = CaptureContext.init(std.testing.allocator, null, capture_context.stateTargetForSink(&sink));
+    defer context.deinit();
+    overlay.capture_context = &context;
+    try context.begin();
+    defer {
+        if (context.isActive()) context.abort() catch {};
+        overlay.capture_context = null;
+    }
     overlay.trace_depth = 4;
 
     overlay.beginTransaction();
-    const checkpoint_state = overlay.checkpoint();
+    const checkpoint_state = try overlay.checkpoint();
     try std.testing.expectEqual(@as(u256, 0), try overlay.getBalance(address));
     try std.testing.expectEqual(Host.StorageStatus.added, try overlay.setStorage(address, 1, 2));
-    overlay.commitCheckpoint(checkpoint_state);
+    try overlay.commitCheckpoint(checkpoint_state);
 
     try std.testing.expectEqual(@as(u8, 2), recorder.checkpoints);
     try std.testing.expectEqual(trace.CheckpointKind.checkpoint, recorder.first_checkpoint_tag);
@@ -1638,6 +1647,46 @@ test "trace sink receives state and checkpoint events" {
     try std.testing.expectEqual(trace.StateWriteKind.storage, recorder.last_write_tag);
     try std.testing.expectEqual(@as(u16, 4), recorder.last_write_depth);
     try std.testing.expectEqual(@as(u256, 2), recorder.last_write_value);
+    _ = try context.finish();
+}
+
+test "fallible capture target rolls back the failed state mutation" {
+    const FailingTarget = struct {
+        fn target(self: *@This()) capture_context.StateTarget {
+            return capture_context.StateTarget.init(self, &.{ .state_write = stateWrite });
+        }
+
+        fn stateWrite(_: *anyopaque, _: trace.StateWrite) !void {
+            return error.TestCaptureFailure;
+        }
+    };
+
+    const address = evmz.addr(0xabc);
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.setBalance(address, 5);
+    const journal_len = overlay.journal.len();
+
+    var failing = FailingTarget{};
+    var context = CaptureContext.init(std.testing.allocator, null, failing.target());
+    defer context.deinit();
+    overlay.capture_context = &context;
+    try context.begin();
+    defer {
+        if (context.isActive()) context.abort() catch {};
+        overlay.capture_context = null;
+    }
+
+    try std.testing.expectError(error.TestCaptureFailure, overlay.setBalance(address, 9));
+    try std.testing.expectEqual(@as(u256, 5), try overlay.getBalance(address));
+    try std.testing.expectEqual(journal_len, overlay.journal.len());
+
+    const code = [_]u8{ 0x60, 0x00 };
+    try std.testing.expectError(error.TestCaptureFailure, overlay.setCode(address, &code));
+    try std.testing.expectEqualSlices(u8, &.{}, try overlay.getCode(address));
+    try std.testing.expectEqual(@as(u32, 0), overlay.code_cache.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.code_bytes_used);
+    _ = try context.finish();
 }
 
 const StateEventRecorder = struct {

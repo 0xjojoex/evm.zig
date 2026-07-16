@@ -308,21 +308,33 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     var recorder = BalRecorder.init(allocator);
     defer recorder.deinit();
-    var recorder_sink = recorder.sink();
-    var trace_fanout: TraceFanout = undefined;
-    var payload_trace_sink: ?*trace.Sink = input.trace_sink;
-    var fanout_sink: trace.Sink = undefined;
-    if (record_block_access_list) {
-        if (input.trace_sink) |caller_sink| {
-            trace_fanout = .{ .first = &recorder_sink, .second = caller_sink };
-            fanout_sink = trace_fanout.sink();
-            payload_trace_sink = &fanout_sink;
-        } else {
-            payload_trace_sink = &recorder_sink;
-        }
-        recorder.setBlockAccessIndex(0);
-        evm.executor.setTraceSink(&recorder_sink);
+    var runtime_tape = trace.TraceTape.initGrowable(allocator);
+    defer runtime_tape.deinit();
+    const runtime_state_target = if (input.trace_sink) |sink|
+        Executor.capture_context.stateTargetForSink(sink)
+    else
+        null;
+    const capture_steps = if (input.trace_sink) |sink| sink.wantsSteps() else false;
+    var state_fanout = Executor.capture_context.StateFanout{
+        .first = if (record_block_access_list) recorder.stateTarget() else null,
+    };
+    const captures_state = record_block_access_list or runtime_state_target != null;
+    const capture_enabled = captures_state or capture_steps;
+    var capture_context = Executor.CaptureContext.init(
+        allocator,
+        null,
+        if (captures_state) state_fanout.target() else null,
+    );
+    defer capture_context.deinit();
+    var capture_open = false;
+    if (capture_enabled) {
+        if (record_block_access_list) recorder.setBlockAccessIndex(0);
+        evm.executor.setCaptureContext(&capture_context);
+        try capture_context.begin();
+        capture_open = true;
     }
+    defer if (capture_enabled) evm.executor.setCaptureContext(null);
+    defer if (capture_open) capture_context.abort() catch {};
 
     var block = try evm.beginBlock(input.env);
     if (input.block_header) |header| {
@@ -336,9 +348,9 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         };
     }
 
-    // Trace payload transactions only; block-start system contracts above seed
-    // header state outside the payload transaction trace.
-    evm.executor.setTraceSink(payload_trace_sink);
+    // Runtime compatibility state events and replayed steps are payload-only;
+    // BAL remains active across the complete block transition.
+    state_fanout.second = runtime_state_target;
 
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     defer {
@@ -352,6 +364,10 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     const blob_gas_limit = try blockBlobGasLimit(input.revision, input.env.blob_schedule);
 
     for (input.transactions, 0..) |entry, tx_index| {
+        if (capture_steps) try capture_context.beginTrace(&runtime_tape);
+        var step_capture_open = capture_steps;
+        defer if (step_capture_open) capture_context.abortTrace() catch {};
+
         if (record_block_access_list) {
             recorder.setBlockAccessIndex(try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index)));
         }
@@ -415,7 +431,17 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
             else => return err,
         };
+
+        if (capture_steps) {
+            const span = try capture_context.finishTrace();
+            step_capture_open = false;
+            trace.replaySteps(input.trace_sink.?, span);
+            try runtime_tape.resolve(span);
+            try runtime_tape.reset();
+        }
     }
+
+    state_fanout.second = null;
 
     const effective_parent_blob_gas = if (input.revision.isImpl(.cancun))
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
@@ -431,9 +457,8 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     if (record_block_access_list) {
         recorder.setBlockAccessIndex(try eth_bal.postExecutionSystemIndex(block_access_transaction_count));
-        evm.executor.setTraceSink(&recorder_sink);
         for (input.withdrawals) |withdrawal| {
-            recorder.recordAccountAccess(withdrawal.address) catch |err| switch (err) {
+            capture_context.accountAccess(.{ .address = withdrawal.address }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return err,
             };
@@ -445,8 +470,6 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         else => return err,
     };
 
-    // Keep payload transaction tracing scoped to payload transactions.
-    evm.executor.setTraceSink(if (record_block_access_list) &recorder_sink else null);
     const derived_requests = deriveRequests(allocator, &block, deposit_request_data.items) catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         error.SystemCallFailed => return .{ .status = .system_contract_failed },
@@ -458,6 +481,10 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         else => return err,
     };
 
+    if (capture_enabled) {
+        _ = try capture_context.finish();
+        capture_open = false;
+    }
     if (record_block_access_list) {
         observed_block_access_list = recorder.toOwnedBlockAccessList(allocator) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -658,69 +685,6 @@ fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessInd
 fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!void {
     try eth_bal.validate(block_access_list, .{ .transaction_count = transaction_count });
     if (gas_limit != 0) try eth_bal.validateGasLimit(block_access_list, gas_limit);
-}
-
-const TraceFanout = struct {
-    first: *trace.Sink,
-    second: *trace.Sink,
-
-    fn sink(self: *TraceFanout) trace.Sink {
-        return trace.Sink.init(self, traceEventsUnion(self.first.events, self.second.events), &.{
-            .stepStart = stepStart,
-            .stepEnd = stepEnd,
-            .accountAccess = accountAccess,
-            .stateRead = stateRead,
-            .stateWrite = stateWrite,
-            .checkpoint = checkpoint,
-        });
-    }
-
-    fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.stepStart(event);
-        self.second.stepStart(event);
-    }
-
-    fn stepEnd(ptr: *anyopaque, event: trace.StepEnd) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.stepEnd(event);
-        self.second.stepEnd(event);
-    }
-
-    fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.accountAccess(event);
-        self.second.accountAccess(event);
-    }
-
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.stateRead(event);
-        self.second.stateRead(event);
-    }
-
-    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.stateWrite(event);
-        self.second.stateWrite(event);
-    }
-
-    fn checkpoint(ptr: *anyopaque, event: trace.Checkpoint) void {
-        const self: *TraceFanout = @ptrCast(@alignCast(ptr));
-        self.first.checkpoint(event);
-        self.second.checkpoint(event);
-    }
-};
-
-fn traceEventsUnion(lhs: trace.Events, rhs: trace.Events) trace.Events {
-    return .{
-        .step_start = lhs.step_start.unionWith(rhs.step_start),
-        .step_end = lhs.step_end.unionWith(rhs.step_end),
-        .account_access = lhs.account_access.unionWith(rhs.account_access),
-        .state_read = lhs.state_read.unionWith(rhs.state_read),
-        .state_write = lhs.state_write.unionWith(rhs.state_write),
-        .checkpoint = lhs.checkpoint.unionWith(rhs.checkpoint),
-    };
 }
 
 fn parentHeaderStatus(input: BlockInput) ?Status {
@@ -1056,11 +1020,43 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqualSlices(u8, &expected_receipts_root, &first_result.receipts_root);
     try std.testing.expectEqualSlices(u8, &expected_logs_bloom, &first_result.logs_bloom);
 
+    const RuntimeTraceRecorder = struct {
+        step_starts: usize = 0,
+        step_ends: usize = 0,
+        storage_writes: usize = 0,
+
+        fn stepStart(ptr: *anyopaque, _: trace.StepStart) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.step_starts += 1;
+        }
+
+        fn stepEnd(ptr: *anyopaque, _: trace.StepEnd) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.step_ends += 1;
+        }
+
+        fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (event == .storage) self.storage_writes += 1;
+        }
+    };
+    var trace_recorder = RuntimeTraceRecorder{};
+    var trace_sink = trace.Sink.init(&trace_recorder, .{
+        .step_start = trace.StepStartFields.initMany(&.{.pc}),
+        .step_end = trace.StepEndFields.initMany(&.{.status}),
+        .state_write = trace.StateWriteKinds.initMany(&.{.storage}),
+    }, &.{
+        .stepStart = RuntimeTraceRecorder.stepStart,
+        .stepEnd = RuntimeTraceRecorder.stepEnd,
+        .stateWrite = RuntimeTraceRecorder.stateWrite,
+    });
+
     const result = try apply(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
+        .trace_sink = &trace_sink,
         .root_checks = testRootChecks(
             expected_state_root,
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
@@ -1076,6 +1072,9 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expect(result.gas_used > 0);
     try std.testing.expectEqualSlices(u8, &expected_state_root, &result.state_root);
+    try std.testing.expect(trace_recorder.step_starts > 0);
+    try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
+    try std.testing.expect(trace_recorder.storage_writes > 0);
 
     const gas_mismatch = try apply(scratch, .{
         .revision = .frontier,
