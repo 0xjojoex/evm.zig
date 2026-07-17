@@ -293,6 +293,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                             .pc_next = pc,
                             .gas_after = gas,
                             .outcome = tapeStepOutcome(ctx.frame.status),
+                            .stack = ctx.stackSlice(sp),
+                            .memory = ctx.frame.memory.readBytes(0, ctx.frame.memory.len()),
                         }) catch |err| {
                             ctx.spill(opcode_ip, sp, gas);
                             ctx.err = err;
@@ -305,6 +307,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                         .pc_next = pc,
                         .gas_after = gas,
                         .outcome = tapeStepOutcome(ctx.frame.status),
+                        .stack = ctx.stackSlice(sp),
+                        .memory = ctx.frame.memory.readBytes(0, ctx.frame.memory.len()),
                     }) catch |err| {
                         ctx.spill(opcode_ip, sp, gas);
                         ctx.err = err;
@@ -316,9 +320,12 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                         .opcode = opcode_byte,
                         .gas_before = gas,
                         .refund_before = ctx.frame.gas_refund,
-                        .stack = ctx.stackSlice(sp),
+                        .stack_len = ctx.stackLen(sp),
                         .memory_size = ctx.frame.memory.len(),
-                        .return_data_size = ctx.frame.return_data.len,
+                        .memory_write = if (ctx.capture.capturesMemoryWrites())
+                            memoryWritePlan(opcode_byte, ctx.stackSlice(sp))
+                        else
+                            null,
                     }) catch |err| {
                         ctx.spill(opcode_ip, sp, gas);
                         ctx.err = err;
@@ -383,6 +390,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                     .pc_next = frame.pc,
                     .gas_after = frame.gas_left,
                     .outcome = tapeStepOutcome(frame.status),
+                    .stack = frame.stack.asSlice(),
+                    .memory = frame.memory.readBytes(0, frame.memory.len()),
                 });
             }
             if (frame.status != .running) return;
@@ -424,6 +433,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                     .pc_next = frame.pc,
                     .gas_after = frame.gas_left,
                     .outcome = tapeStepOutcome(frame.status),
+                    .stack = frame.stack.asSlice(),
+                    .memory = frame.memory.readBytes(0, frame.memory.len()),
                 });
             }
         }
@@ -1114,6 +1125,54 @@ fn tapeStepOutcome(status: Interpreter.FrameStatus) trace.TraceStepOutcome {
         .revert => .revert,
         .out_of_gas => .out_of_gas,
     };
+}
+
+fn memoryWritePlan(opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
+    const op = std.enums.fromInt(Opcode, opcode_byte) orelse return null;
+    return switch (op) {
+        .MSTORE => memoryRangeFromStack(stack, 1, null, 32),
+        .MSTORE8 => memoryRangeFromStack(stack, 1, null, 1),
+        .CALLDATACOPY, .CODECOPY, .RETURNDATACOPY, .MCOPY => memoryRangeFromStack(stack, 1, 3, null),
+        .EXTCODECOPY => memoryRangeFromStack(stack, 2, 4, null),
+        .CALL, .CALLCODE => memoryRangeFromStack(stack, 6, 7, null),
+        .DELEGATECALL, .STATICCALL => memoryRangeFromStack(stack, 5, 6, null),
+        else => null,
+    };
+}
+
+fn memoryRangeFromStack(
+    stack: []const u256,
+    offset_depth: usize,
+    size_depth: ?usize,
+    fixed_size: ?usize,
+) ?trace.tape.MemoryWritePlan {
+    const required = @max(offset_depth, size_depth orelse 0);
+    if (required == 0 or stack.len < required) return null;
+    const offset = std.math.cast(usize, stack[stack.len - offset_depth]) orelse return null;
+    const size = fixed_size orelse std.math.cast(usize, stack[stack.len - size_depth.?]) orelse return null;
+    if (size == 0) return null;
+    _ = std.math.add(usize, offset, size) catch return null;
+    return .{ .offset = offset, .size = size };
+}
+
+test "captured memory plans use each opcode's destination operands" {
+    try std.testing.expectEqual(
+        trace.tape.MemoryWritePlan{ .offset = 3, .size = 5 },
+        memoryWritePlan(@intFromEnum(Opcode.CALLDATACOPY), &.{ 5, 11, 3 }).?,
+    );
+    try std.testing.expectEqual(
+        trace.tape.MemoryWritePlan{ .offset = 7, .size = 9 },
+        memoryWritePlan(@intFromEnum(Opcode.EXTCODECOPY), &.{ 9, 11, 7, 13 }).?,
+    );
+    try std.testing.expectEqual(
+        trace.tape.MemoryWritePlan{ .offset = 17, .size = 19 },
+        memoryWritePlan(@intFromEnum(Opcode.CALL), &.{ 19, 17, 0, 0, 0, 0x1234, 100_000 }).?,
+    );
+    try std.testing.expectEqual(
+        trace.tape.MemoryWritePlan{ .offset = 23, .size = 29 },
+        memoryWritePlan(@intFromEnum(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
+    );
+    try std.testing.expect(memoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
 }
 
 fn invalidStatusError(err: anyerror) bool {

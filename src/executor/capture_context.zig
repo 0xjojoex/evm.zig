@@ -105,7 +105,11 @@ pub fn stateTargetForSink(sink: *trace.Sink) ?StateTarget {
 
 fn sinkAccountAccess(ptr: *anyopaque, event: trace.AccountAccess) !void {
     const sink: *trace.Sink = @ptrCast(@alignCast(ptr));
-    sink.accountAccess(event);
+    const fields = sink.events.account_access;
+    sink.accountAccess(.{
+        .depth = if (fields.contains(.depth)) event.depth else 0,
+        .address = if (fields.contains(.address)) event.address else @splat(0),
+    });
 }
 
 fn sinkStateRead(ptr: *anyopaque, event: trace.StateRead) !void {
@@ -123,9 +127,15 @@ fn sinkCheckpoint(ptr: *anyopaque, event: trace.Checkpoint) !void {
     sink.checkpoint(event);
 }
 
+pub const TraceBinding = struct {
+    tape: *trace.TraceTape,
+    profile: trace.CaptureProfile = .{},
+};
+
 pub const Context = struct {
     allocator: ?std.mem.Allocator,
     tape: ?*trace.TraceTape = null,
+    trace_profile: trace.CaptureProfile = .{},
     state_target: ?StateTarget = null,
     frame_captures: std.ArrayList(trace.TraceCapture) = .empty,
     next_frame_id: u32 = 0,
@@ -135,12 +145,13 @@ pub const Context = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        tape: ?*trace.TraceTape,
+        trace_binding: ?TraceBinding,
         state_target: ?StateTarget,
     ) Context {
         return .{
             .allocator = allocator,
-            .tape = tape,
+            .tape = if (trace_binding) |binding| binding.tape else null,
+            .trace_profile = if (trace_binding) |binding| binding.profile else .{},
             .state_target = state_target,
         };
     }
@@ -150,12 +161,13 @@ pub const Context = struct {
     /// growable.
     pub fn initBounded(
         frame_storage: []trace.TraceCapture,
-        tape: ?*trace.TraceTape,
+        trace_binding: ?TraceBinding,
         state_target: ?StateTarget,
     ) Context {
         return .{
             .allocator = null,
-            .tape = tape,
+            .tape = if (trace_binding) |binding| binding.tape else null,
+            .trace_profile = if (trace_binding) |binding| binding.profile else .{},
             .state_target = state_target,
             .frame_captures = .initBuffer(frame_storage),
         };
@@ -177,7 +189,7 @@ pub const Context = struct {
         self.active = true;
         errdefer self.active = false;
         self.next_frame_id = 0;
-        self.mark = if (self.tape) |tape| try tape.begin() else null;
+        self.mark = if (self.tape) |tape| try tape.begin(self.trace_profile) else null;
     }
 
     /// Close one successful capture. The returned span remains borrowed from
@@ -212,18 +224,20 @@ pub const Context = struct {
 
     /// Enable step capture for one sub-operation while keeping the state target
     /// active across a wider scope such as a block.
-    pub fn beginTrace(self: *Context, tape: *trace.TraceTape) !void {
+    pub fn beginTrace(self: *Context, binding: TraceBinding) !void {
         if (!self.active) return error.CaptureOperationNotActive;
         if (self.mark != null) return error.TraceOperationActive;
         if (self.frame_captures.items.len != 0) return error.ActiveCaptureFrames;
         if (self.tape != null) return error.TraceOperationActive;
-        self.tape = tape;
+        self.tape = binding.tape;
+        self.trace_profile = binding.profile;
         self.tape_attached = true;
         errdefer {
             self.tape = null;
+            self.trace_profile = .{};
             self.tape_attached = false;
         }
-        self.mark = try tape.begin();
+        self.mark = try binding.tape.begin(binding.profile);
         self.next_frame_id = 0;
     }
 
@@ -248,6 +262,11 @@ pub const Context = struct {
         self: *Context,
         depth: u16,
         kind: trace.TraceFrameKind,
+        initial_stack: []const u256,
+        initial_memory_size: usize,
+        initial_return_data: []const u8,
+        parent_stack: []const u256,
+        parent_memory_size: usize,
     ) !void {
         if (!self.capturesSteps()) return;
         if (self.allocator) |allocator| {
@@ -256,17 +275,27 @@ pub const Context = struct {
             return error.TraceCapacityExceeded;
         }
         const frame_id = self.next_frame_id;
-        self.next_frame_id = std.math.add(u32, frame_id, 1) catch return error.TraceIndexOverflow;
-        const parent_frame_id = if (self.frame_captures.getLastOrNull()) |parent|
-            parent.frame_id
+        const next_frame_id = std.math.add(u32, frame_id, 1) catch return error.TraceIndexOverflow;
+        const parent_capture = self.frame_captures.getLastOrNull();
+        const parent_frame_id = if (parent_capture) |parent| parent.frame_id else null;
+        const parent_return_data: trace.tape.ByteRange = if (parent_capture) |parent|
+            parent.currentReturnData()
         else
-            null;
-        self.frame_captures.appendAssumeCapacity(try trace.TraceCapture.init(self.tape.?, .{
+            .{};
+        const frame_capture = try trace.TraceCapture.init(self.tape.?, .{
             .frame_id = frame_id,
             .parent_frame_id = parent_frame_id,
             .depth = depth,
             .kind = kind,
-        }));
+            .initial_stack = initial_stack,
+            .initial_memory_size = initial_memory_size,
+            .initial_return_data = initial_return_data,
+            .parent_stack = parent_stack,
+            .parent_memory_size = parent_memory_size,
+            .parent_return_data = parent_return_data,
+        });
+        self.frame_captures.appendAssumeCapacity(frame_capture);
+        self.next_frame_id = next_frame_id;
     }
 
     pub inline fn currentFrame(self: *Context) *trace.TraceCapture {
@@ -276,6 +305,16 @@ pub const Context = struct {
     pub fn finishCurrentFrame(self: *Context, completion: trace.TraceFrameFinish) !void {
         if (!self.capturesSteps()) return;
         try self.currentFrame().finishFrame(completion);
+    }
+
+    pub fn replaceFrameReturnData(self: *Context, frame_index: usize, bytes: []const u8) !void {
+        if (!self.capturesSteps()) return;
+        try self.frame_captures.items[frame_index].replaceReturnData(bytes);
+    }
+
+    pub fn setFrameMemoryWrite(self: *Context, frame_index: usize, offset: usize, size: usize) void {
+        if (!self.capturesSteps()) return;
+        self.frame_captures.items[frame_index].setPendingMemoryWrite(.{ .offset = offset, .size = size });
     }
 
     pub fn popFrame(self: *Context) void {
@@ -310,6 +349,7 @@ pub const Context = struct {
     fn detachScopedTape(self: *Context) void {
         if (!self.tape_attached) return;
         self.tape = null;
+        self.trace_profile = .{};
         self.tape_attached = false;
     }
 };
@@ -331,17 +371,15 @@ test "capture context scopes tape and fallible state target together" {
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
     var recorder = Recorder{};
-    var context = Context.init(std.testing.allocator, &tape, recorder.target());
+    var context = Context.init(std.testing.allocator, .{ .tape = &tape }, recorder.target());
     defer context.deinit();
 
     try context.begin();
     try context.accountAccess(.{ .address = @splat(1) });
-    try context.pushFrame(0, .root);
+    try context.pushFrame(0, .root, &.{}, 0, &.{}, &.{}, 0);
     try context.finishCurrentFrame(.{
         .outcome = .success,
-        .stack = &.{},
         .memory_size = 0,
-        .return_data_size = 0,
     });
     context.popFrame();
     const span = (try context.finish()).?;
@@ -351,6 +389,26 @@ test "capture context scopes tape and fallible state target together" {
     try std.testing.expectEqual(@as(usize, 1), span.frames.len);
 }
 
+test "runtime state adapter preserves account-access field masks" {
+    const Recorder = struct {
+        last: trace.AccountAccess = .{ .address = @splat(0) },
+
+        fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.last = event;
+        }
+    };
+
+    var recorder = Recorder{};
+    var sink = trace.Sink.init(&recorder, .{
+        .account_access = trace.AccountAccessFields.initOne(.depth),
+    }, &.{ .accountAccess = Recorder.accountAccess });
+    const target = stateTargetForSink(&sink).?;
+    try target.accountAccess(.{ .depth = 7, .address = @splat(0xaa) });
+    try std.testing.expectEqual(@as(u16, 7), recorder.last.depth);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 20), &recorder.last.address);
+}
+
 test "scoped trace detaches from a reusable state capture context" {
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
@@ -358,13 +416,11 @@ test "scoped trace detaches from a reusable state capture context" {
     defer context.deinit();
 
     try context.begin();
-    try context.beginTrace(&tape);
-    try context.pushFrame(0, .root);
+    try context.beginTrace(.{ .tape = &tape });
+    try context.pushFrame(0, .root, &.{}, 0, &.{}, &.{}, 0);
     try context.finishCurrentFrame(.{
         .outcome = .success,
-        .stack = &.{},
         .memory_size = 0,
-        .return_data_size = 0,
     });
     context.popFrame();
     const span = try context.finishTrace();
@@ -379,20 +435,38 @@ test "scoped trace detaches from a reusable state capture context" {
 test "bounded capture context rejects live-frame growth before tape mutation" {
     var step_storage: [1]trace.tape.StepRow = undefined;
     var frame_storage: [2]trace.tape.FrameRow = undefined;
-    var stack_storage: [1]u256 = undefined;
+    var step_ref_storage: [1]trace.tape.StepTransitionRef = undefined;
+    var stack_transition_storage: [1]trace.tape.StackTransition = undefined;
+    var memory_transition_storage: [1]trace.tape.MemoryTransition = undefined;
+    var return_data_transition_storage: [1]trace.tape.ReturnDataTransition = undefined;
+    var frame_transition_storage: [2]trace.tape.FrameTransition = undefined;
+    var word_storage: [1]u256 = undefined;
+    var byte_storage: [0]u8 = undefined;
+    var memory_write_storage: [0]trace.tape.MemoryWrite = undefined;
     var capture_storage: [1]trace.TraceCapture = undefined;
     var tape = trace.TraceTape.initBounded(.{
-        .steps = &step_storage,
-        .frames = &frame_storage,
-        .stack_words = &stack_storage,
+        .table = .{
+            .steps = &step_storage,
+            .frames = &frame_storage,
+        },
+        .transitions = .{
+            .step_refs = &step_ref_storage,
+            .stack = &stack_transition_storage,
+            .memory = &memory_transition_storage,
+            .return_data = &return_data_transition_storage,
+            .frames = &frame_transition_storage,
+            .words = &word_storage,
+            .bytes = &byte_storage,
+            .memory_writes = &memory_write_storage,
+        },
     });
     defer tape.deinit();
-    var context = Context.initBounded(&capture_storage, &tape, null);
+    var context = Context.initBounded(&capture_storage, .{ .tape = &tape }, null);
     defer context.deinit();
 
     try context.begin();
-    try context.pushFrame(0, .root);
-    try std.testing.expectError(error.TraceCapacityExceeded, context.pushFrame(1, .call));
+    try context.pushFrame(0, .root, &.{}, 0, &.{}, &.{}, 0);
+    try std.testing.expectError(error.TraceCapacityExceeded, context.pushFrame(1, .call, &.{}, 0, &.{}, &.{}, 0));
     try std.testing.expectEqual(@as(usize, 1), tape.frameCount());
     try context.abort();
 }

@@ -1814,7 +1814,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     var sink = recorder.sink();
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape }, null);
     defer capture.deinit();
     executor.setCaptureContext(&capture);
     try capture.begin();
@@ -1830,7 +1830,7 @@ test "trace replay runs after prepared code leaves the live frame" {
 
     const span = (try capture.finish()).?;
     capture_open = false;
-    trace.replaySteps(&sink, span);
+    try trace.replaySteps(&sink, span);
     try tape.resolve(span);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -4175,7 +4175,7 @@ test "captured runtime records nested call and create frames without generic ste
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape }, null);
     defer capture.deinit();
     var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
     defer executor.deinit();
@@ -4238,7 +4238,7 @@ test "captured runtime records nested call and create frames without generic ste
 
     var replay = StepOrderRecorder{};
     var replay_sink = replay.sink();
-    trace.replaySteps(&replay_sink, span);
+    try trace.replaySteps(&replay_sink, span);
     const replay_call_start = replay.firstIndex(.start, .CALL, 0).?;
     const replay_call_end = replay.firstIndex(.end, .CALL, 0).?;
     try std.testing.expect(replay.hasDepthStartBetween(1, replay_call_start, replay_call_end));
@@ -4265,7 +4265,7 @@ test "captured span is inspectable before pending transaction resolution" {
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    var capture = CaptureContext.init(std.testing.allocator, &tape, null);
+    var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape }, null);
     defer capture.deinit();
     executor.setCaptureContext(&capture);
     defer executor.setCaptureContext(null);

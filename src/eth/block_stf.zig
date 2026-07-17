@@ -364,7 +364,10 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     const blob_gas_limit = try blockBlobGasLimit(input.revision, input.env.blob_schedule);
 
     for (input.transactions, 0..) |entry, tx_index| {
-        if (capture_steps) try capture_context.beginTrace(&runtime_tape);
+        if (capture_steps) try capture_context.beginTrace(.{
+            .tape = &runtime_tape,
+            .profile = trace.captureProfileForSink(input.trace_sink.?),
+        });
         var step_capture_open = capture_steps;
         defer if (step_capture_open) capture_context.abortTrace() catch {};
 
@@ -435,7 +438,7 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         if (capture_steps) {
             const span = try capture_context.finishTrace();
             step_capture_open = false;
-            trace.replaySteps(input.trace_sink.?, span);
+            try trace.replaySteps(input.trace_sink.?, span);
             try runtime_tape.resolve(span);
             try runtime_tape.reset();
         }

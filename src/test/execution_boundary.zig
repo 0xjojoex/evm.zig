@@ -501,12 +501,30 @@ test "bounded trace capture failure rolls back the standalone operation" {
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
     var step_storage: [3]trace.tape.StepRow = undefined;
     var frame_storage: [1]trace.tape.FrameRow = undefined;
-    var stack_storage: [3]u256 = undefined;
+    var step_ref_storage: [3]trace.tape.StepTransitionRef = undefined;
+    var stack_transition_storage: [3]trace.tape.StackTransition = undefined;
+    var memory_transition_storage: [3]trace.tape.MemoryTransition = undefined;
+    var return_data_transition_storage: [3]trace.tape.ReturnDataTransition = undefined;
+    var frame_transition_storage: [1]trace.tape.FrameTransition = undefined;
+    var word_storage: [3]u256 = undefined;
+    var byte_storage: [0]u8 = undefined;
+    var memory_write_storage: [0]trace.tape.MemoryWrite = undefined;
     var capture_frame_storage: [1]trace.TraceCapture = undefined;
     var tape = trace.TraceTape.initBounded(.{
-        .steps = &step_storage,
-        .frames = &frame_storage,
-        .stack_words = &stack_storage,
+        .table = .{
+            .steps = &step_storage,
+            .frames = &frame_storage,
+        },
+        .transitions = .{
+            .step_refs = &step_ref_storage,
+            .stack = &stack_transition_storage,
+            .memory = &memory_transition_storage,
+            .return_data = &return_data_transition_storage,
+            .frames = &frame_transition_storage,
+            .words = &word_storage,
+            .bytes = &byte_storage,
+            .memory_writes = &memory_write_storage,
+        },
     });
     defer tape.deinit();
 
@@ -516,7 +534,7 @@ test "bounded trace capture failure rolls back the standalone operation" {
     try account.setCode(&code);
     try executor.state.seedAccount(contract, account);
 
-    var capture = evmz.executor.CaptureContext.initBounded(&capture_frame_storage, &tape, null);
+    var capture = evmz.executor.CaptureContext.initBounded(&capture_frame_storage, .{ .tape = &tape }, null);
     defer capture.deinit();
     executor.setCaptureContext(&capture);
     defer executor.setCaptureContext(null);
@@ -534,6 +552,70 @@ test "bounded trace capture failure rolls back the standalone operation" {
     try capture.abort();
     try std.testing.expectEqual(@as(usize, 0), tape.stepCount());
     try std.testing.expectEqual(@as(usize, 0), tape.frameCount());
+}
+
+test "captured CALL publishes return data and parent memory output after resume" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const child = evmz.addr(0x1234);
+    const child_code = evmz.t.bytecode(.{
+        .PUSH1, 0xaa, .PUSH0, .MSTORE8, .PUSH1, 0x01, .PUSH0, .RETURN,
+    });
+    const code = evmz.t.bytecode(.{
+        .PUSH1, 0x01, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH2, 0x12, 0x34,   .GAS,   .CALL,  .STOP,
+    });
+
+    var executor = Executor.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&code);
+    try executor.state.seedAccount(contract, account);
+    var child_account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try child_account.setCode(&child_code);
+    try executor.state.seedAccount(child, child_account);
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, .{
+        .tape = &tape,
+        .profile = .{ .memory = .writes },
+    }, null);
+    defer capture.deinit();
+    executor.setCaptureContext(&capture);
+    defer executor.setCaptureContext(null);
+
+    try capture.begin();
+    errdefer capture.abort() catch {};
+    const result = try executor.runStandaloneRequest(request(sender, contract), .{});
+    const span = (try capture.finish()).?;
+    defer tape.resolve(span) catch unreachable;
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
+
+    var call_index: ?usize = null;
+    var stop_index: ?usize = null;
+    for (span.steps, 0..) |row, index| {
+        if (row.frame_id != 0) continue;
+        if (row.opcode == @intFromEnum(evmz.Opcode.CALL)) call_index = index;
+        if (row.opcode == @intFromEnum(evmz.Opcode.STOP)) stop_index = index;
+    }
+
+    const root = span.frames[0];
+    const child_frame = span.frames[1];
+    var cursor = trace.tape.TraceCursor.init(span);
+    cursor.enterFrame(root);
+    for (span.steps[0..call_index.?]) |row| cursor.finishStep(row);
+    cursor.enterFrame(child_frame);
+    for (span.steps[call_index.? + 1 .. stop_index.?]) |row| cursor.finishStep(row);
+    cursor.finishFrame(child_frame);
+    cursor.leaveFrame(child_frame);
+    cursor.finishStep(span.steps[call_index.?]);
+
+    const writes = try cursor.memoryWrites();
+    try std.testing.expectEqual(@as(usize, 1), writes.len);
+    try std.testing.expectEqual(@as(u32, 0), writes[0].offset);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, cursor.memoryWriteBytes(writes[0]));
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, cursor.returnData());
 }
 
 fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExecutionRequest {

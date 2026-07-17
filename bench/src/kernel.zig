@@ -12,6 +12,11 @@ const default_warmups = 1;
 const default_fixtures_dir = "fixtures/kernel";
 
 const KernelCase = enum {
+    capture_stack_16,
+    capture_stack_256,
+    capture_stack_1024,
+    memory_store_same,
+    memory_store_expand,
     push_pop,
     add,
     mul,
@@ -52,6 +57,9 @@ const KernelTier = enum {
 
 const Engine = enum {
     evmz,
+    evmz_capture,
+    evmz_capture_growable,
+    evmz_capture_memory,
     evmz_call_total,
     evmone_baseline,
     evmone_advanced,
@@ -74,6 +82,7 @@ const Options = struct {
 const Measurement = struct {
     elapsed_ns: u64,
     bytecode_bytes: usize,
+    capture_bytes: usize = 0,
     gas_used: u64,
     host_calls: u64,
 };
@@ -160,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (!options.no_header) {
-        try stdout.print("suite,engine,case,repeat,iterations,bytecode_bytes,elapsed_ns,ns_per_iter,gas_used,host_calls\n", .{});
+        try stdout.print("suite,engine,case,repeat,iterations,bytecode_bytes,capture_bytes,bytes_per_iter,elapsed_ns,ns_per_iter,gas_used,host_calls\n", .{});
     }
 
     for (selected_engines.items) |engine| {
@@ -175,14 +184,18 @@ pub fn main(init: std.process.Init) !void {
                 const measurement = try measure(init.io, allocator, engine, case, options.iterations, options.revision, options.fixtures_dir);
                 const ns_per_iter = @as(f64, @floatFromInt(measurement.elapsed_ns)) /
                     @as(f64, @floatFromInt(options.iterations));
+                const bytes_per_iter = @as(f64, @floatFromInt(measurement.capture_bytes)) /
+                    @as(f64, @floatFromInt(options.iterations));
                 try stdout.print(
-                    "kernel,{s},{s},{d},{d},{d},{d},{d:.3},{d},{d}\n",
+                    "kernel,{s},{s},{d},{d},{d},{d},{d:.3},{d},{d:.3},{d},{d}\n",
                     .{
                         engineName(engine),
                         @tagName(case),
                         repeat_index + 1,
                         options.iterations,
                         measurement.bytecode_bytes,
+                        measurement.capture_bytes,
+                        bytes_per_iter,
                         measurement.elapsed_ns,
                         ns_per_iter,
                         measurement.gas_used,
@@ -204,7 +217,7 @@ fn printUsage() void {
         \\Options:
         \\  --case <name>           case filter; repeatable, default all cases
         \\  --tier <name>           small, edge, large, branch, all; repeatable
-        \\  --engine <name>         evmz, evmz-call-total, evmone, evmone-baseline, evmone-advanced
+        \\  --engine <name>         evmz, evmz-capture, evmz-capture-growable, evmz-capture-memory, evmz-call-total, evmone, evmone-baseline, evmone-advanced
         \\  --iterations, -n <n>    repeated opcode pattern count, default 100000
         \\  --repeats <n>           printed samples per case, default 5
         \\  --warmups <n>           unprinted samples before repeats, default 1
@@ -213,7 +226,9 @@ fn printUsage() void {
         \\  --no-header             omit CSV header
         \\
         \\Cases:
-        \\  push-pop, add, mul, div, sdiv, mod, smod, addmod, mulmod,
+        \\  capture-stack-16, capture-stack-256, capture-stack-1024,
+        \\  memory-store-same, memory-store-expand, push-pop,
+        \\  add, mul, div, sdiv, mod, smod, addmod, mulmod,
         \\  exp, comparison, bitwise, shift, add-wide, mul-wide, div-wide,
         \\  sdiv-wide, mod-wide, smod-wide, addmod-wide, mulmod-wide,
         \\  exp-wide, pushdata-large, jumpdest-dense, jump, jumpi-taken,
@@ -236,6 +251,9 @@ fn measure(
 
     return switch (engine) {
         .evmz => try measureEvmz(allocator, code, revision, .execute_only),
+        .evmz_capture => try measureEvmzCapture(allocator, code, revision, case, iterations, false, false),
+        .evmz_capture_growable => try measureEvmzCapture(allocator, code, revision, case, iterations, false, true),
+        .evmz_capture_memory => try measureEvmzCapture(allocator, code, revision, case, iterations, true, false),
         .evmz_call_total => try measureEvmz(allocator, code, revision, .call_total),
         .evmone_baseline => blk: {
             const measurement = try kernel_evmone.measure(code, revision, .baseline);
@@ -255,6 +273,105 @@ fn measure(
                 .host_calls = measurement.host_calls,
             };
         },
+    };
+}
+
+fn measureEvmzCapture(
+    allocator: std.mem.Allocator,
+    code: []const u8,
+    revision: evmz.eth.Revision,
+    case: KernelCase,
+    iterations: usize,
+    capture_memory: bool,
+    growable: bool,
+) !Measurement {
+    var counting_host = common.CountingHost.init(allocator, .null);
+    defer counting_host.deinit();
+    var host = counting_host.host();
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = common.max_gas,
+        .recipient = common.contract_address,
+        .sender = common.caller_address,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = common.contract_address,
+    };
+
+    // Kernel fixtures keep at most three live operands per opcode. Stack-depth
+    // cases use their exact suffix-transition payload; other cases reserve four
+    // words per byte to keep allocator growth outside the execution-cost lane.
+    const stack_capacity = if (growable) 0 else try captureStackCapacity(case, code.len, iterations);
+    const bounded_step_capacity = if (growable) 0 else code.len;
+    const step_storage = try allocator.alloc(evmz.trace.tape.StepRow, bounded_step_capacity);
+    defer allocator.free(step_storage);
+    const frame_storage = try allocator.alloc(evmz.trace.tape.FrameRow, @intFromBool(!growable));
+    defer allocator.free(frame_storage);
+    const step_ref_storage = try allocator.alloc(evmz.trace.tape.StepTransitionRef, bounded_step_capacity);
+    defer allocator.free(step_ref_storage);
+    const stack_transition_storage = try allocator.alloc(evmz.trace.tape.StackTransition, bounded_step_capacity);
+    defer allocator.free(stack_transition_storage);
+    const memory_transition_storage = try allocator.alloc(evmz.trace.tape.MemoryTransition, bounded_step_capacity);
+    defer allocator.free(memory_transition_storage);
+    const return_data_transition_storage = try allocator.alloc(evmz.trace.tape.ReturnDataTransition, bounded_step_capacity);
+    defer allocator.free(return_data_transition_storage);
+    const frame_transition_storage = try allocator.alloc(evmz.trace.tape.FrameTransition, @intFromBool(!growable));
+    defer allocator.free(frame_transition_storage);
+    const word_storage = try allocator.alloc(u256, stack_capacity);
+    defer allocator.free(word_storage);
+    const byte_capacity = if (!growable and capture_memory) try std.math.mul(usize, code.len, 4) else 0;
+    const byte_storage = try allocator.alloc(u8, byte_capacity);
+    defer allocator.free(byte_storage);
+    const memory_write_capacity = if (!growable and capture_memory) code.len else 0;
+    const memory_write_storage = try allocator.alloc(evmz.trace.tape.MemoryWrite, memory_write_capacity);
+    defer allocator.free(memory_write_storage);
+    var tape = if (growable) evmz.trace.TraceTape.initGrowable(allocator) else evmz.trace.TraceTape.initBounded(.{
+        .table = .{
+            .steps = step_storage,
+            .frames = frame_storage,
+        },
+        .transitions = .{
+            .step_refs = step_ref_storage,
+            .stack = stack_transition_storage,
+            .memory = memory_transition_storage,
+            .return_data = return_data_transition_storage,
+            .frames = frame_transition_storage,
+            .words = word_storage,
+            .bytes = byte_storage,
+            .memory_writes = memory_write_storage,
+        },
+    });
+    defer tape.deinit();
+
+    counting_host.resetCounters();
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = code,
+        .revision = revision,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const start_ns = try common.monotonicNowNs();
+    const captured = try interpreter.capture(&tape, .{
+        .memory = if (capture_memory) .writes else .size_only,
+    });
+    const end_ns = try common.monotonicNowNs();
+    const host_calls = counting_host.counters.total();
+    const capture_bytes = tape.capturedBytes();
+    try tape.resolve(captured.span);
+
+    try common.rejectNullHostTouches(.null, counting_host.counters);
+    if (captured.result.status != .success) return error.KernelFailed;
+
+    return .{
+        .elapsed_ns = end_ns - start_ns,
+        .bytecode_bytes = code.len,
+        .capture_bytes = capture_bytes,
+        .gas_used = @intCast(common.max_gas - captured.result.gas_left),
+        .host_calls = host_calls,
     };
 }
 
@@ -313,6 +430,15 @@ fn kernelBytecode(
     iterations: usize,
     fixtures_dir: []const u8,
 ) ![]u8 {
+    switch (case) {
+        .capture_stack_16 => return captureStackBytecode(allocator, 16, iterations),
+        .capture_stack_256 => return captureStackBytecode(allocator, 256, iterations),
+        .capture_stack_1024 => return captureStackBytecode(allocator, 1024, iterations),
+        .memory_store_same => return memoryStoreBytecode(allocator, iterations, false),
+        .memory_store_expand => return memoryStoreBytecode(allocator, iterations, true),
+        else => {},
+    }
+
     var fixture = try FixtureSet.load(io, allocator, fixtures_dir, case);
     defer fixture.deinit(allocator);
 
@@ -326,6 +452,55 @@ fn kernelBytecode(
     }
     try code.append(allocator, 0x00);
     return code.toOwnedSlice(allocator);
+}
+
+fn captureStackBytecode(allocator: std.mem.Allocator, depth: usize, iterations: usize) ![]u8 {
+    std.debug.assert(depth > 0 and depth <= 1024);
+    const code_len = try std.math.add(usize, depth, try std.math.add(usize, try std.math.mul(usize, iterations, 2), 1));
+    const code = try allocator.alloc(u8, code_len);
+    @memset(code[0..depth], @intFromEnum(evmz.Opcode.PUSH0));
+    var offset = depth;
+    for (0..iterations) |_| {
+        code[offset] = @intFromEnum(evmz.Opcode.POP);
+        code[offset + 1] = @intFromEnum(evmz.Opcode.PUSH0);
+        offset += 2;
+    }
+    code[offset] = @intFromEnum(evmz.Opcode.STOP);
+    return code;
+}
+
+fn memoryStoreBytecode(allocator: std.mem.Allocator, iterations: usize, expanding: bool) ![]u8 {
+    const pattern_len: usize = 8;
+    const code_len = try std.math.add(usize, try std.math.mul(usize, iterations, pattern_len), 1);
+    const code = try allocator.alloc(u8, code_len);
+    var offset: usize = 0;
+    for (0..iterations) |index| {
+        code[offset] = @intFromEnum(evmz.Opcode.PUSH1);
+        code[offset + 1] = 0x2a;
+        code[offset + 2] = @intFromEnum(evmz.Opcode.PUSH4);
+        const memory_offset: u32 = if (expanding) @intCast(index * 32) else 0;
+        std.mem.writeInt(u32, code[offset + 3 ..][0..4], memory_offset, .big);
+        code[offset + 7] = @intFromEnum(evmz.Opcode.MSTORE);
+        offset += pattern_len;
+    }
+    code[offset] = @intFromEnum(evmz.Opcode.STOP);
+    return code;
+}
+
+fn captureStackCapacity(case: KernelCase, code_len: usize, iterations: usize) !usize {
+    const depth: ?usize = switch (case) {
+        .capture_stack_16 => 16,
+        .capture_stack_256 => 256,
+        .capture_stack_1024 => 1024,
+        else => null,
+    };
+    const stack_depth = depth orelse return std.math.mul(usize, code_len, 4);
+    return std.math.add(usize, stack_depth, iterations);
+}
+
+test "capture stack capacity follows suffix transitions" {
+    try std.testing.expectEqual(@as(usize, 2016), try captureStackCapacity(.capture_stack_16, 0, 2000));
+    try std.testing.expectEqual(@as(usize, 3024), try captureStackCapacity(.capture_stack_1024, 0, 2000));
 }
 
 const FixtureSet = struct {
@@ -441,6 +616,9 @@ fn parseEngine(value: []const u8) ?Engine {
 fn engineName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "evmz",
+        .evmz_capture => "evmz-capture",
+        .evmz_capture_growable => "evmz-capture-growable",
+        .evmz_capture_memory => "evmz-capture-memory",
         .evmz_call_total => "evmz-call-total",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
@@ -490,6 +668,9 @@ test "tier parser accepts names" {
 test "engine parser accepts evmone aliases" {
     try std.testing.expectEqual(Engine.evmone_advanced, parseEngine("evmone").?);
     try std.testing.expectEqual(Engine.evmone_baseline, parseEngine("evmone-baseline").?);
+    try std.testing.expectEqual(Engine.evmz_capture, parseEngine("evmz-capture").?);
+    try std.testing.expectEqual(Engine.evmz_capture_growable, parseEngine("evmz-capture-growable").?);
+    try std.testing.expectEqual(Engine.evmz_capture_memory, parseEngine("evmz-capture-memory").?);
     try std.testing.expectEqual(Engine.evmz_call_total, parseEngine("evmz-call-total").?);
     try std.testing.expect(parseEngine("evmz-advanced") == null);
     try std.testing.expect(parseEngine("evmz-advanced-call-total") == null);
@@ -514,6 +695,13 @@ test "jump kernel cycles fixture pattern" {
 test "push pop kernel touches no host" {
     const measurement = try measure(std.testing.io, std.testing.allocator, .evmz, .push_pop, 2, .latest, default_fixtures_dir);
     try std.testing.expectEqual(@as(u64, 0), measurement.host_calls);
+}
+
+test "captured push pop kernel touches no host and preserves gas" {
+    const plain = try measure(std.testing.io, std.testing.allocator, .evmz, .push_pop, 2, .latest, default_fixtures_dir);
+    const captured = try measure(std.testing.io, std.testing.allocator, .evmz_capture, .push_pop, 2, .latest, default_fixtures_dir);
+    try std.testing.expectEqual(@as(u64, 0), captured.host_calls);
+    try std.testing.expectEqual(plain.gas_used, captured.gas_used);
 }
 
 test "branch kernels touch no host" {

@@ -200,8 +200,8 @@ pub fn For(comptime ProtocolType: type) type {
         /// Execute this standalone frame through the protocol's fixed capture
         /// table and return a replay-only span. The consumer type never enters
         /// the interpreter type graph.
-        pub fn capture(self: *Self, tape: *trace.TraceTape) Error!CapturedResult {
-            const mark = try tape.begin();
+        pub fn capture(self: *Self, tape: *trace.TraceTape, profile: trace.CaptureProfile) Error!CapturedResult {
+            const mark = try tape.begin(profile);
             errdefer tape.abort(mark) catch {};
 
             var frame_capture = try trace.TraceCapture.init(tape, .{
@@ -209,22 +209,33 @@ pub fn For(comptime ProtocolType: type) type {
                 .parent_frame_id = null,
                 .depth = self.call_frame.msg.depth,
                 .kind = .root,
+                .initial_stack = self.call_frame.stack.asSlice(),
+                .initial_memory_size = self.call_frame.memory.len(),
+                .initial_return_data = self.call_frame.return_data,
             });
             while (true) {
                 switch (try self.executeCapturedUntilAction(&frame_capture)) {
                     .finished => |result| {
                         try frame_capture.finishFrame(.{
                             .outcome = traceFrameOutcome(result.status),
-                            .stack = self.call_frame.stack.asSlice(),
                             .memory_size = self.call_frame.memory.len(),
-                            .return_data_size = self.call_frame.return_data.len,
                         });
                         return .{
                             .result = result,
                             .span = try tape.finish(mark),
                         };
                     },
-                    .action => |action| try self.resolveHostAction(action),
+                    .action => |action| {
+                        try self.resolveHostAction(action);
+                        switch (action) {
+                            .call => |call_action| frame_capture.setPendingMemoryWrite(.{
+                                .offset = call_action.continuation.out_offset,
+                                .size = @min(call_action.continuation.out_size, self.call_frame.return_data.len),
+                            }),
+                            .create => {},
+                        }
+                        try frame_capture.replaceReturnData(self.call_frame.return_data);
+                    },
                 }
             }
         }
@@ -232,8 +243,8 @@ pub fn For(comptime ProtocolType: type) type {
         /// Compatibility helper for runtime-selected step consumers. Capture
         /// remains fixed; only completed rows are dispatched through `Sink`.
         pub fn executeWithTrace(self: *Self, tape: *trace.TraceTape, sink: *trace.Sink) Error!Result {
-            const captured = try self.capture(tape);
-            trace.replaySteps(sink, captured.span);
+            const captured = try self.capture(tape, trace.captureProfileForSink(sink));
+            try trace.replaySteps(sink, captured.span);
             try tape.resolve(captured.span);
             try tape.reset();
             return captured.result;
@@ -768,7 +779,7 @@ test "interpreter captured tail table records a replay span" {
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    const mark = try tape.begin();
+    const mark = try tape.begin(.{});
     var capture = try trace.TraceCapture.init(&tape, .{
         .frame_id = 0,
         .parent_frame_id = null,
@@ -791,9 +802,7 @@ test "interpreter captured tail table records a replay span" {
     };
     try capture.finishFrame(.{
         .outcome = .success,
-        .stack = interpreter.call_frame.stack.asSlice(),
         .memory_size = interpreter.call_frame.memory.len(),
-        .return_data_size = interpreter.call_frame.return_data.len,
     });
     const span = try tape.finish(mark);
     defer tape.resolve(span) catch unreachable;
@@ -802,9 +811,50 @@ test "interpreter captured tail table records a replay span" {
     try std.testing.expectEqual(@as(usize, 2), span.steps.len);
     try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), span.steps[0].opcode);
     try std.testing.expectEqual(@as(u32, 2), span.steps[0].pc_next);
-    try std.testing.expectEqual(@as(usize, 0), span.stackFor(span.steps[0]).len);
+    var cursor = trace.TraceCursor.init(span);
+    cursor.enterFrame(span.frames[0]);
+    try std.testing.expectEqual(@as(usize, 0), cursor.stack().?.len);
+    cursor.finishStep(span.steps[0]);
     try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.STOP)), span.steps[1].opcode);
-    try std.testing.expectEqualSlices(u256, &.{0x2a}, span.stackFor(span.steps[1]));
+    try std.testing.expectEqualSlices(u256, &.{0x2a}, cursor.stack().?);
+}
+
+test "interpreter captured tail table records optional memory writes" {
+    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .STOP });
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+
+    const captured = try interpreter.capture(&tape, .{ .memory = .writes });
+    defer tape.resolve(captured.span) catch unreachable;
+    var cursor = trace.tape.TraceCursor.init(captured.span);
+    cursor.enterFrame(captured.span.frames[0]);
+    const writes = for (captured.span.steps) |row| {
+        cursor.finishStep(row);
+        // TODO: has to check if custom protocol overrides opcode mstore.
+        if (row.opcode == @intFromEnum(Opcode.MSTORE)) break try cursor.memoryWrites();
+    } else unreachable;
+    try std.testing.expectEqual(@as(usize, 1), writes.len);
+    const bytes = cursor.memoryWriteBytes(writes[0]);
+    try std.testing.expectEqual(@as(usize, 32), bytes.len);
+    try std.testing.expectEqual(@as(u8, 0x2a), bytes[31]);
 }
 
 test "interpreter captured tail table preserves terminal and fault outcomes" {
@@ -855,7 +905,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         defer frame.deinit();
         var interpreter = frame.interpreter();
 
-        const captured = try interpreter.capture(&tape);
+        const captured = try interpreter.capture(&tape, .{});
         try std.testing.expectEqual(case.status, captured.result.status);
         try std.testing.expectEqual(@as(usize, 1), captured.span.frames.len);
         try std.testing.expectEqual(case.outcome, captured.span.frames[0].outcome);
@@ -868,6 +918,42 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         try tape.resolve(captured.span);
         try tape.reset();
     }
+}
+
+test "interpreter capture replays minimal EIP-3155 JSONL" {
+    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+
+    const captured = try interpreter.capture(&tape, .{});
+    defer tape.resolve(captured.span) catch unreachable;
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try trace.eip3155.writeSteps(&output.writer, captured.span);
+
+    try std.testing.expectEqualStrings(
+        "{\"pc\":0,\"op\":96,\"gas\":\"0x64\",\"gasCost\":\"0x3\",\"memSize\":0,\"stack\":[],\"depth\":1,\"returnData\":\"0x\",\"refund\":0,\"opName\":\"PUSH1\"}\n" ++
+            "{\"pc\":2,\"op\":0,\"gas\":\"0x61\",\"gasCost\":\"0x0\",\"memSize\":0,\"stack\":[\"0x2a\"],\"depth\":1,\"returnData\":\"0x\",\"refund\":0,\"opName\":\"STOP\"}\n",
+        output.written(),
+    );
 }
 
 test "interpreter state gas charges reservoir before gas left and refills LIFO" {

@@ -18,11 +18,17 @@ const address = @import("./address.zig");
 
 pub const tape = @import("./trace/tape.zig");
 pub const capture = @import("./trace/capture.zig");
+pub const eip3155 = @import("./trace/eip3155.zig");
 
 pub const TraceTapeError = tape.Error;
 pub const TraceTape = tape.TraceTape;
+pub const CaptureProfile = tape.CaptureProfile;
+pub const StackCapture = tape.StackCapture;
+pub const MemoryCapture = tape.MemoryCapture;
 pub const TraceMark = tape.TraceMark;
 pub const TraceSpan = tape.TraceSpan;
+pub const TraceCursor = tape.TraceCursor;
+pub const TraceOutcome = tape.TraceOutcome;
 pub const TraceStepOutcome = tape.StepOutcome;
 pub const TraceFrameKind = tape.FrameKind;
 pub const TraceFrameOutcome = tape.FrameOutcome;
@@ -496,115 +502,62 @@ pub const Sink = struct {
 /// Live state/lifecycle callbacks are adapted separately by `CaptureContext`.
 /// Parent CALL/CREATE end events are delayed until child frames close, matching
 /// the former synchronous callback order.
-pub fn replaySteps(sink: *Sink, span: TraceSpan) void {
+pub fn replaySteps(sink: *Sink, span: TraceSpan) error{TraceCapabilityUnavailable}!void {
     if (!sink.wantsSteps()) return;
+    try span.require(captureProfileForSink(sink));
 
-    const max_live_frames = 1025;
-    const no_pending = std.math.maxInt(usize);
-    const ActiveFrame = struct {
-        id: u32,
-        pending_row: usize = no_pending,
-    };
-    var active_frames: [max_live_frames]ActiveFrame = undefined;
-    var active_len: usize = 0;
-
-    for (span.steps, 0..) |row, row_index| {
-        const row_frame = frameById(span, row.frame_id);
-        if (active_len == 0) {
-            if (row_frame.parent_frame_id != null) @panic("trace begins outside a root frame");
-            active_frames[0] = .{ .id = row.frame_id };
-            active_len = 1;
-        } else if (active_frames[active_len - 1].id != row.frame_id) {
-            while (active_len > 0 and
-                active_frames[active_len - 1].id != row.frame_id and
-                row_frame.parent_frame_id != active_frames[active_len - 1].id)
-            {
-                active_len -= 1;
-                replayPendingEnd(sink, span, &active_frames[active_len].pending_row, null);
-            }
-
-            if (active_len == 0) @panic("trace frame is disconnected from the live stack");
-            if (active_frames[active_len - 1].id != row.frame_id) {
-                if (row_frame.parent_frame_id != active_frames[active_len - 1].id) {
-                    @panic("trace child has the wrong parent");
-                }
-                if (active_len == active_frames.len) @panic("trace exceeds EVM live-frame limit");
-                active_frames[active_len] = .{ .id = row.frame_id };
-                active_len += 1;
-            }
+    var cursor = tape.TraceCursor.init(span);
+    while (cursor.next() catch @panic("invalid internal trace span")) |event| {
+        switch (event) {
+            .step_start => |view| replayStepStart(sink, view),
+            .step_end => |view| replayStepEnd(sink, view),
+            .frame_enter, .frame_leave => {},
         }
-
-        const current = &active_frames[active_len - 1];
-        replayPendingEnd(sink, span, &current.pending_row, &row);
-        replayStepStart(sink, span, row);
-        current.pending_row = row_index;
-    }
-
-    while (active_len > 0) {
-        active_len -= 1;
-        replayPendingEnd(sink, span, &active_frames[active_len].pending_row, null);
     }
 }
 
-fn frameById(span: TraceSpan, frame_id: u32) tape.FrameRow {
-    const index: usize = frame_id;
-    if (index >= span.frames.len or span.frames[index].frame_id != frame_id) {
-        @panic("trace step references a missing frame");
-    }
-    return span.frames[index];
+/// Minimum tape payload needed by one runtime compatibility sink.
+pub fn captureProfileForSink(sink: *const Sink) CaptureProfile {
+    const wants_stack = (sink.wantsStepStart() and sink.events.step_start.contains(.stack)) or
+        (sink.wantsStepEnd() and sink.events.step_end.contains(.stack));
+    return .{
+        .stack = if (wants_stack) .full else .omitted,
+        // Runtime Sink exposes memory size, not memory contents.
+        .memory = .size_only,
+    };
 }
 
-fn replayStepStart(sink: *Sink, span: TraceSpan, row: tape.StepRow) void {
+fn replayStepStart(sink: *Sink, view: tape.TraceCursor.StepView) void {
     if (!sink.wantsStepStart()) return;
     const fields = sink.events.step_start;
-    const frame = frameById(span, row.frame_id);
     sink.stepStart(.{
-        .pc = if (fields.contains(.pc)) row.pc else 0,
-        .opcode = if (fields.contains(.opcode)) row.opcode else 0,
-        .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(row.opcode) else null,
-        .depth = if (fields.contains(.depth)) frame.depth else 0,
-        .gas_left = if (fields.contains(.gas_left)) row.gas_before else 0,
-        .stack = if (fields.contains(.stack)) span.stackFor(row) else &.{},
-        .memory_size = if (fields.contains(.memory_size)) row.memory_size else 0,
-        .return_data_size = if (fields.contains(.return_data_size)) row.return_data_size else 0,
+        .pc = if (fields.contains(.pc)) view.row.pc else 0,
+        .opcode = if (fields.contains(.opcode)) view.row.opcode else 0,
+        .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(view.row.opcode) else null,
+        .depth = if (fields.contains(.depth)) view.frame.depth else 0,
+        .gas_left = if (fields.contains(.gas_left)) view.row.gas_before else 0,
+        .stack = if (fields.contains(.stack)) view.state.stack.? else &.{},
+        .memory_size = if (fields.contains(.memory_size)) view.state.memory_size else 0,
+        .return_data_size = if (fields.contains(.return_data_size)) view.state.return_data.len else 0,
     });
 }
 
-fn replayPendingEnd(
-    sink: *Sink,
-    span: TraceSpan,
-    pending_row: *usize,
-    next_row: ?*const tape.StepRow,
-) void {
-    if (pending_row.* == std.math.maxInt(usize)) return;
-    const row_index = pending_row.*;
-    pending_row.* = std.math.maxInt(usize);
+fn replayStepEnd(sink: *Sink, view: tape.TraceCursor.StepView) void {
     if (!sink.wantsStepEnd()) return;
 
-    const row = span.steps[row_index];
     const fields = sink.events.step_end;
-    const frame = frameById(span, row.frame_id);
     sink.stepEnd(.{
-        .pc = if (fields.contains(.pc)) row.pc else 0,
-        .pc_next = if (fields.contains(.pc_next)) row.pc_next else 0,
-        .opcode = if (fields.contains(.opcode)) row.opcode else 0,
-        .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(row.opcode) else null,
-        .depth = if (fields.contains(.depth)) frame.depth else 0,
-        .status = if (fields.contains(.status)) if (next_row == null) frameStatus(frame.outcome) else .running else .running,
-        .gas_left = if (fields.contains(.gas_left)) row.gas_after else 0,
-        .gas_cost = if (fields.contains(.gas_cost)) gasDelta(row.gas_before, row.gas_after) else 0,
-        .stack = if (fields.contains(.stack))
-            if (next_row) |next| span.stackFor(next.*) else span.finalStackFor(frame)
-        else
-            &.{},
-        .memory_size = if (fields.contains(.memory_size))
-            if (next_row) |next| next.memory_size else frame.final_memory_size
-        else
-            0,
-        .return_data_size = if (fields.contains(.return_data_size))
-            if (next_row) |next| next.return_data_size else frame.final_return_data_size
-        else
-            0,
+        .pc = if (fields.contains(.pc)) view.row.pc else 0,
+        .pc_next = if (fields.contains(.pc_next)) view.row.pc_next else 0,
+        .opcode = if (fields.contains(.opcode)) view.row.opcode else 0,
+        .decoded_opcode = if (fields.contains(.decoded_opcode)) decodedOpcode(view.row.opcode) else null,
+        .depth = if (fields.contains(.depth)) view.frame.depth else 0,
+        .status = if (fields.contains(.status)) if (view.terminal) frameStatus(view.frame.outcome) else .running else .running,
+        .gas_left = if (fields.contains(.gas_left)) view.row.gas_after else 0,
+        .gas_cost = if (fields.contains(.gas_cost)) gasDelta(view.row.gas_before, view.row.gas_after) else 0,
+        .stack = if (fields.contains(.stack)) view.state.stack.? else &.{},
+        .memory_size = if (fields.contains(.memory_size)) view.state.memory_size else 0,
+        .return_data_size = if (fields.contains(.return_data_size)) view.state.return_data.len else 0,
     });
 }
 
@@ -761,33 +714,39 @@ test "terminal step replay uses exact frame-end state" {
 
     var target = TraceTape.initGrowable(std.testing.allocator);
     defer target.deinit();
-    const mark = try target.begin();
+    const mark = try target.begin(.{});
     const frame = try target.appendFrame(.{
-        .frame_id = 0,
+        .frame_id = 4,
         .parent_frame_id = null,
         .depth = 0,
         .kind = .root,
+        .initial_stack = &.{9},
+        .initial_return_data = &.{ 1, 2, 3 },
     });
     const step = try target.appendStep(.{
-        .frame_id = 0,
+        .frame_id = 4,
         .pc = 0,
         .opcode = @intFromEnum(Opcode.POP),
         .gas_before = 10,
         .refund_before = 0,
-        .stack = &.{9},
+        .stack_len = 1,
         .memory_size = 32,
-        .return_data_size = 3,
+        .return_data = frame.initial_return_data,
     });
+    var final_memory = [_]u8{0} ** 64;
     try target.finishStep(step, .{
         .pc_next = 1,
         .gas_after = 8,
         .outcome = .success,
+        .stack = &.{},
+        .memory = &final_memory,
+        .return_data = frame.initial_return_data,
     });
+    const final_return_data = try target.storeReturnData(&.{ 1, 2, 3, 4, 5 });
     try target.finishFrame(frame, .{
         .outcome = .success,
-        .stack = &.{ 21, 22 },
         .memory_size = 64,
-        .return_data_size = 5,
+        .return_data = final_return_data,
     });
     const span = try target.finish(mark);
     defer target.resolve(span) catch unreachable;
@@ -796,12 +755,67 @@ test "terminal step replay uses exact frame-end state" {
     var sink = Sink.init(&recorder, .{
         .step_end = StepEndFields.initMany(&.{ .stack, .memory_size, .return_data_size, .status }),
     }, &.{ .stepEnd = Recorder.stepEnd });
-    replaySteps(&sink, span);
+    try replaySteps(&sink, span);
 
-    try std.testing.expectEqualSlices(u256, &.{ 21, 22 }, recorder.stack[0..recorder.stack_len]);
+    try std.testing.expectEqual(@as(usize, 0), recorder.stack_len);
     try std.testing.expectEqual(@as(usize, 64), recorder.memory_size);
     try std.testing.expectEqual(@as(usize, 5), recorder.return_data_size);
     try std.testing.expectEqual(StepStatus.success, recorder.status);
+}
+
+test "step replay rejects an omitted stack required by the sink" {
+    const Recorder = struct {
+        calls: usize = 0,
+
+        fn stepStart(ptr: *anyopaque, _: StepStart) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+        }
+    };
+
+    var target = TraceTape.initGrowable(std.testing.allocator);
+    defer target.deinit();
+    const mark = try target.begin(.{ .stack = .omitted });
+    const frame = try target.appendFrame(.{
+        .frame_id = 0,
+        .parent_frame_id = null,
+        .depth = 0,
+        .kind = .root,
+        .initial_stack = &.{1},
+    });
+    const step = try target.appendStep(.{
+        .frame_id = 0,
+        .pc = 0,
+        .opcode = @intFromEnum(Opcode.STOP),
+        .gas_before = 1,
+        .refund_before = 0,
+        .stack_len = 1,
+        .memory_size = 0,
+    });
+    try target.finishStep(step, .{
+        .pc_next = 1,
+        .gas_after = 1,
+        .outcome = .success,
+        .stack = &.{1},
+    });
+    try target.finishFrame(frame, .{ .outcome = .success, .memory_size = 0 });
+    const span = try target.finish(mark);
+    defer target.resolve(span) catch unreachable;
+
+    var recorder = Recorder{};
+    var sink = Sink.init(&recorder, .{
+        .step_start = StepStartFields.initOne(.stack),
+    }, &.{ .stepStart = Recorder.stepStart });
+    try std.testing.expectEqual(StackCapture.full, captureProfileForSink(&sink).stack);
+    try std.testing.expectError(error.TraceCapabilityUnavailable, replaySteps(&sink, span));
+    try std.testing.expectEqual(@as(usize, 0), recorder.calls);
+
+    var metadata_sink = Sink.init(&recorder, .{
+        .step_start = StepStartFields.initOne(.pc),
+    }, &.{ .stepStart = Recorder.stepStart });
+    try std.testing.expectEqual(StackCapture.omitted, captureProfileForSink(&metadata_sink).stack);
+    try replaySteps(&metadata_sink, span);
+    try std.testing.expectEqual(@as(usize, 1), recorder.calls);
 }
 
 test "step replay bounds live depth rather than total sibling frames" {
@@ -821,56 +835,54 @@ test "step replay bounds live depth rather than total sibling frames" {
     };
 
     const sibling_count = 1100;
-    var frames: std.ArrayList(tape.FrameRow) = .empty;
-    defer frames.deinit(std.testing.allocator);
-    var steps: std.ArrayList(tape.StepRow) = .empty;
-    defer steps.deinit(std.testing.allocator);
-    try frames.ensureTotalCapacity(std.testing.allocator, sibling_count + 1);
-    try steps.ensureTotalCapacity(std.testing.allocator, sibling_count * 2);
-    frames.appendAssumeCapacity(.{
+    var target = TraceTape.initGrowable(std.testing.allocator);
+    defer target.deinit();
+    const mark = try target.begin(.{});
+    const root = try target.appendFrame(.{
         .frame_id = 0,
         .parent_frame_id = null,
         .depth = 0,
         .kind = .root,
-        .outcome = .success,
     });
 
     for (0..sibling_count) |index| {
         const frame_id: u32 = @intCast(index + 1);
-        steps.appendAssumeCapacity(.{
+        const call = try target.appendStep(.{
             .gas_before = 100,
-            .gas_after = 99,
             .refund_before = 0,
-            .stack = .{ .offset = 0, .len = 0 },
+            .stack_len = 0,
             .frame_id = 0,
             .pc = @intCast(index),
-            .pc_next = @intCast(index + 1),
             .memory_size = 0,
-            .return_data_size = 0,
             .opcode = @intFromEnum(Opcode.CALL),
-            .outcome = .success,
         });
-        frames.appendAssumeCapacity(.{
+        const child = try target.appendFrame(.{
             .frame_id = frame_id,
             .parent_frame_id = 0,
             .depth = 1,
             .kind = .call,
-            .outcome = .success,
         });
-        steps.appendAssumeCapacity(.{
+        const stop = try target.appendStep(.{
             .gas_before = 10,
-            .gas_after = 9,
             .refund_before = 0,
-            .stack = .{ .offset = 0, .len = 0 },
+            .stack_len = 0,
             .frame_id = frame_id,
             .pc = 0,
-            .pc_next = 1,
             .memory_size = 0,
-            .return_data_size = 0,
             .opcode = @intFromEnum(Opcode.STOP),
+        });
+        try target.finishStep(stop, .{ .pc_next = 1, .gas_after = 9, .outcome = .success, .stack = &.{} });
+        try target.finishFrame(child, .{ .outcome = .success, .memory_size = 0 });
+        try target.finishStep(call, .{
+            .pc_next = index + 1,
+            .gas_after = 99,
             .outcome = .success,
+            .stack = &.{},
         });
     }
+    try target.finishFrame(root, .{ .outcome = .success, .memory_size = 0 });
+    const span = try target.finish(mark);
+    defer target.resolve(span) catch unreachable;
 
     var recorder = Recorder{};
     var sink = Sink.init(&recorder, .{
@@ -880,15 +892,10 @@ test "step replay bounds live depth rather than total sibling frames" {
         .stepStart = Recorder.stepStart,
         .stepEnd = Recorder.stepEnd,
     });
-    replaySteps(&sink, .{
-        .generation = 1,
-        .steps = steps.items,
-        .frames = frames.items,
-        .stack_words = &.{},
-    });
+    try replaySteps(&sink, span);
 
-    try std.testing.expectEqual(steps.items.len, recorder.starts);
-    try std.testing.expectEqual(steps.items.len, recorder.ends);
+    try std.testing.expectEqual(span.steps.len, recorder.starts);
+    try std.testing.expectEqual(span.steps.len, recorder.ends);
 }
 
 fn emptyStepStart() StepStart {

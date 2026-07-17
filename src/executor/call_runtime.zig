@@ -144,9 +144,22 @@ pub fn For(comptime Executor: type) type {
 
                 if (self.stepCaptureContext()) |context| {
                     const runtime_frame = &self.frames.items[self.frames.items.len - 1];
+                    const parent_stack = if (self.frames.items.len > 1)
+                        self.frames.items[self.frames.items.len - 2].frame.callFrame().stack.asSlice()
+                    else
+                        &.{};
+                    const parent_memory_size = if (self.frames.items.len > 1)
+                        self.frames.items[self.frames.items.len - 2].frame.callFrame().memory.len()
+                    else
+                        0;
                     try context.pushFrame(
                         runtime_frame.frame.callFrame().msg.depth,
                         traceFrameKind(runtime_frame),
+                        runtime_frame.frame.callFrame().stack.asSlice(),
+                        runtime_frame.frame.callFrame().memory.len(),
+                        runtime_frame.frame.callFrame().return_data,
+                        parent_stack,
+                        parent_memory_size,
                     );
                 }
             }
@@ -205,10 +218,13 @@ pub fn For(comptime Executor: type) type {
                 switch (action) {
                     .call => |call_action| {
                         if (try self.startCall(call_action.msg)) |host_result| {
+                            const call_result = host_result.expectCall();
                             try self.frames.items[frame_index].frame.callFrame().resumeCallResult(
                                 call_action.continuation,
-                                host_result.expectCall(),
+                                call_result,
                             );
+                            self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
+                            try self.captureReturnData(frame_index);
                         } else {
                             self.frames.items[frame_index].pending_action = action;
                         }
@@ -219,6 +235,7 @@ pub fn For(comptime Executor: type) type {
                                 create_action.continuation,
                                 host_result.expectCreate(),
                             );
+                            try self.captureReturnData(frame_index);
                         } else {
                             self.frames.items[frame_index].pending_action = action;
                         }
@@ -228,15 +245,42 @@ pub fn For(comptime Executor: type) type {
 
             fn resumeParentAction(self: *CallRuntime, frame_index: usize, action: Interpreter.Action, result: Host.Result) !void {
                 switch (action) {
-                    .call => |call_action| try self.frames.items[frame_index].frame.callFrame().resumeCallResult(
-                        call_action.continuation,
-                        result.expectCall(),
-                    ),
+                    .call => |call_action| {
+                        const call_result = result.expectCall();
+                        try self.frames.items[frame_index].frame.callFrame().resumeCallResult(
+                            call_action.continuation,
+                            call_result,
+                        );
+                        self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
+                    },
                     .create => |create_action| try self.frames.items[frame_index].frame.callFrame().resumeCreateResult(
                         create_action.continuation,
                         result.expectCreate(),
                     ),
                 }
+                try self.captureReturnData(frame_index);
+            }
+
+            fn captureReturnData(self: *CallRuntime, frame_index: usize) !void {
+                const context = self.stepCaptureContext() orelse return;
+                try context.replaceFrameReturnData(
+                    frame_index,
+                    self.frames.items[frame_index].frame.callFrame().return_data,
+                );
+            }
+
+            fn captureCallOutput(
+                self: *CallRuntime,
+                frame_index: usize,
+                continuation: Interpreter.CallResume,
+                output_len: usize,
+            ) void {
+                const context = self.stepCaptureContext() orelse return;
+                context.setFrameMemoryWrite(
+                    frame_index,
+                    continuation.out_offset,
+                    @min(continuation.out_size, output_len),
+                );
             }
 
             fn startCall(self: *CallRuntime, msg: Host.Message) !?Host.Result {
@@ -288,9 +332,7 @@ pub fn For(comptime Executor: type) type {
                 if (self.stepCaptureContext()) |context| {
                     try context.finishCurrentFrame(.{
                         .outcome = Interpreter.traceFrameOutcome(stable_result.status),
-                        .stack = call_frame.stack.asSlice(),
                         .memory_size = call_frame.memory.len(),
-                        .return_data_size = call_frame.return_data.len,
                     });
                 }
 
