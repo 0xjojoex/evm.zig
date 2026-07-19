@@ -132,18 +132,28 @@ pub const Storage = struct {
     }
 };
 
+pub const Execution = struct {
+    pub fn valueTransferLog(revision: Revision, input: types.ValueTransferInput) ?types.ValueTransferLog {
+        if (!revision.isImpl(.amsterdam)) return null;
+        if (input.amount == 0) return null;
+        if (std.mem.eql(u8, &input.from, &input.to)) return null;
+        return .{
+            .address = system_address,
+            .topic = value_transfer_log_topic,
+        };
+    }
+};
+
 pub const Block = struct {
     const Self = @This();
 
     /// Partial Ethereum authoring surface for the complete block policy.
     pub fn Patch(comptime R: type) type {
         const PatchType = struct {
-            valueTransferLog: ?*const fn (R, types.ValueTransferInput) ?types.ValueTransferLog = null,
             beforeBlock: ?*const fn (R, types.BeforeBlockContext) types.BlockSystemCalls = null,
             beforeTransaction: ?*const fn (R, types.BeforeTransactionContext) types.BlockSystemCalls = null,
             afterTransaction: ?*const fn (R, types.AfterTransactionContext) types.BlockSystemCalls = null,
             finalizeBlock: ?*const fn (R, types.FinalizeBlockContext) types.FinalizeSystemCalls = null,
-            transactionWarmsCoinbase: ?*const fn (R) bool = null,
         };
         definition.assertPatchMirrors(definition.BlockConfig(R), PatchType);
         return PatchType;
@@ -154,22 +164,10 @@ pub const Block = struct {
     pub fn config(comptime R: type) definition.BlockConfig(R) {
         if (R != Revision) return .default;
         return .{
-            .valueTransferLog = Self.valueTransferLog,
             .beforeBlock = Self.beforeBlock,
             .beforeTransaction = Self.beforeTransaction,
             .afterTransaction = Self.afterTransaction,
             .finalizeBlock = Self.finalizeBlock,
-            .transactionWarmsCoinbase = Self.transactionWarmsCoinbase,
-        };
-    }
-
-    pub fn valueTransferLog(revision: Revision, input: types.ValueTransferInput) ?types.ValueTransferLog {
-        if (!revision.isImpl(.amsterdam)) return null;
-        if (input.amount == 0) return null;
-        if (std.mem.eql(u8, &input.from, &input.to)) return null;
-        return .{
-            .address = system_address,
-            .topic = value_transfer_log_topic,
         };
     }
 
@@ -222,10 +220,6 @@ pub const Block = struct {
             calls.append(eip8282.builderExitFinalizeSystemCall(system_address, system_call_gas));
         }
         return calls;
-    }
-
-    pub fn transactionWarmsCoinbase(revision: Revision) bool {
-        return revision.isImpl(.shanghai);
     }
 };
 

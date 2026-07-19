@@ -3,7 +3,7 @@
 //! One transaction flows through several representations. Keep them distinct:
 //!
 //!   raw bytes ─(transaction/envelope.zig)-> Transaction ─(prepare)->
-//!     TransactionView ─> Prepared{scope, root} ─> EvmExecutionRequest
+//!     TransactionView ─> Prepared{scope, message} ─> EvmExecutionRequest
 
 const std = @import("std");
 
@@ -11,7 +11,7 @@ const Address = @import("../address.zig").Address;
 const execution = @import("../execution.zig");
 const BlobSchedule = @import("./blob.zig").BlobSchedule;
 const BlockGas = @import("./settlement.zig").BlockGas;
-const ExecutionGas = @import("./gas.zig").ExecutionGas;
+const ExecutionGas = execution.ExecutionGas;
 
 pub const AccessListCounts = struct {
     addresses: usize = 0,
@@ -179,7 +179,8 @@ pub fn executionContext(env: EnvFacts, origin: Address, gas_price: u256, gas_lim
 ///
 /// Mirrors the spec's `TransactionEnvironment` — the executor's transaction
 /// accounting shell warms the `access_list` and applies the `authorization_list`;
-/// the interpreter never sees them. Paired with a `RootFrame` in `Prepared`.
+/// the interpreter never sees them. Paired with an execution `Message` in
+/// `Prepared`.
 pub const TransactionScope = struct {
     pub const Context = execution.ExecutionContext;
 
@@ -234,123 +235,13 @@ pub fn effectiveGasPrice(env: EnvFacts, view: TransactionView) u256 {
     };
 }
 
-/// The transaction-derived top-level call/create plan.
-///
-/// `gas_limit` is the original transaction cap, not the resolved post-intrinsic
-/// engine budget. Transaction-scope data (access list, authorizations, block/tx
-/// context) lives on `TransactionScope`; execution later combines this root with
-/// `ExecutionGas` to form the gas-bearing executor message.
-pub const RootFrame = union(enum) {
-    /// A message call to `recipient`.
-    call: Call,
-    /// A contract creation (address derived from sender + nonce).
-    create: Create,
-
-    pub const Call = struct {
-        sender: Address,
-        recipient: Address,
-        input: []const u8 = &.{},
-        gas_limit: u64,
-        value: u256 = 0,
-    };
-
-    pub const Create = struct {
-        sender: Address,
-        init_code: []const u8,
-        gas_limit: u64,
-        value: u256 = 0,
-    };
-
-    /// Build a `RootFrame` from flat input: `to`-present becomes a `.call`, `to == null`
-    /// becomes a `.create` (with `input` reinterpreted as init code).
-    pub fn init(root_frame_input: struct {
-        sender: Address,
-        to: ?Address = null,
-        input: []const u8 = &.{},
-        gas_limit: u64,
-        value: u256 = 0,
-    }) RootFrame {
-        if (root_frame_input.to) |recipient| {
-            return .{ .call = .{
-                .sender = root_frame_input.sender,
-                .recipient = recipient,
-                .input = root_frame_input.input,
-                .gas_limit = root_frame_input.gas_limit,
-                .value = root_frame_input.value,
-            } };
-        }
-        return .{ .create = .{
-            .sender = root_frame_input.sender,
-            .init_code = root_frame_input.input,
-            .gas_limit = root_frame_input.gas_limit,
-            .value = root_frame_input.value,
-        } };
-    }
-
-    pub fn sender(self: RootFrame) Address {
-        return switch (self) {
-            .call => |tx| tx.sender,
-            .create => |tx| tx.sender,
-        };
-    }
-
-    pub fn input(self: RootFrame) []const u8 {
-        return switch (self) {
-            .call => |tx| tx.input,
-            .create => |tx| tx.init_code,
-        };
-    }
-
-    pub fn gasLimit(self: RootFrame) u64 {
-        return switch (self) {
-            .call => |tx| tx.gas_limit,
-            .create => |tx| tx.gas_limit,
-        };
-    }
-
-    pub fn value(self: RootFrame) u256 {
-        return switch (self) {
-            .call => |tx| tx.value,
-            .create => |tx| tx.value,
-        };
-    }
-
-    pub fn isCreate(self: RootFrame) bool {
-        return switch (self) {
-            .call => false,
-            .create => true,
-        };
-    }
-};
-
-/// Project a transaction root and its resolved post-intrinsic gas into the
-/// concrete engine message consumed by `Executor.executeMessage`.
-pub fn executionMessage(root: RootFrame, gas: ExecutionGas) execution.Message {
-    return switch (root) {
-        .call => |call| .{ .call = .{
-            .sender = call.sender,
-            .recipient = call.recipient,
-            .input = call.input,
-            .gas = gas.regular_left,
-            .gas_reservoir = gas.reservoir,
-            .value = call.value,
-        } },
-        .create => |create| .{ .create = .{
-            .sender = create.sender,
-            .init_code = create.init_code,
-            .gas = gas.regular_left,
-            .gas_reservoir = gas.reservoir,
-            .value = create.value,
-        } },
-    };
-}
-
 /// Build the immutable EVM request after family lifecycle has resolved the
 /// message gas budget.
-pub fn executionRequest(context: execution.ExecutionContext, root: RootFrame, gas: ExecutionGas) execution.EvmExecutionRequest {
+pub fn executionRequest(context: execution.ExecutionContext, message: execution.Message, gas: ExecutionGas) execution.EvmExecutionRequest {
     return .{
         .context = context,
-        .message = executionMessage(root, gas),
+        .message = message,
+        .gas = gas,
     };
 }
 
@@ -361,8 +252,8 @@ pub fn Prepared(comptime Protocol: type) type {
         created_address: ?Address = null,
         /// Transaction-scope environment (context + access/authorization lists).
         scope: TransactionScope,
-        /// The top-level call/create the executor runs.
-        root: RootFrame,
+        /// The top-level call/create identity the executor runs.
+        message: execution.Message,
         /// Resolved execution gas; null when the transaction has no execution step.
         execution_gas: ?ExecutionGas,
         settlement: Protocol.Settlement.Plan,

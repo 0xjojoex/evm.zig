@@ -14,17 +14,17 @@ const MemoryStore = @import("./MemoryStore.zig");
 const Overlay = @import("./Overlay.zig");
 
 const EthereumFinalizer = struct {
-    revision: evmz.Evm.Protocol.Revision,
+    revision: evmz.Evm.ExecutionProtocol.Revision,
 
     pub fn selfDestructFinalization(
         self: @This(),
         created_in_transaction: bool,
     ) evmz.protocol.SelfDestructFinalization {
-        return evmz.Evm.Protocol.self_destruct.selfDestructFinalization(self.revision, created_in_transaction);
+        return evmz.Evm.ExecutionProtocol.self_destruct.selfDestructFinalization(self.revision, created_in_transaction);
     }
 };
 
-fn ethereumFinalizer(revision: evmz.Evm.Protocol.Revision) EthereumFinalizer {
+fn ethereumFinalizer(revision: evmz.Evm.ExecutionProtocol.Revision) EthereumFinalizer {
     return .{ .revision = revision };
 }
 
@@ -252,6 +252,45 @@ test "fused storage slots share value warmth and original across rollback and tr
     try std.testing.expectEqual(Host.AccessStatus.cold, next_transaction.access_status);
     try std.testing.expectEqual(@as(u256, 2), next_transaction.value);
     try std.testing.expectEqual(@as(u256, 2), overlay.storage_slots.get(storage_key).?.original);
+}
+
+test "execution scopes retain writes but reset transaction-local storage state" {
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+
+    const address = evmz.addr(0xbeef);
+    const key = 7;
+    const storage_key = StorageKey{ .address = address, .key = key };
+    var account = MemoryAccount.init(std.testing.allocator);
+    try account.storage.put(key, 1);
+    try overlay.seedAccount(address, account);
+
+    const transaction_checkpoint = try overlay.checkpoint();
+
+    const prelude_journal_start = overlay.beginExecutionScope();
+    try std.testing.expectEqual(Host.AccessStatus.cold, (try overlay.storeStorage(address, key, 2)).access_status);
+    try overlay.setTransientStorage(address, key, 9);
+    try overlay.closeExecutionScope(prelude_journal_start);
+
+    try std.testing.expectEqual(@as(u256, 2), try overlay.getStorage(address, key));
+    try std.testing.expectEqual(@as(usize, 0), overlay.storage_slots.count());
+    try std.testing.expectEqual(@as(usize, 0), overlay.warmStorageCount());
+    try std.testing.expectEqual(@as(usize, 0), overlay.originalStorageCount());
+    try std.testing.expectEqual(@as(usize, 0), overlay.transient_storage.count());
+
+    const payload_journal_start = overlay.beginExecutionScope();
+    const payload_load = try overlay.loadStorage(address, key);
+    try std.testing.expectEqual(Host.AccessStatus.cold, payload_load.access_status);
+    try std.testing.expectEqual(@as(u256, 2), payload_load.value);
+    try std.testing.expectEqual(@as(u256, 2), overlay.storage_slots.get(storage_key).?.original);
+    try std.testing.expectEqual(@as(u256, 0), try overlay.getTransientStorage(address, key));
+    try std.testing.expectEqual(Host.StorageStatus.modified, try overlay.setStorage(address, key, 3));
+    try overlay.closeExecutionScope(payload_journal_start);
+
+    try std.testing.expectEqual(@as(u256, 3), try overlay.getStorage(address, key));
+    try overlay.revertToCheckpoint(transaction_checkpoint);
+    try std.testing.expect(!overlay.storage_overlay.contains(storage_key));
+    try std.testing.expectEqual(@as(u256, 1), try overlay.getStorage(address, key));
 }
 
 test "fused storage writes merge into accepted overlay only when transaction closes" {

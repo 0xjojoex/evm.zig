@@ -89,6 +89,10 @@ pub fn For(comptime Definition: type, comptime support_window: Definition.Suppor
             return Definition.Instruction.executionTarget(value);
         }
 
+        pub fn staticGasForRevision(revision: Definition.Revision, comptime value: ValueType) i64 {
+            return Definition.Instruction.staticGasForRevision(revision, value);
+        }
+
         pub fn expByteGas(revision: Definition.Revision) i64 {
             return Definition.Instruction.expByteGas(revision);
         }

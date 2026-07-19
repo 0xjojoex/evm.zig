@@ -6,6 +6,7 @@ const blob_mod = @import("./transaction/blob.zig");
 const gas_mod = @import("./transaction/gas.zig");
 const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
+pub const program = @import("./transaction/program.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
 pub const signing = @import("./transaction/signing.zig");
@@ -20,7 +21,6 @@ pub const IntrinsicGasOptions = gas_mod.IntrinsicGasOptions;
 pub const FloorGasInput = gas_mod.FloorGasInput;
 pub const GasCharge = gas_mod.GasCharge;
 pub const InitialGas = gas_mod.InitialGas;
-pub const ExecutionGas = gas_mod.ExecutionGas;
 pub const GasPlan = gas_mod.GasPlan;
 pub const AccessListEntry = transaction_mod.AccessListEntry;
 pub const AuthorizationTuple = transaction_mod.AuthorizationTuple;
@@ -32,7 +32,6 @@ pub const PreparationAccount = transaction_mod.PreparationAccount;
 pub const PreparationStateAccess = transaction_mod.PreparationStateAccess;
 pub const PreparationBlockProgress = transaction_mod.PreparationBlockProgress;
 pub const TransactionScope = transaction_mod.TransactionScope;
-pub const RootFrame = transaction_mod.RootFrame;
 pub const FeeInput = settlement_mod.FeeInput;
 pub const ExecutionGasResult = settlement_mod.ExecutionGasResult;
 pub const BlockGas = settlement_mod.BlockGas;
@@ -43,7 +42,6 @@ pub const SenderRecoveryError = signing.SenderRecoveryError;
 pub const transactionView = transaction_mod.transactionView;
 pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
 pub const executionContext = transaction_mod.executionContext;
-pub const executionMessage = transaction_mod.executionMessage;
 pub const executionRequest = transaction_mod.executionRequest;
 pub const accessListCounts = gas_mod.accessListCounts;
 pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;
@@ -56,19 +54,14 @@ pub const PrepareResult = transaction_mod.PrepareResult;
 pub const recoverSender = signing.recoverSender;
 pub const signingHash = signing.signingHash;
 pub const recoverAuthorizationSigner = signing.recoverAuthorizationSigner;
+pub const Program = program.Transaction;
+pub const Context = program.Context;
+pub const TransitionOutcome = program.TransitionOutcome;
+pub const TransactOutcome = program.TransactOutcome;
+pub const GasRuntime = gas_mod.Runtime;
+pub const SettlementRuntime = settlement_mod.Runtime;
 
-pub fn For(comptime ProtocolType: type) type {
-    return struct {
-        pub const Protocol = ProtocolType;
-        pub const blob = blob_mod.For(ProtocolType);
-        pub const gas = gas_mod.For(ProtocolType);
-        /// Gas-derived producer for source-neutral resource-bound envelopes.
-        pub const gas_bound = gas_bound_plan.For(ProtocolType);
-        pub const settlement = settlement_mod.For(ProtocolType);
-    };
-}
-
-test "transaction facade exposes root frame and transaction scope" {
+test "transaction scope composes with the canonical execution message" {
     const addr = @import("./address.zig").addr;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
@@ -88,11 +81,10 @@ test "transaction facade exposes root frame and transaction scope" {
         .r = 1,
         .s = 1,
     }};
-    const root = RootFrame{ .call = .{
+    const message = @import("./execution.zig").Message{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .input = &.{0x42},
-        .gas_limit = 100_000,
         .value = 3,
     } };
     const scope = TransactionScope{
@@ -106,51 +98,24 @@ test "transaction facade exposes root frame and transaction scope" {
         .authorization_count = authorization_list.len,
     };
 
-    try std.testing.expect(!root.isCreate());
-    try std.testing.expectEqualSlices(u8, &sender, &root.sender());
-    try std.testing.expectEqualSlices(u8, &.{0x42}, root.input());
-    try std.testing.expectEqual(@as(u64, 100_000), root.gasLimit());
-    try std.testing.expectEqual(@as(u256, 3), root.value());
+    try std.testing.expect(!message.isCreate());
+    try std.testing.expectEqualSlices(u8, &sender, &message.sender());
+    try std.testing.expectEqualSlices(u8, &.{0x42}, message.input());
+    try std.testing.expectEqual(@as(u256, 3), message.value());
     try std.testing.expectEqual(@as(usize, 1), scope.access_list.len);
     try std.testing.expectEqual(@as(usize, 1), scope.authorization_list.len);
     try std.testing.expectEqual(@as(usize, 1), scope.authorizationCount());
 
-    const request = executionRequest(scope.context, root, .{
+    const request = executionRequest(scope.context, message, .{
         .regular_left = 79_000,
         .reservoir = 3,
     });
     try std.testing.expectEqualDeep(scope.context, request.context);
-    const message = request.message.call;
-    try std.testing.expectEqual(sender, message.sender);
-    try std.testing.expectEqual(recipient, message.recipient);
-    try std.testing.expectEqual(@as(u64, 79_000), message.gas);
-    try std.testing.expectEqual(@as(u64, 3), message.gas_reservoir);
-}
-
-test "transaction bound namespace carries comptime protocol" {
-    const blob_gas_per_blob: u64 = 131_072;
-    const DoubleBlobProtocol = struct {
-        pub const Revision = enum { test_revision };
-
-        pub const transaction = struct {
-            pub fn blobSchedule(revision: Revision) ?BlobSchedule {
-                _ = revision;
-                return .{
-                    .target = 3,
-                    .max = 6,
-                    .max_per_transaction = 6,
-                    .gas_per_blob = blob_gas_per_blob * 2,
-                    .min_base_fee = 1,
-                    .execution_base_cost = 8_192,
-                    .base_fee_update_fraction = 3_338_477,
-                    .reserve_price_active = false,
-                };
-            }
-        };
-    };
-    const Bound = For(DoubleBlobProtocol);
-
-    try std.testing.expectEqual(blob_gas_per_blob * 2, Bound.blob.blobSchedule(.test_revision).?.gas_per_blob);
+    const call = request.message.call;
+    try std.testing.expectEqual(sender, call.sender);
+    try std.testing.expectEqual(recipient, call.recipient);
+    try std.testing.expectEqual(@as(u64, 79_000), request.gas.regular_left);
+    try std.testing.expectEqual(@as(u64, 3), request.gas.reservoir);
 }
 
 test {

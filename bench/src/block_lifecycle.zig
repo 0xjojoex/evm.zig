@@ -2,8 +2,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 const common = @import("common.zig");
 
-const Protocol = evmz.Evm.Protocol;
-const GrowableVm = evmz.Evm;
+const Engine = evmz.Evm;
 const MemoryStore = evmz.state.MemoryStore;
 
 const sender_address = evmz.addr(0x1000000000000000000000000000000000000001);
@@ -209,18 +208,20 @@ fn runGrowableLifecycle(allocator: std.mem.Allocator, options: Options) !RunResu
     defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var vm = GrowableVm.init(allocator, .{
+    var executor = Engine.Executor.init(allocator, .{
         .revision = options.spec,
         .state_reader = memory.reader(),
-        .committer = memory.committer(),
-        .env = growableEnv(options.block_gas_limit),
     });
-    errdefer vm.deinit();
+    errdefer executor.deinit();
 
-    var block = try vm.beginBlock(growableEnv(options.block_gas_limit));
+    var block = try Engine.BlockExecution.init(
+        &executor,
+        growableEnv(options.block_gas_limit),
+    );
+    defer block.discardIfUnfinished();
     const block_result = try runTransactions(&block, options, access_list.entries);
-    if (options.commit) try vm.commit();
-    vm.deinit();
+    if (options.commit) try commitChanges(&executor, &memory);
+    executor.deinit();
     const end_ns = try common.monotonicNowNs();
 
     return .{
@@ -243,18 +244,22 @@ fn runExactLifecycle(
     defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var vm = try GrowableVm.initBound(allocator, .{
+    var executor = try Engine.initBoundExecutor(allocator, .{
         .revision = options.spec,
         .state_reader = memory.reader(),
-        .committer = memory.committer(),
-        .env = growableEnv(gas_limit),
-    }, .{ .max_block_gas = gas_limit });
-    errdefer vm.deinit();
+    }, .{
+        .max_block_gas = gas_limit,
+    });
+    errdefer executor.deinit();
 
-    var block = try vm.beginBlock(growableEnv(gas_limit));
+    var block = try Engine.BlockExecution.init(
+        &executor,
+        growableEnv(gas_limit),
+    );
+    defer block.discardIfUnfinished();
     const block_result = try runTransactions(&block, options, access_list.entries);
-    if (options.commit) try vm.commit();
-    vm.deinit();
+    if (options.commit) try commitChanges(&executor, &memory);
+    executor.deinit();
     const end_ns = try common.monotonicNowNs();
 
     return .{
@@ -263,6 +268,13 @@ fn runExactLifecycle(
         .block_gas_used = block_result.block_gas.total,
         .tx_count = block_result.tx_count,
     };
+}
+
+fn commitChanges(executor: *Engine.Executor, memory: *MemoryStore) !void {
+    var changes = try executor.changeset();
+    defer changes.deinit(executor.allocator);
+    try memory.committer().commit(&changes);
+    executor.discardChanges();
 }
 
 fn seedState(memory: *MemoryStore, case: Case) !void {
@@ -346,9 +358,11 @@ fn runTransactions(block: anytype, options: Options, access_list: []const evmz.t
             .access_list = access_list,
         });
         switch (result) {
-            .executed => |executed| if (executed.status != .success) {
-                std.debug.print("tx_index={d} status={s}\n", .{ index, @tagName(executed.status) });
-                return error.TransactionFailed;
+            .included => |included| {
+                if (included.result.status != .success) {
+                    std.debug.print("tx_index={d} status={s}\n", .{ index, @tagName(included.result.status) });
+                    return error.TransactionFailed;
+                }
             },
             .rejected => |err| {
                 std.debug.print("tx_index={d} validation_error={s}\n", .{ index, @tagName(err) });
@@ -468,12 +482,12 @@ fn printUsage() void {
         \\  --block-gas-limit <n>        growable block gas limit, default 120000000
         \\  --access-list-addresses <n>  synthetic access-list address entries per tx, default 0
         \\  --access-list-storage-keys <n> synthetic storage keys spread across entries, default 0
-        \\  --no-commit                  skip final vm.commit()
+        \\  --no-commit                  skip final changeset persistence
         \\  --summary                    print resolved options to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp     opt into std.heap.smp_allocator for allocator probes
         \\
-        \\This runner times one VM lifecycle per repeat: seeded pre-state outside timing,
-        \\then Vm.init, beginBlock, tx loop, optional commit, Vm.deinit inside timing.
+        \\This runner times one execution lifecycle per repeat: seeded pre-state outside timing,
+        \\then Executor init, BlockExecution tx loop, optional persistence, and Executor deinit.
         \\
     , .{});
 }

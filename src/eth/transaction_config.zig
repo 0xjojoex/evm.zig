@@ -23,7 +23,7 @@ pub fn Patch(comptime R: type) type {
         maxInitcodeSize: ?*const fn (R) usize = null,
         intrinsicBaseGas: ?*const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = null,
         createIntrinsicGas: ?*const fn (R) ?u64 = null,
-        dataByteGas: ?*const fn (R, u8) u64 = null,
+        calldataGas: ?*const fn (R, []const u8) ?u64 = null,
         accessListAddressGas: ?*const fn (R) u64 = null,
         storageKeyGas: ?*const fn (R) u64 = null,
         accessListDataGas: ?*const fn (R, tx_gas.AccessListCounts) ?u64 = null,
@@ -34,6 +34,7 @@ pub fn Patch(comptime R: type) type {
         regularGasLimit: ?*const fn (R, u64) u64 = null,
         intrinsicRegularGasLimit: ?*const fn (R) ?u64 = null,
         totalGasLimit: ?*const fn (R) ?u64 = null,
+        transactionWarmsCoinbase: ?*const fn (R) bool = null,
     };
     definition.assertPatchMirrors(definition.TransactionConfig(R), PatchType);
     return PatchType;
@@ -54,7 +55,7 @@ pub fn config(comptime R: type) definition.TransactionConfig(R) {
         .maxInitcodeSize = transaction.Transaction.maxInitcodeSize,
         .intrinsicBaseGas = transaction.Transaction.intrinsicBaseGas,
         .createIntrinsicGas = transaction.Transaction.createIntrinsicGas,
-        .dataByteGas = transaction.Transaction.dataByteGas,
+        .calldataGas = transaction.Transaction.calldataGas,
         .accessListAddressGas = transaction.Transaction.accessListAddressGas,
         .storageKeyGas = transaction.Transaction.storageKeyGas,
         .accessListDataGas = transaction.Transaction.accessListDataGas,
@@ -65,5 +66,6 @@ pub fn config(comptime R: type) definition.TransactionConfig(R) {
         .regularGasLimit = transaction.Transaction.regularGasLimit,
         .intrinsicRegularGasLimit = transaction.Transaction.intrinsicRegularGasLimit,
         .totalGasLimit = transaction.Transaction.totalGasLimit,
+        .transactionWarmsCoinbase = transaction.Transaction.transactionWarmsCoinbase,
     };
 }

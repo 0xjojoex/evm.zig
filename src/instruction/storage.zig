@@ -181,7 +181,7 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.SLOAD)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -237,7 +237,7 @@ test "SSTORE gas and state gas come from comptime protocol" {
     msg.gas_reservoir = 5;
     const code = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -275,7 +275,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -309,7 +309,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -345,7 +345,7 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -371,7 +371,7 @@ test "prepared SSTORE rejects static context before host access" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -404,7 +404,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,

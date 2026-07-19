@@ -1,11 +1,13 @@
-//! Binds a `Definition` value into the runtime dispatch surface.
+//! Binds authored definition values into per-layer runtime surfaces.
 //!
-//! `Protocol` turns a fork-config value (`definition.zig`) into the bound
-//! namespace the interpreter, executor, and VM dispatch through: instruction
-//! tables, transaction rules, support window, and revision model.
+//! Each layer binds directly above the one below it: `ExecutionProtocol`
+//! turns an execution definition into the dispatch namespace the interpreter
+//! and executor consume (instruction tables, support window, revision model);
+//! `TransactionProtocol` binds transaction policy above it; `BlockProtocol`
+//! binds block sequencing hooks above that. There is no composed all-domain
+//! protocol namespace.
 
 const definition = @import("./definition.zig");
-const opcode_info = @import("./opcode.zig");
 
 const types = @import("./protocol/types.zig");
 const validate = @import("./protocol/validate.zig");
@@ -45,45 +47,34 @@ pub const DelegatedAccountAccess = types.DelegatedAccountAccess;
 pub const AuthorizationGasAdjustment = types.AuthorizationGasAdjustment;
 pub const ChildGas = types.ChildGas;
 
-pub fn assertValidDefinition(comptime definition_value: anytype) void {
-    validate.assertValidDefinition(definition.Bound(definition_value));
+/// Assert the full execution-layer contract for one execution definition:
+/// dispatch surface, precompile domain, and interpreter dynamic-gas hooks.
+pub fn assertExecutionContract(comptime execution_definition: anytype) void {
+    validate.assertExecutionContract(definition.BoundExecution(execution_definition));
 }
 
-pub fn assertValidProtocolDefinition(comptime definition_value: anytype) void {
-    validate.assertValidProtocolDefinition(definition.Bound(definition_value));
+/// Assert the dispatch and precompile contract for one execution definition.
+pub fn assertDispatchContract(comptime execution_definition: anytype) void {
+    validate.assertDispatchContract(definition.BoundExecution(execution_definition));
 }
 
-pub const RevisionModel = support.Model;
+/// Assert one transaction definition's preparation contract over revision `R`.
+pub fn assertTransactionContract(comptime R: type, comptime transaction_definition: anytype) void {
+    validate.assertTransactionContract(R, transaction_definition);
+}
+
 pub const DispatchEntry = dispatcher.DispatchEntry;
-pub const DispatchTable = dispatcher.DispatchTable;
-pub const DispatchConfig = dispatcher.DispatchConfig;
-pub const ExecutionOverride = dispatcher.ExecutionOverride;
 pub const ExecutionTarget = dispatcher.ExecutionTarget;
-pub const HotColdDispatch = dispatcher.HotColdDispatch;
-pub const InstructionContext = instruction.Context;
-pub const OpInfo = opcode_info.OpInfo;
 pub const OpcodeTier = support.OpcodeTier;
 pub const Resolution = support.Resolution;
-pub const ProtocolWithDispatch = binding.ProtocolWithDispatch;
+pub const ExecutionProtocol = binding.ExecutionProtocol;
+pub const TransactionProtocol = binding.TransactionProtocol;
+pub const BlockProtocol = binding.BlockProtocol;
 pub const StaticGas = dispatcher.StaticGas;
-pub const StaticGasBand = support.StaticGasBand;
-pub const StaticGasBands = support.StaticGasBands;
-pub const resolveDispatchTable = dispatcher.resolveDispatchTable;
 pub const RevisionId = support.RevisionId;
 pub const revisionId = support.revisionId;
-pub const decodeRevision = support.decodeRevision;
-pub const revisionSupported = support.revisionSupported;
-pub const assertRevisionSupported = support.assertRevisionSupported;
 pub const revisionIdForProtocol = support.revisionIdForProtocol;
 pub const decodeRevisionForProtocol = support.decodeRevisionForProtocol;
-
-/// Bind a protocol definition to one concrete support window.
-pub fn Protocol(
-    comptime definition_value: anytype,
-    comptime support_window: definition.Bound(definition_value).Support,
-) type {
-    return ProtocolWithDispatch(definition_value, support_window, .{});
-}
 
 test {
     _ = @import("./protocol/test.zig");

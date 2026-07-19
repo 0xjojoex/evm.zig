@@ -11,34 +11,85 @@ const Address = @import("./address.zig").Address;
 
 const precompile_runtime = @import("./execution/precompile_runtime.zig");
 
+pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
 pub const PrecompileCall = precompile_runtime.PrecompileCall;
 pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
 pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
 
-/// A raw top-level call to execute in one transaction scope.
+/// A top-level call message.
 pub const Call = struct {
     sender: Address,
     recipient: Address,
     input: []const u8 = &.{},
-    gas: u64,
-    gas_reservoir: u64 = 0,
     value: u256 = 0,
 };
 
-/// A raw top-level create or create2 to execute in one transaction scope.
+/// A top-level create or create2 message.
 pub const Create = struct {
     sender: Address,
     init_code: []const u8,
-    gas: u64,
-    gas_reservoir: u64 = 0,
     value: u256 = 0,
     salt: ?u256 = null,
 };
 
-/// The gas-bearing root message consumed by the execution engine.
+/// The root call/create identity consumed by the execution engine.
+///
+/// The resolved execution budget lives on `EvmExecutionRequest`: it changes
+/// during transaction preparation while the message itself does not.
 pub const Message = union(enum) {
     call: Call,
     create: Create,
+
+    pub fn init(message_input: struct {
+        sender: Address,
+        to: ?Address = null,
+        input: []const u8 = &.{},
+        value: u256 = 0,
+        create2_salt: ?u256 = null,
+    }) Message {
+        if (message_input.to) |recipient| {
+            return .{ .call = .{
+                .sender = message_input.sender,
+                .recipient = recipient,
+                .input = message_input.input,
+                .value = message_input.value,
+            } };
+        }
+        return .{ .create = .{
+            .sender = message_input.sender,
+            .init_code = message_input.input,
+            .value = message_input.value,
+            .salt = message_input.create2_salt,
+        } };
+    }
+
+    pub fn sender(self: Message) Address {
+        return switch (self) {
+            .call => |call| call.sender,
+            .create => |create| create.sender,
+        };
+    }
+
+    pub fn input(self: Message) []const u8 {
+        return switch (self) {
+            .call => |call| call.input,
+            .create => |create| create.init_code,
+        };
+    }
+
+    pub fn value(self: Message) u256 {
+        return switch (self) {
+            .call => |call| call.value,
+            .create => |create| create.value,
+        };
+    }
+
+    pub fn isCreate(self: Message) bool {
+        return switch (self) {
+            .call => false,
+            .create => true,
+        };
+    }
 };
 
 /// Chain-lifetime values resolved for EVM execution.
@@ -108,15 +159,18 @@ pub const ExecutionScopeInit = struct {
 pub const EvmExecutionRequest = struct {
     context: ExecutionContext,
     message: Message,
+    gas: ExecutionGas,
 };
 
 test "execution request and scope initialization contain no family policy" {
     const request_fields = std.meta.fields(EvmExecutionRequest);
-    try std.testing.expectEqual(@as(usize, 2), request_fields.len);
+    try std.testing.expectEqual(@as(usize, 3), request_fields.len);
     try std.testing.expectEqualStrings("context", request_fields[0].name);
     try std.testing.expect(request_fields[0].type == ExecutionContext);
     try std.testing.expectEqualStrings("message", request_fields[1].name);
     try std.testing.expect(request_fields[1].type == Message);
+    try std.testing.expectEqualStrings("gas", request_fields[2].name);
+    try std.testing.expect(request_fields[2].type == ExecutionGas);
 
     const scope_fields = std.meta.fields(ExecutionScopeInit);
     try std.testing.expectEqual(@as(usize, 1), scope_fields.len);
@@ -128,8 +182,28 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expect(!@hasField(EvmExecutionRequest, "authorization_list"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "settlement"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "checkpoint"));
+    try std.testing.expect(!@hasField(Call, "gas"));
+    try std.testing.expect(!@hasField(Call, "gas_reservoir"));
+    try std.testing.expect(!@hasField(Create, "gas"));
+    try std.testing.expect(!@hasField(Create, "gas_reservoir"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "access_list"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "authorization_list"));
+}
+
+test "message identity is independent from gas and preserves create2 salt" {
+    const sender = [_]u8{0x11} ** 20;
+    const message = Message.init(.{
+        .sender = sender,
+        .input = &.{0x42},
+        .value = 7,
+        .create2_salt = 9,
+    });
+
+    try std.testing.expect(message.isCreate());
+    try std.testing.expectEqual(sender, message.sender());
+    try std.testing.expectEqualSlices(u8, &.{0x42}, message.input());
+    try std.testing.expectEqual(@as(u256, 7), message.value());
+    try std.testing.expectEqual(@as(?u256, 9), message.create.salt);
 }
 
 test "concrete request literals expose call and warm-set fields" {
@@ -144,8 +218,8 @@ test "concrete request literals expose call and warm-set fields" {
         .message = .{ .call = .{
             .sender = sender,
             .recipient = recipient,
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     };
     const scope: ExecutionScopeInit = .{ .initial_warm_set = .{
         .accounts = &.{recipient},
@@ -153,6 +227,7 @@ test "concrete request literals expose call and warm-set fields" {
     } };
 
     try std.testing.expectEqual(@as(u256, 1), request.context.chain.chain_id);
+    try std.testing.expectEqual(@as(u64, 100_000), request.gas.regular_left);
     try std.testing.expectEqual(@as(usize, 1), scope.initial_warm_set.accounts.len);
     try std.testing.expectEqual(@as(usize, 1), scope.initial_warm_set.storage_slots.len);
 }

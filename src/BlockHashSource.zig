@@ -1,7 +1,7 @@
 //! Canonical block-history lookup for the native BLOCKHASH opcode.
 //!
-//! Real chain callers pass this through `Vm.Init.block_hash_source` or
-//! `Executor.Init.block_hash_source` before executing transactions for a block.
+//! Real chain callers pass this through `Executor.Init.block_hash_source`
+//! before executing transactions for a block.
 //! Implement it from canonical header/block-history data: return the ancestor
 //! hash for the requested block number, or `null` when the hash is unavailable.
 

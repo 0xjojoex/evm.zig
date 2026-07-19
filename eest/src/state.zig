@@ -6,9 +6,9 @@ const tx_validation = @import("tx_validation.zig");
 const Address = evmz.Address;
 const JsonValue = fixture_common.JsonValue;
 const transaction = evmz.transaction;
-const EthProtocol = evmz.Evm.Protocol;
-const tx_protocol = transaction.For(EthProtocol);
+const EthTransactionProtocol = evmz.Evm.TransactionProtocol;
 const Evm = evmz.Evm;
+const TxResult = transaction.TransactOutcome(evmz.vm.TxExecutionResult, Evm.Rejection);
 
 const supported_exact_gas_bound_limits = [_]u64{
     1_000_000,
@@ -320,7 +320,7 @@ fn finishVectorResult(
     fixture: *const std.json.ObjectMap,
     post_obj: *const std.json.ObjectMap,
     host: anytype,
-    result: evmz.TxResult,
+    result: TxResult,
     expected_exception: ?[]const u8,
     summary: *Summary,
 ) !void {
@@ -345,7 +345,7 @@ fn finishVectorResult(
     }
 }
 
-fn validationFailReason(err: EthProtocol.Transaction.ValidationError) FailReason {
+fn validationFailReason(err: EthTransactionProtocol.Tx.ValidationError) FailReason {
     return switch (err) {
         .nonce_mismatch => .transaction_nonce_mismatch,
         else => .unexpected_status,
@@ -657,7 +657,8 @@ fn parseBlobBaseFee(revision: evmz.eth.Revision, env: *const std.json.ObjectMap,
     if (config.blob_schedule) |schedule| {
         return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
     }
-    return tx_protocol.blob.blobBaseFeeForRevision(revision, excess_blob_gas) orelse error.Overflow;
+    const schedule = Evm.transaction_policy.transaction.blobSchedule(revision) orelse return 0;
+    return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
 }
 
 fn selectedU256(tx: *const std.json.ObjectMap, key: []const u8, index: usize) !u256 {
@@ -698,7 +699,8 @@ fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
 const FixtureHost = struct {
     allocator: std.mem.Allocator,
     store: *evmz.state.MemoryStore,
-    vm: Evm,
+    executor: Evm.Executor,
+    env: evmz.Env,
 
     const Self = @This();
 
@@ -715,48 +717,54 @@ const FixtureHost = struct {
 
         try seedMemoryStore(allocator, store, pre);
 
-        var vm = Evm.init(allocator, .{
+        var executor = Evm.Executor.init(allocator, .{
             .revision = revision,
             .state_reader = store.reader(),
             .block_hash_source = EestStateBlockHashSource.source(),
-            .env = env,
         });
-        errdefer vm.deinit();
+        errdefer executor.deinit();
 
         return .{
             .allocator = allocator,
             .store = store,
-            .vm = vm,
+            .executor = executor,
+            .env = env,
         };
     }
 
     fn deinit(self: *Self) void {
-        self.vm.deinit();
+        self.executor.deinit();
         self.store.deinit();
         self.allocator.destroy(self.store);
     }
 
     fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
-        return self.vm.getAccount(address);
+        return accountView(&self.executor, address);
     }
 
     fn getStorage(self: *Self, address: Address, key: u256) !u256 {
-        return self.vm.getStorage(address, key);
+        return self.executor.getStorage(address, key);
     }
 
-    fn transact(self: *Self, tx: evmz.Transaction) !evmz.TxResult {
-        const outcome = try self.vm.transact(tx);
-        var pending = switch (outcome) {
-            .pending => |value| value,
-            .rejected => |err| return .{ .rejected = err },
+    fn transact(self: *Self, tx: evmz.Transaction) !TxResult {
+        var block = try Evm.BlockExecution.init(
+            &self.executor,
+            self.env,
+        );
+        defer block.discardIfUnfinished();
+        const outcome = try block.transact(tx);
+        return switch (outcome) {
+            .included => |included| blk: {
+                _ = try block.finish();
+                break :blk .{ .executed = included.result };
+            },
+            .rejected => |err| .{ .rejected = err },
         };
-        defer pending.deinit();
-        return .{ .executed = try pending.accept() };
     }
 
     fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-        var changeset = try self.vm.changeset();
-        defer changeset.deinit(self.vm.executor.allocator);
+        var changeset = try self.executor.changeset();
+        defer changeset.deinit(self.executor.allocator);
         return self.store.stateRootAfterChangeset(allocator, &changeset);
     }
 };
@@ -767,7 +775,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
     return struct {
         allocator: std.mem.Allocator,
         store: *evmz.state.MemoryStore,
-        vm: ExactEvm,
+        executor: ExactEvm.Executor,
         env: evmz.Env,
 
         const Self = @This();
@@ -785,24 +793,25 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
 
             try seedMemoryStore(allocator, store, pre);
 
-            var vm = try ExactEvm.initBound(allocator, .{
+            var executor = try ExactEvm.initBoundExecutor(allocator, .{
                 .revision = spec,
                 .state_reader = store.reader(),
                 .block_hash_source = EestStateBlockHashSource.source(),
-                .env = env,
-            }, .{ .max_block_gas = gas_limit });
-            errdefer vm.deinit();
+            }, .{
+                .max_block_gas = gas_limit,
+            });
+            errdefer executor.deinit();
 
             return .{
                 .allocator = allocator,
                 .store = store,
-                .vm = vm,
+                .executor = executor,
                 .env = env,
             };
         }
 
         fn deinit(self: *Self) void {
-            self.vm.deinit();
+            self.executor.deinit();
             self.store.deinit();
             self.allocator.destroy(self.store);
         }
@@ -816,33 +825,52 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.store.clearAccounts();
             try seedMemoryStore(self.allocator, self.store, pre);
 
-            try self.vm.reset(.{
+            try self.executor.reset(.{
                 .revision = spec,
                 .state_reader = self.store.reader(),
                 .block_hash_source = EestStateBlockHashSource.source(),
-                .env = env,
             });
             self.env = env;
         }
 
         fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
-            return self.vm.getAccount(address);
+            return accountView(&self.executor, address);
         }
 
         fn getStorage(self: *Self, address: Address, key: u256) !u256 {
-            return self.vm.getStorage(address, key);
+            return self.executor.getStorage(address, key);
         }
 
-        fn transact(self: *Self, tx: evmz.Transaction) !evmz.TxResult {
-            var block = try self.vm.beginBlock(self.env);
-            return block.transact(tx);
+        fn transact(self: *Self, tx: evmz.Transaction) !TxResult {
+            var block = try ExactEvm.BlockExecution.init(
+                &self.executor,
+                self.env,
+            );
+            defer block.discardIfUnfinished();
+            const outcome = try block.transact(tx);
+            return switch (outcome) {
+                .included => |included| blk: {
+                    _ = try block.finish();
+                    break :blk .{ .executed = included.result };
+                },
+                .rejected => |err| .{ .rejected = err },
+            };
         }
 
         fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-            var changeset = try self.vm.changeset();
-            defer changeset.deinit(self.vm.executor.allocator);
+            var changeset = try self.executor.changeset();
+            defer changeset.deinit(self.executor.allocator);
             return self.store.stateRootAfterChangeset(allocator, &changeset);
         }
+    };
+}
+
+fn accountView(executor: *Evm.Executor, address: Address) !?evmz.vm.AccountView {
+    const account = try executor.getAccountOrLoad(address) orelse return null;
+    return .{
+        .nonce = account.nonce,
+        .balance = account.balance,
+        .code = try executor.getCode(address),
     };
 }
 

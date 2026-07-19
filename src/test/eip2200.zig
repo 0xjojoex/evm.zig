@@ -126,7 +126,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, revision: evmz.eth.Revi
     };
 }
 
-fn testingFrame() !Interpreter.OwnedCallFrame(evmz.Evm.Protocol) {
+fn testingFrame() !Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol) {
     const code = [_]u8{@intFromEnum(Opcode.STOP)};
     var host: Host = undefined;
     const msg = Host.Message{
@@ -139,7 +139,7 @@ fn testingFrame() !Interpreter.OwnedCallFrame(evmz.Evm.Protocol) {
         .value = 0,
     };
 
-    return Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    return Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,

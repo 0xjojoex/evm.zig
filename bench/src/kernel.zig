@@ -345,7 +345,7 @@ fn measureEvmzCapture(
     defer tape.deinit();
 
     counting_host.resetCounters();
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
@@ -397,7 +397,7 @@ fn measureEvmz(
 
     counting_host.resetCounters();
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,

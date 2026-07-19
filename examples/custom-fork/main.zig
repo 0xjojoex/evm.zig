@@ -3,10 +3,17 @@ const evmz = @import("evmz");
 
 const Revision = evmz.eth.Revision;
 
-const CustomFork = evmz.eth.define(.{
+const CustomExecution = evmz.eth.defineExecution(.{
     .name = "custom-fork",
+    .create = .{
+        .createCodeSizeLimit = createCodeSizeLimit,
+        .createInitCodeSizeLimit = createInitCodeSizeLimit,
+    },
+});
+const CustomTransaction = evmz.eth.defineTransaction(.{
     .transaction = .{
         .maxInitcodeSize = maxInitcodeSize,
+        .transactionWarmsCoinbase = transactionWarmsCoinbase,
     },
     .settlement = .{
         .gasRefundCapDivisor = gasRefundCapDivisor,
@@ -14,18 +21,17 @@ const CustomFork = evmz.eth.define(.{
     .authorization = .{
         .warmsDelegatedTarget = warmsDelegatedTarget,
     },
-    .block = .{
-        .transactionWarmsCoinbase = transactionWarmsCoinbase,
-    },
-    .create = .{
-        .createCodeSizeLimit = createCodeSizeLimit,
-        .createInitCodeSizeLimit = createInitCodeSizeLimit,
-    },
 });
-const CustomVM = evmz.Vm(Revision, CustomFork, .{
-    .support = .{ .min = .cancun, .max = .cancun },
-});
-const CustomProtocol = CustomVM.Protocol;
+const CustomBlock = evmz.eth.defineBlock(.{});
+const CustomVM = evmz.Vm(
+    Revision,
+    CustomExecution,
+    CustomTransaction,
+    CustomBlock,
+    .{ .support = .{ .min = .cancun, .max = .cancun } },
+);
+const CustomExecutionProtocol = CustomVM.ExecutionProtocol;
+const CustomTransactionProtocol = CustomVM.TransactionProtocol;
 
 fn warmsDelegatedTarget(revision: Revision) bool {
     return revision.isImpl(.prague);
@@ -56,22 +62,18 @@ fn createInitCodeSizeLimit(revision: Revision) ?usize {
 }
 
 comptime {
-    evmz.protocol.assertValidDefinition(CustomFork);
-    if (CustomProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) @compileError("custom create limit mismatch");
-    if (CustomProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) @compileError("custom transaction limit mismatch");
-    if (CustomProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) @compileError("custom settlement mismatch");
-    if (!CustomProtocol.authorization.warmsDelegatedTarget(.prague)) @compileError("custom authorization mismatch");
-    if (!CustomProtocol.block.transactionWarmsCoinbase(.london)) @compileError("custom block mismatch");
+    if (CustomExecutionProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) @compileError("custom create limit mismatch");
+    if (CustomTransactionProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) @compileError("custom transaction limit mismatch");
+    if (CustomTransactionProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) @compileError("custom settlement mismatch");
+    if (!CustomTransactionProtocol.authorization.warmsDelegatedTarget(.prague)) @compileError("custom authorization mismatch");
+    if (!CustomTransactionProtocol.transaction.transactionWarmsCoinbase(.london)) @compileError("custom transaction warming mismatch");
 }
 
 pub fn main(_: std.process.Init) !void {
-    var vm = CustomVM.init(std.heap.page_allocator, .{ .revision = .cancun });
-    defer vm.deinit();
-
-    if (CustomProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
-    if (CustomProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
-    if (CustomProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
-    if (!CustomProtocol.authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
-    if (!CustomProtocol.block.transactionWarmsCoinbase(.london)) return error.CustomBlockMismatch;
-    std.debug.print("{s}: code size limit {d}\n", .{ CustomFork.name, CustomProtocol.create.createCodeSizeLimit(.cancun).? });
+    if (CustomExecutionProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
+    if (CustomTransactionProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
+    if (CustomTransactionProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
+    if (!CustomTransactionProtocol.authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
+    if (!CustomTransactionProtocol.transaction.transactionWarmsCoinbase(.london)) return error.CustomTransactionWarmingMismatch;
+    std.debug.print("{s}: code size limit {d}\n", .{ CustomExecution.name, CustomExecutionProtocol.create.createCodeSizeLimit(.cancun).? });
 }

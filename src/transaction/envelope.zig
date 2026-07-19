@@ -7,8 +7,8 @@
 //! a malformed authorization signature (bad scalar range, s-too-high) or an
 //! empty authorization list rejects the entire transaction here.
 //!
-//! This is deliberately NOT the same check as the executor's per-tuple
-//! authorization processing (`executor.applyAuthorizationTuple`). Per EIP-7702,
+//! This is deliberately NOT the same check as the transaction program's
+//! per-tuple authorization processing. Per EIP-7702,
 //! at execution an invalid authorization tuple is silently skipped and the
 //! transaction still succeeds. Keep the two separate: wiring this hard-reject
 //! into block execution would reject blocks the network considers valid.
@@ -191,7 +191,7 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
 }
 
 test "set-code transaction rejects empty authorization list" {
-    const Ethereum = @import("../eth.zig").Protocol;
+    const Ethereum = @import("../eth.zig").Protocol.TransactionProtocol;
     const hex = "04f86401808007830186a09400000000000000000000000000000000000000008080c0c001a04319a2e8066a9beedd85b227bf40cdecfb6134e6c1254f1e680895bc3131df31a059efad54e662f062d9af60acca08efb1d3d312742e381a600aac7c7989f892cc";
     var bytes: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, hex);
@@ -202,7 +202,7 @@ test "set-code transaction rejects empty authorization list" {
 }
 
 test "raw transaction validation uses comptime transaction kind policy" {
-    const Ethereum = @import("../eth.zig").Protocol;
+    const Ethereum = @import("../eth.zig").Protocol.TransactionProtocol;
     const EarlySetCodeProtocol = struct {
         pub const Revision = EthRevision;
 

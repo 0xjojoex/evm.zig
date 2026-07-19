@@ -653,7 +653,7 @@ test "call frame can execute with externally supplied stack storage" {
     defer frame.deinit();
     try std.testing.expect(frame.stack.slots == &stack_storage);
 
-    var interpreter = For(evmz.Evm.Protocol).init(&frame);
+    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -698,7 +698,7 @@ test "call frame can execute with externally supplied memory storage" {
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
 
-    var interpreter = For(evmz.Evm.Protocol).init(&frame);
+    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -730,7 +730,7 @@ test "interpreter trace sink records step start and end" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sink();
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -786,7 +786,7 @@ test "interpreter captured tail table records a replay span" {
         .depth = 0,
         .kind = .root,
     });
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -831,7 +831,7 @@ test "interpreter captured tail table records optional memory writes" {
         .input_data = &.{},
         .value = 0,
     };
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -896,7 +896,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
             .input_data = &.{},
             .value = 0,
         };
-        var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+        var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .code = case.code,
@@ -932,7 +932,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
         .input_data = &.{},
         .value = 0,
     };
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -1049,7 +1049,7 @@ test "interpreter trace schema controls step emission" {
 
     var recorder = TraceRecorder{};
     var sink = recorder.sinkWithoutEvents();
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
@@ -1257,7 +1257,7 @@ test "interpreter can execute prepared bytecode jumpdest map" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -1291,7 +1291,7 @@ test "prepared bytecode preserves truncated push semantics" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
@@ -1325,7 +1325,7 @@ test "prepared bytecode keeps CODESIZE semantic length" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.Protocol).init(std.testing.allocator, .{
+    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,

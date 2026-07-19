@@ -472,7 +472,9 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return switch (comptime availability) {
                 .always => null,
                 .never => fail(ctx, ip, sp, gas, .invalid),
-                .runtime => switch (comptime Protocol.opcodeAvailability(opcode)) {
+                .runtime => switch (comptime Protocol.Instruction.rawAvailability(
+                    Protocol.Instruction.fromByte(@intFromEnum(opcode)),
+                )) {
                     .always => null,
                     .never => fail(ctx, ip, sp, gas, .invalid),
                     .since => |activation| if (Instructions.revisionIncludes(Instructions.frameRevision(ctx.frame), activation)) null else fail(ctx, ip, sp, gas, .invalid),

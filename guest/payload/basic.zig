@@ -98,20 +98,23 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     const contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(&bytecode);
 
-    var vm = evmz.Evm.init(allocator, .{
+    var executor = evmz.Evm.Executor.init(allocator, .{
         .revision = .latest,
         .state_reader = memory.reader(),
-        .env = .{ .gas_limit = gas_limit },
     });
-    defer vm.deinit();
+    defer executor.deinit();
 
+    var vm = evmz.Evm.init(&executor);
     const outcome = try vm.transact(.{
-        .sender = sender,
-        .to = contract,
-        .gas_limit = gas_limit,
+        .env = .{ .gas_limit = gas_limit },
+        .tx = .{
+            .sender = sender,
+            .to = contract,
+            .gas_limit = gas_limit,
+        },
     });
-    var pending = switch (outcome) {
-        .pending => |value| value,
+    const executed = switch (outcome) {
+        .executed => |value| value,
         .rejected => return .{
             .status = .rejected,
             .gas_used = 0,
@@ -120,9 +123,9 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
             .storage_slot0_low = 0,
         },
     };
-    defer pending.deinit();
-    const result = try pending.accept();
-    var diff = try vm.changeset();
+    defer executed.discardIfCurrent();
+    const result = try executed.result();
+    var diff = try executed.changeset();
     defer diff.deinit(allocator);
 
     return .{

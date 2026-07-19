@@ -3,14 +3,16 @@ const evmz = @import("../../evm.zig");
 
 const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
-const EthProtocol = evmz.Evm.Protocol;
-const Executor = evmz.Executor;
+const Executor = evmz.Evm.Executor;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
-const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
-const tx_protocol = transaction.For(EthProtocol);
+const Gas = transaction.GasRuntime(
+    evmz.Evm.TransactionProtocol,
+    @FieldType(evmz.Evm.TransactionPolicy, "transaction"),
+);
+const gas = Gas{ .transaction = &evmz.Evm.transaction_policy.transaction };
 
 test "Amsterdam value-to-empty account state gas is charged at top frame" {
     const sender = evmz.addr(0xaaaa);
@@ -28,21 +30,20 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
 }
 
 test "Amsterdam value-to-empty account state gas is not intrinsic" {
-    try std.testing.expectEqual(@as(u64, 21_000), tx_protocol.gas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
+    try std.testing.expectEqual(@as(u64, 21_000), gas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
         .value = 1,
         .creates_account = true,
     }));
 
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const root = RootFrame{ .call = .{
+    const message = evmz.execution.Message{ .call = .{
         .sender = sender,
         .recipient = recipient,
-        .gas_limit = 21_000,
         .value = 1,
     } };
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{
-        .value = root.value(),
+    const gas_plan = gas.gasPlan(.amsterdam, &.{}, 21_000, .{
+        .value = message.value(),
         .creates_account = true,
     });
 
@@ -91,35 +92,30 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
         .r = 1,
         .s = 1,
     }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 300_000,
-        .value = 1,
-    } };
-    const scope = Executor.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{
-        .authorization_count = authorization_list.len,
-        .value = root.value(),
-        .creates_account = true,
-    });
+    var vm = evmz.Evm.init(&executor);
+    const executed = try expectExecuted(try vm.transact(.{
+        .env = .{ .gas_limit = 300_000, .coinbase = tx_context.coinbase },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 300_000,
+            .max_fee_per_gas = tx_context.gas_price,
+            .max_priority_fee_per_gas = 0,
+            .value = 1,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+    const result = try executed.result();
 
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
-            .gas_price = tx_context.gas_price,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-            .payer = sender,
-            .value = root.value(),
-        }),
-    }, .{ .execute = ExecuteTx.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
+    try std.testing.expectEqual(evmz.TxStatus.success, result.status);
+    // The authorization itself creates state, but the value transfer does not
+    // charge a second new-account slice after installing the delegation.
+    try std.testing.expectEqual(
+        @as(u64, evmz.eth.transaction.amsterdam_authorization_state_gas),
+        result.gas.block.state,
+    );
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
 }
 
@@ -150,17 +146,6 @@ test "Amsterdam top-frame delegated target charges cold even when warm" {
     try std.testing.expectEqual(@as(i64, 7_000), result.gas_left);
 }
 
-const ExecuteTx = struct {
-    fn execute(
-        ptr: ?*anyopaque,
-        inner: *Executor,
-        request: evmz.execution.EvmExecutionRequest,
-    ) !Interpreter.Result {
-        _ = ptr;
-        return inner.executeTransactionRequest(request);
-    }
-};
-
 fn executorWithSender(sender: Address, balance: u256) !Executor {
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .amsterdam,
@@ -169,6 +154,13 @@ fn executorWithSender(sender: Address, balance: u256) !Executor {
     sender_account.balance = balance;
     try executor.state.seedAccount(sender, sender_account);
     return executor;
+}
+
+fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
+    return switch (outcome) {
+        .executed => |executed| executed,
+        .rejected => error.UnexpectedRejection,
+    };
 }
 
 const testTxContext = evmz.t.defaultTxContext;

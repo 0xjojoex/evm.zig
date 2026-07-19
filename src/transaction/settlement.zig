@@ -2,6 +2,7 @@ const std = @import("std");
 
 const address = @import("../address.zig");
 const Address = address.Address;
+const definition = @import("../definition.zig");
 const definition_support = @import("../protocol/support.zig");
 const tx_blob = @import("blob.zig");
 const tx_gas = @import("gas.zig");
@@ -147,13 +148,20 @@ const EthereumSettlementProtocol = struct {
     };
 };
 
-pub fn For(comptime ProtocolType: type) type {
+/// Settlement planner borrowing one immutable transaction-policy snapshot.
+pub fn Runtime(
+    comptime ProtocolType: type,
+    comptime TransactionPolicy: type,
+) type {
     return struct {
         pub const Protocol = ProtocolType;
+        const Self = @This();
 
-        pub fn effectivePriorityFee(revision: Protocol.Revision, input: FeeInput) u256 {
+        policy: *const TransactionPolicy,
+
+        pub fn effectivePriorityFee(self: Self, revision: Protocol.Revision, input: FeeInput) u256 {
             definition_support.assertRevisionSupported(Protocol, revision);
-            if (!Protocol.settlement.baseFeeActive(revision)) return input.gas_price;
+            if (!self.policy.settlement.baseFeeActive(revision)) return input.gas_price;
             if (input.max_fee_per_gas) |max_fee| {
                 const max_priority_fee = input.max_priority_fee_per_gas orelse 0;
                 if (max_fee <= input.base_fee) return 0;
@@ -163,8 +171,8 @@ pub fn For(comptime ProtocolType: type) type {
             return input.gas_price - input.base_fee;
         }
 
-        pub fn defaultPlanFromGasPlan(revision: Protocol.Revision, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
-            const upfront_debit = prechargeCost(Protocol, revision, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
+        pub fn defaultPlanFromGasPlan(self: Self, revision: Protocol.Revision, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
+            const upfront_debit = prechargeCost(self.policy.transaction.blobSchedule, revision, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
             return .{
                 .revision_id = definition_support.revisionIdForProtocol(Protocol, revision),
                 .payer = fees.payer,
@@ -180,11 +188,11 @@ pub fn For(comptime ProtocolType: type) type {
             };
         }
 
-        pub fn planRevisionId(plan: DefaultPlan) definition_support.RevisionId {
+        pub fn planRevisionId(_: Self, plan: DefaultPlan) definition_support.RevisionId {
             return plan.revision_id;
         }
 
-        pub fn planPrecharge(plan: DefaultPlan) Precharge {
+        pub fn planPrecharge(_: Self, plan: DefaultPlan) Precharge {
             return .{
                 .payer = plan.payer,
                 .upfront_debit = plan.upfront_debit,
@@ -192,73 +200,114 @@ pub fn For(comptime ProtocolType: type) type {
             };
         }
 
-        pub fn planCosts(plan: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
-            return defaultCosts(plan, result);
+        pub fn planCosts(self: Self, plan: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
+            return self.defaultCosts(plan, result);
         }
 
-        pub fn planGas(costs: DefaultCosts) ResultGas {
+        pub fn planGas(_: Self, costs: DefaultCosts) ResultGas {
             return costs.gas;
         }
 
-        pub fn defaultCosts(settlement: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
+        pub fn defaultCosts(self: Self, settlement: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
             const revision = definition_support.decodeRevisionForProtocol(Protocol, settlement.revision_id);
-            const uses_state_gas_accounting = Protocol.settlement.usesStateGasAccounting(revision);
-            const gas_left = positiveGas(result.gas_left);
-            const gas_reservoir = if (uses_state_gas_accounting) positiveGas(result.gas_reservoir) else 0;
-            // EIP-8037: `gas_left` is regular gas only; unused state reservoir is also
-            // refunded, so transaction gas spent subtracts both remaining pools.
-            const pre_refund_gas_used = if (uses_state_gas_accounting)
-                settlement.gas_limit - @min(settlement.gas_limit, gas_left +| gas_reservoir)
-            else
-                settlement.gas_limit - @min(settlement.gas_limit, gas_left);
-            const refund_cap_divisor = Protocol.settlement.gasRefundCapDivisor(revision);
-            const refund_cap = pre_refund_gas_used / refund_cap_divisor;
-            const raw_refund = if (result.gas_refund > 0)
-                std.math.cast(u64, result.gas_refund) orelse std.math.maxInt(u64)
-            else
-                0;
-            const refund_gas = @min(raw_refund, refund_cap);
-            const gas_used_after_refund = pre_refund_gas_used - @min(pre_refund_gas_used, refund_gas);
-            const gas_used = @max(gas_used_after_refund, settlement.floor_gas);
-            const block_state_gas_used = if (uses_state_gas_accounting)
-                settledStateGas(settlement.intrinsic_state_gas, result.state_gas_spent)
-            else
-                0;
-            const block_regular_before_floor = pre_refund_gas_used - @min(pre_refund_gas_used, block_state_gas_used);
-            const block_regular_gas_used = if (uses_state_gas_accounting)
-                @max(block_regular_before_floor, settlement.floor_gas)
-            else
-                gas_used;
-            const block_gas = if (uses_state_gas_accounting)
-                BlockGas.fromDimensions(block_regular_gas_used, block_state_gas_used)
-            else
-                BlockGas.legacy(gas_used);
-            const sender_refunded_gas = settlement.gas_limit - @min(settlement.gas_limit, gas_used);
-
-            return .{
-                .gas = .{
-                    .used = gas_used,
-                    .refunded = sender_refunded_gas,
-                    .block = block_gas,
-                },
-                .payer_refund = try checkedGasCost(sender_refunded_gas, settlement.gas_price),
-                .fee_payment = try checkedGasCost(gas_used, settlement.priority_fee),
-            };
+            return calculateDefaultCosts(
+                settlement,
+                result,
+                self.policy.settlement.usesStateGasAccounting(revision),
+                self.policy.settlement.gasRefundCapDivisor(revision),
+            );
         }
     };
 }
 
-fn prechargeCost(comptime Protocol: type, revision: Protocol.Revision, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn StaticPolicy(comptime Protocol: type) type {
+    return struct {
+        settlement: definition.SettlementConfig(Protocol.Revision),
+        transaction: definition.TransactionPolicyConfig(Protocol.Revision),
+    };
+}
+
+/// Static-policy adapter for protocol-level helpers and tests. Settlement
+/// behavior remains implemented only by `Runtime`.
+pub fn For(comptime ProtocolType: type) Runtime(ProtocolType, StaticPolicy(ProtocolType)) {
+    const Policy = StaticPolicy(ProtocolType);
+    const Values = struct {
+        const policy: Policy = .{
+            .settlement = definition.projectSettlementConfig(
+                ProtocolType.Revision,
+                ProtocolType.settlement,
+            ),
+            .transaction = definition.projectTransactionConfig(
+                ProtocolType.Revision,
+                if (@hasDecl(ProtocolType, "transaction"))
+                    ProtocolType.transaction
+                else
+                    definition.TransactionConfig(ProtocolType.Revision).default,
+            ),
+        };
+    };
+    return .{ .policy = &Values.policy };
+}
+
+fn prechargeCost(blob_schedule_for_revision: anytype, revision: anytype, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
     const gas_cost = checkedGasCost(gas_limit, gas_price) catch return null;
-    const blob_gas = blobGasForCount(Protocol, revision, blob_count, blob_schedule) orelse return null;
+    const blob_gas = blobGasForCount(blob_schedule_for_revision, revision, blob_count, blob_schedule) orelse return null;
     const blob_cost = std.math.mul(u256, blob_gas, blob_base_fee) catch return null;
     return std.math.add(u256, gas_cost, blob_cost) catch null;
 }
 
-fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn blobGasForCount(blob_schedule_for_revision: anytype, revision: anytype, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = blob_schedule orelse Protocol.transaction.blobSchedule(revision) orelse return null;
+    const schedule = blob_schedule orelse blob_schedule_for_revision(revision) orelse return null;
     return tx_blob.blobGasForSchedule(schedule, blob_count);
+}
+
+fn calculateDefaultCosts(
+    settlement: DefaultPlan,
+    result: ExecutionGasResult,
+    uses_state_gas_accounting: bool,
+    refund_cap_divisor: u64,
+) !DefaultCosts {
+    const gas_left = positiveGas(result.gas_left);
+    const gas_reservoir = if (uses_state_gas_accounting) positiveGas(result.gas_reservoir) else 0;
+    // EIP-8037: `gas_left` is regular gas only; unused state reservoir is also
+    // refunded, so transaction gas spent subtracts both remaining pools.
+    const pre_refund_gas_used = if (uses_state_gas_accounting)
+        settlement.gas_limit - @min(settlement.gas_limit, gas_left +| gas_reservoir)
+    else
+        settlement.gas_limit - @min(settlement.gas_limit, gas_left);
+    const refund_cap = pre_refund_gas_used / refund_cap_divisor;
+    const raw_refund = if (result.gas_refund > 0)
+        std.math.cast(u64, result.gas_refund) orelse std.math.maxInt(u64)
+    else
+        0;
+    const refund_gas = @min(raw_refund, refund_cap);
+    const gas_used_after_refund = pre_refund_gas_used - @min(pre_refund_gas_used, refund_gas);
+    const gas_used = @max(gas_used_after_refund, settlement.floor_gas);
+    const block_state_gas_used = if (uses_state_gas_accounting)
+        settledStateGas(settlement.intrinsic_state_gas, result.state_gas_spent)
+    else
+        0;
+    const block_regular_before_floor = pre_refund_gas_used - @min(pre_refund_gas_used, block_state_gas_used);
+    const block_regular_gas_used = if (uses_state_gas_accounting)
+        @max(block_regular_before_floor, settlement.floor_gas)
+    else
+        gas_used;
+    const block_gas = if (uses_state_gas_accounting)
+        BlockGas.fromDimensions(block_regular_gas_used, block_state_gas_used)
+    else
+        BlockGas.legacy(gas_used);
+    const sender_refunded_gas = settlement.gas_limit - @min(settlement.gas_limit, gas_used);
+
+    return .{
+        .gas = .{
+            .used = gas_used,
+            .refunded = sender_refunded_gas,
+            .block = block_gas,
+        },
+        .payer_refund = try checkedGasCost(sender_refunded_gas, settlement.gas_price),
+        .fee_payment = try checkedGasCost(gas_used, settlement.priority_fee),
+    };
 }
 
 pub fn checkedGasCost(gas: u64, price: u256) !u256 {

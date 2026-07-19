@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
-const Executor = evmz.Executor;
+const Executor = evmz.Evm.Executor;
 const Host = evmz.Host;
 const trace = evmz.trace;
 
@@ -17,12 +17,10 @@ test "execution checkpoints require one stable transaction scope" {
     try std.testing.expectError(error.MissingTransactionScope, executor.checkpoint());
     try std.testing.expectError(error.MissingTransactionScope, executor.warmAccount(other));
     try std.testing.expectError(error.MissingTransactionScope, executor.warmStorage(other, 1));
-    try std.testing.expectError(error.MissingTransactionScope, executor.warmAccessList(&.{}));
     try std.testing.expectError(error.MissingTransactionScope, executor.executeMessage(.{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 100_000,
-    } }));
+    } }, .legacy(100_000)));
 
     const tx_context = evmz.t.defaultTxContext(sender, 100_000);
     try executor.beginTransaction(tx_context, sender, contract);
@@ -80,43 +78,7 @@ test "transaction request rejects a root different from the warmed scope" {
     var mismatched = original;
     mismatched.message.call.recipient = evmz.addr(0xcccc);
     try std.testing.expectError(error.ExecutionScopeRootMismatch, executor.executeTransactionRequest(mismatched));
-    try std.testing.expectError(error.ExecutionScopeRootMismatch, executor.executeMessage(mismatched.message));
-}
-
-test "top-level shell rejects a root different from the warmed scope before mutation" {
-    const sender = evmz.addr(0xaaaa);
-    const opened_recipient = evmz.addr(0xbbbb);
-    const mismatched_recipient = evmz.addr(0xcccc);
-    var executor = Executor.init(std.testing.allocator, .{ .revision = .cancun });
-    defer executor.deinit();
-
-    const opened = request(sender, opened_recipient);
-    try executor.beginMessageScope(opened, .{});
-    defer executor.closeTransaction();
-
-    const scope = Executor.TransactionScope{ .context = opened.context };
-    const root = evmz.transaction.RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = mismatched_recipient,
-        .gas_limit = 100_000,
-    } };
-    try std.testing.expectError(error.ExecutionScopeRootMismatch, executor.runTopLevelTransaction(scope, root, .{
-        .execution = .legacy(79_000),
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.cancun),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = evmz.addr(0),
-        },
-    }));
-
-    if (try executor.getAccountOrLoad(sender)) |account| {
-        try std.testing.expectEqual(@as(u64, 0), account.nonce);
-    }
+    try std.testing.expectError(error.ExecutionScopeRootMismatch, executor.executeMessage(mismatched.message, mismatched.gas));
 }
 
 test "beginMessageScope derives root identity context and neutral warmth" {
@@ -160,8 +122,8 @@ test "beginMessageScope derives root identity context and neutral warmth" {
         .message = .{ .call = .{
             .sender = sender,
             .recipient = recipient,
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     }, .{ .initial_warm_set = .{
         .accounts = &warm_accounts,
         .storage_slots = &warm_slots,
@@ -184,7 +146,7 @@ test "beginMessageScope derives root identity context and neutral warmth" {
     }, try host.getTxContext());
     try std.testing.expect(executor.state.warm_accounts.contains(sender));
     try std.testing.expect(executor.state.warm_accounts.contains(recipient));
-    try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
+    try std.testing.expect(!executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(executor.state.warm_accounts.contains(additional));
     try std.testing.expect(executor.state.isStorageWarm(additional, 47));
     try std.testing.expect(!executor.state.warm_accounts.contains(cold));
@@ -195,12 +157,12 @@ test "beginMessageScope derives root identity context and neutral warmth" {
         .message = .{ .create = .{
             .sender = sender,
             .init_code = &.{},
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     }, .{});
 
     try std.testing.expect(executor.state.warm_accounts.contains(sender));
-    try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
+    try std.testing.expect(!executor.state.warm_accounts.contains(coinbase));
     try std.testing.expect(!executor.state.warm_accounts.contains(recipient));
 }
 
@@ -214,7 +176,7 @@ test "beginMessageScope closes scope when initial warming fails" {
     });
     defer executor.deinit();
     try executor.state.configureAccessResources(.{
-        .accounts = 3,
+        .accounts = 2,
         .storage_keys = 0,
     });
 
@@ -227,8 +189,8 @@ test "beginMessageScope closes scope when initial warming fails" {
         .message = .{ .call = .{
             .sender = sender,
             .recipient = recipient,
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     }, .{ .initial_warm_set = .{
         .accounts = &.{additional},
     } }));
@@ -478,8 +440,8 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
             .sender = sender,
             .recipient = precompile,
             .input = &input,
-            .gas = 1_000,
         } },
+        .gas = .legacy(1_000),
     }, .{}));
     _ = try capture.finish();
 
@@ -624,8 +586,8 @@ fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExec
         .message = .{ .call = .{
             .sender = sender,
             .recipient = recipient,
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     };
 }
 

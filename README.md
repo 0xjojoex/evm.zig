@@ -42,31 +42,36 @@ const evmz = @import("evmz");
 var memory = evmz.state.MemoryStore.init(allocator);
 defer memory.deinit();
 
-var vm = evmz.Evm.init(allocator, .{
+var executor = evmz.Evm.Executor.init(allocator, .{
     .revision = .latest,
     .state_reader = memory.reader(),
-    .env = .{ .gas_limit = 100_000 },
 });
-defer vm.deinit();
+defer executor.deinit();
 
-var pending = switch (try vm.transact(.{
-    .sender = evmz.addr(0xaaaa),
-    .to = evmz.addr(0xbbbb),
-    .gas_limit = 100_000,
+var vm = evmz.Evm.init(&executor);
+const execution = switch (try vm.transact(.{
+    .env = .{ .gas_limit = 100_000 },
+    .tx = .{
+        .sender = evmz.addr(0xaaaa),
+        .to = evmz.addr(0xbbbb),
+        .gas_limit = 100_000,
+    },
 })) {
-    .pending => |value| value,
+    .executed => |value| value,
     .rejected => return error.TransactionRejected,
 };
-defer pending.deinit(); // Rejects automatically if still unresolved.
+defer execution.discardIfCurrent();
 
-// Inspect pending.result() and pending.logs(), then decide explicitly.
-const executed = try pending.accept();
-// executed.status, executed.gas.used, executed.output
-// vm.changeset() gives you the state diff to commit or discard.
+// Execution is complete, but its rollback cursor remains armed.
+const result = try execution.result();
+// result.status, result.gas.used, result.output
+var diff = try execution.changeset();
+defer diff.deinit(allocator);
 ```
 
-Use `vm.transactCommit(tx)` when the VM has a committer and the transaction
-should be accepted and persisted in one call.
+To persist, commit `diff` to the backend first, then call `execution.retain()`
+and `executor.discardChanges()`. If persistence fails, the deferred discard
+still restores the pre-transaction branch.
 
 A complete runnable version — deploy code, transact, read storage back — lives
 in `examples/basic.zig`:
@@ -92,40 +97,67 @@ Normal initialization is infallible and growable. Embedded and zkVM callers
 can reserve a gas-derived capacity envelope explicitly:
 
 ```zig
-var vm = try evmz.Evm.initBound(allocator, .{
+var executor = try evmz.Evm.initBoundExecutor(allocator, .{
     .revision = .cancun,
     .state_reader = memory.reader(),
-    .env = .{ .gas_limit = 30_000_000 },
 }, .{
     .max_block_gas = 30_000_000,
 });
+defer executor.deinit();
 
-var block = try vm.beginBlock(.{ .gas_limit = 30_000_000 });
+var block = try evmz.Evm.BlockExecution.init(&executor, .{
+    .gas_limit = 30_000_000,
+});
+defer block.discardIfUnfinished();
 ```
 
 The bound controls allocation capacity; `Env.gas_limit` remains actual runtime
-block data. Bounded VMs validate it against the allocation envelope and execute
-transactions and system calls through `BlockSession`.
+block data. Bounded executors validate it when `BlockExecution` runs a
+transaction. Family system operations belong to `BlockSTF`; the optional
+one-worker hook convenience is `Evm.Sequential`.
+Every block execution must reach `finish()` or `discardIfUnfinished()`.
 
 ## Bring your own chain
 
-Ethereum's constants, gas tables, and activation schedule live in one preset:
-`evmz.eth`. A custom EVM-family chain — different gas costs, forks, or
-precompile addresses — is another definition value bound the same way:
+Ethereum's execution, transaction, and block semantics live in the `evmz.eth`
+preset. A custom EVM-family chain can replace each layer independently and bind
+the three definitions into one engine family:
 
 ```zig
-const MyVM = evmz.Vm(MyRevision, MyChainDefinition, .{});
+const MyExecution = evmz.eth.defineExecution(.{ /* opcodes, gas, precompiles */ });
+const MyTransaction = evmz.eth.defineTransaction(.{ /* validation, settlement */ });
+const MyBlock = evmz.eth.defineBlock(.{ /* block hooks */ });
+
+const MyVM = evmz.Vm(
+    MyRevision,
+    MyExecution,
+    MyTransaction,
+    MyBlock,
+    .{},
+);
 ```
 
-The returned type carries its matching `Protocol`, `Executor`, `Interpreter`,
-`Transaction`, `TransactResult`, `PendingTransaction`, `TxResult`, and
-`TxStatus` types. Lowercase modules such as
+The returned type carries matching `ExecutionProtocol`, `TransactionProtocol`,
+and `BlockProtocol` bindings alongside its `Executor`, `Interpreter`,
+`Transaction`, `Outcome`, and `Executed` types. Lowercase modules such as
 `evmz.execution` and `evmz.executor` remain available for low-level work.
-Representation-changing families can build a typed facade over those APIs;
+`Executor` is the reusable mutable execution substrate.
+`MyVM.BlockExecution.init(&executor, env)` creates the block lifetime and its
+default transaction runtime in one step. Advanced composition can pass an
+already configured transaction runtime to `initWithRuntime` instead.
+Alternate transaction programs bind the complete family with
+`TransactionProgram.bind(MyVM)`, keeping their transaction rules and Executor
+protocol matched at comptime. Family-specific runtimes can build typed facades;
 [`examples/op-deposit.zig`](examples/op-deposit.zig) is a compact example.
 
-`evmz.protocol.assertValidDefinition` reports exactly what a definition must
-provide, and `examples/custom-fork/` is a working downstream-style template.
+Authored definitions provide the defaults. `initWithPolicy` on a transaction
+runtime, or `initWithPolicies` on block and sequential runtimes, selects other
+policy values without changing the generated `MyVM` or `Executor` type.
+
+`evmz.protocol.assertExecutionContract` and
+`evmz.protocol.assertTransactionContract` report what authored execution and
+transaction definitions must provide. `examples/custom-fork/` is a compiled
+downstream-style template of the complete composition.
 
 ## C / EVMC
 
@@ -156,20 +188,25 @@ medians per deployed-runtime call:
 
 | VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
 | ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
-| Arithmetic loop         |  0.120 ms |    0.102 ms |   0.325 ms |  0.489 ms |     0.85× |     4.08× |
-| Memory MSTORE loop      |  0.136 ms |    0.083 ms |   0.251 ms |  0.400 ms |     0.61× |     2.94× |
-| Keccak loop             |  2.656 ms |    3.505 ms |   3.587 ms |  2.697 ms |     1.32× |     1.02× |
-| Ten-thousand hashes     |  0.882 ms |    0.740 ms |   1.629 ms |  2.034 ms |     0.84× |     2.31× |
-| Storage SLOAD loop      |  0.300 ms |    0.585 ms |   0.644 ms |  0.350 ms |     1.95× |     1.17× |
-| Storage SSTORE loop     |  0.330 ms |    0.848 ms |   0.898 ms |  0.858 ms |     2.57× |     2.60× |
+| Arithmetic loop         |  0.119 ms |    0.099 ms |   0.325 ms |  0.489 ms |     0.83× |     4.11× |
+| Memory MSTORE loop      |  0.136 ms |    0.083 ms |   0.252 ms |  0.403 ms |     0.61× |     2.96× |
+| Keccak loop             |  2.652 ms |    3.508 ms |   3.589 ms |  2.697 ms |     1.32× |     1.02× |
+| Ten-thousand hashes     |  0.916 ms |    0.742 ms |   1.629 ms |  2.036 ms |     0.81× |     2.22× |
+| Storage SLOAD loop      |  0.189 ms |    0.589 ms |   0.644 ms |  0.350 ms |     3.12× |     1.85× |
+| Storage SSTORE loop     |  0.196 ms |    0.866 ms |   0.879 ms |  0.858 ms |     4.42× |     4.38× |
 | LOG0 / 0-byte data      |  0.045 ms |    0.030 ms |   0.081 ms |  0.127 ms |     0.66× |     2.81× |
-| LOG0 / 32-byte data     |  0.050 ms |    0.033 ms |   0.083 ms |  0.285 ms |     0.66× |     5.70× |
-| LOG4 / 0-byte data      |  0.086 ms |    0.069 ms |   0.147 ms |  0.264 ms |     0.81× |     3.09× |
-| LOG4 / 32-byte data     |  0.103 ms |    0.082 ms |   0.148 ms |  0.408 ms |     0.80× |     3.96× |
-| ERC20 mint              |  2.183 ms |    3.798 ms |   4.690 ms |  3.630 ms |     1.74× |     1.66× |
-| ERC20 transfer          |  4.235 ms |    6.207 ms |   7.391 ms |  6.094 ms |     1.47× |     1.44× |
-| ERC20 approval+transfer |  3.670 ms |    4.936 ms |   5.956 ms |  4.665 ms |     1.35× |     1.27× |
-| Snailtracer             | 22.349 ms |   59.465 ms |  78.832 ms | 37.814 ms |     2.66× |     1.69× |
+| LOG0 / 32-byte data     |  0.050 ms |    0.033 ms |   0.081 ms |  0.308 ms |     0.66× |     6.17× |
+| LOG4 / 0-byte data      |  0.086 ms |    0.078 ms |   0.148 ms |  0.264 ms |     0.90× |     3.08× |
+| LOG4 / 32-byte data     |  0.102 ms |    0.082 ms |   0.147 ms |  0.409 ms |     0.81× |     4.01× |
+| ERC20 mint              |  1.869 ms |    3.817 ms |   4.717 ms |  3.625 ms |     2.04× |     1.94× |
+| ERC20 transfer          |  3.859 ms |    6.183 ms |   7.423 ms |  6.088 ms |     1.60× |     1.58× |
+| ERC20 approval+transfer |  3.485 ms |    4.936 ms |   5.950 ms |  4.665 ms |     1.42× |     1.34× |
+| Snailtracer             | 20.495 ms |   59.606 ms |  78.840 ms | 37.704 ms |     2.91× |     1.84× |
+
+The ten-thousand-hashes dip is consistent with code-layout sensitivity rather
+than tracing work: trace-replay growth leaves the untraced Keccak handler
+byte-identical but shifts it by 16 bytes modulo a 64-byte cache line in the
+final binary.
 
 ### AMD EPYC Genoa / Linux x86-64
 

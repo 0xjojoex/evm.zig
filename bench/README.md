@@ -146,9 +146,10 @@ finalization, or journal/database setup.
 
 ## Block lifecycle runner
 
-`zig build block-lifecycle` measures the normal VM ownership shape for one block:
-pre-state is seeded outside timing, then the timed window runs `Vm.init`,
-`beginBlock`, a loop of protocol transactions, optional `commit`, and `Vm.deinit`.
+`zig build block-lifecycle` measures the normal execution ownership shape for
+one block: pre-state is seeded outside timing, then the timed window runs
+`Executor` initialization, a `BlockExecution` transaction loop, optional
+changeset persistence, and `Executor.deinit`.
 This lane is for integration-level growable-vs-exact policy checks, not VM-core
 dispatch comparisons.
 

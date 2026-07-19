@@ -5,7 +5,7 @@ const Host = evmz.Host;
 
 pub fn emit(executor: anytype, input: evmz.protocol.ValueTransferInput) !void {
     const Protocol = @TypeOf(executor.*).Protocol;
-    const transfer_log = Protocol.block.valueTransferLog(executor.revision(), input) orelse return;
+    const transfer_log = Protocol.valueTransferLog(executor.revision(), input) orelse return;
 
     const topics = [_]u256{
         transfer_log.topic,
@@ -26,19 +26,17 @@ test "value transfer log metadata comes from comptime protocol" {
     const CustomProtocol = struct {
         pub const Revision = evmz.eth.Revision;
 
-        pub const block = struct {
-            pub fn valueTransferLog(
-                revision: Revision,
-                input: evmz.protocol.ValueTransferInput,
-            ) ?evmz.protocol.ValueTransferLog {
-                _ = revision;
-                _ = input;
-                return .{
-                    .address = evmz.addr(0x77),
-                    .topic = 0x1234,
-                };
-            }
-        };
+        pub fn valueTransferLog(
+            revision: Revision,
+            input: evmz.protocol.ValueTransferInput,
+        ) ?evmz.protocol.ValueTransferLog {
+            _ = revision;
+            _ = input;
+            return .{
+                .address = evmz.addr(0x77),
+                .topic = 0x1234,
+            };
+        }
     };
     const FakeState = struct {
         allocator: std.mem.Allocator,

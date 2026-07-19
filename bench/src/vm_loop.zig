@@ -11,7 +11,7 @@ const BenchVM = evmz.EvmWith(.{
         .max = parseBuildSpec(build_options.support_max),
     },
 });
-const BenchProtocol = BenchVM.Protocol;
+const BenchExecutionProtocol = BenchVM.ExecutionProtocol;
 const Executor = BenchVM.Executor;
 const CountingHost = common.CountingHost;
 const HostCounters = common.HostCounters;
@@ -256,10 +256,10 @@ pub fn main(init: std.process.Init) !void {
         printUsage();
         return error.MissingContractCodePath;
     }
-    if (!BenchProtocol.support.contains(resolved.revision)) {
+    if (!BenchExecutionProtocol.support.contains(resolved.revision)) {
         std.debug.print(
             "spec {s} is outside compiled support range {s}..{s}\n",
-            .{ @tagName(resolved.revision), @tagName(BenchProtocol.support.min), @tagName(BenchProtocol.support.max) },
+            .{ @tagName(resolved.revision), @tagName(BenchExecutionProtocol.support.min), @tagName(BenchExecutionProtocol.support.max) },
         );
         return error.SpecOutsideSupportRange;
     }
@@ -321,8 +321,8 @@ pub fn main(init: std.process.Init) !void {
                 measureScopeName(resolved),
                 @tagName(resolved.host_profile),
                 @tagName(resolved.revision),
-                @tagName(BenchProtocol.support.min),
-                @tagName(BenchProtocol.support.max),
+                @tagName(BenchExecutionProtocol.support.min),
+                @tagName(BenchExecutionProtocol.support.max),
                 resolved.gas_limit,
                 runtime_code.len,
                 if (proxy_target_runtime_code) |target_code| target_code.len else 0,
@@ -677,7 +677,7 @@ fn deployRuntime(
     contract_code: []const u8,
     revision: evmz.eth.Revision,
 ) ![]u8 {
-    return deployRuntimeForProtocol(BenchProtocol, allocator, host, contract_code, revision);
+    return deployRuntimeForProtocol(BenchExecutionProtocol, allocator, host, contract_code, revision);
 }
 
 fn loadRuntimeCode(
@@ -740,7 +740,7 @@ fn timeRuntimeCall(
     revision: evmz.eth.Revision,
     gas_limit: u64,
 ) !u64 {
-    return timeRuntimeCallForProtocol(BenchProtocol, allocator, host, runtime_code, call_data, revision, gas_limit);
+    return timeRuntimeCallForProtocol(BenchExecutionProtocol, allocator, host, runtime_code, call_data, revision, gas_limit);
 }
 
 fn warmRuntimeCalls(
@@ -850,7 +850,7 @@ test "engine parser accepts aliases" {
 }
 
 test "compiled support range accepts default latest spec" {
-    try std.testing.expect(BenchProtocol.support.contains(.latest));
+    try std.testing.expect(BenchExecutionProtocol.support.contains(.latest));
 }
 
 test "build support spec parser accepts latest and hyphen aliases" {

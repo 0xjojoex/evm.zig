@@ -4,6 +4,7 @@ const evmz = @import("../evm.zig");
 const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
+const context_adapter = @import("context.zig");
 
 pub const BeforeBlockContext = evmz.protocol.BeforeBlockContext;
 pub const BeforeTransactionContext = evmz.protocol.BeforeTransactionContext;
@@ -13,41 +14,47 @@ pub const FinalizeBlockContext = evmz.protocol.FinalizeBlockContext;
 /// Applies before-block system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
 /// - EIP-2935 stores the previous block hash from Prague onward.
-pub fn applyBeforeBlock(executor: anytype, tx_context: Host.TxContext, context: BeforeBlockContext) !void {
-    const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.beforeBlock(executor.revision(), context);
+pub fn applyBeforeBlock(block_policy: anytype, executor: anytype, tx_context: Host.TxContext, context: BeforeBlockContext) !void {
+    const calls = block_policy.beforeBlock(executor.revision(), context);
     try applySystemCalls(executor, tx_context, &calls);
 }
 
-/// Produce the before-transaction batch without executing it.
-pub fn beforeTransactionCalls(executor: anytype, context: BeforeTransactionContext) evmz.protocol.BlockSystemCalls {
-    const Protocol = @TypeOf(executor.*).Protocol;
-    return Protocol.block.beforeTransaction(executor.revision(), context);
-}
-
-/// Execute one already-produced before-transaction batch.
-pub fn applyBeforeTransactionCalls(
-    executor: anytype,
+/// Execute a before-transaction batch inside the transaction program's outer
+/// journal attempt. Each call keeps its own execution checkpoint, while any
+/// later hook/payload/inclusion failure discards the complete attempt.
+pub fn applyBeforeTransactionPrelude(
+    block_policy: anytype,
+    prelude: anytype,
     tx_context: Host.TxContext,
-    calls: *const evmz.protocol.BlockSystemCalls,
-) !void {
-    try applySystemCalls(executor, tx_context, calls);
+    context: BeforeTransactionContext,
+) @TypeOf(prelude).Error!void {
+    const calls = block_policy.beforeTransaction(try prelude.revision(), context);
+    for (calls.slice()) |*call| {
+        try callSystemContractInPrelude(
+            prelude,
+            tx_context,
+            call.sender,
+            call.recipient,
+            call.input.slice(),
+            call.gas,
+            call.require_code,
+        );
+    }
 }
 
-pub fn applyAfterTransaction(executor: anytype, tx_context: Host.TxContext, context: AfterTransactionContext) !void {
-    const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.afterTransaction(executor.revision(), context);
+pub fn applyAfterTransaction(block_policy: anytype, executor: anytype, tx_context: Host.TxContext, context: AfterTransactionContext) !void {
+    const calls = block_policy.afterTransaction(executor.revision(), context);
     try applySystemCalls(executor, tx_context, &calls);
 }
 
 pub fn applyFinalizeBlock(
+    block_policy: anytype,
     executor: anytype,
     tx_context: Host.TxContext,
     allocator: std.mem.Allocator,
     context: FinalizeBlockContext,
 ) ![]const []const u8 {
-    const Protocol = @TypeOf(executor.*).Protocol;
-    const calls = Protocol.block.finalizeBlock(executor.revision(), context);
+    const calls = block_policy.finalizeBlock(executor.revision(), context);
 
     var out: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -135,6 +142,30 @@ fn callSystemContract(
     if (has_code and result.status != .success) return error.SystemCallFailed;
 }
 
+fn callSystemContractInPrelude(
+    prelude: anytype,
+    tx_context: Host.TxContext,
+    sender: Address,
+    recipient: Address,
+    input: []const u8,
+    gas: u64,
+    require_code: bool,
+) @TypeOf(prelude).Error!void {
+    const has_code = (try prelude.code(recipient)).len != 0;
+    if (!has_code and require_code) return error.SystemCallFailed;
+
+    const result = try prelude.executeRequest(.{
+        .context = context_adapter.fromHost(tx_context),
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = recipient,
+            .input = input,
+        } },
+        .gas = .legacy(gas),
+    });
+    if (has_code and result.status != .success) return error.SystemCallFailed;
+}
+
 fn callRequestSystemContract(
     executor: anytype,
     tx_context: Host.TxContext,
@@ -188,7 +219,7 @@ test "before block calls Prague and Cancun system contracts" {
     beacon_root[31] = 0xbb;
 
     const tx_context = testTxContext();
-    const calls = evmz.Evm.Protocol.block.beforeBlock(.prague, .{
+    const calls = evmz.Evm.block_policy.beforeBlock(.prague, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,
@@ -198,7 +229,7 @@ test "before block calls Prague and Cancun system contracts" {
         try std.testing.expectEqualSlices(u8, &ethereum.system_address, &call.sender);
     }
 
-    try applyBeforeBlock(&executor, tx_context, .{
+    try applyBeforeBlock(&evmz.Evm.block_policy, &executor, tx_context, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,
@@ -240,10 +271,18 @@ test "finalize block copies successful system contract output into typed request
         }
     };
 
-    const RequestProtocol = evmz.protocol.Protocol(evmz.eth.define(.{
+    const RequestBlockDefinition = comptime evmz.eth.defineBlock(.{
         .block = .{ .finalizeBlock = RequestBlock.finalizeBlock },
-    }), .all);
-    const Executor = evmz.executor.Executor(RequestProtocol);
+    });
+    const RequestProtocol = evmz.protocol.BlockProtocol(
+        evmz.eth.transactionProtocol(.all),
+        RequestBlockDefinition,
+    );
+    const request_policy = evmz.definition.projectBlockPolicy(
+        ethereum.Revision,
+        RequestBlockDefinition,
+    );
+    const Executor = evmz.executor.Executor(RequestProtocol.ExecutionProtocol);
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .prague,
     });
@@ -259,7 +298,7 @@ test "finalize block copies successful system contract output into typed request
     };
     try executor.state.setCode(RequestBlock.recipient, &request_code);
 
-    const requests = try applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
+    const requests = try applyFinalizeBlock(&request_policy, &executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,
@@ -297,16 +336,24 @@ test "finalize block rejects missing required system contract code" {
         }
     };
 
-    const RequiredProtocol = evmz.protocol.Protocol(evmz.eth.define(.{
+    const RequiredBlockDefinition = comptime evmz.eth.defineBlock(.{
         .block = .{ .finalizeBlock = RequiredBlock.finalizeBlock },
-    }), .all);
-    const Executor = evmz.executor.Executor(RequiredProtocol);
+    });
+    const RequiredProtocol = evmz.protocol.BlockProtocol(
+        evmz.eth.transactionProtocol(.all),
+        RequiredBlockDefinition,
+    );
+    const required_policy = evmz.definition.projectBlockPolicy(
+        ethereum.Revision,
+        RequiredBlockDefinition,
+    );
+    const Executor = evmz.executor.Executor(RequiredProtocol.ExecutionProtocol);
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .prague,
     });
     defer executor.deinit();
 
-    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
+    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&required_policy, &executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,

@@ -142,7 +142,7 @@ pub fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth
 fn parseBlobSchedule(revision: evmz.eth.Revision, value: JsonValue) !evmz.transaction.BlobSchedule {
     const schedule = asObject(value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = evmz.eth.Protocol.transaction.blobSchedule(revision) orelse return error.MalformedFixture;
+    var result = evmz.Evm.TransactionProtocol.transaction.blobSchedule(revision) orelse return error.MalformedFixture;
     result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
     result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
     result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);

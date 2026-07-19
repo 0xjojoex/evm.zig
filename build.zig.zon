@@ -35,6 +35,7 @@
         "build.zig",
         "build.zig.zon",
         "guest",
+        "examples",
         "include",
         "LICENSE",
         "pkg",

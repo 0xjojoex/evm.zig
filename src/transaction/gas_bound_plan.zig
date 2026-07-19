@@ -248,7 +248,7 @@ pub fn For(comptime Protocol: type) type {
         }
 
         pub fn maxCodeSize(revision: Protocol.Revision) usize {
-            return Protocol.create.createCodeSizeLimit(revision) orelse legacy_max_code_size;
+            return Protocol.ExecutionProtocol.create.createCodeSizeLimit(revision) orelse legacy_max_code_size;
         }
 
         fn accountWarmCost(revision: Protocol.Revision) u64 {
@@ -260,11 +260,11 @@ pub fn For(comptime Protocol: type) type {
         }
 
         fn storageOverlayEntryCost(revision: Protocol.Revision) u64 {
-            const state_gas = Protocol.storage.sstoreStateGas(revision, .added);
+            const state_gas = Protocol.ExecutionProtocol.storage.sstoreStateGas(revision, .added);
             if (state_gas.charge <= 0) return legacy_storage_overlay_entry_gas;
 
-            const storage_access = Protocol.storage.sstoreStorageAccessGas(revision, .cold) orelse 0;
-            const storage_write = Protocol.storage.sstoreGas(revision, .added).cost;
+            const storage_access = Protocol.ExecutionProtocol.storage.sstoreStorageAccessGas(revision, .cold) orelse 0;
+            const storage_write = Protocol.ExecutionProtocol.storage.sstoreGas(revision, .added).cost;
             const regular_gas = std.math.add(i64, storage_access, storage_write) catch return std.math.maxInt(u64);
             return std.math.cast(u64, regular_gas) orelse std.math.maxInt(u64);
         }
@@ -276,7 +276,7 @@ pub fn For(comptime Protocol: type) type {
 
         fn protocolWarmAccountReserve(revision: Protocol.Revision) usize {
             var count: usize = 2; // sender plus recipient or created address.
-            if (Protocol.block.transactionWarmsCoinbase(revision)) count += 1;
+            if (Protocol.transaction.transactionWarmsCoinbase(revision)) count += 1;
             if (Protocol.authorization.warmsDelegatedTarget(revision)) count += 1;
             return count;
         }
@@ -387,7 +387,7 @@ fn mul(comptime T: type, a: T, b: T) Error!T {
 
 fn ethereumTestProtocol() type {
     const eth = @import("../eth.zig");
-    return @import("../protocol.zig").ProtocolWithDispatch(eth.definition, eth.Protocol.Support.all, .{});
+    return eth.transactionProtocol(.all);
 }
 
 fn ethereumTestPlanner() type {
@@ -396,8 +396,7 @@ fn ethereumTestPlanner() type {
 
 test "bound gas plan input defaults to protocol support max" {
     const eth = @import("../eth.zig");
-    const protocol = @import("../protocol.zig");
-    const Cancun = protocol.ProtocolWithDispatch(eth.definition, eth.Protocol.Support.at(.cancun), .{});
+    const Cancun = eth.transactionProtocol(eth.Protocol.Support.at(.cancun));
     const Planner = For(Cancun);
     const input = Planner.Input{ .gas_limit = 1_000_000 };
 
@@ -500,7 +499,7 @@ fn runMstoreMemoryBoundary(comptime Protocol: type, gas_limit: u64, target_words
         .value = 0,
     };
 
-    var owned = try Interpreter.OwnedCallFrame(Protocol).init(std.testing.allocator, .{
+    var owned = try Interpreter.OwnedCallFrame(Protocol.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,

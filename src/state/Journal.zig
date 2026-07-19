@@ -44,6 +44,11 @@ pub const Entry = union(enum) {
         prev: u256,
         dirty: bool,
     },
+    storage_overlay: struct {
+        key: StorageKey,
+        had_value: bool,
+        prev: u256,
+    },
     transient_storage: struct {
         address: Address,
         key: u256,

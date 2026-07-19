@@ -3,171 +3,68 @@ const evmz = @import("../../evm.zig");
 
 const MemoryAccount = evmz.state.MemoryAccount;
 const Address = evmz.Address;
-const EthProtocol = evmz.Evm.Protocol;
-const Executor = evmz.Executor;
-const Host = evmz.Host;
+const Executor = evmz.Evm.Executor;
 const Interpreter = evmz.interpreter;
-const RootFrame = Executor.RootFrame;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
-const tx_protocol = transaction.For(EthProtocol);
 const eth_tx = evmz.eth.transaction;
 
-test "Amsterdam existing delegated EIP-7702 authority refills auth base state gas" {
-    const sender = evmz.addr(0xaaaa);
-    const authority = evmz.addr(0xbbbb);
-    const old_target = evmz.addr(0xcccc);
-    const new_target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
-    defer executor.deinit();
-
-    var code: [eip7702.delegation_code_len]u8 = undefined;
-    eip7702.writeDelegationCode(&code, old_target);
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    try authority_account.setCode(&code);
-    try executor.state.seedAccount(authority, authority_account);
-
-    try executor.beginTransaction(tx_context, sender, new_target);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = new_target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
+test "Amsterdam authorization policy refills existing delegation state gas" {
+    const adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+        .account_exists = true,
+        .clears_delegation = false,
+        .delegated_before_tuple = true,
+        .delegated_before_first_tuple = true,
     });
 
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), refund.regular_refund);
+    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.regular_refund);
     try std.testing.expectEqual(
         @as(u64, eth_tx.amsterdam_new_account_state_gas + eth_tx.amsterdam_auth_base_state_gas),
-        refund.state_refund,
+        adjustment.state_refund,
     );
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqualSlices(u8, &new_target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
-test "Amsterdam clearing EIP-7702 authority refills auth base state gas" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
-    defer executor.deinit();
-
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = evmz.address.zero_address,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
+test "Amsterdam authorization policy refills cleared delegation state gas" {
+    const adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+        .account_exists = false,
+        .clears_delegation = true,
+        .delegated_before_tuple = false,
+        .delegated_before_first_tuple = false,
     });
 
-    try std.testing.expectEqual(@as(u64, 0), refund.regular_refund);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_auth_base_state_gas), refund.state_refund);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
+    try std.testing.expectEqual(@as(u64, 0), adjustment.regular_refund);
+    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_auth_base_state_gas), adjustment.state_refund);
 }
 
-test "Amsterdam create then clear EIP-7702 authority refills auth base twice" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
+test "Amsterdam authorization policy composes create then clear refunds" {
+    var adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+        .account_exists = false,
+        .clears_delegation = false,
+        .delegated_before_tuple = false,
+        .delegated_before_first_tuple = false,
     });
-    defer executor.deinit();
+    adjustment.add(evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+        .account_exists = true,
+        .clears_delegation = true,
+        .delegated_before_tuple = true,
+        .delegated_before_first_tuple = false,
+    }));
 
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    const authorization_list = [_]transaction.AuthorizationTuple{
-        .{
-            .chain_id = 0,
-            .target = target,
-            .signer = authority,
-            .nonce = 0,
-            .y_parity = 0,
-            .legacy_v = null,
-            .r = 1,
-            .s = 1,
-        },
-        .{
-            .chain_id = 0,
-            .target = evmz.address.zero_address,
-            .signer = authority,
-            .nonce = 1,
-            .y_parity = 0,
-            .legacy_v = null,
-            .r = 1,
-            .s = 1,
-        },
-    };
-
-    const refund = try executor.applyAuthorizationList(&authorization_list);
-
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), refund.regular_refund);
+    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.regular_refund);
     try std.testing.expectEqual(
         @as(u64, eth_tx.amsterdam_new_account_state_gas + 2 * eth_tx.amsterdam_auth_base_state_gas),
-        refund.state_refund,
+        adjustment.state_refund,
     );
-    try std.testing.expectEqual(@as(u64, 2), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
 }
 
-test "Amsterdam invalid EIP-7702 authorization refills intrinsic auth gas" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
-    defer executor.deinit();
+test "Amsterdam invalid authorization policy refills intrinsic authorization gas" {
+    const adjustment = evmz.Evm.TransactionProtocol.authorization.invalidGasAdjustment(.amsterdam);
 
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    authority_account.nonce = std.math.maxInt(u64);
-    try executor.state.seedAccount(authority, authority_account);
-
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = std.math.maxInt(u64),
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    });
-
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), refund.regular_refund);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_authorization_state_gas), refund.state_refund);
-    try std.testing.expect(!executor.state.warm_accounts.contains(authority));
-    try std.testing.expectEqual(std.math.maxInt(u64), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
+    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.regular_refund);
+    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_authorization_state_gas), adjustment.state_refund);
 }
 
-test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
+test "Amsterdam transaction program applies EIP-7702 authorization" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const authority = evmz.addr(0xcccc);
@@ -196,59 +93,23 @@ test "Amsterdam existing EIP-7702 authority refills state gas reservoir" {
         .r = 1,
         .s = 1,
     }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 300_000,
-    } };
-    const scope = Executor.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-    const gas_plan = tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{ .authorization_count = 1 });
-
-    const CheckingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Executor,
-            request: evmz.execution.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = inner;
-            const gas = switch (request.message) {
-                inline else => |message| transaction.ExecutionGas{
-                    .regular_left = message.gas,
-                    .reservoir = message.gas_reservoir,
-                },
-            };
-            try std.testing.expectEqual(@as(u64, 50_394), gas.regular_left);
-            try std.testing.expectEqual(@as(u64, evmz.eth.transaction.amsterdam_new_account_state_gas), gas.reservoir);
-            return .{
-                .status = .success,
-                .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_refund = 0,
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
-                .state_gas_spent = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution = gas_plan.execution,
-        .settlement = tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
-            .gas_price = tx_context.gas_price,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-            .payer = sender,
-            .value = root.value(),
-        }),
-    }, .{ .execute = CheckingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, eth_tx.amsterdam_account_write_cost), result.gas_refund);
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
-    try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
+    var vm = evmz.Evm.init(&executor);
+    const executed = try expectExecuted(try vm.transact(.{
+        .env = .{ .gas_limit = 300_000, .coinbase = tx_context.coinbase },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 300_000,
+            .max_fee_per_gas = tx_context.gas_price,
+            .max_priority_fee_per_gas = 0,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+    try std.testing.expectEqual(evmz.TxStatus.success, (try executed.result()).status);
+    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
+    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "Amsterdam CREATE to pre-existing account refills parent state gas" {
@@ -361,3 +222,10 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
 }
 
 const testTxContext = evmz.t.defaultTxContext;
+
+fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
+    return switch (outcome) {
+        .executed => |executed| executed,
+        .rejected => error.UnexpectedRejection,
+    };
+}

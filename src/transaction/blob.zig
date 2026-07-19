@@ -109,7 +109,7 @@ pub fn blobVersion(hash: u256) u8 {
 
 test "transaction blob fee helpers" {
     const eth = @import("../eth.zig");
-    const Ethereum = eth.Protocol;
+    const Ethereum = eth.Protocol.TransactionProtocol;
     const EthBlob = For(Ethereum);
 
     try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(Ethereum.transaction.blobSchedule(.cancun).?, 0x0e0000));

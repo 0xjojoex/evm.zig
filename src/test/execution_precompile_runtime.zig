@@ -60,11 +60,17 @@ const StatefulPrecompile = struct {
     }
 };
 
-const StatefulDefinition = evmz.eth.define(.{
+const StatefulDefinition = evmz.eth.defineExecution(.{
     .name = "stateful-precompile-service-test",
     .precompile = StatefulPrecompile,
 });
-const StatefulVm = evmz.Vm(evmz.eth.Revision, StatefulDefinition, .{});
+const StatefulVm = evmz.Vm(
+    evmz.eth.Revision,
+    StatefulDefinition,
+    evmz.eth.transaction_definition,
+    evmz.eth.block_definition,
+    .{},
+);
 
 test "family precompile runtime can use host state and keeps EVM rollback semantics" {
     const sender = evmz.addr(0xaaaa);
@@ -120,27 +126,27 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     try std.testing.expectEqualSlices(u8, &.{0x55}, bounded_result.output_data);
 }
 
-test "Vm bounded init and reset preserve the precompile runtime" {
+test "bounded Executor reset preserves and replaces the precompile runtime" {
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
-    var vm = try StatefulVm.initBound(std.testing.allocator, .{
+    var executor = try StatefulVm.initBoundExecutor(std.testing.allocator, .{
         .revision = .cancun,
         .precompile_runtime = first_runtime.service(),
     }, .{ .max_block_gas = 100_000 });
-    defer vm.deinit();
+    defer executor.deinit();
 
-    const first = (try vm.executor.runStandaloneRequest(
+    const first = (try executor.runStandaloneRequest(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
-    try vm.reset(.{
+    try executor.reset(.{
         .revision = .cancun,
         .precompile_runtime = second_runtime.service(),
     });
-    const second = (try vm.executor.runStandaloneRequest(
+    const second = (try executor.runStandaloneRequest(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -157,7 +163,7 @@ fn request(sender: evmz.Address, recipient: evmz.Address, input: []const u8) evm
             .sender = sender,
             .recipient = recipient,
             .input = input,
-            .gas = 100_000,
         } },
+        .gas = .legacy(100_000),
     };
 }

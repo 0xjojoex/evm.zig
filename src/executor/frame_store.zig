@@ -348,7 +348,7 @@ test "frame store rebinds active rows after growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -367,7 +367,7 @@ test "frame store rebinds active rows after growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -407,7 +407,7 @@ test "bounded frame store uses reserved rows without growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -424,7 +424,7 @@ test "bounded frame store uses reserved rows without growth" {
         .input_data = &.{},
         .value = 0,
     };
-    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -432,7 +432,7 @@ test "bounded frame store uses reserved rows without growth" {
     });
     defer second.deinit();
 
-    try std.testing.expectError(error.FrameCapacityExceeded, store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    try std.testing.expectError(error.FrameCapacityExceeded, store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -457,7 +457,7 @@ test "frame store io slot owns frame output and parent returndata without frame 
         .input_data = &.{},
         .value = 0,
     };
-    var lease = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var lease = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -499,7 +499,7 @@ test "bounded frame store reconfigures retained growable io slots" {
         .value = 0,
     };
 
-    var growable = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var growable = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -512,7 +512,7 @@ test "bounded frame store reconfigures retained growable io slots" {
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].return_data.capacity());
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].output_data.capacity());
 
-    var bounded = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var bounded = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -541,7 +541,7 @@ test "bounded frame store reuses reserved evm memory without allocator growth" {
         .value = 0,
     };
 
-    var first = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var first = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &evmz.Bytecode.empty,
@@ -554,7 +554,7 @@ test "bounded frame store reuses reserved evm memory without allocator growth" {
     try std.testing.expectEqual(@as(usize, 32), store.memories.items[0].capacity);
     try std.testing.expectEqual(@as(usize, 0), store.memories.items[0].items.len);
 
-    var second = try store.acquire(evmz.Evm.Protocol, std.testing.allocator, std.testing.allocator, .{
+    var second = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &evmz.Bytecode.empty,

@@ -50,6 +50,10 @@ pub const amsterdam_max_initcode_size = eip8037.max_initcode_size;
 pub const max_transaction_gas_limit = eip8037.max_transaction_gas_limit;
 
 pub const Transaction = struct {
+    pub fn transactionWarmsCoinbase(revision: Revision) bool {
+        return revision.isImpl(.shanghai);
+    }
+
     pub fn kindActive(revision: Revision, kind: tx.TxKind) bool {
         return switch (kind) {
             .legacy => true,
@@ -161,6 +165,14 @@ pub const Transaction = struct {
     pub fn dataByteGas(revision: Revision, byte: u8) u64 {
         if (byte == 0) return 4;
         return if (revision.isImpl(.istanbul)) 16 else 68;
+    }
+
+    pub fn calldataGas(revision: Revision, input: []const u8) ?u64 {
+        var gas: u64 = 0;
+        for (input) |byte| {
+            gas = std.math.add(u64, gas, dataByteGas(revision, byte)) catch return null;
+        }
+        return gas;
     }
 
     pub fn accessListAddressGas(revision: Revision) u64 {

@@ -349,7 +349,7 @@ fn runBytecodeHostOp(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.Protocol).init(allocator, .{
+    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,

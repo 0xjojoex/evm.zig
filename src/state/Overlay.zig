@@ -964,16 +964,47 @@ pub fn beginTransaction(self: *Overlay) void {
     self.transaction_open = true;
 }
 
+/// Open one execution scope while retaining an outer transaction attempt's
+/// journal. Returns the journal boundary used to compact scope-local entries
+/// when the scope closes.
+pub fn beginExecutionScope(self: *Overlay) usize {
+    std.debug.assert(!self.transaction_open);
+    std.debug.assert(self.warm_accounts.count() == 0);
+    std.debug.assert(self.storage_slots.count() == 0);
+    std.debug.assert(self.transient_storage.count() == 0);
+    self.clearLogsRetainingCapacity();
+    self.transaction_open = true;
+    return self.journal.len();
+}
+
+/// Close a finalized execution scope without closing its outer transaction
+/// attempt. Canonical storage writes are promoted into the overlay with inverse
+/// journal entries; warmth, transient storage, and other scope-local entries
+/// are discarded before the next execution scope begins.
+pub fn closeExecutionScope(self: *Overlay, journal_start: usize) !void {
+    std.debug.assert(self.transaction_open);
+    try self.mergeDirtyStorageSlotsJournaled();
+    self.compactExecutionScopeJournal(journal_start);
+    self.clearExecutionScopeState();
+    self.transaction_open = false;
+}
+
 pub fn closeTransaction(self: *Overlay) void {
     self.mergeDirtyStorageSlots();
+    self.clearExecutionScopeState();
+    self.journal.clearRetainingCapacity(self.allocator);
+    self.transaction_open = false;
+}
+
+fn clearExecutionScopeState(self: *Overlay) void {
     self.warm_accounts.clearRetainingCapacity();
     self.storage_slots.clearRetainingCapacity();
     self.warm_storage_count = 0;
     self.original_storage_count = 0;
     self.pending_storage_overlay_entries = 0;
     self.transient_storage.clearRetainingCapacity();
-    self.journal.clearRetainingCapacity(self.allocator);
-    self.transaction_open = false;
+    self.selfdestructed_accounts.clearRetainingCapacity();
+    self.created_contracts.clearRetainingCapacity();
 }
 
 fn mergeDirtyStorageSlots(self: *Overlay) void {
@@ -991,6 +1022,59 @@ fn mergeDirtyStorageSlots(self: *Overlay) void {
     }
 }
 
+fn mergeDirtyStorageSlotsJournaled(self: *Overlay) !void {
+    const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
+    errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);
+
+    var it = self.storage_slots.iterator();
+    while (it.next()) |entry| {
+        const slot = entry.value_ptr;
+        if (!slot.dirty) continue;
+        if (self.deleted_accounts.contains(entry.key_ptr.address)) continue;
+
+        const previous = self.storage_overlay.get(entry.key_ptr.*);
+        try self.journal.append(self.allocator, .{ .storage_overlay = .{
+            .key = entry.key_ptr.*,
+            .had_value = previous != null,
+            .prev = previous orelse 0,
+        } });
+        if (self.storage_overlay.getPtr(entry.key_ptr.*)) |accepted| {
+            accepted.* = slot.current;
+        } else {
+            self.storage_overlay.putAssumeCapacityNoClobber(entry.key_ptr.*, slot.current);
+        }
+    }
+}
+
+fn compactExecutionScopeJournal(self: *Overlay, journal_start: usize) void {
+    std.debug.assert(journal_start <= self.journal.items.items.len);
+    var write_index = journal_start;
+    var read_index = journal_start;
+    while (read_index < self.journal.items.items.len) : (read_index += 1) {
+        const entry = self.journal.items.items[read_index];
+        const scope_local = switch (entry) {
+            .storage_slot,
+            .transient_storage,
+            .warm_account,
+            .warm_storage,
+            .created_contract,
+            .selfdestruct,
+            .created_contract_cleared,
+            .selfdestruct_cleared,
+            => true,
+            else => false,
+        };
+        if (scope_local) {
+            var discarded = entry;
+            discarded.deinit(self.allocator);
+            continue;
+        }
+        if (write_index != read_index) self.journal.items.items[write_index] = entry;
+        write_index += 1;
+    }
+    self.journal.items.items.len = write_index;
+}
+
 pub fn discardChanges(self: *Overlay) void {
     self.closeTransaction();
     self.clearAccounts();
@@ -1002,6 +1086,14 @@ pub fn discardChanges(self: *Overlay) void {
     self.deleted_accounts.clearRetainingCapacity();
     self.dirty_accounts.clearRetainingCapacity();
     self.clearLogsRetainingCapacity();
+}
+
+/// Whether the eager branch contains canonical state mutations.
+/// Read caches and transaction-local access metadata do not count as changes.
+pub fn hasChanges(self: *const Overlay) bool {
+    return self.dirty_accounts.count() != 0 or
+        self.deleted_accounts.count() != 0 or
+        self.storage_overlay.count() != 0;
 }
 
 pub fn warmAccount(self: *Overlay, address: Address) !void {
@@ -1288,6 +1380,21 @@ fn revertJournalEntry(self: *Overlay, entry: *Journal.Entry) void {
                 }
                 slot.current = storage_entry.prev;
                 slot.dirty = storage_entry.dirty;
+            }
+        },
+        .storage_overlay => |storage_entry| {
+            if (storage_entry.had_value) {
+                if (self.storage_overlay.getPtr(storage_entry.key)) |value| {
+                    value.* = storage_entry.prev;
+                } else {
+                    restoreMapValueAssumeCapacity(
+                        &self.storage_overlay,
+                        storage_entry.key,
+                        storage_entry.prev,
+                    );
+                }
+            } else {
+                _ = self.storage_overlay.remove(storage_entry.key);
             }
         },
         .transient_storage => |storage_entry| {

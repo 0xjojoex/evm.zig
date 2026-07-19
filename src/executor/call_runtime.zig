@@ -12,7 +12,7 @@ const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
 const runtime_frames = @import("./runtime_frames.zig");
-const transaction = @import("../transaction.zig");
+const ExecutionGas = @import("../execution.zig").ExecutionGas;
 const call_scratch_storage = @import("./call_scratch.zig");
 const context_adapter = @import("./context.zig");
 const CaptureContext = executor_module.CaptureContext;
@@ -386,16 +386,17 @@ pub fn For(comptime Executor: type) type {
             frame.* = undefined;
         }
 
-        pub fn executeCall(self: *Executor, options: executor_module.Call) !executor_module.EvmResult {
+        pub fn executeCall(
+            self: *Executor,
+            options: executor_module.Call,
+            gas: ExecutionGas,
+        ) !executor_module.EvmResult {
             const result = try executeCallTransaction(
                 self,
                 options.sender,
                 options.recipient,
                 options.input,
-                .{
-                    .regular_left = options.gas,
-                    .reservoir = options.gas_reservoir,
-                },
+                gas,
                 options.value,
             );
             return Host.Result.fromCall(.{
@@ -414,7 +415,7 @@ pub fn For(comptime Executor: type) type {
             sender: Address,
             recipient: Address,
             input: []const u8,
-            gas: transaction.ExecutionGas,
+            gas: ExecutionGas,
             value: u256,
         ) !Interpreter.Result {
             self.beginPreparedCodeExecution();
@@ -499,7 +500,7 @@ pub fn For(comptime Executor: type) type {
             sender: Address,
             recipient: Address,
             value: u256,
-            gas: *transaction.ExecutionGas,
+            gas: *ExecutionGas,
         ) !TopFrameStateGasCharge {
             const same_address = std.mem.eql(u8, &sender, &recipient);
             const creates_account = if (value == 0 or same_address)
@@ -549,7 +550,7 @@ pub fn For(comptime Executor: type) type {
             sender: Address,
             recipient: Address,
             input: []const u8,
-            gas: transaction.ExecutionGas,
+            gas: ExecutionGas,
             value: u256,
         ) !Interpreter.Result {
             self.clearLastOutput();
@@ -637,19 +638,21 @@ pub fn For(comptime Executor: type) type {
             self: *Executor,
             sender: Address,
             init_code: []const u8,
-            gas: transaction.ExecutionGas,
+            gas: ExecutionGas,
             value: u256,
         ) !Host.Result {
             return executeCreate(self, .{
                 .sender = sender,
                 .init_code = init_code,
-                .gas = gas.regular_left,
-                .gas_reservoir = gas.reservoir,
                 .value = value,
-            });
+            }, gas);
         }
 
-        pub fn executeCreate(self: *Executor, options: executor_module.Create) !executor_module.EvmResult {
+        pub fn executeCreate(
+            self: *Executor,
+            options: executor_module.Create,
+            gas: ExecutionGas,
+        ) !executor_module.EvmResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -658,8 +661,8 @@ pub fn For(comptime Executor: type) type {
             return executeCreateMessage(self, .{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
-                .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
                 .sender = options.sender,
                 .input_data = options.init_code,
                 .value = options.value,
@@ -1267,7 +1270,7 @@ pub fn For(comptime Executor: type) type {
 }
 
 test "CREATE final stabilization reuses already-stable output" {
-    const Executor = executor_module.Executor(evmz.Evm.Protocol);
+    const Executor = executor_module.Executor(evmz.Evm.ExecutionProtocol);
     const runtime = For(Executor);
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });

@@ -1,4 +1,5 @@
-//! Ethereum block state-transition orchestration above `Vm.BlockSession`.
+//! Ethereum block state-transition orchestration above the engine's bound
+//! block program.
 //!
 //! This module owns block-level lifecycle policy: system-contract hooks,
 //! transaction folding, withdrawal credits, root/commitment assembly, and
@@ -9,6 +10,7 @@ const std = @import("std");
 
 const Config = @import("../ExecutionConfig.zig");
 const Executor = @import("../executor.zig");
+const Host = @import("../Host.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal.zig");
@@ -33,13 +35,21 @@ const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
 
-const definition = eth_config.define(.{});
-const Vm = vm.Vm(Revision, definition, .{});
-pub const Protocol = Vm.Protocol;
+const execution_definition = eth_config.execution(.{});
+const transaction_definition = eth_config.transaction(.{});
+const block_definition = eth_config.block(.{});
+const Engine = vm.Vm(
+    Revision,
+    execution_definition,
+    transaction_definition,
+    block_definition,
+    .{},
+);
+const BlockExecution = Engine.BlockExecution;
+pub const TransactionProtocol = Engine.TransactionProtocol;
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
 pub const ParentBlobGas = transaction.ExcessBlobGasInput;
-const EthBlob = transaction.For(Protocol).blob;
 const Env = vm.Env;
 const BlockHashSource = vm.BlockHashSource;
 const TxReceiptView = vm.TxReceiptView;
@@ -47,7 +57,7 @@ const Log = vm.Log;
 const TxStatus = vm.TxStatus;
 
 pub const TransactionInput = struct {
-    tx: Vm.Transaction,
+    tx: Engine.Transaction,
     encoded: []const u8,
 };
 
@@ -220,6 +230,10 @@ pub const empty_logs_bloom = [_]u8{0} ** 256;
 pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
 
+fn lifecycleTxContext(env: Env) Host.TxContext {
+    return env.txContext(address.addr(0), 0, env.gas_limit, &.{});
+}
+
 const RootField = enum {
     state,
     transactions,
@@ -296,15 +310,14 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    var evm = Vm.init(allocator, .{
+    var executor = Engine.Executor.init(allocator, .{
         .revision = input.revision,
         .state_reader = state_backend.reader(),
         .prepared_code_backend = input.prepared_code_backend,
         .block_hash_source = input.block_hash_source,
-        .env = input.env,
         .config = input.config,
     });
-    defer evm.deinit();
+    defer executor.deinit();
 
     var recorder = BalRecorder.init(allocator);
     defer recorder.deinit();
@@ -329,19 +342,30 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var capture_open = false;
     if (capture_enabled) {
         if (record_block_access_list) recorder.setBlockAccessIndex(0);
-        evm.executor.setCaptureContext(&capture_context);
+        executor.setCaptureContext(&capture_context);
         try capture_context.begin();
         capture_open = true;
     }
-    defer if (capture_enabled) evm.executor.setCaptureContext(null);
+    defer if (capture_enabled) executor.setCaptureContext(null);
     defer if (capture_open) capture_context.abort() catch {};
 
-    var block = try evm.beginBlock(input.env);
+    var block = try BlockExecution.init(
+        &executor,
+        input.env,
+    );
+    defer block.discardIfUnfinished();
     if (input.block_header) |header| {
-        block.beforeBlock(.{
-            .parent_hash = header.parent_hash,
-            .parent_beacon_block_root = header.parent_beacon_block_root,
-        }) catch |err| switch (err) {
+        Executor.system_contracts.applyBeforeBlock(
+            block.policy(),
+            &executor,
+            lifecycleTxContext(input.env),
+            .{
+                .number = input.env.number,
+                .timestamp = input.env.timestamp,
+                .parent_hash = header.parent_hash,
+                .parent_beacon_block_root = header.parent_beacon_block_root,
+            },
+        ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             error.SystemCallFailed => return .{ .status = .system_contract_failed },
             else => return err,
@@ -377,50 +401,60 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         const tx_blob_gas_used = try transactionBlobGasUsed(input.revision, input.env.blob_schedule, entry.tx);
         const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
         if (next_blob_gas_used > blob_gas_limit) {
+            const progress = block.progress();
             return .{
                 .status = .blob_gas_limit_exceeded,
                 .tx_index = tx_index,
-                .gas_used = block.gas_used,
-                .block_gas_used = block.block_gas.total,
-                .block_state_gas_used = block.block_gas.state,
+                .gas_used = progress.gas_used,
+                .block_gas_used = progress.block_gas.total,
+                .block_state_gas_used = progress.block_gas.state,
                 .blob_gas_used = blob_gas_used,
                 .requests_hash = computed_requests_hash,
             };
         }
-        const tx_result = block.transact(entry.tx) catch |err| switch (err) {
+        const tx_result = transactPayload(&block, input.env, entry.tx) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
-            error.BlockGasExceeded => return .{
-                .status = .block_gas_exceeded,
-                .tx_index = tx_index,
-                .gas_used = block.gas_used,
-                .block_gas_used = block.block_gas.total,
-                .block_state_gas_used = block.block_gas.state,
-                .requests_hash = computed_requests_hash,
+            error.BlockGasExceeded => {
+                const progress = block.progress();
+                return .{
+                    .status = .block_gas_exceeded,
+                    .tx_index = tx_index,
+                    .gas_used = progress.gas_used,
+                    .block_gas_used = progress.block_gas.total,
+                    .block_state_gas_used = progress.block_gas.state,
+                    .requests_hash = computed_requests_hash,
+                };
             },
             else => return err,
         };
-        const executed = switch (tx_result) {
-            .executed => |executed| executed,
-            .rejected => return .{
-                .status = .transaction_rejected,
-                .tx_index = tx_index,
-                .gas_used = block.gas_used,
-                .block_gas_used = block.block_gas.total,
-                .block_state_gas_used = block.block_gas.state,
-                .requests_hash = computed_requests_hash,
+        const included = switch (tx_result) {
+            .included => |value| value,
+            .rejected => {
+                const progress = block.progress();
+                return .{
+                    .status = .transaction_rejected,
+                    .tx_index = tx_index,
+                    .gas_used = progress.gas_used,
+                    .block_gas_used = progress.block_gas.total,
+                    .block_state_gas_used = progress.block_gas.state,
+                    .requests_hash = computed_requests_hash,
+                };
             },
         };
-        const receipt = block.receipt(executed);
+        const receipt = included.receipt;
         mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
         if (input.revision.isImpl(.prague)) {
             eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
-                error.InvalidRequest => return .{
-                    .status = .invalid_requests,
-                    .tx_index = tx_index,
-                    .gas_used = block.gas_used,
-                    .block_gas_used = block.block_gas.total,
-                    .block_state_gas_used = block.block_gas.state,
-                    .requests_hash = computed_requests_hash,
+                error.InvalidRequest => {
+                    const progress = block.progress();
+                    return .{
+                        .status = .invalid_requests,
+                        .tx_index = tx_index,
+                        .gas_used = progress.gas_used,
+                        .block_gas_used = progress.block_gas.total,
+                        .block_state_gas_used = progress.block_gas.state,
+                        .requests_hash = computed_requests_hash,
+                    };
                 },
                 else => return err,
             };
@@ -429,7 +463,22 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         const encoded_receipt = try encodeReceipt(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
-        block.afterTransaction() catch |err| switch (err) {
+        const progress = block.progress();
+        Executor.system_contracts.applyAfterTransaction(
+            block.policy(),
+            &executor,
+            lifecycleTxContext(input.env),
+            .{
+                .number = input.env.number,
+                .timestamp = input.env.timestamp,
+                .transaction_index = progress.tx_count - 1,
+                .status = receipt.status,
+                .gas_used = receipt.gas_used,
+                .cumulative_gas_used = progress.gas_used,
+                .cumulative_block_gas = progress.block_gas.total,
+                .cumulative_state_gas = progress.block_gas.state,
+            },
+        ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
             error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
             else => return err,
@@ -454,7 +503,7 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         if (input.env.blob_schedule) |schedule|
             transaction.calcExcessBlobGasForSchedule(schedule, parent_blob_gas) orelse return error.BlobGasOverflow
         else
-            EthBlob.calcExcessBlobGas(input.revision, parent_blob_gas) orelse return error.BlobGasOverflow
+            calcProtocolExcessBlobGas(input.revision, parent_blob_gas) orelse return error.BlobGasOverflow
     else
         null;
 
@@ -468,12 +517,19 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         }
     }
 
-    applyWithdrawals(&evm, input.withdrawals) catch |err| switch (err) {
+    applyWithdrawals(&executor, input.withdrawals) catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         else => return err,
     };
 
-    const derived_requests = deriveRequests(allocator, &block, deposit_request_data.items) catch |err| switch (err) {
+    const derived_requests = deriveRequests(
+        allocator,
+        &executor,
+        block.policy(),
+        input.env,
+        block.progress(),
+        deposit_request_data.items,
+    ) catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         error.SystemCallFailed => return .{ .status = .system_contract_failed },
         else => return err,
@@ -505,14 +561,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         }
     }
 
-    var changeset = try evm.changeset();
+    const block_result = try block.finish();
+
+    var changeset = try executor.changeset();
     defer changeset.deinit(allocator);
 
     var result = Result{
         .status = .valid,
-        .gas_used = block.gas_used,
-        .block_gas_used = block.block_gas.total,
-        .block_state_gas_used = block.block_gas.state,
+        .gas_used = block_result.gas_used,
+        .block_gas_used = block_result.block_gas.total,
+        .block_state_gas_used = block_result.block_gas.state,
         .state_root = state_backend.stateRootAfterChangeset(allocator, &changeset) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,
@@ -567,6 +625,47 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         try state_backend.commit(&changeset);
     }
     return result;
+}
+
+/// Keep a definition-owned before-transaction batch in the same rollback
+/// domain as the payload transaction. Ethereum currently emits no such calls,
+/// but the family STF preserves the hook's atomic contract for future forks.
+fn transactPayload(
+    block: *BlockExecution,
+    env: Env,
+    tx_value: Engine.Transaction,
+) !BlockExecution.Outcome {
+    const progress = block.progress();
+    const PayloadPrelude = struct {
+        block_policy: *const Engine.BlockPolicy,
+        env: Env,
+        transaction_index: u64,
+
+        pub fn run(
+            self: *@This(),
+            prelude: Engine.PreludeContext,
+        ) Engine.PreludeContext.Error!void {
+            try Executor.system_contracts.applyBeforeTransactionPrelude(
+                self.block_policy,
+                prelude,
+                lifecycleTxContext(self.env),
+                .{
+                    .number = self.env.number,
+                    .timestamp = self.env.timestamp,
+                    .transaction_index = self.transaction_index,
+                },
+            );
+        }
+    };
+    var prelude = PayloadPrelude{
+        .block_policy = block.policy(),
+        .env = env,
+        .transaction_index = progress.tx_count,
+    };
+    return block.transactWithPrelude(
+        tx_value,
+        Engine.Prelude.init(&prelude),
+    );
 }
 
 fn blockBodyValid(input: BlockInput) bool {
@@ -769,17 +868,24 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-fn applyWithdrawals(evm: *Vm, withdrawals: []const Withdrawal) !void {
+fn applyWithdrawals(executor: *Engine.Executor, withdrawals: []const Withdrawal) !void {
     for (withdrawals) |withdrawal| {
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
-        evm.creditBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
+        executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
             error.BalanceOverflow => return error.WithdrawalBalanceOverflow,
             else => return err,
         };
     }
 }
 
-fn deriveRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession, deposit_request_data: []const u8) ![]const []const u8 {
+fn deriveRequests(
+    allocator: std.mem.Allocator,
+    executor: *Engine.Executor,
+    block_policy: *const Engine.BlockPolicy,
+    env: Env,
+    progress: vm.BlockResult,
+    deposit_request_data: []const u8,
+) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (requests.items) |request| allocator.free(request);
@@ -794,7 +900,13 @@ fn deriveRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession, deposit
         deposit_request_owned = false;
     }
 
-    const block_end_requests = try deriveFinalizeRequests(allocator, block);
+    const block_end_requests = try deriveFinalizeRequests(
+        allocator,
+        executor,
+        block_policy,
+        env,
+        progress,
+    );
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
     try requests.appendSlice(allocator, block_end_requests);
@@ -804,8 +916,27 @@ fn deriveRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession, deposit
     return try requests.toOwnedSlice(allocator);
 }
 
-fn deriveFinalizeRequests(allocator: std.mem.Allocator, block: *Vm.BlockSession) ![]const []const u8 {
-    return block.finalizeBlock(allocator);
+fn deriveFinalizeRequests(
+    allocator: std.mem.Allocator,
+    executor: *Engine.Executor,
+    block_policy: *const Engine.BlockPolicy,
+    env: Env,
+    progress: vm.BlockResult,
+) ![]const []const u8 {
+    return Executor.system_contracts.applyFinalizeBlock(
+        block_policy,
+        executor,
+        lifecycleTxContext(env),
+        allocator,
+        .{
+            .number = env.number,
+            .timestamp = env.timestamp,
+            .transaction_count = progress.tx_count,
+            .gas_used = progress.gas_used,
+            .block_gas = progress.block_gas.total,
+            .state_gas = progress.block_gas.state,
+        },
+    );
 }
 
 fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
@@ -813,7 +944,7 @@ fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void
     allocator.free(requests);
 }
 
-fn transactionBlobGasUsed(revision: Revision, blob_schedule: ?transaction.BlobSchedule, tx: Vm.Transaction) !u64 {
+fn transactionBlobGasUsed(revision: Revision, blob_schedule: ?transaction.BlobSchedule, tx: Engine.Transaction) !u64 {
     if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;
     const schedule = blob_schedule orelse eth_transaction.Transaction.blobSchedule(revision) orelse return error.BlobGasOverflow;
@@ -825,6 +956,11 @@ fn blockBlobGasLimit(revision: Revision, blob_schedule: ?transaction.BlobSchedul
     if (!revision.isImpl(.cancun)) return 0;
     const schedule = blob_schedule orelse eth_transaction.Transaction.blobSchedule(revision) orelse return error.BlobGasOverflow;
     return std.math.mul(u64, schedule.max, schedule.gas_per_blob) catch error.BlobGasOverflow;
+}
+
+fn calcProtocolExcessBlobGas(revision: Revision, input: ParentBlobGas) ?u256 {
+    const schedule = Engine.transaction_policy.transaction.blobSchedule(revision) orelse return 0;
+    return transaction.calcExcessBlobGasForSchedule(schedule, input);
 }
 
 const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
@@ -852,7 +988,7 @@ const ReceiptPayload = struct {
     });
 };
 
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Vm.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
+pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Engine.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
     const payload: ReceiptPayload = .{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
@@ -880,7 +1016,7 @@ fn receiptStatus(status: TxStatus) u8 {
     };
 }
 
-fn transactionType(kind: @TypeOf(@as(Vm.Transaction, undefined).kind)) ?u8 {
+fn transactionType(kind: @TypeOf(@as(Engine.Transaction, undefined).kind)) ?u8 {
     return switch (kind) {
         .legacy => null,
         .access_list => 0x01,
@@ -1711,7 +1847,7 @@ test "BlockSTF validates blob gas header fields" {
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const expected_excess_blob_gas = EthBlob.calcExcessBlobGas(.prague, parent_blob_gas).?;
+    const expected_excess_blob_gas = calcProtocolExcessBlobGas(.prague, parent_blob_gas).?;
     var custom_blob_schedule = eth_transaction.Transaction.blobSchedule(.prague).?;
     custom_blob_schedule.target = 10;
     custom_blob_schedule.max = 12;

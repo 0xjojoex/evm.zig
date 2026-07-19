@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const blob = @import("../transaction/blob.zig");
+const definition = @import("../definition.zig");
 const definition_support = @import("../protocol/support.zig");
 const gas = @import("../transaction/gas.zig");
 const Transaction = @import("../transaction/types.zig");
@@ -69,29 +70,41 @@ fn ValidationInput(comptime Protocol: type) type {
     };
 }
 
-pub fn For(comptime ProtocolType: type) type {
+/// Validation program borrowing one immutable transaction-policy snapshot.
+pub fn Runtime(
+    comptime ProtocolType: type,
+    comptime TransactionPolicy: type,
+) type {
     return struct {
         const Self = @This();
-        const gas_protocol = gas.For(Protocol);
-        const transaction = ProtocolType.transaction;
-        const settlement = ProtocolType.settlement;
+        const Gas = gas.Runtime(
+            ProtocolType,
+            @FieldType(TransactionPolicy, "transaction"),
+        );
 
         pub const Protocol = ProtocolType;
         pub const Input = ValidationInput(Protocol);
 
-        pub fn validate(input: Input) ?ValidationError {
-            const gas_plan = Self.gasPlan(input);
-            if (Self.validateBeforeAccount(input, gas_plan)) |err| return err;
-            if (Self.validateAfterAccount(input)) |err| return err;
-            return Self.validateSenderCode(input);
+        policy: *const TransactionPolicy,
+
+        fn gasPlanner(self: Self) Gas {
+            return .{ .transaction = &self.policy.transaction };
         }
 
-        /// Checks whose result is independent of sender state. Keep this order in
-        /// sync with protocol transaction preparation: a decisive rejection here
-        /// must happen before the first account proof is requested.
-        pub fn validateBeforeAccount(input: Input, gas_plan: gas.GasPlan) ?ValidationError {
+        pub fn validate(self: Self, input: Input) ?ValidationError {
+            const gas_plan = self.gasPlan(input);
+            if (self.validateBeforeAccount(input, gas_plan)) |err| return err;
+            if (self.validateAfterAccount(input)) |err| return err;
+            return self.validateSenderCode(
+                input,
+                self.policy.transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind),
+            );
+        }
+
+        pub fn validateBeforeAccount(self: Self, input: Input, gas_plan: gas.GasPlan) ?ValidationError {
             definition_support.assertRevisionSupported(Protocol, input.revision);
-            if (Self.inactiveTransactionKindError(input.revision, input.kind)) |err| return err;
+            const transaction = &self.policy.transaction;
+            if (self.inactiveTransactionKindError(input.revision, input.kind)) |err| return err;
 
             if (gas_plan.intrinsic_regular_gas == std.math.maxInt(u64) or
                 gas_plan.intrinsic_state_gas == std.math.maxInt(u64) or
@@ -104,36 +117,31 @@ pub fn For(comptime ProtocolType: type) type {
                 const capped_intrinsic = @max(gas_plan.intrinsic_regular_gas, gas_plan.floor_gas);
                 if (capped_intrinsic > regular_intrinsic_limit) return .intrinsic_gas_too_low;
             }
-
             if (input.gas_limit < gas_plan.intrinsic_gas) return .intrinsic_gas_too_low;
-
             if (input.gas_limit < gas_plan.floor_gas) return .intrinsic_gas_below_floor_gas_cost;
-
             if (input.tx_nonce) |tx_nonce| {
                 if (tx_nonce == std.math.maxInt(u64)) return .nonce_is_max;
             }
-
-            if (input.is_create and input.input.len > gas_protocol.maxInitcodeSize(input.revision)) {
+            if (input.is_create and input.input.len > self.gasPlanner().maxInitcodeSize(input.revision))
                 return .initcode_size_exceeded;
-            }
-
             if (transaction.totalGasLimit(input.revision)) |limit| {
                 if (input.gas_limit > limit) return .gas_allowance_exceeded;
             }
-
-            if (Self.exceedsBlockGasAllowance(input)) return .gas_allowance_exceeded;
-
+            if (self.exceedsBlockGasAllowance(input)) return .gas_allowance_exceeded;
             if (input.kind == .blob) {
-                const schedule = effectiveBlobSchedule(Protocol, input.revision, input.blob_schedule) orelse return .type_3_tx_max_blob_gas_allowance_exceeded;
+                const schedule = effectiveBlobScheduleWith(
+                    transaction.blobSchedule,
+                    input.revision,
+                    input.blob_schedule,
+                ) orelse return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCount(schedule)) return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCountPerTransaction(schedule)) return .type_3_tx_blob_count_exceeded;
             }
-
             return null;
         }
 
-        pub fn gasPlan(input: Input) gas.GasPlan {
-            return gas_protocol.gasPlan(input.revision, input.input, input.gas_limit, .{
+        pub fn gasPlan(self: Self, input: Input) gas.GasPlan {
+            return self.gasPlanner().gasPlan(input.revision, input.input, input.gas_limit, .{
                 .authorization_count = input.authorization_count,
                 .access_list_counts = input.access_list_counts,
                 .is_create = input.is_create,
@@ -142,21 +150,17 @@ pub fn For(comptime ProtocolType: type) type {
             });
         }
 
-        /// Checks ordered after the sender account proof and before sender code.
-        pub fn validateAfterAccount(input: Input) ?ValidationError {
+        pub fn validateAfterAccount(self: Self, input: Input) ?ValidationError {
             definition_support.assertRevisionSupported(Protocol, input.revision);
-
+            const transaction = &self.policy.transaction;
             if (input.kind == .dynamic_fee or input.kind == .blob or input.kind == .set_code) {
                 const max_fee = input.max_fee_per_gas orelse 0;
                 const priority_fee = input.max_priority_fee_per_gas orelse 0;
                 if (priority_fee > max_fee) return .priority_greater_than_max_fee_per_gas;
                 if (max_fee < input.base_fee) return .insufficient_max_fee_per_gas;
             }
-
-            if ((input.kind == .legacy or input.kind == .access_list) and settlement.baseFeeActive(input.revision) and input.gas_price < input.base_fee) {
+            if ((input.kind == .legacy or input.kind == .access_list) and self.policy.settlement.baseFeeActive(input.revision) and input.gas_price < input.base_fee)
                 return .insufficient_max_fee_per_gas;
-            }
-
             if (input.kind == .blob) {
                 const max_blob_fee = input.max_fee_per_blob_gas orelse 0;
                 if (max_blob_fee < input.blob_base_fee) return .insufficient_max_fee_per_blob_gas;
@@ -166,31 +170,26 @@ pub fn For(comptime ProtocolType: type) type {
                     if (!transaction.blobVersionedHashActive(input.revision, blob.blobVersion(hash))) return .type_3_tx_invalid_blob_versioned_hash;
                 }
             }
-
             if (input.kind == .set_code) {
                 if (!transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
                 if (transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
             }
-
             if (input.tx_nonce) |tx_nonce| {
                 if (tx_nonce != input.sender_nonce) return .nonce_mismatch;
             }
-
-            const required_balance = Self.maxPrepaymentCost(input) orelse return .insufficient_account_funds;
+            const required_balance = self.maxPrepaymentCost(input) orelse return .insufficient_account_funds;
             if (input.sender_balance < required_balance) return .insufficient_account_funds;
-
             return null;
         }
 
-        pub fn validateSenderCode(input: Input) ?ValidationError {
+        pub fn validateSenderCode(_: Self, input: Input, rejects_non_delegating: bool) ?ValidationError {
             definition_support.assertRevisionSupported(Protocol, input.revision);
-            if (transaction.rejectsNonDelegatingSenderCode(input.revision, input.kind) and input.sender_code_kind == .non_delegating) {
+            if (rejects_non_delegating and input.sender_code_kind == .non_delegating)
                 return .sender_not_eoa;
-            }
             return null;
         }
 
-        pub fn maxPrepaymentCost(input: Input) ?u256 {
+        pub fn maxPrepaymentCost(self: Self, input: Input) ?u256 {
             definition_support.assertRevisionSupported(Protocol, input.revision);
             const gas_price = switch (input.kind) {
                 .legacy, .access_list => input.gas_price,
@@ -198,22 +197,27 @@ pub fn For(comptime ProtocolType: type) type {
             };
             const blob_fee = if (input.kind == .blob) input.max_fee_per_blob_gas orelse return null else 0;
             const gas_cost = uint256.checkedMul(@as(u256, input.gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(Protocol, input.revision, input.blob_schedule, if (input.kind == .blob) input.blob_hashes.len else 0) orelse return null;
+            const blob_gas = blobGasForCountWith(
+                self.policy.transaction.blobSchedule,
+                input.revision,
+                input.blob_schedule,
+                if (input.kind == .blob) input.blob_hashes.len else 0,
+            ) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_fee) orelse return null;
             const transaction_cost = uint256.checkedAdd(gas_cost, blob_cost) orelse return null;
             return uint256.checkedAdd(transaction_cost, input.value);
         }
 
-        pub fn prepaymentCost(revision: Protocol.Revision, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
+        pub fn prepaymentCost(self: Self, revision: Protocol.Revision, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
             definition_support.assertRevisionSupported(Protocol, revision);
             const gas_cost = uint256.checkedMul(@as(u256, gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(Protocol, revision, null, blob_count) orelse return null;
+            const blob_gas = blobGasForCountWith(self.policy.transaction.blobSchedule, revision, null, blob_count) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_base_fee) orelse return null;
             return uint256.checkedAdd(gas_cost, blob_cost);
         }
 
-        fn inactiveTransactionKindError(revision: Protocol.Revision, kind: TxKind) ?ValidationError {
-            if (transaction.kindActive(revision, kind)) return null;
+        fn inactiveTransactionKindError(self: Self, revision: Protocol.Revision, kind: TxKind) ?ValidationError {
+            if (self.policy.transaction.kindActive(revision, kind)) return null;
             return switch (kind) {
                 .legacy => null,
                 .access_list => .type_1_tx_pre_fork,
@@ -223,13 +227,12 @@ pub fn For(comptime ProtocolType: type) type {
             };
         }
 
-        fn exceedsBlockGasAllowance(input: Input) bool {
+        fn exceedsBlockGasAllowance(self: Self, input: Input) bool {
             if (input.block_gas_limit == 0) return false;
-            const uses_state_gas_accounting = settlement.usesStateGasAccounting(input.revision);
-            if (uses_state_gas_accounting) {
+            if (self.policy.settlement.usesStateGasAccounting(input.revision)) {
                 const regular_available = input.block_gas_limit -| input.block_progress.block_gas.regular;
                 const state_available = input.block_gas_limit -| input.block_progress.block_gas.state;
-                return gas_protocol.regularGasLimit(input.revision, input.gas_limit) > regular_available or
+                return self.gasPlanner().regularGasLimit(input.revision, input.gas_limit) > regular_available or
                     input.gas_limit > state_available;
             }
             const available = input.block_gas_limit -| input.block_progress.receipt_gas_used;
@@ -238,8 +241,37 @@ pub fn For(comptime ProtocolType: type) type {
     };
 }
 
-fn effectiveBlobSchedule(comptime Protocol: type, revision: Protocol.Revision, blob_schedule: ?blob.BlobSchedule) ?blob.BlobSchedule {
-    return blob_schedule orelse Protocol.transaction.blobSchedule(revision);
+fn StaticPolicy(comptime Protocol: type) type {
+    return struct {
+        transaction: definition.TransactionPolicyConfig(Protocol.Revision),
+        settlement: definition.SettlementConfig(Protocol.Revision),
+    };
+}
+
+/// Static-policy adapter for protocol-level helpers and tests. Validation
+/// behavior remains implemented only by `Runtime`.
+pub fn For(comptime ProtocolType: type) Runtime(ProtocolType, StaticPolicy(ProtocolType)) {
+    const Policy = StaticPolicy(ProtocolType);
+    const Values = struct {
+        const policy: Policy = .{
+            .transaction = definition.projectTransactionConfig(
+                ProtocolType.Revision,
+                ProtocolType.transaction,
+            ),
+            .settlement = definition.projectSettlementConfig(
+                ProtocolType.Revision,
+                if (@hasDecl(ProtocolType, "settlement"))
+                    ProtocolType.settlement
+                else
+                    definition.SettlementConfig(ProtocolType.Revision).default,
+            ),
+        };
+    };
+    return .{ .policy = &Values.policy };
+}
+
+fn effectiveBlobScheduleWith(blob_schedule_for_revision: anytype, revision: anytype, blob_schedule: ?blob.BlobSchedule) ?blob.BlobSchedule {
+    return blob_schedule orelse blob_schedule_for_revision(revision);
 }
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
@@ -250,14 +282,14 @@ fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
     return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
 }
 
-fn blobGasForCount(comptime Protocol: type, revision: Protocol.Revision, blob_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {
+fn blobGasForCountWith(blob_schedule_for_revision: anytype, revision: anytype, blob_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = effectiveBlobSchedule(Protocol, revision, blob_schedule) orelse return null;
+    const schedule = effectiveBlobScheduleWith(blob_schedule_for_revision, revision, blob_schedule) orelse return null;
     return blob.blobGasForSchedule(schedule, blob_count);
 }
 
 fn ethereumProtocol() type {
-    return @import("../eth.zig").Protocol;
+    return @import("../eth.zig").Protocol.TransactionProtocol;
 }
 
 test "transaction prepayment includes blob gas" {
@@ -285,7 +317,8 @@ test "transaction prepayment uses comptime blob gas" {
         };
     };
     const hashes = [_]u256{@as(u256, 0x01) << 248} ** 2;
-    const input = For(ethereumProtocol()).Input{
+    const Validation = @TypeOf(For(ethereumProtocol()));
+    const input = Validation.Input{
         .revision = .cancun,
         .kind = .blob,
         .gas_limit = 500_000,
@@ -614,9 +647,9 @@ test "transaction validation uses comptime policy" {
                 return 0;
             }
 
-            pub fn dataByteGas(revision: Revision, byte: u8) u64 {
+            pub fn calldataGas(revision: Revision, input: []const u8) ?u64 {
                 _ = revision;
-                _ = byte;
+                _ = input;
                 return 0;
             }
 

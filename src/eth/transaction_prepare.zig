@@ -7,16 +7,32 @@ const settlement = @import("../transaction/settlement.zig");
 const tx = @import("../transaction/types.zig");
 const validation = @import("transaction_validation.zig");
 
-pub fn For(comptime Protocol: type) type {
+/// Ordered Ethereum preparation borrowing one transaction-runtime policy.
+pub fn Runtime(
+    comptime Protocol: type,
+    comptime TransactionPolicy: type,
+) type {
     return struct {
-        const settlement_protocol = settlement.For(Protocol);
-        const transaction = Protocol.transaction;
-        const validation_protocol = validation.For(Protocol);
+        const Settlement = settlement.Runtime(Protocol, TransactionPolicy);
+        const Validation = validation.Runtime(Protocol, TransactionPolicy);
 
-        pub fn prepare(input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
-            const view = Protocol.Transaction.view(input.tx);
+        policy: *const TransactionPolicy,
+
+        fn settlementPlanner(self: @This()) Settlement {
+            return .{ .policy = self.policy };
+        }
+
+        fn validationPlanner(self: @This()) Validation {
+            return .{ .policy = self.policy };
+        }
+
+        pub fn prepare(self: @This(), input: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
+            const transaction = &self.policy.transaction;
+            const settlement_planner = self.settlementPlanner();
+            const validation_planner = self.validationPlanner();
+            const view = Protocol.Tx.view(input.tx);
             const access_list_counts = gas.accessListCounts(view.access_list);
-            var validation_input = validation_protocol.Input{
+            var validation_input = Validation.Input{
                 .revision = input.revision,
                 .kind = view.kind,
                 .is_create = view.to == null,
@@ -38,11 +54,10 @@ pub fn For(comptime Protocol: type) type {
                 .access_list_counts = access_list_counts,
                 .blob_hashes = view.blob_hashes,
             };
-            const gas_plan = validation_protocol.gasPlan(validation_input);
+            const gas_plan = validation_planner.gasPlan(validation_input);
 
-            if (validation_protocol.validateBeforeAccount(validation_input, gas_plan)) |err| {
+            if (validation_planner.validateBeforeAccount(validation_input, gas_plan)) |err|
                 return .{ .rejected = err };
-            }
 
             const sender_account = try input.state.accountSummary(view.sender);
             if (sender_account) |account| {
@@ -50,38 +65,32 @@ pub fn For(comptime Protocol: type) type {
                 validation_input.sender_nonce = account.nonce;
             }
 
-            if (validation_protocol.validateAfterAccount(validation_input)) |err| {
+            if (validation_planner.validateAfterAccount(validation_input)) |err|
                 return .{ .rejected = err };
-            }
 
+            const rejects_non_delegating = transaction.rejectsNonDelegatingSenderCode(input.revision, view.kind);
             if (sender_account) |account| {
-                if (transaction.rejectsNonDelegatingSenderCode(input.revision, view.kind)) {
-                    // The empty code hash already proves the sender has no
-                    // code; skip the code read (and its hash validation) on
-                    // the dominant EOA path.
+                if (rejects_non_delegating) {
                     validation_input.sender_code_kind = if (std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty))
                         .empty
                     else code_kind: {
                         const code = try input.state.code(view.sender, account.code_hash);
-                        // The transaction policy must revision-gate EIP-7702's
-                        // exception so pre-Prague EIP-3607 still rejects all code.
                         break :code_kind if (code.len == 0)
                             .empty
-                        else if (isDelegationCode(input.revision, code))
+                        else if (transaction.isDelegationCode(input.revision, code))
                             .delegation
                         else
                             .non_delegating;
                     };
                 }
             }
-            if (validation_protocol.validateSenderCode(validation_input)) |err| {
+            if (validation_planner.validateSenderCode(validation_input, rejects_non_delegating)) |err|
                 return .{ .rejected = err };
-            }
 
             const gas_price = tx.effectiveGasPrice(input.env, view);
-            const settlement_plan = settlement_protocol.defaultPlanFromGasPlan(input.revision, view.gas_limit, gas_plan, .{
+            const settlement_plan = settlement_planner.defaultPlanFromGasPlan(input.revision, view.gas_limit, gas_plan, .{
                 .gas_price = gas_price,
-                .priority_fee = settlement_protocol.effectivePriorityFee(input.revision, .{
+                .priority_fee = settlement_planner.effectivePriorityFee(input.revision, .{
                     .gas_price = gas_price,
                     .base_fee = input.env.base_fee,
                     .max_fee_per_gas = view.fee.max_fee_per_gas,
@@ -103,11 +112,10 @@ pub fn For(comptime Protocol: type) type {
                     .authorization_list = view.authorization_list,
                     .authorization_count = view.authorization_count,
                 },
-                .root = .init(.{
+                .message = .init(.{
                     .sender = view.sender,
                     .to = view.to,
                     .input = view.input,
-                    .gas_limit = view.gas_limit,
                     .value = view.value,
                 }),
                 .execution_gas = gas_plan.execution,
@@ -118,10 +126,6 @@ pub fn For(comptime Protocol: type) type {
         fn isSelfTransfer(view: tx.TransactionView) bool {
             const recipient = view.to orelse return false;
             return std.mem.eql(u8, &view.sender, &recipient);
-        }
-
-        fn isDelegationCode(revision: Protocol.Revision, code: []const u8) bool {
-            return transaction.isDelegationCode(revision, code);
         }
     };
 }

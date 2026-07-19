@@ -216,7 +216,7 @@ pub fn resolveExecutionTarget(comptime Definition: type, comptime opcode: Opcode
 }
 
 pub fn resolveExecutionTargetByte(comptime Definition: type, comptime opcode_byte: u8) ExecutionTarget {
-    const instruction = instructionFromByte(Definition, opcode_byte);
+    const instruction = comptime instructionFromByte(Definition, opcode_byte);
     return resolveExecutionTargetInstructionWithInfo(Definition, instruction, instruction_mod.info(Definition, instruction));
 }
 
@@ -264,7 +264,8 @@ pub fn resolveStaticGas(comptime Definition: type, comptime support: Definition.
 
 pub fn resolveStaticGasByte(comptime Definition: type, comptime support: Definition.Support, comptime opcode_byte: u8) StaticGas {
     @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
-    return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, Definition.opcodeInfoByte(opcode_byte));
+    const instruction = comptime instructionFromByte(Definition, opcode_byte);
+    return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, instruction_mod.info(Definition, instruction));
 }
 
 pub fn resolveStaticGasInstruction(
@@ -274,7 +275,7 @@ pub fn resolveStaticGasInstruction(
 ) StaticGas {
     @setEvalBranchQuota(dispatchEvalBranchQuota(Definition));
     switch (comptime instructionContext(Definition, instruction)) {
-        .byte => |opcode_byte| return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, Definition.opcodeInfoByte(opcode_byte)),
+        .byte => |opcode_byte| return resolveStaticGasByteWithInfo(Definition, support, opcode_byte, instruction_mod.info(Definition, instruction)),
         .custom => {},
     }
     return resolveStaticGasInstructionWithInfo(Definition, support, instruction, resolveOpcodeInfoInstruction(Definition, instruction));
@@ -322,13 +323,14 @@ fn resolveStaticGasByteWithInfo(comptime Definition: type, comptime support: Def
 
     var bands = support_mod.StaticGasBands{};
     var last: ?i64 = null;
+    const instruction = comptime instructionFromByte(Definition, opcode_byte);
     if (support.min == support.max) {
-        return .{ .constant = Definition.staticGasForRevisionByte(support.min, opcode_byte) };
+        return .{ .constant = Definition.Instruction.staticGasForRevision(support.min, instruction) };
     }
 
     inline for (Definition.revisions) |revision_value| {
         if (support.contains(revision_value)) {
-            const gas = Definition.staticGasForRevisionByte(revision_value, opcode_byte);
+            const gas = Definition.Instruction.staticGasForRevision(revision_value, instruction);
             if (last == null or last.? != gas) {
                 bands.appendRevision(revision_value, gas);
                 last = gas;
@@ -383,14 +385,7 @@ pub fn resolveStaticGasForRevisionInstruction(
     revision: Definition.Revision,
     comptime instruction: Instruction(Definition),
 ) i64 {
-    switch (comptime instructionContext(Definition, instruction)) {
-        .byte => |opcode_byte| return Definition.staticGasForRevisionByte(revision, opcode_byte),
-        .custom => {},
-    }
-    if (comptime std.meta.hasFn(Definition, "staticGasForRevisionInstruction")) {
-        return Definition.staticGasForRevisionInstruction(revision, instruction);
-    }
-    @compileError("Definition with custom Instruction must declare staticGasForRevisionInstruction");
+    return Definition.Instruction.staticGasForRevision(revision, instruction);
 }
 
 pub fn hotPathFromResolved(tier: OpcodeTier, availability: Resolution, static_gas: StaticGas) bool {
@@ -404,7 +399,7 @@ pub fn hotPathFromResolved(tier: OpcodeTier, availability: Resolution, static_ga
 
 test "ethereum support windows resolve opcode availability" {
     const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);
@@ -423,7 +418,7 @@ test "ethereum support windows resolve opcode availability" {
 
 test "ethereum support windows collapse stable static gas" {
     const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);
@@ -475,18 +470,24 @@ test "static gas folding uses support containment instead of revision tag order"
             }
         };
 
-        pub fn opcodeInfoByte(comptime opcode_byte: u8) OpInfo {
-            _ = opcode_byte;
-            return .{ .defined = true };
-        }
+        pub const Instruction = struct {
+            pub const Value = u8;
 
-        pub fn staticGasForRevisionByte(revision: Revision, comptime opcode_byte: u8) i64 {
-            _ = opcode_byte;
-            return switch (revision) {
-                .alpha => 1,
-                .beta => 2,
-            };
-        }
+            pub fn fromByte(comptime opcode_byte: u8) Value {
+                return opcode_byte;
+            }
+
+            pub fn info(comptime _: Value) OpInfo {
+                return .{ .defined = true };
+            }
+
+            pub fn staticGasForRevision(revision: Revision, comptime _: Value) i64 {
+                return switch (revision) {
+                    .alpha => 1,
+                    .beta => 2,
+                };
+            }
+        };
     };
 
     const resolved = resolveStaticGasByte(ReverseDefinition, ReverseDefinition.Support.all, 0);
@@ -501,7 +502,7 @@ test "static gas folding uses support containment instead of revision tag order"
 
 test "resolved hot path requires tier, always availability, and constant gas" {
     const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.Bound(ethereum.definition);
+    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);

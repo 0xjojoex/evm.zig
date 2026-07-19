@@ -1,4 +1,4 @@
-//! Comptime validation for Definition and generated Protocol contracts.
+//! Comptime validation for bound execution and transaction contracts.
 //!
 //! Implementer-facing hook semantics and neutral defaults live in
 //! `definition.zig`; shared semantic values live in `types.zig`.
@@ -6,6 +6,7 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
+const definition = @import("../definition.zig");
 const execution = @import("execution.zig");
 const instruction_mod = @import("instruction.zig");
 const opcode_info = @import("../opcode.zig");
@@ -18,23 +19,24 @@ const tx_settlement = @import("../transaction/settlement.zig");
 
 const RevisionId = support.RevisionId;
 
-// Definition values are nominally typed and complete before binding. What
-// remains here are the boundaries where user-provided *types* enter the
-// engine — instruction, precompile, revision, and transaction preparation.
-pub fn assertValidDispatchDefinition(comptime Definition: type) void {
-    const support_window = comptime assertDefinitionModel(Definition);
-    assertDispatchSurfaceTypes(Definition, support_window);
+// Authored definition values are nominally typed before this point. These
+// checks receive a `BoundExecution` and validate the user-provided type
+// surfaces that enter dispatch, precompiles, and interpreter execution.
+pub fn assertInstructionContract(comptime ExecutionBinding: type) void {
+    const support_window = comptime assertDefinitionModel(ExecutionBinding);
+    assertDispatchSurfaceTypes(ExecutionBinding, support_window);
 }
 
-pub fn assertValidProtocolDefinition(comptime Definition: type) void {
-    assertValidDispatchDefinition(Definition);
-    assertPrecompileDomainTypes(Definition);
+pub fn assertDispatchContract(comptime ExecutionBinding: type) void {
+    assertInstructionContract(ExecutionBinding);
+    assertPrecompileDomainTypes(ExecutionBinding);
 }
 
-pub fn assertValidDefinition(comptime Definition: type) void {
-    assertValidProtocolDefinition(Definition);
-    assertInstructionDynamicGasTypes(Definition);
-    assertTransactionPreparationType(Definition);
+/// Full execution-layer contract: dispatch surface, precompile domain, and the
+/// dynamic-gas hooks the real Interpreter consumes. Takes a `BoundExecution`.
+pub fn assertExecutionContract(comptime ExecutionBinding: type) void {
+    assertDispatchContract(ExecutionBinding);
+    assertInstructionDynamicGasTypes(ExecutionBinding);
 }
 
 fn requireDecl(comptime Definition: type, comptime name: []const u8) void {
@@ -157,39 +159,24 @@ fn assertDispatchSurfaceTypes(comptime Definition: type, comptime support_window
     requireNestedFn(Instruction, "Definition.Instruction", "availability");
     requireNestedFn(Instruction, "Definition.Instruction", "tier");
     requireNestedFn(Instruction, "Definition.Instruction", "executionTarget");
+    requireNestedFn(Instruction, "Definition.Instruction", "staticGasForRevision");
 
     const instruction: Instruction.Value = comptime Instruction.fromByte(opcode_byte);
     const revision = Definition.revisions[0];
 
-    const info: opcode_info.OpInfo = Definition.opcodeInfoByte(opcode_byte);
-    const named_info: opcode_info.OpInfo = Definition.opcodeInfo(opcode);
     const instruction_info: opcode_info.OpInfo = comptime Instruction.info(instruction);
-    _ = info;
-    _ = named_info;
     _ = instruction_info;
     const context: instruction_mod.Context = comptime Instruction.context(instruction);
     const first_byte: u8 = context.firstByte();
     _ = first_byte;
 
-    const availability: Definition.Availability = comptime Definition.opcodeAvailabilityByte(opcode_byte);
-    const named_availability: Definition.Availability = comptime Definition.opcodeAvailability(opcode);
     const instruction_availability: Definition.Availability = comptime Instruction.availability(instruction);
-    _ = named_availability;
-    _ = instruction_availability;
-    const resolved: support.Resolution = Definition.resolveAvailability(availability, support_window);
+    const resolved: support.Resolution = Definition.resolveAvailability(instruction_availability, support_window);
     _ = resolved;
 
-    const static_gas: i64 = Definition.staticGasForRevisionByte(revision, opcode_byte);
-    const named_static_gas: i64 = Definition.staticGasForRevision(revision, opcode);
-    _ = named_static_gas;
-    _ = static_gas;
-    const instruction_static_gas: i64 = comptime Definition.staticGasForRevisionInstruction(revision, instruction);
+    const instruction_static_gas: i64 = comptime Instruction.staticGasForRevision(revision, instruction);
     _ = instruction_static_gas;
 
-    const tier_byte: support.OpcodeTier = Definition.opcodeTierByte(opcode_byte);
-    _ = tier_byte;
-    const tier: support.OpcodeTier = Definition.opcodeTier(opcode);
-    _ = tier;
     const instruction_tier: support.OpcodeTier = comptime Instruction.tier(instruction);
     _ = instruction_tier;
 
@@ -242,24 +229,30 @@ fn assertInstructionDynamicGasTypes(comptime Definition: type) void {
     _ = code_account_access_gas;
 }
 
-fn assertTransactionPreparationType(comptime Definition: type) void {
-    const TransactionApi = transaction_protocol.For(Definition);
+/// Assert that one transaction definition's user-provided `Preparation` type
+/// satisfies the engine prepare contract. Runs at `TransactionProtocol` bind.
+pub fn assertTransactionContract(comptime R: type, comptime transaction_definition: anytype) void {
+    const TransactionApi = transaction_protocol.For(transaction_definition.transaction);
     const ProtocolLike = struct {
-        pub const Revision = Definition.Revision;
-        pub const transaction = Definition.transaction;
-        pub const Transaction = TransactionApi;
-        pub const settlement = Definition.settlement;
+        pub const Revision = R;
+        pub const transaction = transaction_definition.transaction;
+        pub const Tx = TransactionApi;
+        pub const settlement = transaction_definition.settlement;
         pub const Settlement = tx_settlement.Default;
     };
 
-    const prepare_result_type = @TypeOf(TransactionApi.prepare(ProtocolLike, @as(tx.PrepareInput(ProtocolLike), undefined)));
+    const prepare_result_type = @TypeOf(TransactionApi.prepare(
+        ProtocolLike,
+        @as(*const definition.TransactionPolicy(R), undefined),
+        @as(tx.PrepareInput(ProtocolLike), undefined),
+    ));
     switch (@typeInfo(prepare_result_type)) {
         .error_union => |info| {
             if (info.payload != tx.PrepareResult(ProtocolLike)) {
-                @compileError("Protocol.Transaction.prepare must return !transaction.PrepareResult(Protocol)");
+                @compileError("Protocol.Tx.prepare must return !transaction.PrepareResult(Protocol)");
             }
         },
-        else => @compileError("Protocol.Transaction.prepare must return an error union"),
+        else => @compileError("Protocol.Tx.prepare must return an error union"),
     }
 }
 

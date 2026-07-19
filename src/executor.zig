@@ -5,18 +5,17 @@
 //! `Vm` handle validation and user-facing transaction shapes; this type is the
 //! execution substrate underneath them.
 //!
-//! The public methods fall into three lifecycle layers:
+//! The public methods fall into two lifecycle layers:
 //!
 //! 1. `runStandalone` is the convenience path for raw call/create messages. It
 //!    opens a transaction scope, checkpoints state, executes, then commits or
 //!    rolls back from the result status.
-//! 2. `beginMessageScope` + `runTopLevelTransaction` is the normal validated
-//!    transaction path used by `Vm.transact`: the caller opens the scope, then
-//!    the executor charges gas, applies nonce/access/authorization effects,
-//!    executes the message, settles costs, and closes the scope.
-//! 3. `beginTransaction` / `beginCreateTransaction` + `executeCall` /
-//!    `executeCreate` are lower-level building blocks for tests, fixtures,
-//!    benchmarks, and code that needs to drive a partially-managed scope.
+//! 2. `beginMessageScope` + `beginTransactionAttempt` is the neutral transaction
+//!    program boundary used by `Vm.transact`: the family program owns charging,
+//!    nonce/access/authorization effects, execution rollback, and settlement.
+//! `beginTransaction` / `beginCreateTransaction` + `executeCall` /
+//! `executeCreate` are lower-level building blocks for tests, fixtures,
+//! benchmarks, and code that needs to drive a partially-managed scope.
 //!
 //! `executor/call_runtime.zig` owns call/create frame execution and bytecode
 //! frame setup. `executor/host_callbacks.zig` owns the `Host` vtable adapter.
@@ -25,6 +24,7 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 pub const resource_bound = @import("./executor/resource_bound.zig");
+pub const errors = @import("./executor/error.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
 const MemoryAccount = evmz.state.MemoryAccount;
@@ -37,19 +37,12 @@ const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const JournalCheckpoint = evmz.state.Journal.Checkpoint;
 const StateOverlay = evmz.state.Overlay;
-const transaction = evmz.transaction;
 const RevisionId = evmz.protocol.RevisionId;
-const EthProtocol = evmz.Evm.Protocol;
+const EthProtocol = evmz.Evm.ExecutionProtocol;
 pub const Snapshot = StateOverlay.Snapshot;
 pub const TransientSnapshot = StateOverlay.TransientSnapshot;
 pub const EvmResult = Host.Result;
-pub const AuthorizationTuple = transaction.AuthorizationTuple;
-pub const TransactionScope = transaction.TransactionScope;
-pub const RootFrame = transaction.RootFrame;
 const EvmResultType = EvmResult;
-const AuthorizationTupleType = AuthorizationTuple;
-const TransactionScopeType = TransactionScope;
-const RootFrameType = RootFrame;
 const SnapshotType = Snapshot;
 const TransientSnapshotType = TransientSnapshot;
 const call_runtime = @import("./executor/call_runtime.zig");
@@ -65,7 +58,6 @@ pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
-const tx_gas = @import("./transaction/gas.zig");
 const uint256 = @import("./uint256.zig");
 
 const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
@@ -77,13 +69,6 @@ const ScopeRoot = struct {
 
     fn fromMessage(message: execution_values.Message) ScopeRoot {
         return switch (message) {
-            .call => |call| .{ .sender = call.sender, .recipient = call.recipient },
-            .create => |create| .{ .sender = create.sender, .recipient = null },
-        };
-    }
-
-    fn fromTransactionRoot(root: transaction.RootFrame) ScopeRoot {
-        return switch (root) {
             .call => |call| .{ .sender = call.sender, .recipient = call.recipient },
             .create => |create| .{ .sender = create.sender, .recipient = null },
         };
@@ -128,6 +113,9 @@ pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
 /// `prepared_code_backend`, tracing, and precompile runtimes are outside this
 /// VM-owned resource envelope and must enforce their own operational policy.
 pub const BoundedRuntimeResources = struct {
+    /// Semantic ceiling when these capacities were derived from block gas.
+    /// Caller-declared capacity envelopes leave this null.
+    max_block_gas: ?u64 = null,
     max_live_frames: usize = default_max_live_frames,
     memory_bytes_per_frame: ?usize = null,
     io_bytes_per_frame: ?usize = null,
@@ -184,6 +172,13 @@ pub const RuntimeResources = union(enum) {
         return switch (self) {
             .growable => null,
             .bounded => |bounded| bounded.max_live_frames,
+        };
+    }
+
+    pub fn blockGasLimitBound(self: RuntimeResources) ?u64 {
+        return switch (self) {
+            .growable => null,
+            .bounded => |bounded| bounded.max_block_gas,
         };
     }
 };
@@ -269,6 +264,7 @@ const code_deposit_gas_value = code_deposit_gas;
 const default_max_live_frames_value = default_max_live_frames;
 const RuntimeResourcesType = RuntimeResources;
 const BoundedRuntimeResourcesType = BoundedRuntimeResources;
+const ErrorType = errors.Error;
 pub const CaptureContext = capture_context.Context;
 pub const CaptureStateTarget = capture_context.StateTarget;
 
@@ -283,24 +279,25 @@ pub fn Executor(comptime ProtocolType: type) type {
         const Self = @This();
         const runtime = call_runtime.For(Self);
         const callbacks = host_callbacks.For(Self);
-        const tx_protocol = transaction.For(Protocol);
 
         pub const Protocol = ProtocolType;
+        pub const Error = ErrorType;
         pub const Init = InitFor(Protocol);
         pub const PreparedCallTransaction = PreparedCallTransactionType;
         pub const Call = CallType;
         pub const Create = CreateType;
         pub const Message = MessageType;
         pub const EvmResult = EvmResultType;
-        pub const AuthorizationTuple = AuthorizationTupleType;
-        pub const TransactionScope = TransactionScopeType;
-        pub const RootFrame = RootFrameType;
         pub const Snapshot = SnapshotType;
         pub const TransientSnapshot = TransientSnapshotType;
         pub const code_deposit_gas = code_deposit_gas_value;
         pub const default_max_live_frames = default_max_live_frames_value;
         pub const RuntimeResources = RuntimeResourcesType;
         pub const BoundedRuntimeResources = BoundedRuntimeResourcesType;
+
+        pub fn normalizeError(err: anyerror) Error {
+            return errors.normalize(err);
+        }
 
         allocator: std.mem.Allocator,
         state: StateOverlay,
@@ -312,8 +309,15 @@ pub fn Executor(comptime ProtocolType: type) type {
         runtime_resources_locked: bool = false,
         execution_context: ?execution_values.ExecutionContext = null,
         scope_root: ?ScopeRoot = null,
+        attempt_execution_journal_start: ?usize = null,
         active_transaction_checkpoint_id: usize = 0,
         next_transaction_checkpoint_id: usize = 0,
+        current_transaction_attempt: ?TransactionAttemptState = null,
+        next_transaction_attempt_generation: u64 = 0,
+        current_execution_lease: ?ExecutionLeaseState = null,
+        next_execution_lease_generation: u64 = 0,
+        active_block_execution_generation: ?u64 = null,
+        next_block_execution_generation: u64 = 0,
         checkpoint_top: usize = 0,
         next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
@@ -327,118 +331,287 @@ pub fn Executor(comptime ProtocolType: type) type {
         capture_context: ?*CaptureContext = null,
         last_call_output: frame_io.ByteSlot,
 
-        /// Parameters that belong to transaction settlement rather than bytecode
-        /// execution.
-        pub const TopLevelTransactionRun = struct {
-            execution: ?transaction.ExecutionGas = null,
-            execution_gas: ?u64 = null,
-            settlement: Protocol.Settlement.Plan,
-
-            fn gas(self: TopLevelTransactionRun) ?transaction.ExecutionGas {
-                if (self.execution) |execution| return execution;
-                if (self.execution_gas) |legacy| return transaction.ExecutionGas.legacy(legacy);
-                return null;
-            }
+        const ExecutionLeaseState = struct {
+            checkpoint: TransactionCheckpoint,
+            generation: u64,
         };
 
-        /// EVM execution facts plus the already-computed transaction gas result.
-        pub const TopLevelTransactionResult = struct {
-            status: Interpreter.Status,
-            gas_left: i64,
-            gas_refund: i64,
-            gas_reservoir: i64,
-            state_gas_spent: i64,
-            state_gas_from_gas_left: i64,
-            output_data: []u8,
-            gas: transaction.ResultGas,
+        const TransactionAttemptState = struct {
+            checkpoint: TransactionCheckpoint,
+            generation: u64,
+        };
 
-            fn init(result: Interpreter.Result, gas: transaction.ResultGas) @This() {
+        pub const TransactionAttemptError = error{
+            NoCurrentTransaction,
+            StaleTransactionExecution,
+        };
+
+        /// Generation-checked mutation capability for one rollback-armed
+        /// transaction attempt. It exposes execution and neutral state
+        /// operations, but only the owning transaction binder may turn it into
+        /// an executed lease.
+        pub const TransactionAttempt = struct {
+            executor: *Self,
+            generation: u64,
+
+            pub const AccountSummary = struct {
+                nonce: u64,
+                balance: u256,
+                code_hash: [32]u8,
+            };
+
+            pub fn revision(self: TransactionAttempt) TransactionAttemptError!Protocol.Revision {
+                try self.requireActive();
+                return self.executor.revision();
+            }
+
+            pub fn allocator(self: TransactionAttempt) TransactionAttemptError!std.mem.Allocator {
+                try self.requireActive();
+                return self.executor.allocator;
+            }
+
+            pub fn executeRequest(
+                self: TransactionAttempt,
+                request: execution_values.EvmExecutionRequest,
+            ) !Interpreter.Result {
+                try self.requireActive();
+                return self.executor.executeTransactionRequest(request);
+            }
+
+            /// Execute a nested prelude request under this attempt's outer
+            /// rollback checkpoint while temporarily using the request's own
+            /// opcode-visible context and root message.
+            pub fn executePreludeRequest(
+                self: TransactionAttempt,
+                request: execution_values.EvmExecutionRequest,
+            ) !Interpreter.Result {
+                try self.requireActive();
+                return self.executor.runTransactionPreludeRequest(request);
+            }
+
+            /// Open the payload's execution scope after any transaction
+            /// prelude scopes have closed.
+            pub fn beginExecution(
+                self: TransactionAttempt,
+                request: execution_values.EvmExecutionRequest,
+                scope_init: execution_values.ExecutionScopeInit,
+            ) !void {
+                try self.requireActive();
+                try self.executor.beginMessageScopeInAttempt(request, scope_init);
+            }
+
+            pub fn checkpoint(self: TransactionAttempt) !ExecutionCheckpoint {
+                try self.requireActive();
+                return self.executor.checkpoint();
+            }
+
+            pub fn accountSummary(self: TransactionAttempt, account_address: Address) !?AccountSummary {
+                try self.requireActive();
+                const account = try self.executor.getAccountOrLoad(account_address) orelse return null;
                 return .{
-                    .status = result.status,
-                    .gas_left = result.gas_left,
-                    .gas_refund = result.gas_refund,
-                    .gas_reservoir = result.gas_reservoir,
-                    .state_gas_spent = result.state_gas_spent,
-                    .state_gas_from_gas_left = result.state_gas_from_gas_left,
-                    .output_data = result.output_data,
-                    .gas = gas,
+                    .nonce = account.nonce,
+                    .balance = account.balance,
+                    .code_hash = account.code_hash,
                 };
             }
+
+            pub fn code(self: TransactionAttempt, account_address: Address) ![]const u8 {
+                try self.requireActive();
+                return self.executor.getCode(account_address);
+            }
+
+            pub fn balance(self: TransactionAttempt, account_address: Address) !u256 {
+                try self.requireActive();
+                return self.executor.getBalance(account_address);
+            }
+
+            pub fn addBalance(self: TransactionAttempt, account_address: Address, value: u256) !void {
+                try self.requireActive();
+                try self.executor.state.addBalance(account_address, value);
+            }
+
+            pub fn subtractBalance(self: TransactionAttempt, account_address: Address, value: u256) !bool {
+                try self.requireActive();
+                return self.executor.state.subtractBalance(account_address, value);
+            }
+
+            pub fn setNonce(self: TransactionAttempt, account_address: Address, nonce: u64) !void {
+                try self.requireActive();
+                try self.executor.state.setNonce(account_address, nonce);
+            }
+
+            pub fn incrementNonce(self: TransactionAttempt, account_address: Address) !void {
+                try self.requireActive();
+                try self.executor.incrementNonce(account_address);
+            }
+
+            pub fn setCode(self: TransactionAttempt, account_address: Address, code_bytes: []const u8) !void {
+                try self.requireActive();
+                try self.executor.state.setCode(account_address, code_bytes);
+            }
+
+            pub fn clearCode(self: TransactionAttempt, account_address: Address) !void {
+                try self.requireActive();
+                try self.executor.state.clearCode(account_address);
+            }
+
+            pub fn warmAccount(self: TransactionAttempt, account_address: Address) !void {
+                try self.requireActive();
+                try self.executor.warmAccount(account_address);
+            }
+
+            pub fn warmStorage(self: TransactionAttempt, account_address: Address, key: u256) !void {
+                try self.requireActive();
+                try self.executor.warmStorage(account_address, key);
+            }
+
+            pub fn finalizeState(self: TransactionAttempt) !void {
+                try self.requireActive();
+                try self.executor.finalizeTransactionState();
+            }
+
+            pub fn logs(self: TransactionAttempt) TransactionAttemptError![]const Host.Log {
+                try self.requireActive();
+                return self.executor.logs();
+            }
+
+            /// Seal the attempt into a neutral retain/discard lease. Family
+            /// transaction output stays in the transaction binder.
+            pub fn completeLease(self: TransactionAttempt) TransactionAttemptError!ExecutionLease {
+                const state_value = try self.state();
+                const checkpoint_value = state_value.checkpoint;
+                self.executor.current_transaction_attempt = null;
+                return self.executor.openExecutionLease(checkpoint_value);
+            }
+
+            pub fn discard(self: TransactionAttempt) !void {
+                const state_value = try self.state();
+                defer {
+                    self.executor.clearLastOutput();
+                    self.executor.closeTransactionLifetime();
+                    self.executor.current_transaction_attempt = null;
+                }
+                try state_value.checkpoint.restore();
+            }
+
+            pub fn discardIfCurrent(self: TransactionAttempt) void {
+                const current = if (self.executor.current_transaction_attempt) |*value| value else return;
+                if (current.generation != self.generation) return;
+                self.discard() catch {};
+            }
+
+            fn requireActive(self: TransactionAttempt) TransactionAttemptError!void {
+                _ = try self.state();
+            }
+
+            fn state(self: TransactionAttempt) TransactionAttemptError!*TransactionAttemptState {
+                const state_value = if (self.executor.current_transaction_attempt) |*value| value else return error.NoCurrentTransaction;
+                if (state_value.generation != self.generation)
+                    return error.StaleTransactionExecution;
+                return state_value;
+            }
         };
 
-        /// A fully executed, finalized, and settled transaction whose outer
-        /// journal checkpoint is still unresolved.
+        pub const ExecutionLeaseError = error{
+            NoCurrentTransaction,
+            StaleTransactionExecution,
+        };
+
+        /// Generation-checked exclusive claim over this mutable state branch.
+        /// Independent executors carry independent claims.
+        pub const BlockExecutionClaim = struct {
+            executor: *Self,
+            generation: u64,
+
+            pub fn requireActive(self: BlockExecutionClaim) !void {
+                const active = self.executor.active_block_execution_generation orelse
+                    return error.BlockExecutionFinished;
+                if (active != self.generation) return error.StaleBlockExecution;
+            }
+
+            pub fn requireFor(self: BlockExecutionClaim, executor: *Self) !void {
+                if (self.executor != executor) return error.WrongBlockExecution;
+                try self.requireActive();
+            }
+
+            pub fn release(self: BlockExecutionClaim) void {
+                if (self.executor.active_block_execution_generation == self.generation) {
+                    self.executor.active_block_execution_generation = null;
+                }
+            }
+        };
+
+        /// Checked lease over the Executor-owned top-level transaction attempt.
         ///
-        /// Treat this token as move-only. `deinit` rejects an unresolved
-        /// transaction so callers can use the normal `defer pending.deinit()`
-        /// pattern safely.
-        pub const PendingTopLevelTransaction = struct {
-            checkpoint: TransactionCheckpoint,
-            result_value: TopLevelTransactionResult,
+        /// The outer journal checkpoint and result remain in the Executor until
+        /// one current lease retains or discards them. Copies are safe: resolving
+        /// one makes every same-generation copy stale, while a later generation
+        /// cannot be affected by an older lease.
+        pub const ExecutionLease = struct {
+            executor: *Self,
+            generation: u64,
 
-            pub fn result(self: *const PendingTopLevelTransaction) TopLevelTransactionResult {
-                return self.result_value;
+            pub fn requireCurrent(self: ExecutionLease) ExecutionLeaseError!void {
+                _ = try self.state();
             }
 
-            pub fn logs(self: *const PendingTopLevelTransaction) []const Host.Log {
-                return self.checkpoint.executor.logs();
+            pub fn logs(self: ExecutionLease) ExecutionLeaseError![]const Host.Log {
+                _ = try self.state();
+                return self.executor.logs();
             }
 
-            pub fn accept(self: *PendingTopLevelTransaction) !TopLevelTransactionResult {
-                const result_value = self.result_value;
-                defer self.checkpoint.executor.closeTransaction();
-                try self.checkpoint.commit();
-                return result_value;
+            /// Materialize the eager overlay while rollback remains armed.
+            pub fn changeset(self: ExecutionLease) !Changeset {
+                _ = try self.state();
+                return self.executor.state.changeset();
             }
 
-            pub fn reject(self: *PendingTopLevelTransaction) !void {
+            /// Retain a neutral lease whose family output lives beside it.
+            pub fn retain(self: ExecutionLease) !void {
+                const state_value = try self.state();
+                try self.retainState(state_value);
+            }
+
+            fn retainState(self: ExecutionLease, state_value: *ExecutionLeaseState) !void {
+                state_value.checkpoint.commit() catch |err| {
+                    self.executor.clearLastOutput();
+                    self.executor.closeTransactionLifetime();
+                    self.executor.current_execution_lease = null;
+                    return err;
+                };
+                self.executor.closeTransactionLifetime();
+                self.executor.current_execution_lease = null;
+            }
+
+            /// Restore the state that preceded this execution. Transaction
+            /// ownership closes even if rollback observation reports an error.
+            pub fn discard(self: ExecutionLease) !void {
+                const state_value = try self.state();
                 defer {
-                    self.checkpoint.executor.clearLastOutput();
-                    self.checkpoint.executor.closeTransaction();
+                    self.executor.clearLastOutput();
+                    self.executor.closeTransactionLifetime();
+                    self.executor.current_execution_lease = null;
                 }
-                try self.checkpoint.restore();
+                try state_value.checkpoint.restore();
             }
 
-            pub fn deinit(self: *PendingTopLevelTransaction) void {
-                if (self.checkpoint.open) {
-                    self.reject() catch {};
-                }
+            pub fn discardIfCurrent(self: ExecutionLease) void {
+                const current = if (self.executor.current_execution_lease) |*value| value else return;
+                if (current.generation != self.generation) return;
+                self.discard() catch {};
+            }
+
+            pub fn deinit(self: *ExecutionLease) void {
+                self.discardIfCurrent();
                 self.* = undefined;
             }
-        };
 
-        /// Options for `transactionScope`: the access list and authorizations to
-        /// attach. `authorization_count` defaults to `authorization_list.len`.
-        pub const TransactionScopeOptions = struct {
-            access_list: []const transaction.AccessListEntry = &.{},
-            authorization_list: []const Self.AuthorizationTuple = &.{},
-            authorization_count: ?usize = null,
+            fn state(self: ExecutionLease) ExecutionLeaseError!*ExecutionLeaseState {
+                const state_value = if (self.executor.current_execution_lease) |*value| value else return error.NoCurrentTransaction;
+                if (state_value.generation != self.generation) return error.StaleTransactionExecution;
+                return state_value;
+            }
         };
-
-        /// Optional request execution hook for benchmark/fixture drivers.
-        ///
-        /// Production transaction execution installs a protocol-bound engine; tests and
-        /// benchmark harnesses can swap this to time or compare only the message
-        /// execution portion while reusing the same transaction accounting shell.
-        pub const TransactionEngine = struct {
-            ptr: ?*anyopaque = null,
-            execute: *const fn (
-                ptr: ?*anyopaque,
-                executor: *Self,
-                request: execution_values.EvmExecutionRequest,
-            ) anyerror!Interpreter.Result,
-        };
-
-        /// Build a `TransactionScope` from a host tx-context plus optional access
-        /// list and authorizations — the tx-scope half of `beginTransactionScope`.
-        pub fn transactionScope(tx_context: Host.TxContext, options: TransactionScopeOptions) Self.TransactionScope {
-            return .{
-                .context = context_adapter.fromHost(tx_context),
-                .access_list = options.access_list,
-                .authorization_list = options.authorization_list,
-                .authorization_count = options.authorization_count orelse options.authorization_list.len,
-            };
-        }
 
         const TransactionFinalizer = struct {
             revision: Protocol.Revision,
@@ -451,14 +624,13 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
         };
 
-        const AuthorizationGasAdjustment = evmz.protocol.AuthorizationGasAdjustment;
-
         /// Scope-bound execution checkpoint paired with one trace/BAL lifecycle.
         ///
         /// This journal-backed token must be opened and closed inside one active
-        /// transaction scope. It never finalizes or closes that scope. Use a full
-        /// `Snapshot` or the owning STF/backend checkpoint for rollback that must
-        /// span family pre-writes or scope opening. Treat this token as move-only.
+        /// transaction scope. It never finalizes or closes that scope. The owning
+        /// transaction attempt can span prelude writes and payload execution;
+        /// broader block phases still use their own STF/backend lifetime.
+        /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Self,
             journal_checkpoint: JournalCheckpoint,
@@ -602,9 +774,11 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Rebind fixture/benchmark inputs while retaining configured resources.
         pub fn reset(self: *Self, options: Init) !void {
+            if (self.hasActiveBlockExecution()) return error.BlockExecutionActive;
             if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
             if (self.checkpoint_top != 0) return error.ActiveCheckpoints;
             if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
+            if (self.attempt_execution_journal_start != null) return error.ActiveTransactionScope;
             if (self.prepared_code_execution_depth != 0) return error.ActivePreparedCodeExecution;
 
             const next_revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision);
@@ -614,6 +788,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.state.reset(options.state_reader);
             self.execution_context = null;
             self.scope_root = null;
+            self.attempt_execution_journal_start = null;
             self.block_hash_source = options.block_hash_source;
             self.precompile_runtime = options.precompile_runtime;
             self.revision_id = next_revision_id;
@@ -623,12 +798,17 @@ pub fn Executor(comptime ProtocolType: type) type {
         }
 
         pub fn configureRuntimeResources(self: *Self, runtime_resources: RuntimeResourcesType) !void {
+            if (self.hasActiveBlockExecution()) return error.BlockExecutionActive;
             if (self.runtime_resources_locked) return error.RuntimeResourcesLocked;
             try self.configureRuntimeResourcesUnlocked(runtime_resources);
         }
 
         pub fn lockRuntimeResources(self: *Self) void {
             self.runtime_resources_locked = true;
+        }
+
+        pub fn blockGasLimitBound(self: *const Self) ?u64 {
+            return self.runtime_resources.blockGasLimitBound();
         }
 
         fn configureRuntimeResourcesUnlocked(self: *Self, runtime_resources: RuntimeResourcesType) !void {
@@ -749,12 +929,16 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
         pub fn deinit(self: *Self) void {
+            std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.runtime_frames.items.len == 0);
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.active_transaction_checkpoint_id == 0);
+            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.attempt_execution_journal_start == null);
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
             if (self.capture_context) |context| std.debug.assert(!context.isActive());
+            std.debug.assert(self.current_execution_lease == null);
             self.state.deinit();
             self.runtime_frames.deinit(self.allocator);
             self.frame_store.deinit(self.allocator);
@@ -769,16 +953,12 @@ pub fn Executor(comptime ProtocolType: type) type {
 
         fn warmTransactionAccesses(
             self: *Self,
-            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: ?Address,
         ) !void {
             try self.state.warmAccount(sender);
             if (recipient) |address| {
                 try self.state.warmAccount(address);
-            }
-            if (Protocol.block.transactionWarmsCoinbase(self.revision())) {
-                try self.state.warmAccount(context.block.coinbase);
             }
             self.scope_root = .{ .sender = sender, .recipient = recipient };
         }
@@ -790,6 +970,26 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.execution_context = context;
             self.scope_root = null;
             self.state.beginTransaction();
+        }
+
+        fn openTransactionAttemptScope(self: *Self, context: execution_values.ExecutionContext) !void {
+            if (self.execution_context != null) return error.ActiveTransactionScope;
+            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            if (self.active_transaction_checkpoint_id == 0) return error.NoCurrentTransaction;
+            if (self.attempt_execution_journal_start != null) return error.ActiveTransactionScope;
+            self.execution_context = context;
+            self.scope_root = null;
+            self.attempt_execution_journal_start = self.state.beginExecutionScope();
+        }
+
+        fn closeTransactionAttemptScope(self: *Self) !void {
+            if (self.execution_context == null) return;
+            const journal_start = self.attempt_execution_journal_start orelse
+                return error.MissingTransactionScope;
+            try self.state.closeExecutionScope(journal_start);
+            self.execution_context = null;
+            self.scope_root = null;
+            self.attempt_execution_journal_start = null;
         }
 
         fn requireTransactionScope(self: *const Self) !void {
@@ -811,12 +1011,13 @@ pub fn Executor(comptime ProtocolType: type) type {
         ///
         /// Callers that use this directly must eventually call `commitTransaction`,
         /// `rollbackTransaction`, `closeTransaction`, or another helper that does so.
-        /// The scope warms the sender, recipient, and spec-required coinbase account.
+        /// The scope warms the sender and recipient. Family-required additions,
+        /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
         pub fn beginTransaction(self: *Self, tx_context: Host.TxContext, sender: Address, recipient: Address) !void {
             const context = context_adapter.fromHost(tx_context);
             try self.openTransactionScope(context);
             errdefer self.closeTransaction();
-            try warmTransactionAccesses(self, context, sender, recipient);
+            try warmTransactionAccesses(self, sender, recipient);
         }
 
         /// Open a manual create transaction scope.
@@ -827,34 +1028,56 @@ pub fn Executor(comptime ProtocolType: type) type {
             const context = context_adapter.fromHost(tx_context);
             try self.openTransactionScope(context);
             errdefer self.closeTransaction();
-            try warmTransactionAccesses(self, context, sender, null);
-        }
-
-        /// Open the Ethereum transaction scope for a prepared scope + root frame.
-        ///
-        /// New family paths use `beginMessageScope`; Ethereum-focused lower-level
-        /// callers may use this adapter before `runTopLevelTransaction`.
-        pub fn beginTransactionScope(self: *Self, scope: Self.TransactionScope, root: Self.RootFrame) !void {
-            try self.openTransactionScope(scope.context);
-            errdefer self.closeTransaction();
-            switch (root) {
-                .call => |call_tx| try warmTransactionAccesses(self, scope.context, call_tx.sender, call_tx.recipient),
-                .create => |create_tx| try warmTransactionAccesses(self, scope.context, create_tx.sender, null),
-            }
+            try warmTransactionAccesses(self, sender, null);
         }
 
         /// Open a direct message-execution scope from its authoritative context.
         ///
         /// This is open-only: callers own checkpoint placement, execution, and
         /// the eventual commit, restore, or close. Mandatory sender/recipient/
-        /// coinbase warmth is derived by the engine; `scope_init` adds neutral
-        /// family- or witness-resolved warmth.
+        /// `scope_init` supplies family- or witness-resolved warmth beyond the
+        /// mandatory root sender/recipient accounts.
         pub fn beginMessageScope(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
         ) !void {
             try self.beginMessageScopeContext(request.context, request.message, scope_init);
+        }
+
+        /// Atomically open one transaction attempt and its payload execution
+        /// scope. Transaction programs with preludes use
+        /// `beginTransactionAttemptLifetime` and open the payload afterwards.
+        pub fn beginTransactionAttempt(
+            self: *Self,
+            request: execution_values.EvmExecutionRequest,
+            scope_init: execution_values.ExecutionScopeInit,
+        ) !TransactionAttempt {
+            const attempt = try self.beginTransactionAttemptLifetime();
+            errdefer attempt.discardIfCurrent();
+            try attempt.beginExecution(request, scope_init);
+            return attempt;
+        }
+
+        /// Open only the rollback-armed transaction lifetime. Prelude execution
+        /// scopes and the payload scope are sequenced beneath this attempt.
+        pub fn beginTransactionAttemptLifetime(self: *Self) !TransactionAttempt {
+            if (self.current_transaction_attempt != null or self.current_execution_lease != null)
+                return error.TransactionAttemptActive;
+            if (self.execution_context != null) return error.ActiveTransactionScope;
+            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            if (self.attempt_execution_journal_start != null) return error.ActiveTransactionScope;
+
+            const checkpoint_value = try self.transactionCheckpoint();
+            self.next_transaction_attempt_generation +%= 1;
+            self.current_transaction_attempt = .{
+                .checkpoint = checkpoint_value,
+                .generation = self.next_transaction_attempt_generation,
+            };
+            return .{
+                .executor = self,
+                .generation = self.next_transaction_attempt_generation,
+            };
         }
 
         fn beginMessageScopeContext(
@@ -866,16 +1089,34 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.openTransactionScope(context);
             errdefer self.closeTransaction();
 
+            try self.initializeMessageScope(message, scope_init);
+        }
+
+        fn beginMessageScopeInAttempt(
+            self: *Self,
+            request: execution_values.EvmExecutionRequest,
+            scope_init: execution_values.ExecutionScopeInit,
+        ) !void {
+            try self.openTransactionAttemptScope(request.context);
+            errdefer self.closeTransactionAttemptScope() catch {};
+
+            try self.initializeMessageScope(request.message, scope_init);
+        }
+
+        fn initializeMessageScope(
+            self: *Self,
+            message: Self.Message,
+            scope_init: execution_values.ExecutionScopeInit,
+        ) !void {
             const initial_warm_set = scope_init.initial_warm_set;
             if (initial_warm_set.accounts.len != 0 or initial_warm_set.storage_slots.len != 0) {
                 const root_accounts: usize = switch (message) {
                     .call => 2,
                     .create => 1,
                 };
-                const coinbase_accounts: usize = @intFromBool(Protocol.block.transactionWarmsCoinbase(self.revision()));
                 const account_hint = std.math.add(
                     usize,
-                    root_accounts + coinbase_accounts,
+                    root_accounts,
                     initial_warm_set.accounts.len,
                 ) catch return error.AccessCapacityTooLarge;
                 try self.state.reserveAccessHint(.{
@@ -885,8 +1126,8 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
 
             switch (message) {
-                .call => |call| try warmTransactionAccesses(self, context, call.sender, call.recipient),
-                .create => |create| try warmTransactionAccesses(self, context, create.sender, null),
+                .call => |call| try warmTransactionAccesses(self, call.sender, call.recipient),
+                .create => |create| try warmTransactionAccesses(self, create.sender, null),
             }
             for (initial_warm_set.accounts) |address| {
                 try self.state.warmAccount(address);
@@ -910,22 +1151,6 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub fn warmStorage(self: *Self, address: Address, key: u256) !void {
             try self.requireTransactionScope();
             try self.state.warmStorage(address, key);
-        }
-
-        /// Apply a transaction access list to the current scope.
-        pub fn warmAccessList(self: *Self, access_list: []const transaction.AccessListEntry) !void {
-            try self.requireTransactionScope();
-            const counts = tx_gas.accessListCounts(access_list);
-            try self.state.reserveAccessHint(.{
-                .accounts = counts.addresses,
-                .storage_keys = counts.storage_keys,
-            });
-            for (access_list) |entry| {
-                try self.state.warmAccount(entry.address);
-                for (entry.storage_keys) |key| {
-                    try self.state.warmStorage(entry.address, key);
-                }
-            }
         }
 
         /// Return account metadata already present in the overlay.
@@ -992,7 +1217,6 @@ pub fn Executor(comptime ProtocolType: type) type {
         }
 
         fn transactionCheckpoint(self: *Self) !TransactionCheckpoint {
-            try self.requireTransactionScope();
             if (self.active_transaction_checkpoint_id != 0) return error.PendingTransactionActive;
             if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
             const id = std.math.add(usize, self.next_transaction_checkpoint_id, 1) catch return error.CheckpointIdExhausted;
@@ -1006,13 +1230,51 @@ pub fn Executor(comptime ProtocolType: type) type {
             };
         }
 
-        pub fn hasPendingTransaction(self: *const Self) bool {
+        fn openExecutionLease(
+            self: *Self,
+            transaction_checkpoint: TransactionCheckpoint,
+        ) ExecutionLease {
+            std.debug.assert(self.current_execution_lease == null);
+            std.debug.assert(transaction_checkpoint.executor == self);
+            std.debug.assert(transaction_checkpoint.open);
+            self.next_execution_lease_generation +%= 1;
+            self.current_execution_lease = .{
+                .checkpoint = transaction_checkpoint,
+                .generation = self.next_execution_lease_generation,
+            };
+            return .{
+                .executor = self,
+                .generation = self.next_execution_lease_generation,
+            };
+        }
+
+        pub fn hasCurrentTransaction(self: *const Self) bool {
             return self.active_transaction_checkpoint_id != 0;
         }
 
         /// Restore the overlay to a previous full snapshot.
         pub fn restore(self: *Self, snapshot_state: *Self.Snapshot) !void {
             try self.state.restore(snapshot_state);
+        }
+
+        /// Internal lifetime seam used by the engine's BlockExecution scope.
+        /// Public integrations construct that scope instead of claiming directly.
+        pub fn claimBlockExecution(self: *Self) !BlockExecutionClaim {
+            if (self.hasActiveBlockExecution()) return error.BlockExecutionActive;
+            self.next_block_execution_generation +%= 1;
+            self.active_block_execution_generation = self.next_block_execution_generation;
+            return .{
+                .executor = self,
+                .generation = self.next_block_execution_generation,
+            };
+        }
+
+        pub fn hasActiveBlockExecution(self: *const Self) bool {
+            return self.active_block_execution_generation != null;
+        }
+
+        pub fn hasChanges(self: *const Self) bool {
+            return self.state.hasChanges();
         }
 
         /// Finalize state changes for the current transaction and close its context.
@@ -1045,6 +1307,18 @@ pub fn Executor(comptime ProtocolType: type) type {
             self.state.closeTransaction();
             self.execution_context = null;
             self.scope_root = null;
+            self.attempt_execution_journal_start = null;
+        }
+
+        /// Close whichever execution scope belongs to a resolved transaction
+        /// attempt, or clear an execution-less attempt's retained journal.
+        fn closeTransactionLifetime(self: *Self) void {
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.active_transaction_checkpoint_id == 0);
+            self.state.closeTransaction();
+            self.execution_context = null;
+            self.scope_root = null;
+            self.attempt_execution_journal_start = null;
         }
 
         /// Return the pending overlay changes without committing them.
@@ -1086,8 +1360,8 @@ pub fn Executor(comptime ProtocolType: type) type {
         }
 
         /// Execute a raw call inside an already-open tx scope.
-        pub fn executeCall(self: *Self, options: Self.Call) !Self.EvmResult {
-            return runtime.executeCall(self, options);
+        pub fn executeCall(self: *Self, message: Self.Call, gas: execution_values.ExecutionGas) !Self.EvmResult {
+            return runtime.executeCall(self, message, gas);
         }
 
         /// Execute a raw call by loading and preparing recipient code first.
@@ -1096,7 +1370,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             sender: Address,
             recipient: Address,
             input: []const u8,
-            gas: transaction.ExecutionGas,
+            gas: execution_values.ExecutionGas,
             value: u256,
         ) !Interpreter.Result {
             return runtime.executeCallTransaction(self, sender, recipient, input, gas, value);
@@ -1112,26 +1386,26 @@ pub fn Executor(comptime ProtocolType: type) type {
             self: *Self,
             sender: Address,
             init_code: []const u8,
-            gas: transaction.ExecutionGas,
+            gas: execution_values.ExecutionGas,
             value: u256,
         ) !Self.EvmResult {
             return runtime.executeCreateTransaction(self, sender, init_code, gas, value);
         }
 
         /// Execute a raw create/create2 message inside an already-open tx scope.
-        pub fn executeCreate(self: *Self, options: Self.Create) !Self.EvmResult {
-            return runtime.executeCreate(self, options);
+        pub fn executeCreate(self: *Self, message: Self.Create, gas: execution_values.ExecutionGas) !Self.EvmResult {
+            return runtime.executeCreate(self, message, gas);
         }
 
         /// Execute a raw call/create message inside an already-open tx scope.
         ///
         /// This does not open or close a transaction scope. Use `runStandalone` for the
         /// fully-managed raw-message lifecycle.
-        pub fn executeMessage(self: *Self, message: Self.Message) !Self.EvmResult {
+        pub fn executeMessage(self: *Self, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
             try self.validateScopeRoot(.fromMessage(message));
             return switch (message) {
-                .call => |options| runtime.executeCall(self, options),
-                .create => |options| runtime.executeCreate(self, options),
+                .call => |call| runtime.executeCall(self, call, gas),
+                .create => |create| runtime.executeCreate(self, create, gas),
             };
         }
 
@@ -1139,8 +1413,8 @@ pub fn Executor(comptime ProtocolType: type) type {
         ///
         /// New integrations should prefer `runStandaloneRequest`, whose context is
         /// the authoritative concrete execution value.
-        pub fn runStandalone(self: *Self, tx_context: Host.TxContext, message: Self.Message) !Self.EvmResult {
-            return self.runStandaloneContext(context_adapter.fromHost(tx_context), message, .{});
+        pub fn runStandalone(self: *Self, tx_context: Host.TxContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
+            return self.runStandaloneContext(context_adapter.fromHost(tx_context), message, gas, .{});
         }
 
         /// Run one direct execution request as a complete transaction scope.
@@ -1154,13 +1428,14 @@ pub fn Executor(comptime ProtocolType: type) type {
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
         ) !Self.EvmResult {
-            return self.runStandaloneContext(request.context, request.message, scope_init);
+            return self.runStandaloneContext(request.context, request.message, request.gas, scope_init);
         }
 
         fn runStandaloneContext(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
+            gas: execution_values.ExecutionGas,
             scope_init: execution_values.ExecutionScopeInit,
         ) !Self.EvmResult {
             try self.beginMessageScopeContext(context, message, scope_init);
@@ -1169,7 +1444,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             var pre_execution = try self.checkpoint();
             defer pre_execution.deinit();
 
-            const result = try self.executeMessage(message);
+            const result = try self.executeMessage(message, gas);
             if (executionRolledBack(result.status())) {
                 try pre_execution.restore();
                 self.closeTransaction();
@@ -1184,11 +1459,37 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// Execute the normalized request inside its already-open transaction scope.
         ///
         /// The caller owns transaction charging, nonce/access/auth handling, settlement,
-        /// and final commit/rollback. `runTopLevelTransaction` wraps those pieces.
+        /// and final commit/rollback. Transaction programs compose those pieces.
         pub fn executeTransactionRequest(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
             try self.validateScopeContext(request.context);
             try self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrusted(request);
+        }
+
+        /// Execute and finalize one family prelude request in its own execution
+        /// scope while retaining the transaction attempt's outer journal. The
+        /// next prelude request or payload starts with fresh warmth, transient
+        /// storage, logs, and original-storage tracking.
+        fn runTransactionPreludeRequest(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
+            try self.openTransactionAttemptScope(request.context);
+            errdefer self.closeTransactionAttemptScope() catch {};
+            self.scope_root = .fromMessage(request.message);
+
+            var execution_checkpoint = try self.checkpoint();
+            defer execution_checkpoint.deinit();
+            const result = try self.executeTransactionRequestTrusted(request);
+            if (executionRolledBack(result.status)) {
+                try execution_checkpoint.restore();
+                try self.closeTransactionAttemptScope();
+            } else {
+                try self.finalizeTransactionState();
+                // Keep rollback armed until scope-local storage has been
+                // promoted into the outer transaction journal. This also
+                // leaves a caught allocation/capture error retry-safe.
+                try self.closeTransactionAttemptScope();
+                try execution_checkpoint.commit();
+            }
+            return result;
         }
 
         fn executeTransactionRequestTrusted(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
@@ -1196,7 +1497,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .call => |call| try self.traceAccountAccess(call.recipient, 0),
                 .create => {},
             }
-            const result = try self.executeMessage(request.message);
+            const result = try self.executeMessage(request.message, request.gas);
             return switch (result) {
                 .call => |call_result| .{
                     .status = call_result.status,
@@ -1220,158 +1521,6 @@ pub fn Executor(comptime ProtocolType: type) type {
                     interpreter_result.refillIntrinsicStateGas(create_result.state_gas_refund);
                     break :blk interpreter_result;
                 },
-            };
-        }
-
-        /// Run and immediately accept the normal top-level transaction shell.
-        ///
-        /// Callers must first open a matching scope with `beginMessageScope` or the
-        /// Ethereum `beginTransactionScope` adapter. This method charges upfront gas,
-        /// applies nonce/access/authorization effects, executes when `execution_gas`
-        /// is present, commits or restores state, settles gas costs, and closes the
-        /// transaction context.
-        pub fn runTopLevelTransaction(
-            self: *Self,
-            scope: Self.TransactionScope,
-            root: Self.RootFrame,
-            run: TopLevelTransactionRun,
-        ) !Self.TopLevelTransactionResult {
-            var pending = try self.runTopLevelTransactionPending(scope, root, run);
-            defer pending.deinit();
-            return pending.accept();
-        }
-
-        /// Run the normal top-level transaction accounting shell while retaining
-        /// its outer journal checkpoint for explicit acceptance or rejection.
-        pub fn runTopLevelTransactionPending(
-            self: *Self,
-            scope: Self.TransactionScope,
-            root: Self.RootFrame,
-            run: TopLevelTransactionRun,
-        ) !Self.PendingTopLevelTransaction {
-            const Engine = struct {
-                fn execute(
-                    ptr: ?*anyopaque,
-                    executor: *Self,
-                    request: execution_values.EvmExecutionRequest,
-                ) !Interpreter.Result {
-                    _ = ptr;
-                    return executor.executeTransactionRequestTrusted(request);
-                }
-            };
-
-            return self.runTopLevelTransactionPendingWithEngine(scope, root, run, .{
-                .execute = Engine.execute,
-            });
-        }
-
-        /// Variant of `runTopLevelTransaction` with an injectable execution engine.
-        ///
-        /// Benchmark and fixture drivers use this to swap only the message execution
-        /// step while preserving the same transaction accounting behavior.
-        pub fn runTopLevelTransactionWithEngine(
-            self: *Self,
-            scope: Self.TransactionScope,
-            root: Self.RootFrame,
-            run: TopLevelTransactionRun,
-            engine: TransactionEngine,
-        ) !Self.TopLevelTransactionResult {
-            var pending = try self.runTopLevelTransactionPendingWithEngine(scope, root, run, engine);
-            defer pending.deinit();
-            return pending.accept();
-        }
-
-        /// Pending-result variant with an injectable execution engine.
-        pub fn runTopLevelTransactionPendingWithEngine(
-            self: *Self,
-            scope: Self.TransactionScope,
-            root: Self.RootFrame,
-            run: TopLevelTransactionRun,
-            engine: TransactionEngine,
-        ) !Self.PendingTopLevelTransaction {
-            try self.validateScopeContext(scope.context);
-            try self.validateScopeRoot(.fromTransactionRoot(root));
-            try self.validateSettlementRevision(run.settlement);
-
-            errdefer self.closeTransaction();
-            var shell_checkpoint = try self.transactionCheckpoint();
-            errdefer shell_checkpoint.restore() catch {};
-
-            const sender = root.sender();
-            var execution_gas = run.gas();
-            const transaction_charged = if (execution_gas != null)
-                try self.chargeTransactionCosts(sender, run.settlement)
-            else
-                false;
-            var authorization_gas = AuthorizationGasAdjustment{};
-            if (transaction_charged) {
-                if (!root.isCreate()) {
-                    try self.incrementNonce(sender);
-                }
-                try self.warmAccessList(scope.access_list);
-                authorization_gas = try self.applyAuthorizationList(scope.authorization_list);
-                authorization_gas.add(malformedAuthorizationGasAdjustment(self, scope));
-                if (authorization_gas.state_refund != 0) {
-                    if (execution_gas) |current_gas| {
-                        const adjusted_gas = transaction.ExecutionGas{
-                            .regular_left = current_gas.regular_left,
-                            .reservoir = std.math.add(u64, current_gas.reservoir, authorization_gas.state_refund) catch std.math.maxInt(u64),
-                        };
-                        execution_gas = adjusted_gas;
-                    }
-                }
-                try warmDelegatedTransactionTarget(self, root);
-            }
-
-            var execution_checkpoint = try self.checkpoint();
-            defer execution_checkpoint.deinit();
-
-            var result = Interpreter.Result{
-                .status = .out_of_gas,
-                .gas_left = 0,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-            if (execution_gas) |gas| {
-                if (!transaction_charged) {
-                    result.status = .invalid;
-                } else {
-                    const context = self.execution_context orelse return error.MissingTransactionScope;
-                    result = try engine.execute(engine.ptr, self, transaction.executionRequest(context, root, gas));
-                }
-            }
-            const authorization_refund_i64 = std.math.cast(i64, authorization_gas.regular_refund) orelse std.math.maxInt(i64);
-            result.gas_refund = std.math.add(i64, result.gas_refund, authorization_refund_i64) catch std.math.maxInt(i64);
-            if (authorization_gas.state_refund != 0) {
-                const state_refund_i64 = std.math.cast(i64, authorization_gas.state_refund) orelse std.math.maxInt(i64);
-                result.state_gas_spent = std.math.sub(i64, result.state_gas_spent, state_refund_i64) catch std.math.minInt(i64);
-            }
-
-            if (executionRolledBack(result.status)) {
-                if (root.isCreate() and transaction_charged) {
-                    result.refillIntrinsicStateGas(Protocol.create.createTransactionRollbackStateGasRefund(self.revision()));
-                }
-                try execution_checkpoint.restore();
-                if (root.isCreate() and transaction_charged) {
-                    try self.incrementNonce(sender);
-                }
-            } else {
-                try execution_checkpoint.commit();
-                try self.finalizeTransactionState();
-            }
-            const result_gas = if (transaction_charged)
-                try self.settleTransactionCosts(sender, run.settlement, result)
-            else
-                tx_protocol.settlement.planGas(try tx_protocol.settlement.planCosts(run.settlement, .{
-                    .gas_left = result.gas_left,
-                    .gas_refund = result.gas_refund,
-                    .gas_reservoir = result.gas_reservoir,
-                    .state_gas_spent = result.state_gas_spent,
-                }));
-
-            return .{
-                .checkpoint = shell_checkpoint,
-                .result_value = TopLevelTransactionResult.init(result, result_gas),
             };
         }
 
@@ -1458,132 +1607,6 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.state.setNonce(address, std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
         }
 
-        /// Charge the sender's upfront transaction cost.
-        ///
-        /// Returns false when prepayment overflows or the sender cannot cover gas plus
-        /// value. The caller still decides whether to execute and how to close scope.
-        pub fn chargeTransactionCosts(self: *Self, sender: Address, settlement: Protocol.Settlement.Plan) !bool {
-            try self.validateSettlementRevision(settlement);
-            const precharge = tx_protocol.settlement.planPrecharge(settlement);
-            const required_balance = @max(precharge.minimum_balance, precharge.upfront_debit);
-            if (required_balance == 0) return true;
-            const payer = precharge.payer orelse sender;
-            const payer_account = try self.state.getAccountOrLoad(payer) orelse return false;
-            if (payer_account.balance < required_balance) return false;
-            return self.state.subtractBalance(payer, precharge.upfront_debit);
-        }
-
-        /// Compute settlement once, apply the engine shell's fixed credits, and
-        /// return the receipt/block gas result to the VM.
-        pub fn settleTransactionCosts(self: *Self, sender: Address, settlement: Protocol.Settlement.Plan, result: Interpreter.Result) !transaction.ResultGas {
-            try self.validateSettlementRevision(settlement);
-            const costs = try tx_protocol.settlement.planCosts(settlement, .{
-                .gas_left = result.gas_left,
-                .gas_refund = result.gas_refund,
-                .gas_reservoir = result.gas_reservoir,
-                .state_gas_spent = result.state_gas_spent,
-            });
-            try self.addBalance(settlement.payer orelse sender, costs.payer_refund);
-            try self.addBalance(settlement.fee_recipient, costs.fee_payment);
-            return tx_protocol.settlement.planGas(costs);
-        }
-
-        fn validateSettlementRevision(self: *const Self, settlement: Protocol.Settlement.Plan) !void {
-            const settlement_revision_id = tx_protocol.settlement.planRevisionId(settlement);
-            if (settlement_revision_id != self.revision_id) return error.SettlementRevisionMismatch;
-        }
-
-        /// Apply all EIP-7702 authorizations and return their gas refund.
-        pub fn applyAuthorizationList(self: *Self, authorization_list: []const Self.AuthorizationTuple) !AuthorizationGasAdjustment {
-            if (!Protocol.authorization.active(self.revision())) return .{};
-            var adjustment = AuthorizationGasAdjustment{};
-            var pre_delegated = std.AutoHashMap(Address, bool).init(self.allocator);
-            defer pre_delegated.deinit();
-            for (authorization_list) |auth| {
-                adjustment.add(try self.applyAuthorizationTupleTracked(auth, &pre_delegated));
-            }
-            return adjustment;
-        }
-
-        /// Apply one EIP-7702 authorization tuple.
-        ///
-        /// Invalid tuples are ignored. Before Amsterdam they do not refund; Amsterdam
-        /// refills the tuple's intrinsic state-gas slice and refunds ACCOUNT_WRITE.
-        pub fn applyAuthorizationTuple(self: *Self, auth: Self.AuthorizationTuple) !AuthorizationGasAdjustment {
-            return self.applyAuthorizationTupleTracked(auth, null);
-        }
-
-        fn applyAuthorizationTupleTracked(
-            self: *Self,
-            auth: Self.AuthorizationTuple,
-            pre_delegated_by_authority: ?*std.AutoHashMap(Address, bool),
-        ) !AuthorizationGasAdjustment {
-            if (!Protocol.authorization.active(self.revision())) return .{};
-            if (!eip7702.authorizationSignatureShapeValid(auth.y_parity, auth.legacy_v, auth.r, auth.s)) return invalidAuthorizationGasAdjustment(self);
-            const tx_context = try runtime.currentTxContext(self);
-            if (auth.chain_id != 0 and auth.chain_id != tx_context.chain_id) return invalidAuthorizationGasAdjustment(self);
-            if (auth.nonce == std.math.maxInt(u64)) return invalidAuthorizationGasAdjustment(self);
-
-            try self.state.warmAccount(auth.signer);
-
-            const existing_account = try self.state.getAccountOrLoad(auth.signer);
-            const account_exists = existing_account != null;
-            const existing_code = if (existing_account != null) try self.getCode(auth.signer) else &.{};
-            const cur_delegated = eip7702.delegationTarget(existing_code) != null;
-            const pre_delegated = if (pre_delegated_by_authority) |map| blk: {
-                if (map.get(auth.signer)) |delegated| break :blk delegated;
-                try map.put(auth.signer, cur_delegated);
-                break :blk cur_delegated;
-            } else cur_delegated;
-            if (existing_account) |existing| {
-                if (existing_code.len != 0 and !cur_delegated) return invalidAuthorizationGasAdjustment(self);
-                if (existing.nonce != auth.nonce) return invalidAuthorizationGasAdjustment(self);
-            } else if (auth.nonce != 0) {
-                return invalidAuthorizationGasAdjustment(self);
-            }
-
-            const account = try self.getOrCreateAccount(auth.signer);
-
-            if (std.mem.eql(u8, &auth.target, &evmz.address.zero_address)) {
-                try self.state.clearCode(auth.signer);
-            } else {
-                var code: [eip7702.delegation_code_len]u8 = undefined;
-                eip7702.writeDelegationCode(&code, auth.target);
-                try self.state.setCode(auth.signer, &code);
-            }
-            try self.state.setNonce(auth.signer, account.nonce + 1);
-            const clears_delegation = std.mem.eql(u8, &auth.target, &evmz.address.zero_address);
-            return Protocol.authorization.successGasAdjustment(self.revision(), .{
-                .account_exists = account_exists,
-                .clears_delegation = clears_delegation,
-                .delegated_before_tuple = cur_delegated,
-                .delegated_before_first_tuple = pre_delegated,
-            });
-        }
-
-        fn invalidAuthorizationGasAdjustment(self: *const Self) AuthorizationGasAdjustment {
-            return Protocol.authorization.invalidGasAdjustment(self.revision());
-        }
-
-        fn malformedAuthorizationGasAdjustment(self: *const Self, scope: Self.TransactionScope) AuthorizationGasAdjustment {
-            const total_count = scope.authorizationCount();
-            const parsed_count = scope.authorization_list.len;
-            if (total_count <= parsed_count) return .{};
-            return Protocol.authorization.malformedGasAdjustment(self.revision(), total_count - parsed_count);
-        }
-
-        fn warmDelegatedTransactionTarget(self: *Self, root: Self.RootFrame) !void {
-            if (!Protocol.authorization.warmsDelegatedTarget(self.revision())) return;
-            switch (root) {
-                .call => |call_tx| {
-                    // EIP-7702 warms the delegate target when the tx destination is delegated.
-                    const target = eip7702.delegationTarget(try self.getCode(call_tx.recipient)) orelse return;
-                    try self.warmAccount(target);
-                },
-                .create => {},
-            }
-        }
-
         /// Snapshot transient storage for nested execution rollback.
         pub fn snapshotTransient(self: *Self) !Self.TransientSnapshot {
             return self.state.snapshotTransient();
@@ -1629,8 +1652,18 @@ pub fn Executor(comptime ProtocolType: type) type {
 }
 
 const Default = Executor(EthProtocol);
-const default_tx_protocol = transaction.For(EthProtocol);
 const testTxContext = evmz.t.defaultTxContext;
+
+test "Executor exposes a neutral transaction lifecycle" {
+    try std.testing.expect(Default.Protocol == evmz.Evm.ExecutionProtocol);
+    try std.testing.expect(@hasDecl(Default, "TransactionAttempt"));
+    try std.testing.expect(@hasDecl(Default, "ExecutionLease"));
+    try std.testing.expect(!@hasDecl(Default, "TopLevelTransactionRun"));
+    try std.testing.expect(!@hasDecl(Default, "TransactionScope"));
+    try std.testing.expect(!@hasDecl(Default, "runTopLevelTransaction"));
+    try std.testing.expect(!@hasDecl(Default, "settleTransactionCosts"));
+    try std.testing.expect(!@hasDecl(Default, "applyAuthorizationTuple"));
+}
 
 test "executor init options retain code analysis config" {
     var executor = Default.init(std.testing.allocator, .{
@@ -1759,8 +1792,7 @@ test "CREATE initcode preparation remains execution-local" {
     const result = (try executor.executeCreate(.{
         .sender = sender,
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
-        .gas = 100_000,
-    })).expectCreate();
+    }, .legacy(100_000))).expectCreate();
     executor.closeTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2162,15 +2194,14 @@ test "executor executeMessage dispatches top-level call" {
     const result = (try executor.executeMessage(.{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
 test "executor carries comptime protocol through nested host calls" {
-    const IstanbulProtocol = evmz.eth.fork(.istanbul);
+    const IstanbulProtocol = evmz.eth.fork(.istanbul).ExecutionProtocol;
 
     const default_gas_left = try executeNestedBalanceCall(EthProtocol, .istanbul);
     const istanbul_gas_left = try executeNestedBalanceCall(IstanbulProtocol, .istanbul);
@@ -2178,12 +2209,12 @@ test "executor carries comptime protocol through nested host calls" {
     try std.testing.expectEqual(default_gas_left, istanbul_gas_left);
 }
 
-fn ethereumProtocolWith(comptime definition_name: []const u8, comptime overrides: evmz.eth.DefinitionOptions(evmz.eth.Revision)) type {
+fn ethereumProtocolWith(comptime definition_name: []const u8, comptime overrides: evmz.eth.ExecutionOptions(evmz.eth.Revision)) type {
     comptime var options = overrides;
     options.name = definition_name;
-    const custom_definition = evmz.eth.define(options);
-    const CustomDefinition = evmz.definition.Bound(custom_definition);
-    return evmz.protocol.binding.Protocol(custom_definition, CustomDefinition.Support.all);
+    const custom_definition = comptime evmz.eth.defineExecution(options);
+    const CustomDefinition = evmz.definition.BoundExecution(custom_definition);
+    return evmz.protocol.ExecutionProtocol(custom_definition, CustomDefinition.Support.all);
 }
 
 test "protocol definition drives call base gas" {
@@ -2244,8 +2275,7 @@ test "top-level call code resolution reuses one traced view" {
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = recipient,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
     try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2295,8 +2325,7 @@ test "top-level delegated access failure does not read target code" {
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = authority,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
     try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
@@ -2396,8 +2425,7 @@ fn executeCreateOpcodeStatus(comptime Protocol: type) !Interpreter.Status {
     return (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 100_000,
-    } })).expectCall().status;
+    } }, .legacy(100_000))).expectCall().status;
 }
 
 fn executeCallResultStore(comptime Protocol: type) !u256 {
@@ -2428,8 +2456,7 @@ fn executeCallResultStore(comptime Protocol: type) !u256 {
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = parent,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return executor.getStorage(parent, 0);
@@ -2461,8 +2488,7 @@ fn executeTopLevelDelegatedCall(comptime Protocol: type) !i64 {
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
         .recipient = authority,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return result.gas_left;
@@ -2511,9 +2537,8 @@ fn executeTopFrameValueTransfer(comptime Protocol: type) !TopFrameValueTransferR
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
         .recipient = recipient,
-        .gas = 100_000,
         .value = 1,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return .{
@@ -2555,8 +2580,7 @@ fn emptyCallRecipientMaterialized(comptime Protocol: type) !bool {
     const result = (try executor.runStandalone(tx_context, .{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return executor.state.accountExists(recipient);
@@ -2597,1097 +2621,6 @@ fn executeNestedBalanceCall(comptime Protocol: type, revision_value: Protocol.Re
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     return result.gas_left;
-}
-
-test "executor begins transaction scope and warms access list" {
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const access_address = evmz.addr(0xcccc);
-    const coinbase = evmz.addr(0xdddd);
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.coinbase = coinbase;
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .shanghai,
-    });
-    defer executor.deinit();
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    defer executor.closeTransaction();
-
-    const storage_keys = [_]u256{ 1, 2 };
-    const access_list = [_]transaction.AccessListEntry{.{
-        .address = access_address,
-        .storage_keys = &storage_keys,
-    }};
-    try executor.warmAccessList(&access_list);
-
-    try std.testing.expect(executor.state.warm_accounts.contains(sender));
-    try std.testing.expect(executor.state.warm_accounts.contains(contract));
-    try std.testing.expect(executor.state.warm_accounts.contains(coinbase));
-    try std.testing.expect(executor.state.warm_accounts.contains(access_address));
-    try std.testing.expect(executor.state.isStorageWarm(access_address, 1));
-    try std.testing.expect(executor.state.isStorageWarm(access_address, 2));
-}
-
-test "protocol definition drives initial coinbase warm access" {
-    const overrides = struct {
-        fn transactionWarmsCoinbase(revision_value: evmz.eth.Revision) bool {
-            _ = revision_value;
-            return true;
-        }
-    };
-    const WarmCoinbaseProtocol = ethereumProtocolWith("warm-coinbase", .{
-        .block = .{ .transactionWarmsCoinbase = overrides.transactionWarmsCoinbase },
-    });
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const coinbase = evmz.addr(0xcccc);
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.coinbase = coinbase;
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-
-    var default_executor = Default.init(std.testing.allocator, .{
-        .revision = .frontier,
-    });
-    defer default_executor.deinit();
-    try default_executor.beginTransactionScope(scope, root);
-    defer default_executor.closeTransaction();
-    try std.testing.expect(!default_executor.state.warm_accounts.contains(coinbase));
-
-    const WarmCoinbaseExecutor = Executor(WarmCoinbaseProtocol);
-    var custom_executor = WarmCoinbaseExecutor.init(std.testing.allocator, .{
-        .revision = .frontier,
-    });
-    defer custom_executor.deinit();
-    try custom_executor.beginTransactionScope(scope, root);
-    defer custom_executor.closeTransaction();
-    try std.testing.expect(custom_executor.state.warm_accounts.contains(coinbase));
-}
-
-test "executor executeTransactionRequest dispatches root call" {
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .osaka,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.seedAccount(contract, contract_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.executeTransactionRequest(transaction.executionRequest(scope.context, root, .legacy(100_000)));
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
-}
-
-test "executor settleTransactionCosts applies refund and coinbase payment" {
-    const sender = evmz.addr(0xaaaa);
-    const coinbase = evmz.addr(0xbbbb);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .london,
-    });
-    defer executor.deinit();
-
-    const gas = try executor.settleTransactionCosts(sender, .{
-        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.london),
-        .gas_limit = 100,
-        .intrinsic_gas = 20,
-        .intrinsic_state_gas = 0,
-        .floor_gas = 0,
-        .gas_price = 5,
-        .priority_fee = 2,
-        .fee_recipient = coinbase,
-    }, .{
-        .status = .success,
-        .gas_left = 40,
-        .gas_refund = 100,
-        .output_data = &.{},
-    });
-
-    try std.testing.expectEqual(@as(u64, 48), gas.used);
-    try std.testing.expectEqual(@as(u256, 260), executor.getAccount(sender).?.balance);
-    try std.testing.expectEqual(@as(u256, 96), executor.getAccount(coinbase).?.balance);
-}
-
-test "executor upfront charge uses comptime blob gas schedule" {
-    const overrides = struct {
-        fn blobSchedule(revision_value: evmz.eth.Revision) ?evmz.transaction.BlobSchedule {
-            var schedule = evmz.eth.transaction.Transaction.blobSchedule(revision_value) orelse return null;
-            schedule.gas_per_blob *= 2;
-            return schedule;
-        }
-    };
-    const DoubleBlobGasProtocol = ethereumProtocolWith("double-blob-gas", .{
-        .transaction = .{ .blobSchedule = overrides.blobSchedule },
-    });
-
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const blob_hashes = [_]u256{@as(u256, 0x01) << 248};
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.gas_price = 1;
-    tx_context.blob_base_fee = 1;
-    tx_context.blob_hashes = &blob_hashes;
-
-    const DoubleBlobExecutor = Executor(DoubleBlobGasProtocol);
-    var executor = DoubleBlobExecutor.init(std.testing.allocator, .{
-        .revision = .cancun,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 10 + evmz.eth.transaction.blob_gas_per_blob;
-    try executor.state.seedAccount(sender, sender_account);
-
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    try std.testing.expect(!try executor.chargeTransactionCosts(sender, .{
-        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.cancun),
-        .payer = sender,
-        .gas_limit = 10,
-        .intrinsic_gas = 0,
-        .intrinsic_state_gas = 0,
-        .floor_gas = 0,
-        .gas_price = 1,
-        .priority_fee = 0,
-        .fee_recipient = tx_context.coinbase,
-        .upfront_debit = 10 + evmz.eth.transaction.blob_gas_per_blob * 2,
-        .minimum_balance = 10 + evmz.eth.transaction.blob_gas_per_blob * 2,
-    }));
-    try std.testing.expectEqual(@as(u256, 10 + evmz.eth.transaction.blob_gas_per_blob), executor.getAccount(sender).?.balance);
-}
-
-test "executor returns EIP-7702 refund for existing authority account" {
-    const sender = evmz.addr(0xaaaa);
-    const authority = evmz.addr(0xbbbb);
-    const target = evmz.addr(0xcccc);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    const authority_account = MemoryAccount.init(std.testing.allocator);
-    try executor.state.seedAccount(authority, authority_account);
-
-    try executor.beginTransaction(tx_context, sender, target);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    });
-
-    try std.testing.expectEqual(@as(u64, evmz.eth.transaction.authorization_existing_account_refund_gas), refund.regular_refund);
-    try std.testing.expectEqual(@as(u64, 0), refund.state_refund);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
-}
-
-test "executor rejects EIP-7702 max authorization nonce before warming signer" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    authority_account.nonce = std.math.maxInt(u64);
-    try executor.state.seedAccount(authority, authority_account);
-
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = std.math.maxInt(u64),
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    });
-
-    try std.testing.expectEqual(@as(u64, 0), refund.regular_refund);
-    try std.testing.expectEqual(@as(u64, 0), refund.state_refund);
-    try std.testing.expect(!executor.state.warm_accounts.contains(authority));
-    try std.testing.expectEqual(std.math.maxInt(u64), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
-}
-
-test "protocol definition drives authorization activation and success gas adjustment" {
-    const overrides = struct {
-        fn active(revision_value: evmz.eth.Revision) bool {
-            _ = revision_value;
-            return true;
-        }
-
-        fn successGasAdjustment(
-            revision_value: evmz.eth.Revision,
-            input: evmz.protocol.AuthorizationSuccessInput,
-        ) evmz.protocol.AuthorizationGasAdjustment {
-            _ = revision_value;
-            _ = input;
-            return .{ .regular_refund = 17, .state_refund = 19 };
-        }
-    };
-    const CustomAuthorizationProtocol = ethereumProtocolWith("custom-authorization", .{
-        .authorization = .{
-            .active = overrides.active,
-            .successGasAdjustment = overrides.successGasAdjustment,
-        },
-    });
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    const CustomAuthorizationExecutor = Executor(CustomAuthorizationProtocol);
-    var executor = CustomAuthorizationExecutor.init(std.testing.allocator, .{
-        .revision = .frontier,
-    });
-    defer executor.deinit();
-
-    try executor.beginTransaction(tx_context, sender, recipient);
-    defer executor.closeTransaction();
-
-    const refund = try executor.applyAuthorizationTuple(.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    });
-
-    try std.testing.expectEqual(@as(u64, 17), refund.regular_refund);
-    try std.testing.expectEqual(@as(u64, 19), refund.state_refund);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
-}
-
-test "executor top-level transaction settles EIP-7702 authorization refund" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.gas_price = 1;
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const authority_account = MemoryAccount.init(std.testing.allocator);
-    try executor.state.seedAccount(authority, authority_account);
-
-    const authorization_list = [_]transaction.AuthorizationTuple{.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-
-    const SucceedingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Default,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = inner;
-            const gas = switch (request.message) {
-                inline else => |message| message.gas,
-            };
-            try std.testing.expectEqual(@as(u64, 54_000), gas);
-            return .{
-                .status = .success,
-                .gas_left = 54_000,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution_gas = 54_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
-            .payer = sender,
-            .gas_limit = 100_000,
-            .intrinsic_gas = 46_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 1,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-            .upfront_debit = 100_000,
-            .minimum_balance = 100_000,
-        },
-    }, .{ .execute = SucceedingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 12_500), result.gas_refund);
-    try std.testing.expectEqual(@as(u256, 963_200), executor.getAccount(sender).?.balance);
-}
-
-test "Ethereum request path preserves authorization state across EVM revert" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const authority = evmz.addr(0xcccc);
-    const target = evmz.addr(0xdddd);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-    try executor.state.seedAccount(authority, MemoryAccount.init(std.testing.allocator));
-
-    const authorization_list = [_]transaction.AuthorizationTuple{.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-
-    const RevertingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Default,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            try std.testing.expectEqualDeep(inner.execution_context.?, request.context);
-            const execution_recipient = switch (request.message) {
-                .call => |call| call.recipient,
-                .create => return error.ExpectedCall,
-            };
-            _ = try inner.state.setStorage(execution_recipient, 7, 1);
-            return .{
-                .status = .revert,
-                .gas_left = 54_000,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginMessageScope(transaction.executionRequest(scope.context, root, .legacy(54_000)), .{});
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution_gas = 54_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 46_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }, .{ .execute = RevertingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
-    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(recipient, 7));
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
-}
-
-test "top-level engine errors roll back without gas settlement" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.gas_price = 1;
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    sender_account.nonce = 7;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    const FailingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Default,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = inner;
-            _ = request;
-            return error.DatabaseUnavailable;
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    try std.testing.expectError(
-        error.DatabaseUnavailable,
-        executor.runTopLevelTransactionWithEngine(scope, root, .{
-            .execution_gas = 79_000,
-            .settlement = .{
-                .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
-                .payer = sender,
-                .gas_limit = 100_000,
-                .intrinsic_gas = 21_000,
-                .intrinsic_state_gas = 0,
-                .floor_gas = 21_000,
-                .gas_price = 1,
-                .priority_fee = 0,
-                .fee_recipient = tx_context.coinbase,
-                .upfront_debit = 100_000,
-                .minimum_balance = 100_000,
-            },
-        }, .{ .execute = FailingEngine.execute }),
-    );
-
-    const restored_sender = executor.getAccount(sender).?;
-    try std.testing.expectEqual(@as(u256, 1_000_000), restored_sender.balance);
-    try std.testing.expectEqual(@as(u64, 7), restored_sender.nonce);
-    try std.testing.expectEqual(null, executor.execution_context);
-    try std.testing.expectEqual(@as(u32, 0), executor.state.warm_accounts.count());
-}
-
-test "Amsterdam malformed authorization count refills intrinsic auth gas" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    var tx_context = testTxContext(sender, 300_000);
-    tx_context.gas_price = 1;
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 300_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{
-        .authorization_count = 1,
-    });
-    const gas_plan = default_tx_protocol.gas.gasPlan(.amsterdam, &.{}, root.gasLimit(), .{
-        .authorization_count = scope.authorizationCount(),
-    });
-
-    const SucceedingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Default,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = inner;
-            const gas = switch (request.message) {
-                inline else => |message| transaction.ExecutionGas{
-                    .regular_left = message.gas,
-                    .reservoir = message.gas_reservoir,
-                },
-            };
-            return .{
-                .status = .success,
-                .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_refund = 0,
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution = gas_plan.execution,
-        .settlement = default_tx_protocol.settlement.defaultPlanFromGasPlan(.amsterdam, root.gasLimit(), gas_plan, .{
-            .gas_price = tx_context.gas_price,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-            .payer = sender,
-            .value = root.value(),
-        }),
-    }, .{ .execute = SucceedingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_account_write_cost), result.gas_refund);
-    try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_authorization_state_gas), result.state_gas_spent);
-}
-
-test "executor warms delegated target for top-level transaction destination" {
-    const sender = evmz.addr(0xaaaa);
-    const authority = evmz.addr(0xbbbb);
-    const target = evmz.addr(0xcccc);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const authorization_list = [_]transaction.AuthorizationTuple{.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = authority,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-
-    const CheckingEngine = struct {
-        const expected_target = evmz.addr(0xcccc);
-
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *Default,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            const gas = switch (request.message) {
-                inline else => |message| message.gas,
-            };
-            try std.testing.expectEqual(@as(u64, 54_000), gas);
-            try std.testing.expect(inner.state.warm_accounts.contains(expected_target));
-            return .{
-                .status = .success,
-                .gas_left = 54_000,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution_gas = 54_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 46_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }, .{ .execute = CheckingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
-}
-
-test "protocol definition drives delegated transaction target warming" {
-    const overrides = struct {
-        fn warmsDelegatedTarget(revision_value: evmz.eth.Revision) bool {
-            _ = revision_value;
-            return true;
-        }
-    };
-    const WarmDelegatedTargetProtocol = ethereumProtocolWith("warm-delegated-target", .{
-        .authorization = .{ .warmsDelegatedTarget = overrides.warmsDelegatedTarget },
-    });
-    const sender = evmz.addr(0xaaaa);
-    const authority = evmz.addr(0xbbbb);
-    const target = evmz.addr(0xcccc);
-    const tx_context = testTxContext(sender, 100_000);
-    const WarmDelegatedExecutor = Executor(WarmDelegatedTargetProtocol);
-    var executor = WarmDelegatedExecutor.init(std.testing.allocator, .{
-        .revision = .frontier,
-    });
-    defer executor.deinit();
-
-    var code: [eip7702.delegation_code_len]u8 = undefined;
-    eip7702.writeDelegationCode(&code, target);
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    try authority_account.setCode(&code);
-    try executor.state.seedAccount(authority, authority_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = authority,
-        .gas_limit = 100_000,
-    } };
-    const scope = WarmDelegatedExecutor.transactionScope(tx_context, .{});
-    const CheckingEngine = struct {
-        const expected_target = evmz.addr(0xcccc);
-
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *WarmDelegatedExecutor,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = request;
-            try std.testing.expect(inner.state.warm_accounts.contains(expected_target));
-            return .{
-                .status = .success,
-                .gas_left = 100_000,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.frontier),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }, .{ .execute = CheckingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-}
-
-test "Prague top-level delegated precompile call can use exactly intrinsic gas" {
-    const sender = evmz.addr(0xaaaa);
-    const authority = evmz.addr(0xbbbb);
-    const precompile_address = evmz.addr(1);
-    const tx_context = testTxContext(sender, 46_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    authority_account.balance = 1;
-    try executor.state.seedAccount(authority, authority_account);
-
-    const authorization_list = [_]transaction.AuthorizationTuple{.{
-        .chain_id = 0,
-        .target = precompile_address,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = authority,
-        .gas_limit = 46_000,
-        .value = 1,
-    } };
-    const scope = Default.transactionScope(tx_context, .{
-        .authorization_list = &authorization_list,
-    });
-    const gas_plan = default_tx_protocol.gas.gasPlan(.prague, &.{}, root.gasLimit(), .{
-        .authorization_count = authorization_list.len,
-        .value = root.value(),
-    });
-
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransaction(scope, root, .{
-        .execution = gas_plan.execution,
-        .settlement = default_tx_protocol.settlement.defaultPlanFromGasPlan(.prague, root.gasLimit(), gas_plan, .{
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-            .payer = sender,
-            .value = root.value(),
-        }),
-    });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-    try std.testing.expectEqual(@as(u256, 2), executor.getAccount(authority).?.balance);
-    try std.testing.expectEqualSlices(u8, &precompile_address, &eip7702.delegationTarget(try executor.getCode(authority)).?);
-}
-
-test "executor runTopLevelTransaction commits successful call" {
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .osaka,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.seedAccount(contract, contract_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
-    try std.testing.expectEqual(@as(?execution_values.ExecutionContext, null), executor.execution_context);
-}
-
-test "BAL recorder keeps reverted root storage as an access" {
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
-    var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    recorder.setBlockAccessIndex(1);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .osaka,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{ 0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xfd });
-    try executor.state.seedAccount(contract, contract_account);
-    var capture: TestCapture(Default) = undefined;
-    try capture.init(&executor, recorder.stateTarget());
-    defer capture.deinit();
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    });
-    try capture.finish();
-
-    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
-    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
-    defer observed.deinit(std.testing.allocator);
-    try evmz.eth.bal.validate(observed.accounts, .{ .transaction_count = 1 });
-    try std.testing.expectEqual(@as(usize, 2), observed.accounts.len);
-    try std.testing.expectEqual(contract, observed.accounts[1].address);
-    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_changes.len);
-    try std.testing.expectEqualSlices(u256, &.{0}, observed.accounts[1].storage_reads);
-}
-
-test "executor rejects settlement revision mismatch before execution" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .osaka,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    defer executor.closeTransaction();
-
-    try std.testing.expectError(error.SettlementRevisionMismatch, executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.london),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }));
-
-    try std.testing.expectEqual(@as(u64, 0), executor.getAccount(sender).?.nonce);
-}
-
-test "zero-price top-level transaction materializes missing sender" {
-    const sender = evmz.addr(0xaaaa);
-    const recipient = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
-    var recorder = evmz.eth.bal_recorder.Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    recorder.setBlockAccessIndex(1);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .frontier,
-    });
-    defer executor.deinit();
-    var capture: TestCapture(Default) = undefined;
-    try capture.init(&executor, recorder.stateTarget());
-    defer capture.deinit();
-
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.frontier),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    });
-    try capture.finish();
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expectEqual(@as(u256, 0), executor.getAccount(sender).?.balance);
-
-    var observed = try recorder.toOwnedBlockAccessList(std.testing.allocator);
-    defer observed.deinit(std.testing.allocator);
-    try evmz.eth.bal.validate(observed.accounts, .{ .transaction_count = 1 });
-    try std.testing.expectEqual(@as(usize, 2), observed.accounts.len);
-    try std.testing.expectEqual(recipient, observed.accounts[1].address);
-    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_changes.len);
-    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].storage_reads.len);
-    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].balance_changes.len);
-    try std.testing.expectEqual(@as(usize, 0), observed.accounts[1].nonce_changes.len);
-}
-
-test "executor runTopLevelTransaction increments create nonce after rollback" {
-    const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
-    var executor = Default.init(std.testing.allocator, .{
-        .revision = .osaka,
-    });
-    defer executor.deinit();
-
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-
-    const root = RootFrame{ .create = .{
-        .sender = sender,
-        .init_code = &.{0xfe},
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
-    const result = try executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 53_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    });
-
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expectEqual(@as(?execution_values.ExecutionContext, null), executor.execution_context);
-}
-
-test "protocol definition drives create transaction rollback state gas refund" {
-    const overrides = struct {
-        fn createTransactionRollbackStateGasRefund(revision_value: evmz.eth.Revision) i64 {
-            _ = revision_value;
-            return 11;
-        }
-    };
-    const CreateRollbackRefundProtocol = ethereumProtocolWith("create-rollback-refund", .{
-        .create = .{ .createTransactionRollbackStateGasRefund = overrides.createTransactionRollbackStateGasRefund },
-    });
-    const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
-
-    const root = RootFrame{ .create = .{
-        .sender = sender,
-        .init_code = &.{},
-        .gas_limit = 100_000,
-    } };
-    const CreateRollbackRefundExecutor = Executor(CreateRollbackRefundProtocol);
-    const FailingEngine = struct {
-        fn execute(
-            ptr: ?*anyopaque,
-            inner: *CreateRollbackRefundExecutor,
-            request: execution_values.EvmExecutionRequest,
-        ) !Interpreter.Result {
-            _ = ptr;
-            _ = inner;
-            _ = request;
-            return .{
-                .status = .out_of_gas,
-                .gas_left = 0,
-                .gas_refund = 0,
-                .output_data = &.{},
-            };
-        }
-    };
-
-    var custom_executor = CreateRollbackRefundExecutor.init(std.testing.allocator, .{
-        .revision = .prague,
-    });
-    defer custom_executor.deinit();
-    try putFundedSender(&custom_executor, sender);
-
-    const scope = CreateRollbackRefundExecutor.transactionScope(tx_context, .{});
-    try custom_executor.beginTransactionScope(scope, root);
-    const result = try custom_executor.runTopLevelTransactionWithEngine(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.prague),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 53_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }, .{ .execute = FailingEngine.execute });
-
-    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
-    try std.testing.expectEqual(@as(i64, 11), result.gas_reservoir);
-    try std.testing.expectEqual(@as(i64, -11), result.state_gas_spent);
-    try std.testing.expectEqual(@as(u64, 1), custom_executor.getAccount(sender).?.nonce);
 }
 
 test "recursive call bomb unwinds with iterative call runtime" {
@@ -4249,7 +3182,7 @@ test "captured runtime records nested call and create frames without generic ste
     try std.testing.expectEqual(evmz.address.toU256(create_address), replay.events[replay_create_end].stack_top.?);
 }
 
-test "captured span is inspectable before pending transaction resolution" {
+test "captured span is inspectable before executed transaction resolution" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
@@ -4270,37 +3203,87 @@ test "captured span is inspectable before pending transaction resolution" {
     executor.setCaptureContext(&capture);
     defer executor.setCaptureContext(null);
 
-    const root = RootFrame{ .call = .{
-        .sender = sender,
-        .recipient = contract,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
+    const request_value = execution_values.EvmExecutionRequest{
+        .context = context_adapter.fromHost(tx_context),
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = contract,
+        } },
+        .gas = .legacy(100_000),
+    };
+    const attempt = try executor.beginTransactionAttempt(request_value, .{});
+    defer attempt.discardIfCurrent();
     try capture.begin();
-    var pending = try executor.runTopLevelTransactionPending(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.osaka),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    });
-    defer pending.deinit();
+    const result = try attempt.executeRequest(request_value);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    var executed = try attempt.completeLease();
+    defer executed.deinit();
 
     const span = (try capture.finish()).?;
     try std.testing.expect(span.steps.len > 0);
     try std.testing.expectEqual(@as(u8, @intFromEnum(evmz.Opcode.SSTORE)), span.steps[2].opcode);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 
-    try pending.reject();
+    try executed.discard();
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
     try tape.resolve(span);
+}
+
+test "transaction attempt owns rollback before executed lease" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = recipient,
+        } },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    const first = try executor.beginTransactionAttempt(request, .{});
+    const stale = first;
+    try first.addBalance(sender, 9);
+    try std.testing.expectEqual(@as(u256, 9), try first.balance(sender));
+
+    try first.discard();
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(sender));
+    try std.testing.expect(!executor.hasCurrentTransaction());
+
+    const second = try executor.beginTransactionAttempt(request, .{});
+    defer second.discardIfCurrent();
+    try std.testing.expectError(error.StaleTransactionExecution, stale.balance(sender));
+}
+
+test "transaction attempt completes into existing executed lease" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = recipient,
+        } },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    const attempt = try executor.beginTransactionAttempt(request, .{});
+    try attempt.addBalance(sender, 7);
+    const executed = try attempt.completeLease();
+    try std.testing.expectError(error.NoCurrentTransaction, attempt.balance(sender));
+    try executed.retain();
+    try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
+    try std.testing.expect(!executor.hasCurrentTransaction());
 }
 
 test "top-level transaction execution requires begin tx context" {
@@ -4332,16 +3315,14 @@ test "top-level transaction execution requires begin tx context" {
         executor.executeCall(.{
             .sender = evmz.addr(0xaaaa),
             .recipient = evmz.addr(0xbbbb),
-            .gas = 100_000,
-        }),
+        }, .legacy(100_000)),
     );
     try std.testing.expectError(
         error.MissingTxContext,
         executor.executeCreate(.{
             .sender = evmz.addr(0xaaaa),
             .init_code = &.{},
-            .gas = 100_000,
-        }),
+        }, .legacy(100_000)),
     );
 }
 
@@ -4389,8 +3370,7 @@ test "executor executes top-level create transaction" {
     const result = (try executor.executeCreate(.{
         .sender = sender,
         .init_code = init_code,
-        .gas = 100_000,
-    })).expectCreate();
+    }, .legacy(100_000))).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
@@ -4478,9 +3458,10 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 90_000,
-        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
-    } })).expectCall();
+    } }, .{
+        .regular_left = 90_000,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+    })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status);
     try std.testing.expectEqual(@as(usize, 0), executor.logs().len);
@@ -4584,8 +3565,7 @@ test "Amsterdam raises create runtime code size limit" {
     const osaka_result = (try osaka.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &oversized_osaka,
-        .gas = 20_000_000,
-    } })).expectCreate();
+    } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, osaka_result.status);
 
     var amsterdam = Default.init(std.testing.allocator, .{
@@ -4597,9 +3577,10 @@ test "Amsterdam raises create runtime code size limit" {
     const amsterdam_result = (try amsterdam.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &oversized_osaka,
-        .gas = 20_000_000,
-        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas + (default_max_code_size + 1) * evmz.eth.transaction.amsterdam_cost_per_state_byte,
-    } })).expectCreate();
+    } }, .{
+        .regular_left = 20_000_000,
+        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas + (default_max_code_size + 1) * evmz.eth.transaction.amsterdam_cost_per_state_byte,
+    })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status);
     try std.testing.expectEqualSlices(u8, &evmz.address.create(sender, 0), &amsterdam_result.address);
     try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try amsterdam.getCode(amsterdam_result.address)).len);
@@ -4613,8 +3594,7 @@ test "Amsterdam raises create runtime code size limit" {
     const amsterdam_over_result = (try amsterdam_over.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &oversized_amsterdam,
-        .gas = 20_000_000,
-    } })).expectCreate();
+    } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, amsterdam_over_result.status);
 }
 
@@ -4642,8 +3622,7 @@ test "protocol definition drives create runtime code size limit" {
     const result = (try executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &two_byte_runtime,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
 }
 
@@ -4674,8 +3653,7 @@ test "protocol definition drives create runtime prefix rejection" {
     const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &init_code,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.invalid, default_result.status);
 
     const AllowEfExecutor = Executor(AllowEfProtocol);
@@ -4688,8 +3666,7 @@ test "protocol definition drives create runtime prefix rejection" {
     const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &init_code,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, custom_result.status);
     try std.testing.expectEqualSlices(u8, &.{0xef}, try custom_executor.getCode(custom_result.address));
 }
@@ -4718,8 +3695,7 @@ test "protocol definition drives create deposit gas" {
     const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &init_code,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, default_result.status);
     try std.testing.expectEqual(@as(usize, 1), (try default_executor.getCode(default_result.address)).len);
 
@@ -4733,8 +3709,7 @@ test "protocol definition drives create deposit gas" {
     const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &init_code,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status);
 }
 
@@ -4762,8 +3737,7 @@ test "protocol definition drives created account initial nonce" {
     const result = (try executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
         .init_code = &init_code,
-        .gas = 100_000,
-    } })).expectCreate();
+    } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u64, 7), executor.getAccount(result.address).?.nonce);
 }
@@ -4855,8 +3829,7 @@ test "protocol definition drives precompile execution" {
         .sender = sender,
         .recipient = CustomPrecompileOverrides.custom_address,
         .input = &.{0xbb},
-        .gas = 1_000,
-    } })).expectCall();
+    } }, .legacy(1_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 993), result.gas_left);
@@ -4911,8 +3884,7 @@ test "protocol definition drives selfdestruct host policy" {
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
-        .gas = 100_000,
-    } })).expectCall();
+    } }, .legacy(100_000))).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 7), result.gas_refund);
@@ -5040,7 +4012,7 @@ test "checkpoint observation failures restore state and release ownership" {
     try std.testing.expectError(error.TestCaptureFailure, executor.checkpoint());
     try std.testing.expectEqual(@as(usize, 0), executor.checkpoint_top);
     try std.testing.expectError(error.TestCaptureFailure, executor.transactionCheckpoint());
-    try std.testing.expect(!executor.hasPendingTransaction());
+    try std.testing.expect(!executor.hasCurrentTransaction());
 
     failing.fail_kind = null;
     var commit_checkpoint = try executor.checkpoint();
@@ -5063,32 +4035,21 @@ test "checkpoint observation failures restore state and release ownership" {
     try reusable_checkpoint.restore();
     var transaction_checkpoint = try executor.transactionCheckpoint();
     try transaction_checkpoint.restore();
-    try std.testing.expect(!executor.hasPendingTransaction());
+    try std.testing.expect(!executor.hasCurrentTransaction());
     executor.closeTransaction();
 
-    const root = RootFrame{ .call = .{
-        .sender = caller,
-        .recipient = caller,
-        .gas_limit = 100_000,
-    } };
-    const scope = Default.transactionScope(tx_context, .{});
-    try executor.beginTransactionScope(scope, root);
+    const request_value = execution_values.EvmExecutionRequest{
+        .context = context_adapter.fromHost(tx_context),
+        .message = .{ .call = .{
+            .sender = caller,
+            .recipient = caller,
+        } },
+        .gas = .legacy(100_000),
+    };
     failing.fail_kind = .checkpoint;
-    try std.testing.expectError(error.TestCaptureFailure, executor.runTopLevelTransaction(scope, root, .{
-        .execution_gas = 100_000,
-        .settlement = .{
-            .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.berlin),
-            .gas_limit = 100_000,
-            .intrinsic_gas = 21_000,
-            .intrinsic_state_gas = 0,
-            .floor_gas = 21_000,
-            .gas_price = 0,
-            .priority_fee = 0,
-            .fee_recipient = tx_context.coinbase,
-        },
-    }));
+    try std.testing.expectError(error.TestCaptureFailure, executor.beginTransactionAttempt(request_value, .{}));
     try std.testing.expectEqual(@as(?execution_values.ExecutionContext, null), executor.execution_context);
-    try std.testing.expect(!executor.hasPendingTransaction());
+    try std.testing.expect(!executor.hasCurrentTransaction());
 
     failing.fail_kind = null;
     try capture.finish();
@@ -5373,7 +4334,9 @@ test "selfdestruct charges new-account cost for nonzero balance" {
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 69_998), result.gas_left);
+    // Raw message scope is neutral: the zero beneficiary is cold unless the
+    // transaction program supplies Ethereum's coinbase warm-up.
+    try std.testing.expectEqual(@as(i64, 67_398), result.gas_left);
 }
 
 test "TangerineWhistle selfdestruct charges new-account cost without balance transfer" {

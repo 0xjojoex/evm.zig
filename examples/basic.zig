@@ -27,25 +27,28 @@ pub fn main(init: std.process.Init) !void {
         0xf3, // RETURN
     });
 
-    var vm = evmz.Evm.init(allocator, .{
+    var executor = evmz.Evm.Executor.init(allocator, .{
         .revision = .latest,
         .state_reader = memory.reader(),
-        .env = .{ .gas_limit = gas_limit },
     });
-    defer vm.deinit();
+    defer executor.deinit();
 
+    var vm = evmz.Evm.init(&executor);
     const outcome = try vm.transact(.{
-        .sender = sender,
-        .to = contract,
-        .gas_limit = gas_limit,
+        .env = .{ .gas_limit = gas_limit },
+        .tx = .{
+            .sender = sender,
+            .to = contract,
+            .gas_limit = gas_limit,
+        },
     });
-    var pending = switch (outcome) {
-        .pending => |value| value,
+    const executed = switch (outcome) {
+        .executed => |value| value,
         .rejected => return error.ExampleTransactionRejected,
     };
-    defer pending.deinit();
-    const execution = try pending.accept();
-    var diff = try vm.changeset();
+    defer executed.discardIfCurrent();
+    const execution = try executed.result();
+    var diff = try executed.changeset();
     defer diff.deinit(allocator);
     const stored = storageValue(&diff, contract, 0);
     if (execution.status != .success) return error.ExampleTransactionFailed;

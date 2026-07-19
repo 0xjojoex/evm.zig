@@ -9,18 +9,33 @@ const tx = @import("../transaction.zig");
 const tx_gas = @import("../transaction/gas.zig");
 
 const protocol = @import("../protocol.zig");
+const support = @import("support.zig");
 const types = @import("types.zig");
-const Protocol = protocol.binding.Protocol;
+const ExecutionProtocol = protocol.ExecutionProtocol;
+const TransactionProtocol = protocol.TransactionProtocol;
 const Resolution = protocol.Resolution;
 const ExecutionTarget = protocol.ExecutionTarget;
-const RevisionModel = protocol.RevisionModel;
-const InstructionContext = protocol.InstructionContext;
+const RevisionModel = support.Model;
+const InstructionContext = protocol.instruction.Context;
 const OpcodeTier = protocol.OpcodeTier;
 const StaticGas = protocol.StaticGas;
-const assertValidDefinition = protocol.assertValidDefinition;
-const assertValidProtocolDefinition = protocol.assertValidProtocolDefinition;
+const assertExecutionContract = protocol.assertExecutionContract;
+const assertTransactionContract = protocol.assertTransactionContract;
+const assertDispatchContract = protocol.assertDispatchContract;
 
 const TestTransactionPreparation = struct {
+    pub fn Runtime(comptime ProtocolType: type, comptime Policy: type) type {
+        return struct {
+            policy: *const Policy,
+
+            pub fn prepare(self: @This(), input: tx.PrepareInput(ProtocolType)) !tx.PrepareResult(ProtocolType) {
+                _ = self.policy;
+                _ = input;
+                return error.UnsupportedTransactionPreparation;
+            }
+        };
+    }
+
     pub fn For(comptime ProtocolType: type) type {
         return struct {
             pub fn prepare(input: tx.PrepareInput(ProtocolType)) !tx.PrepareResult(ProtocolType) {
@@ -37,24 +52,35 @@ fn instructionFor(comptime ProtocolType: type, comptime opcode: opcode_info.Opco
     return ProtocolType.Instruction.fromByte(@intFromEnum(opcode));
 }
 
-fn testDefinition(
+fn testExecutionDefinition(
     comptime R: type,
     comptime Instruction: type,
     comptime create_code_size_limit: ?*const fn (R) ?usize,
-) definition.Definition(R) {
+) definition.ExecutionDefinition(R) {
     return .{
         .name = "test",
         .instruction = Instruction,
-        .transaction = testTransactionConfig(R),
-        .settlement = testSettlementConfig(R),
-        .authorization = .default,
-        .block = .default,
         .call = testCallConfig(R),
         .create = testCreateConfig(R, create_code_size_limit),
         .storage = testStorageConfig(R),
         .self_destruct = testSelfDestructConfig(R),
         .precompile = TestPrecompile(R),
     };
+}
+
+fn testTransactionDefinition(comptime R: type) definition.TransactionDefinition(R) {
+    return .{
+        .transaction = testTransactionConfig(R),
+        .settlement = testSettlementConfig(R),
+        .authorization = .default,
+    };
+}
+
+fn protocolFor(
+    comptime execution_definition: anytype,
+    comptime support_window: definition.BoundExecution(execution_definition).Support,
+) type {
+    return ExecutionProtocol(execution_definition, support_window);
 }
 
 fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
@@ -87,7 +113,7 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
             return 0;
         }
 
-        fn dataByteGas(_: R, _: u8) u64 {
+        fn calldataGas(_: R, _: []const u8) ?u64 {
             return 0;
         }
 
@@ -141,7 +167,7 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
         .maxInitcodeSize = F.maxInitcodeSize,
         .intrinsicBaseGas = F.intrinsicBaseGas,
         .createIntrinsicGas = F.createIntrinsicGas,
-        .dataByteGas = F.dataByteGas,
+        .calldataGas = F.calldataGas,
         .accessListAddressGas = F.accessListAddressGas,
         .storageKeyGas = F.storageKeyGas,
         .accessListDataGas = F.accessListDataGas,
@@ -286,8 +312,11 @@ fn TestPrecompile(comptime R: type) type {
 
 test "protocol type exposes dispatch facts" {
     const eth = @import("../eth.zig");
-    const Ethereum = definition.Bound(eth.definition);
-    const CancunPlus = Protocol(eth.definition, Ethereum.Support.since(.cancun));
+    const Ethereum = definition.BoundExecution(eth.execution_definition);
+    const CancunPlus = ExecutionProtocol(
+        eth.execution_definition,
+        Ethereum.Support.since(.cancun),
+    );
     const blobbasefee = comptime instructionFor(CancunPlus, .BLOBBASEFEE);
     const slotnum = comptime instructionFor(CancunPlus, .SLOTNUM);
     const balance = comptime instructionFor(CancunPlus, .BALANCE);
@@ -307,18 +336,22 @@ test "protocol type exposes dispatch facts" {
 
 test "transaction resolver defaults engine protocol shape" {
     const eth = @import("../eth.zig");
-    const Ethereum = definition.Bound(eth.definition);
-    assertValidDefinition(eth.definition);
+    const Ethereum = definition.BoundExecution(eth.execution_definition);
+    assertExecutionContract(eth.execution_definition);
+    assertTransactionContract(eth.Revision, eth.transaction_definition);
 
-    const Cancun = Protocol(eth.definition, Ethereum.Support.at(.cancun));
+    const Cancun = TransactionProtocol(
+        ExecutionProtocol(eth.execution_definition, Ethereum.Support.at(.cancun)),
+        eth.transaction_definition,
+    );
     try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.min);
     try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.max);
-    try std.testing.expectEqual(tx.Transaction, Cancun.Transaction.Value);
-    try std.testing.expectEqual(tx.TransactionView, Cancun.Transaction.View);
-    try std.testing.expectEqual(eth.transaction_validation.ValidationError, Cancun.Transaction.ValidationError);
+    try std.testing.expectEqual(tx.Transaction, Cancun.Tx.Value);
+    try std.testing.expectEqual(tx.TransactionView, Cancun.Tx.View);
+    try std.testing.expectEqual(eth.transaction_validation.ValidationError, Cancun.Tx.ValidationError);
 
     const sender = address.addr(0xaaaa);
-    const view = Cancun.Transaction.view(.{
+    const view = Cancun.Tx.view(.{
         .sender = sender,
         .gas_limit = 21_000,
     });
@@ -413,15 +446,15 @@ test "protocol contract accepts non-Ethereum revision model" {
         }
     };
     const FakeDefinition = comptime blk: {
-        var value = testDefinition(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
+        var value = testExecutionDefinition(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
         value.revision = fake_revision_config;
         break :blk value;
     };
-    const FakeBound = definition.Bound(FakeDefinition);
+    const FakeBound = definition.BoundExecution(FakeDefinition);
 
-    assertValidProtocolDefinition(FakeDefinition);
+    assertDispatchContract(FakeDefinition);
 
-    const FakeProtocol = Protocol(FakeDefinition, FakeBound.Support.all);
+    const FakeProtocol = protocolFor(FakeDefinition, FakeBound.Support.all);
     const fake_add = comptime instructionFor(FakeProtocol, .ADD);
     const fake_log1 = comptime instructionFor(FakeProtocol, .LOG1);
     try std.testing.expectEqual(Resolution.always, FakeProtocol.Instruction.availability(fake_add));
@@ -436,7 +469,11 @@ test "protocol contract accepts non-Ethereum revision model" {
     try std.testing.expectEqual(std.math.Order.lt, FakeProtocol.order(.alpha, .beta));
     try std.testing.expectEqual(FakeSemantics.BaseRevision.cancun, FakeProtocol.baseRevision(.beta));
 
-    const AlphaProtocol = Protocol(FakeDefinition, FakeBound.Support.at(.alpha));
+    const FakeTx = TransactionProtocol(FakeProtocol, testTransactionDefinition(FakeRevision));
+    try std.testing.expectEqual(TestTransactionValidationError, FakeTx.Tx.ValidationError);
+    try std.testing.expectEqual(FakeProtocol.support, FakeTx.support);
+
+    const AlphaProtocol = protocolFor(FakeDefinition, FakeBound.Support.at(.alpha));
     const alpha_add = comptime instructionFor(AlphaProtocol, .ADD);
     const alpha_log1 = comptime instructionFor(AlphaProtocol, .LOG1);
     try std.testing.expectEqual(@as(?i64, 3), AlphaProtocol.Instruction.staticGasConstant(alpha_add));
@@ -444,7 +481,7 @@ test "protocol contract accepts non-Ethereum revision model" {
     try std.testing.expectEqual(Resolution.never, AlphaProtocol.Instruction.availability(alpha_log1));
     try std.testing.expectEqual(@as(?usize, null), AlphaProtocol.create.createCodeSizeLimit(.alpha));
 
-    const BetaProtocol = Protocol(FakeDefinition, FakeBound.Support.at(.beta));
+    const BetaProtocol = protocolFor(FakeDefinition, FakeBound.Support.at(.beta));
     const beta_log1 = comptime instructionFor(BetaProtocol, .LOG1);
     try std.testing.expectEqual(Resolution.always, BetaProtocol.Instruction.availability(beta_log1));
 }
@@ -539,12 +576,12 @@ test "definition-owned instruction type can compose custom opcode identity" {
             return @intCast(info(value).static_gas);
         }
     };
-    const CustomDefinition = testDefinition(CustomRevision, CustomInstruction, null);
-    const CustomBound = definition.Bound(CustomDefinition);
+    const CustomDefinition = testExecutionDefinition(CustomRevision, CustomInstruction, null);
+    const CustomBound = definition.BoundExecution(CustomDefinition);
 
-    assertValidProtocolDefinition(CustomDefinition);
+    assertDispatchContract(CustomDefinition);
 
-    const CustomProtocol = Protocol(CustomDefinition, CustomBound.Support.all);
+    const CustomProtocol = protocolFor(CustomDefinition, CustomBound.Support.all);
     const entry = CustomProtocol.Instruction.entry(CustomProtocol.Instruction.fromByte(custom_opcode_byte));
     try std.testing.expectEqual(@as(u8, custom_opcode_byte), entry.opcode_byte);
     try std.testing.expect(entry.defined());
@@ -572,5 +609,6 @@ test "definition-owned instruction type can compose custom opcode identity" {
 
 test "ethereum definition satisfies full runtime contract" {
     const eth = @import("../eth.zig");
-    assertValidDefinition(eth.definition);
+    assertExecutionContract(eth.execution_definition);
+    assertTransactionContract(eth.Revision, eth.transaction_definition);
 }
