@@ -790,7 +790,7 @@ fn Typed(
 
         fn systemCallGasUsed(gas: u64, gas_left: i64) u64 {
             if (gas_left <= 0) return gas;
-            const left = std.math.cast(u64, gas_left) orelse return 0;
+            const left: u64 = @intCast(gas_left);
             return gas -| @min(gas, left);
         }
     };
@@ -798,6 +798,14 @@ fn Typed(
 
 const Default = evmz.Evm;
 const EthValidationError = evmz.Evm.Rejection;
+
+test "system call gas used handles signed gas-left boundaries" {
+    try std.testing.expectEqual(@as(u64, 100), Default.systemCallGasUsed(100, -1));
+    try std.testing.expectEqual(@as(u64, 100), Default.systemCallGasUsed(100, 0));
+    try std.testing.expectEqual(@as(u64, 60), Default.systemCallGasUsed(100, 40));
+    try std.testing.expectEqual(@as(u64, 0), Default.systemCallGasUsed(100, 100));
+    try std.testing.expectEqual(@as(u64, 0), Default.systemCallGasUsed(100, std.math.maxInt(i64)));
+}
 
 fn defaultTransact(
     executor: *Default.Executor,

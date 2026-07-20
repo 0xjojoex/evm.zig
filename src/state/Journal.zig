@@ -70,8 +70,7 @@ pub const Entry = union(enum) {
         prev: u256,
     },
 
-    pub fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        _ = allocator;
+    pub fn deinit(self: *Entry) void {
         self.* = undefined;
     }
 };
@@ -84,7 +83,7 @@ pub fn init() Journal {
 }
 
 pub fn deinit(self: *Journal, allocator: std.mem.Allocator) void {
-    self.clearRetainingCapacity(allocator);
+    self.clearRetainingCapacity();
     self.items.deinit(allocator);
 }
 
@@ -127,15 +126,15 @@ pub fn pop(self: *Journal) ?Entry {
     return entry;
 }
 
-pub fn truncate(self: *Journal, allocator: std.mem.Allocator, target_len: usize) void {
+pub fn truncate(self: *Journal, target_len: usize) void {
     while (self.items.items.len > target_len) {
         var entry = self.pop().?;
-        entry.deinit(allocator);
+        entry.deinit();
     }
 }
 
-pub fn clearRetainingCapacity(self: *Journal, allocator: std.mem.Allocator) void {
-    self.truncate(allocator, 0);
+pub fn clearRetainingCapacity(self: *Journal) void {
+    self.truncate(0);
     self.items.clearRetainingCapacity();
 }
 
@@ -161,7 +160,7 @@ test "bounded journal reports capacity exhaustion" {
         journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(2) }),
     );
 
-    journal.clearRetainingCapacity(std.testing.allocator);
+    journal.clearRetainingCapacity();
     try journal.append(std.testing.allocator, .{ .warm_account = evmz.addr(3) });
 }
 

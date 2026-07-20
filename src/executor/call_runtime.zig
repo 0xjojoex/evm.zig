@@ -53,6 +53,56 @@ pub fn For(comptime Executor: type) type {
         const ChildCreate = runtime_frames.ChildCreate;
         const RuntimeFrame = runtime_frames.Frame;
 
+        /// Owns one interior call/create checkpoint until it is resolved or
+        /// transferred to a runtime frame. Any early error restores it.
+        const CheckpointGuard = struct {
+            state: *Overlay,
+            checkpoint_state: Journal.Checkpoint,
+            open: bool = true,
+
+            fn begin(state: *Overlay) !CheckpointGuard {
+                return .{
+                    .state = state,
+                    .checkpoint_state = try state.checkpoint(),
+                };
+            }
+
+            fn init(state: *Overlay, checkpoint_state: Journal.Checkpoint) CheckpointGuard {
+                return .{
+                    .state = state,
+                    .checkpoint_state = checkpoint_state,
+                };
+            }
+
+            fn commit(self: *CheckpointGuard) !void {
+                try self.state.commitCheckpoint(self.checkpoint_state);
+                self.open = false;
+            }
+
+            fn restore(self: *CheckpointGuard) !void {
+                try self.state.revertToCheckpoint(self.checkpoint_state);
+                self.open = false;
+            }
+
+            fn finish(self: *CheckpointGuard, status: Interpreter.Status) !void {
+                if (status == .success) {
+                    try self.commit();
+                } else {
+                    try self.restore();
+                }
+            }
+
+            fn disarm(self: *CheckpointGuard) void {
+                std.debug.assert(self.open);
+                self.open = false;
+            }
+
+            fn deinit(self: *CheckpointGuard) void {
+                if (self.open) self.state.revertToCheckpoint(self.checkpoint_state) catch {};
+                self.* = undefined;
+            }
+        };
+
         const CallRuntime = struct {
             executor: *Executor,
             host_iface: Host,
@@ -291,13 +341,11 @@ pub fn For(comptime Executor: type) type {
                 switch (try beginCall(self.executor, msg)) {
                     .immediate => |result| return result,
                     .child => |child| {
-                        var checkpoint_open = true;
-                        errdefer {
-                            if (checkpoint_open) self.executor.state.revertToCheckpoint(child.checkpoint_state) catch {};
-                        }
+                        var checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        defer checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.checkpoint_state, child.bytecode);
-                        checkpoint_open = false;
+                        checkpoint.disarm();
                         return null;
                     },
                 }
@@ -313,19 +361,25 @@ pub fn For(comptime Executor: type) type {
                 switch (try beginCreate(self.executor, msg)) {
                     .immediate => |result| return result,
                     .child => |child| {
-                        var checkpoint_open = true;
-                        errdefer {
-                            if (checkpoint_open) self.executor.state.revertToCheckpoint(child.checkpoint_state) catch {};
-                        }
+                        var checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        defer checkpoint.deinit();
 
                         try self.pushChildCreate(child);
-                        checkpoint_open = false;
+                        checkpoint.disarm();
                         return null;
                     },
                 }
             }
 
             fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
+                const frame_kind = self.frames.items[frame_index].kind;
+                var checkpoint: ?CheckpointGuard = switch (frame_kind) {
+                    .root_call => null,
+                    .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
+                    .create => |child| CheckpointGuard.init(&self.executor.state, child.checkpoint_state),
+                };
+                defer if (checkpoint) |*guard| guard.deinit();
+
                 const call_frame = self.frames.items[frame_index].frame.callFrame();
                 var stable_result = result;
                 stable_result.output_data = try call_frame.stabilizeOutputData();
@@ -336,7 +390,7 @@ pub fn For(comptime Executor: type) type {
                     });
                 }
 
-                return switch (self.frames.items[frame_index].kind) {
+                return switch (frame_kind) {
                     .root_call => Host.Result.fromCall(.{
                         .status = stable_result.status,
                         .output_data = stable_result.output_data,
@@ -346,8 +400,10 @@ pub fn For(comptime Executor: type) type {
                         .state_gas_spent = stable_result.state_gas_spent,
                         .state_gas_from_gas_left = stable_result.state_gas_from_gas_left,
                     }),
-                    .call => |checkpoint_state| blk: {
-                        try finishCallCheckpoint(self.executor, checkpoint_state, stable_result.status);
+                    .call => blk: {
+                        if (checkpoint) |*guard| {
+                            try guard.finish(stable_result.status);
+                        } else unreachable;
                         break :blk Host.Result.fromCall(.{
                             .status = stable_result.status,
                             .output_data = stable_result.output_data,
@@ -358,7 +414,12 @@ pub fn For(comptime Executor: type) type {
                             .state_gas_from_gas_left = stable_result.state_gas_from_gas_left,
                         });
                     },
-                    .create => |child| try finishCreate(self.executor, child, stable_result),
+                    .create => |child| blk: {
+                        if (checkpoint) |*guard| {
+                            break :blk try finishCreate(self.executor, child, stable_result, guard);
+                        }
+                        unreachable;
+                    },
                 };
             }
         };
@@ -948,11 +1009,8 @@ pub fn For(comptime Executor: type) type {
                 }) };
             }
 
-            const checkpoint_state = try self.state.checkpoint();
-            var checkpoint_open = true;
-            errdefer {
-                if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
-            }
+            var checkpoint = try CheckpointGuard.begin(&self.state);
+            defer checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
                 const value_ok = if (msg.kind == .call)
@@ -960,8 +1018,7 @@ pub fn For(comptime Executor: type) type {
                 else
                     try hasBalance(self, msg.recipient, msg.value);
                 if (!value_ok) {
-                    try self.state.revertToCheckpoint(checkpoint_state);
-                    checkpoint_open = false;
+                    try checkpoint.restore();
                     return .{ .immediate = Host.Result.fromCall(.{
                         .status = .invalid,
                         .output_data = &.{},
@@ -978,8 +1035,7 @@ pub fn For(comptime Executor: type) type {
                     if (result.status() == .success) {
                         try touchEmptyCallRecipient(self, msg);
                     }
-                    try finishCallCheckpoint(self, checkpoint_state, result.status());
-                    checkpoint_open = false;
+                    try checkpoint.finish(result.status());
                     return .{ .immediate = result };
                 }
             }
@@ -987,8 +1043,7 @@ pub fn For(comptime Executor: type) type {
             const code = try resolvedCodeView(self, resolved);
             if (code.bytes.len == 0) {
                 try touchEmptyCallRecipient(self, msg);
-                try self.state.commitCheckpoint(checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.commit();
                 return .{ .immediate = Host.Result.fromCall(.{
                     .status = .success,
                     .output_data = &.{},
@@ -999,9 +1054,9 @@ pub fn For(comptime Executor: type) type {
             }
 
             const bytecode = try resolveExecutionCodeView(self, code);
-            checkpoint_open = false;
+            checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = checkpoint_state,
+                .checkpoint_state = checkpoint.checkpoint_state,
                 .bytecode = bytecode,
             } };
         }
@@ -1069,14 +1124,6 @@ pub fn For(comptime Executor: type) type {
             });
         }
 
-        fn finishCallCheckpoint(self: *Executor, checkpoint_state: Journal.Checkpoint, status: Interpreter.Status) !void {
-            if (status != .success) {
-                try self.state.revertToCheckpoint(checkpoint_state);
-            } else {
-                try self.state.commitCheckpoint(checkpoint_state);
-            }
-        }
-
         fn touchEmptyCallRecipient(self: *Executor, msg: Host.Message) !void {
             if (msg.kind != .call or !Protocol.call.touchesEmptyCallRecipient(self.revision())) return;
             try self.state.touchAccount(msg.recipient);
@@ -1128,10 +1175,8 @@ pub fn For(comptime Executor: type) type {
             return switch (try beginCall(self, msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var checkpoint_open = true;
-                    errdefer {
-                        if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
-                    }
+                    var checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    defer checkpoint.deinit();
 
                     var host_iface = self.host();
                     var frame = try acquireBytecodeFrame(self, self.allocator, &host_iface, &msg, child.bytecode);
@@ -1140,8 +1185,7 @@ pub fn For(comptime Executor: type) type {
                     var result = try executeInterpreter(self, &interpreter, msg.depth);
                     result.output_data = try self.setLastOutput(result.output_data);
 
-                    try finishCallCheckpoint(self, child.checkpoint_state, result.status);
-                    checkpoint_open = false;
+                    try checkpoint.finish(result.status);
                     break :blk Host.Result.fromCall(.{
                         .status = result.status,
                         .output_data = result.output_data,
@@ -1165,16 +1209,14 @@ pub fn For(comptime Executor: type) type {
             return switch (try beginCreate(self, msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var checkpoint_open = true;
-                    errdefer {
-                        if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
-                    }
+                    var checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    defer checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
                     defer runtime.deinit();
                     try runtime.pushChildCreate(child);
                     const result = try runtime.run();
-                    checkpoint_open = false;
+                    checkpoint.disarm();
                     break :blk result;
                 },
             };
@@ -1192,15 +1234,11 @@ pub fn For(comptime Executor: type) type {
                 try self.warmAccount(create_address);
             }
             try self.state.setNonce(msg.sender, next_nonce);
-            const checkpoint_state = try self.state.checkpoint();
-            var checkpoint_open = true;
-            errdefer {
-                if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state) catch {};
-            }
+            var checkpoint = try CheckpointGuard.begin(&self.state);
+            defer checkpoint.deinit();
 
             if (try createCollision(self, create_address)) {
-                try self.state.commitCheckpoint(checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.commit();
                 return .{ .immediate = createFailure(self, create_address, 0, msg.gas_reservoir, .invalid) };
             }
 
@@ -1227,9 +1265,9 @@ pub fn For(comptime Executor: type) type {
                 .is_static = msg.is_static,
                 .code_address = create_address,
             };
-            checkpoint_open = false;
+            checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = checkpoint_state,
+                .checkpoint_state = checkpoint.checkpoint_state,
                 .address = create_address,
                 .kind = msg.kind,
                 .msg = child_msg,
@@ -1237,16 +1275,15 @@ pub fn For(comptime Executor: type) type {
             } };
         }
 
-        fn finishCreate(self: *Executor, child: ChildCreate, result: Interpreter.Result) !Host.Result {
-            var checkpoint_open = true;
-            errdefer {
-                if (checkpoint_open) self.state.revertToCheckpoint(child.checkpoint_state) catch {};
-            }
-
+        fn finishCreate(
+            self: *Executor,
+            child: ChildCreate,
+            result: Interpreter.Result,
+            checkpoint: *CheckpointGuard,
+        ) !Host.Result {
             const output = try self.setLastOutput(result.output_data);
             if (result.status != .success) {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return Host.Result.fromCreate(child.address, .{
                     .status = result.status,
                     .output_data = output,
@@ -1260,31 +1297,26 @@ pub fn For(comptime Executor: type) type {
 
             if (Protocol.create.createCodeSizeLimit(self.revision())) |limit| {
                 if (output.len > limit) {
-                    try self.state.revertToCheckpoint(child.checkpoint_state);
-                    checkpoint_open = false;
+                    try checkpoint.restore();
                     return createFailureFromResult(self, child.address, result, .out_of_gas);
                 }
             }
             if (Protocol.create.rejectsCreateCode(self.revision(), output)) {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, result, .invalid);
             }
 
             const runtime_size = std.math.cast(i64, output.len) orelse {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, result, .out_of_gas);
             };
             const deposit_regular_cost = Protocol.create.createDepositRegularGas(self.revision(), runtime_size) orelse {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, result, .out_of_gas);
             };
             if (result.gas_left < deposit_regular_cost) {
                 if (Protocol.create.createDepositRegularGasOogCommits(self.revision())) {
-                    try self.state.commitCheckpoint(child.checkpoint_state);
-                    checkpoint_open = false;
+                    try checkpoint.commit();
                     return Host.Result.fromCreate(child.address, .{
                         .status = .success,
                         .output_data = output,
@@ -1295,28 +1327,24 @@ pub fn For(comptime Executor: type) type {
                         .state_gas_from_gas_left = result.state_gas_from_gas_left,
                     });
                 }
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, result, .out_of_gas);
             }
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
             const deposit_state_gas = Protocol.create.createDepositStateGas(self.revision(), runtime_size) orelse {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, deposit_result, .out_of_gas);
             };
             deposit_result.trackStateGas(deposit_state_gas);
             if (deposit_result.status != .success) {
-                try self.state.revertToCheckpoint(child.checkpoint_state);
-                checkpoint_open = false;
+                try checkpoint.restore();
                 return createFailureFromResult(self, child.address, deposit_result, deposit_result.status);
             }
 
             try self.state.setCode(child.address, output);
-            try self.state.commitCheckpoint(child.checkpoint_state);
-            checkpoint_open = false;
+            try checkpoint.commit();
 
             return Host.Result.fromCreate(child.address, .{
                 .status = .success,
@@ -1379,4 +1407,30 @@ test "CREATE final stabilization reuses already-stable output" {
 
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
+}
+
+test "interior checkpoint guard restores unresolved state and preserves commits" {
+    const Executor = executor_module.Executor(evmz.Evm.ExecutionProtocol);
+    const runtime = For(Executor);
+    const address = evmz.addr(0x1234);
+
+    var executor = Executor.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+    executor.state.beginTransaction();
+    defer executor.state.closeTransaction();
+
+    {
+        var checkpoint = try runtime.CheckpointGuard.begin(&executor.state);
+        defer checkpoint.deinit();
+        try executor.state.addBalance(address, 7);
+    }
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(address));
+
+    {
+        var checkpoint = try runtime.CheckpointGuard.begin(&executor.state);
+        defer checkpoint.deinit();
+        try executor.state.addBalance(address, 9);
+        try checkpoint.commit();
+    }
+    try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(address));
 }

@@ -331,11 +331,9 @@ pub fn getOrCreateAccount(self: *Overlay, address: Address) !*Account {
         return self.accounts.getPtr(address).?;
     }
     if (try self.getAccountOrLoad(address)) |account| return account;
-    if (!self.accounts.contains(address)) {
-        try self.journal.append(self.allocator, .{ .account_created = address });
-        errdefer self.discardLastJournalEntry();
-        try self.putAccount(address, .{});
-    }
+    try self.journal.append(self.allocator, .{ .account_created = address });
+    errdefer self.discardLastJournalEntry();
+    try self.putAccount(address, .{});
     return self.accounts.getPtr(address).?;
 }
 
@@ -648,10 +646,8 @@ pub fn clearCode(self: *Overlay, address: Address) !void {
 
 fn readStorageBacking(self: *Overlay, storage_key: StorageKey) !u256 {
     const value = blk: {
-        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(storage_key.address)) break :blk 0;
-        if (self.storage_overlay.count() != 0) {
-            if (self.storage_overlay.get(storage_key)) |overlay_value| break :blk overlay_value;
-        }
+        if (self.deleted_accounts.contains(storage_key.address)) break :blk 0;
+        if (self.storage_overlay.get(storage_key)) |overlay_value| break :blk overlay_value;
         if (self.seeded_storage.get(storage_key)) |seeded_value| break :blk seeded_value;
         const state_reader = self.state_reader orelse break :blk 0;
         break :blk try state_reader.getStorage(storage_key.address, storage_key.key);
@@ -662,7 +658,7 @@ fn readStorageBacking(self: *Overlay, storage_key: StorageKey) !u256 {
 pub fn getStorage(self: *Overlay, address: Address, key: u256) !u256 {
     const storage_key = StorageKey{ .address = address, .key = key };
     const value = blk: {
-        if (self.deleted_accounts.count() != 0 and self.deleted_accounts.contains(address)) break :blk 0;
+        if (self.deleted_accounts.contains(address)) break :blk 0;
         if (self.storage_slots.getPtr(storage_key)) |slot| {
             try self.loadStorageSlot(storage_key, slot);
             break :blk slot.current;
@@ -939,6 +935,7 @@ pub fn accountHasStorage(self: *Overlay, address: Address) !bool {
     return result;
 }
 
+// TODO: perf check
 fn accountHasStorageInner(self: *Overlay, address: Address) !bool {
     if (self.deleted_accounts.contains(address)) return false;
 
@@ -1014,7 +1011,7 @@ pub fn closeExecutionScope(self: *Overlay, journal_start: usize) !void {
 pub fn closeTransaction(self: *Overlay) void {
     self.mergeDirtyStorageSlots();
     self.clearExecutionScopeState();
-    self.journal.clearRetainingCapacity(self.allocator);
+    self.journal.clearRetainingCapacity();
     self.transaction_open = false;
 }
 
@@ -1088,7 +1085,7 @@ fn compactExecutionScopeJournal(self: *Overlay, journal_start: usize) void {
         };
         if (scope_local) {
             var discarded = entry;
-            discarded.deinit(self.allocator);
+            discarded.deinit();
             continue;
         }
         if (write_index != read_index) self.journal.items.items[write_index] = entry;
@@ -1346,7 +1343,7 @@ pub fn revertToCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) 
 fn rollbackInternalCheckpoint(self: *Overlay, checkpoint_state: Journal.Checkpoint) void {
     while (self.journal.len() > checkpoint_state.journal_len) {
         var entry = self.journal.pop().?;
-        defer entry.deinit(self.allocator);
+        defer entry.deinit();
         self.revertJournalEntry(&entry);
     }
     self.truncateLogs(checkpoint_state.logs_len);
@@ -1556,7 +1553,7 @@ fn traceCheckpoint(self: *const Overlay, kind: trace.CheckpointKind, checkpoint_
 
 fn discardLastJournalEntry(self: *Overlay) void {
     var entry = self.journal.pop() orelse return;
-    entry.deinit(self.allocator);
+    entry.deinit();
 }
 
 pub fn snapshot(self: *Overlay) !Snapshot {
@@ -1653,7 +1650,7 @@ fn restoreFromSnapshot(self: *Overlay, snapshot_state: *Snapshot) !void {
     self.deleted_accounts.clearRetainingCapacity();
     self.dirty_accounts.clearRetainingCapacity();
     self.truncateLogs(snapshot_state.logs_len);
-    self.journal.truncate(self.allocator, snapshot_state.journal_len);
+    self.journal.truncate(snapshot_state.journal_len);
 
     var account_it = snapshot_state.accounts.iterator();
     while (account_it.next()) |entry| {

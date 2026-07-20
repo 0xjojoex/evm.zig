@@ -1651,6 +1651,22 @@ test "state reader loads account and storage lazily" {
     try std.testing.expectEqual(@as(usize, 1), reader.storage_reads);
 }
 
+test "missing state-reader account is created once and journaled for rollback" {
+    const address = evmz.addr(0xbeef);
+    var overlay = Overlay.initWithStateReader(std.testing.allocator, StateReader.empty());
+    defer overlay.deinit();
+
+    overlay.beginTransaction();
+    const checkpoint = try overlay.checkpoint();
+    _ = try overlay.getOrCreateAccount(address);
+
+    try std.testing.expect(overlay.accounts.contains(address));
+    try std.testing.expectEqual(checkpoint.journal_len + 1, overlay.journal.len());
+
+    try overlay.revertToCheckpoint(checkpoint);
+    try std.testing.expect(!overlay.accounts.contains(address));
+}
+
 test "zero storage write masks state reader value" {
     const address = evmz.addr(0xbeef);
     var reader = TestStateReader{

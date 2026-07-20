@@ -404,6 +404,7 @@ pub fn Program(
                     }
                 }
 
+                // TODO: perf check
                 fn applyAuthorizationList(
                     context: *const Context,
                     attempt: Context.AttemptCapability,

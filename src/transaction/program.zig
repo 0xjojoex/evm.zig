@@ -131,13 +131,13 @@ fn RuntimeState(
         attempt: ?ExecutorType.TransactionAttempt = null,
         prelude: PreludeState = .none,
 
-        fn discardIfActive(self: *@This()) void {
+        fn discardIfActive(self: *RuntimeState) void {
             const attempt = self.attempt orelse return;
             attempt.discardIfCurrent();
             self.attempt = null;
         }
 
-        fn complete(self: *@This()) Error!ExecutorType.ExecutionLease {
+        fn complete(self: *RuntimeState) Error!ExecutorType.ExecutionLease {
             switch (self.prelude) {
                 .pending => return error.TransactionPreludeNotRun,
                 .failed => return error.TransactionPreludeFailed,
@@ -149,7 +149,7 @@ fn RuntimeState(
             return executed;
         }
 
-        fn preludeFailure(self: *const @This()) ?anyerror {
+        fn preludeFailure(self: *const RuntimeState) ?anyerror {
             return switch (self.prelude) {
                 .failed => |err| err,
                 else => null,
@@ -169,101 +169,101 @@ fn AttemptType(
     return struct {
         handle: *anyopaque,
 
-        fn runtimeState(self: @This()) *Runtime {
+        fn runtimeState(self: AttemptType) *Runtime {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: @This()) Error!ExecutorType.TransactionAttempt {
+        fn token(self: AttemptType) Error!ExecutorType.TransactionAttempt {
             return self.runtimeState().attempt orelse error.NoCurrentTransaction;
         }
 
-        pub fn allocator(self: @This()) Error!std.mem.Allocator {
+        pub fn allocator(self: AttemptType) Error!std.mem.Allocator {
             return (try self.token()).allocator() catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn checkpoint(self: @This()) Error!ExecutorType.ExecutionCheckpoint {
+        pub fn checkpoint(self: AttemptType) Error!ExecutorType.ExecutionCheckpoint {
             return (try self.token()).checkpoint() catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn executeRequest(self: @This(), request: execution.EvmExecutionRequest) Error!Interpreter.Result {
+        pub fn executeRequest(self: AttemptType, request: execution.EvmExecutionRequest) Error!Interpreter.Result {
             return (try self.token()).executeRequest(request) catch |err| return ExecutorType.normalizeError(err);
         }
 
         pub fn executeRequestPhased(
-            self: @This(),
+            self: AttemptType,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
             return (try self.token()).executeRequestPhased(request) catch |err| return ExecutorType.normalizeError(err);
         }
 
         pub fn runPayload(
-            self: @This(),
+            self: AttemptType,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
             return (try self.token()).runPayload(request) catch |err| return ExecutorType.normalizeError(err);
         }
 
         pub fn beginExecution(
-            self: @This(),
+            self: AttemptType,
             request: execution.EvmExecutionRequest,
             init_value: execution.ExecutionScopeInit,
         ) Error!void {
             return (try self.token()).beginExecution(request, init_value) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn accountSummary(self: @This(), account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
+        pub fn accountSummary(self: AttemptType, account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
             return (try self.token()).accountSummary(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn code(self: @This(), account_address: Address) Error![]const u8 {
+        pub fn code(self: AttemptType, account_address: Address) Error![]const u8 {
             return (try self.token()).code(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn balance(self: @This(), account_address: Address) Error!u256 {
+        pub fn balance(self: AttemptType, account_address: Address) Error!u256 {
             return (try self.token()).balance(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn accountAccess(self: @This(), account_address: Address) Error!void {
+        pub fn accountAccess(self: AttemptType, account_address: Address) Error!void {
             return (try self.token()).accountAccess(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn touchAccount(self: @This(), account_address: Address) Error!void {
+        pub fn touchAccount(self: AttemptType, account_address: Address) Error!void {
             return (try self.token()).touchAccount(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn addBalance(self: @This(), account_address: Address, value: u256) Error!void {
+        pub fn addBalance(self: AttemptType, account_address: Address, value: u256) Error!void {
             return (try self.token()).addBalance(account_address, value) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn subtractBalance(self: @This(), account_address: Address, value: u256) Error!bool {
+        pub fn subtractBalance(self: AttemptType, account_address: Address, value: u256) Error!bool {
             return (try self.token()).subtractBalance(account_address, value) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn setNonce(self: @This(), account_address: Address, nonce: u64) Error!void {
+        pub fn setNonce(self: AttemptType, account_address: Address, nonce: u64) Error!void {
             return (try self.token()).setNonce(account_address, nonce) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn incrementNonce(self: @This(), account_address: Address) Error!void {
+        pub fn incrementNonce(self: AttemptType, account_address: Address) Error!void {
             return (try self.token()).incrementNonce(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn setCode(self: @This(), account_address: Address, code_bytes: []const u8) Error!void {
+        pub fn setCode(self: AttemptType, account_address: Address, code_bytes: []const u8) Error!void {
             return (try self.token()).setCode(account_address, code_bytes) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn clearCode(self: @This(), account_address: Address) Error!void {
+        pub fn clearCode(self: AttemptType, account_address: Address) Error!void {
             return (try self.token()).clearCode(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn warmAccount(self: @This(), account_address: Address) Error!void {
+        pub fn warmAccount(self: AttemptType, account_address: Address) Error!void {
             return (try self.token()).warmAccount(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn warmStorage(self: @This(), account_address: Address, key: u256) Error!void {
+        pub fn warmStorage(self: AttemptType, account_address: Address, key: u256) Error!void {
             return (try self.token()).warmStorage(account_address, key) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn finalizeState(self: @This()) Error!void {
+        pub fn finalizeState(self: AttemptType) Error!void {
             return (try self.token()).finalizeState() catch |err| return ExecutorType.normalizeError(err);
         }
     };
@@ -283,23 +283,23 @@ fn PreludeContext(
 
         pub const Error = ContextError;
 
-        fn runtimeState(self: @This()) *Runtime {
+        fn runtimeState(self: PreludeContext) *Runtime {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: @This()) ContextError!ExecutorType.TransactionAttempt {
+        fn token(self: PreludeContext) ContextError!ExecutorType.TransactionAttempt {
             return self.runtimeState().attempt orelse error.NoCurrentTransaction;
         }
 
-        pub fn revision(self: @This()) ContextError!ExecutorType.Protocol.Revision {
+        pub fn revision(self: PreludeContext) ContextError!ExecutorType.Protocol.Revision {
             return (try self.token()).revision() catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn code(self: @This(), account_address: Address) ContextError![]const u8 {
+        pub fn code(self: PreludeContext, account_address: Address) ContextError![]const u8 {
             return (try self.token()).code(account_address) catch |err| return ExecutorType.normalizeError(err);
         }
 
-        pub fn executeRequest(self: @This(), request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
+        pub fn executeRequest(self: PreludeContext, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
             return (try self.token()).executePreludeRequest(request) catch |err| return ExecutorType.normalizeError(err);
         }
     };
@@ -360,6 +360,8 @@ fn TransactionContext(
     return struct {
         handle: *anyopaque,
 
+        const Self = @This();
+
         pub const Error = ContextError;
         pub const Executor = ExecutorType;
         pub const Input = InputType;
@@ -368,47 +370,47 @@ fn TransactionContext(
         pub const TransactionProtocol = TransactionProtocolType;
         pub const TransactionPolicy = TransactionPolicyType;
 
-        fn runtimeState(self: *const @This()) *RuntimeType {
+        fn runtimeState(self: *const Self) *RuntimeType {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        pub fn input(self: *const @This()) *const InputType {
+        pub fn input(self: *const Self) *const InputType {
             return self.runtimeState().input_value;
         }
 
-        pub fn revision(self: *const @This()) ExecutorType.Protocol.Revision {
+        pub fn revision(self: *const Self) ExecutorType.Protocol.Revision {
             return self.runtimeState().executor.revision();
         }
 
-        pub fn policy(self: *const @This()) *const TransactionPolicyType {
+        pub fn policy(self: *const Self) *const TransactionPolicyType {
             return self.runtimeState().policy;
         }
 
-        pub fn blockGasLimitBound(self: *const @This()) ?u64 {
+        pub fn blockGasLimitBound(self: *const Self) ?u64 {
             return self.runtimeState().executor.blockGasLimitBound();
         }
 
-        pub fn preparationState(self: *@This()) tx.PreparationStateAccess {
+        pub fn preparationState(self: *Self) tx.PreparationStateAccess {
             return .{
                 .ptr = self.runtimeState(),
                 .vtable = &preparation_state_vtable,
             };
         }
 
-        pub fn beginAttempt(self: *@This()) ContextError!Attempt {
+        pub fn beginAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
             if (runtime.attempt != null) return error.TransactionAttemptActive;
             runtime.attempt = runtime.executor.beginTransactionAttemptLifetime() catch |err| return ExecutorType.normalizeError(err);
             return .{ .handle = runtime };
         }
 
-        pub fn activeAttempt(self: *@This()) ContextError!Attempt {
+        pub fn activeAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
             _ = runtime.attempt orelse return error.NoCurrentTransaction;
             return .{ .handle = runtime };
         }
 
-        pub fn runPrelude(self: *@This()) ContextError!void {
+        pub fn runPrelude(self: *Self) ContextError!void {
             const runtime = self.runtimeState();
             switch (runtime.prelude) {
                 .none => return,
@@ -426,7 +428,7 @@ fn TransactionContext(
             }
         }
 
-        pub fn infrastructureError(_: *const @This(), err: anyerror) ContextError {
+        pub fn infrastructureError(_: *const Self, err: anyerror) ContextError {
             return ExecutorType.normalizeError(err);
         }
 

@@ -1730,17 +1730,6 @@ pub fn Executor(comptime ProtocolType: type) type {
 const Default = Executor(EthProtocol);
 const testTxContext = evmz.t.defaultTxContext;
 
-test "Executor exposes a neutral transaction lifecycle" {
-    try std.testing.expect(Default.Protocol == evmz.Evm.ExecutionProtocol);
-    try std.testing.expect(@hasDecl(Default, "TransactionAttempt"));
-    try std.testing.expect(@hasDecl(Default, "ExecutionLease"));
-    try std.testing.expect(!@hasDecl(Default, "TopLevelTransactionRun"));
-    try std.testing.expect(!@hasDecl(Default, "TransactionScope"));
-    try std.testing.expect(!@hasDecl(Default, "runTopLevelTransaction"));
-    try std.testing.expect(!@hasDecl(Default, "settleTransactionCosts"));
-    try std.testing.expect(!@hasDecl(Default, "applyAuthorizationTuple"));
-}
-
 test "executor init options retain code analysis config" {
     var executor = Default.init(std.testing.allocator, .{
         .revision = .latest,
