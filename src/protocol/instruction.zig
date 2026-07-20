@@ -5,6 +5,15 @@ const support = @import("support.zig");
 
 pub const AccountAccessStatus = types.AccountAccessStatus;
 
+/// Semantic identity for a definition-owned instruction value.
+///
+/// `.byte` inherits the canonical EVM instruction at that byte. Definitions
+/// may replace its execution target, availability, gas, or tier, but its
+/// structural metadata remains the base EVM metadata.
+///
+/// `.custom` identifies a new instruction whose metadata is definition-owned.
+/// `first_byte` is only its ingress byte; multi-byte decoding remains the
+/// definition's responsibility.
 pub const Context = union(enum) {
     byte: u8,
     custom: struct {

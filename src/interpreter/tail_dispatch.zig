@@ -321,6 +321,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                         .gas_before = gas,
                         .refund_before = ctx.frame.gas_refund,
                         .stack_len = ctx.stackLen(sp),
+                        .stack_prefix_len = stackPrefixLen(opcode_byte, ctx.stackLen(sp)),
                         .memory_size = ctx.frame.memory.len(),
                         .memory_write = if (ctx.capture.capturesMemoryWrites())
                             memoryWritePlan(opcode_byte, ctx.stackSlice(sp))
@@ -1095,6 +1096,44 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             if (offset >= source.len) return &.{};
             return source[offset..];
         }
+
+        fn stackPrefixLen(comptime opcode_byte: u8, before_len: usize) usize {
+            const value = comptime Protocol.Instruction.fromByte(opcode_byte);
+            const info = comptime Protocol.Instruction.info(value);
+            if (!info.defined or before_len < info.stack_in) return 0;
+
+            switch (comptime Protocol.Instruction.context(value)) {
+                .byte => |inherited_byte| {
+                    if (inherited_byte >= @intFromEnum(Opcode.DUP1) and
+                        inherited_byte <= @intFromEnum(Opcode.DUP16))
+                    {
+                        return before_len;
+                    }
+
+                    // These instructions encode their affected suffix in an
+                    // immediate byte. Fall back to a full post-stack until
+                    // prepared-code metadata exposes that depth.
+                    if (inherited_byte == @intFromEnum(Opcode.DUPN) or
+                        inherited_byte == @intFromEnum(Opcode.SWAPN) or
+                        inherited_byte == @intFromEnum(Opcode.EXCHANGE))
+                    {
+                        return 0;
+                    }
+                },
+                .custom => {},
+            }
+            return before_len - info.stack_in;
+        }
+
+        fn memoryWritePlan(comptime opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
+            const value = comptime Protocol.Instruction.fromByte(opcode_byte);
+            return switch (comptime Protocol.Instruction.context(value)) {
+                .byte => |inherited_byte| builtinMemoryWritePlan(inherited_byte, stack),
+                // New instructions require an explicit trace-effect contract;
+                // their runtime support is intentionally deferred.
+                .custom => null,
+            };
+        }
     };
 }
 
@@ -1129,7 +1168,7 @@ fn tapeStepOutcome(status: Interpreter.FrameStatus) trace.TraceStepOutcome {
     };
 }
 
-fn memoryWritePlan(opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
+fn builtinMemoryWritePlan(opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
     const op = std.enums.fromInt(Opcode, opcode_byte) orelse return null;
     return switch (op) {
         .MSTORE => memoryRangeFromStack(stack, 1, null, 32),
@@ -1160,21 +1199,21 @@ fn memoryRangeFromStack(
 test "captured memory plans use each opcode's destination operands" {
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 3, .size = 5 },
-        memoryWritePlan(@intFromEnum(Opcode.CALLDATACOPY), &.{ 5, 11, 3 }).?,
+        builtinMemoryWritePlan(@intFromEnum(Opcode.CALLDATACOPY), &.{ 5, 11, 3 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 7, .size = 9 },
-        memoryWritePlan(@intFromEnum(Opcode.EXTCODECOPY), &.{ 9, 11, 7, 13 }).?,
+        builtinMemoryWritePlan(@intFromEnum(Opcode.EXTCODECOPY), &.{ 9, 11, 7, 13 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 17, .size = 19 },
-        memoryWritePlan(@intFromEnum(Opcode.CALL), &.{ 19, 17, 0, 0, 0, 0x1234, 100_000 }).?,
+        builtinMemoryWritePlan(@intFromEnum(Opcode.CALL), &.{ 19, 17, 0, 0, 0, 0x1234, 100_000 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 23, .size = 29 },
-        memoryWritePlan(@intFromEnum(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
+        builtinMemoryWritePlan(@intFromEnum(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
     );
-    try std.testing.expect(memoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
+    try std.testing.expect(builtinMemoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
 }
 
 fn invalidStatusError(err: anyerror) bool {

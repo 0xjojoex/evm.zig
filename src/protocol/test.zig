@@ -495,30 +495,30 @@ test "definition-owned instruction type can compose custom opcode identity" {
     const CustomInstruction = struct {
         pub const Value = union(enum) {
             byte: u8,
+            prefix,
             evm64: u8,
         };
 
         pub fn fromByte(comptime opcode_byte: u8) Value {
+            if (opcode_byte == custom_opcode_byte) return .prefix;
             return .{ .byte = opcode_byte };
         }
 
         pub fn context(comptime value: Value) InstructionContext {
             return switch (value) {
                 .byte => |opcode_byte| .{ .byte = opcode_byte },
-                .evm64 => .{ .custom = .{ .first_byte = custom_opcode_byte } },
+                .prefix, .evm64 => .{ .custom = .{ .first_byte = custom_opcode_byte } },
             };
         }
 
         pub fn info(comptime value: Value) opcode_info.OpInfo {
             return switch (value) {
-                .byte => |opcode_byte| if (opcode_byte == custom_opcode_byte)
-                    .{
-                        .name = "EVM64_PREFIX",
-                        .defined = true,
-                        .exit = .invalid,
-                    }
-                else
-                    opcode_info.info(opcode_byte),
+                .byte => |opcode_byte| opcode_info.info(opcode_byte),
+                .prefix => .{
+                    .name = "EVM64_PREFIX",
+                    .defined = true,
+                    .exit = .invalid,
+                },
                 .evm64 => |subopcode| if (subopcode == custom_subopcode_byte)
                     .{
                         .name = "C001_ADD64",
@@ -545,13 +545,13 @@ test "definition-owned instruction type can compose custom opcode identity" {
                 .byte => |opcode_byte| blk: {
                     const info_value = info(value);
                     if (!info_value.defined) break :blk .invalid;
-                    if (opcode_byte == custom_opcode_byte) break :blk .{ .custom = CustomHandler };
                     const opcode: opcode_info.Opcode = @enumFromInt(opcode_byte);
                     break :blk switch (opcode) {
                         .INVALID => .invalid,
                         else => .{ .builtin = opcode },
                     };
                 },
+                .prefix => .{ .custom = CustomHandler },
                 .evm64 => .invalid,
             };
         }

@@ -182,6 +182,56 @@ fn assertDispatchSurfaceTypes(comptime Definition: type, comptime support_window
 
     const instruction_target: execution.ExecutionTarget = comptime Instruction.executionTarget(instruction);
     execution.assertValidTarget(instruction_target);
+
+    assertInstructionContexts(Definition);
+}
+
+fn assertInstructionContexts(comptime Definition: type) void {
+    const Instruction = Definition.Instruction;
+    inline for (0..256) |index| {
+        const ingress_byte: u8 = @intCast(index);
+        const value: Instruction.Value = comptime Instruction.fromByte(ingress_byte);
+        switch (comptime Instruction.context(value)) {
+            .byte => |inherited_byte| {
+                if (comptime inherited_byte != ingress_byte) {
+                    @compileError(std.fmt.comptimePrint(
+                        "Definition.Instruction.fromByte(0x{x:0>2}) must inherit the same byte or return a custom instruction",
+                        .{ingress_byte},
+                    ));
+                }
+                const inherited_info = comptime opcode_info.info(inherited_byte);
+                const instruction_info = comptime Instruction.info(value);
+                if (comptime !instructionInfoEql(instruction_info, inherited_info)) {
+                    @compileError(std.fmt.comptimePrint(
+                        "Definition.Instruction byte 0x{x:0>2} changes canonical EVM metadata; use custom context for a new instruction",
+                        .{ingress_byte},
+                    ));
+                }
+            },
+            .custom => |custom| {
+                if (comptime custom.first_byte != ingress_byte) {
+                    @compileError(std.fmt.comptimePrint(
+                        "Definition.Instruction custom value from byte 0x{x:0>2} must retain that first byte",
+                        .{ingress_byte},
+                    ));
+                }
+            },
+        }
+    }
+}
+
+fn instructionInfoEql(a: opcode_info.OpInfo, b: opcode_info.OpInfo) bool {
+    const names_equal = if (a.name) |a_name|
+        if (b.name) |b_name| std.mem.eql(u8, a_name, b_name) else false
+    else
+        b.name == null;
+    if (!names_equal) return false;
+
+    var a_without_name = a;
+    var b_without_name = b;
+    a_without_name.name = null;
+    b_without_name.name = null;
+    return std.meta.eql(a_without_name, b_without_name);
 }
 
 fn assertPrecompileDomainTypes(comptime Definition: type) void {

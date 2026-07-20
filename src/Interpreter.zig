@@ -847,7 +847,6 @@ test "interpreter captured tail table records optional memory writes" {
     cursor.enterFrame(captured.span.frames[0]);
     const writes = for (captured.span.steps) |row| {
         cursor.finishStep(row);
-        // TODO: has to check if custom protocol overrides opcode mstore.
         if (row.opcode == @intFromEnum(Opcode.MSTORE)) break try cursor.memoryWrites();
     } else unreachable;
     try std.testing.expectEqual(@as(usize, 1), writes.len);

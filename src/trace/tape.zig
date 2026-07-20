@@ -6,7 +6,6 @@
 //! restore every buffer to the operation mark.
 
 const std = @import("std");
-const opcode = @import("../opcode.zig");
 pub const step_table = @import("step_table.zig");
 pub const transition_arena = @import("transition_arena.zig");
 
@@ -89,6 +88,9 @@ pub const StepInput = struct {
     gas_before: i64,
     refund_before: i64,
     stack_len: usize,
+    /// Length of the unchanged stack prefix, resolved by the active protocol.
+    /// Zero is always a correct full-snapshot fallback.
+    stack_prefix_len: usize = 0,
     memory_size: usize,
     return_data: ByteRange = .{},
     memory_write: ?MemoryWritePlan = null,
@@ -127,6 +129,7 @@ pub const StepHandle = struct {
     generation: u64,
     index: u32,
     stack_before_len: u16,
+    stack_prefix_len: u16,
     memory_before_size: u32,
     return_data_before: ByteRange,
 };
@@ -509,6 +512,8 @@ pub const TraceTape = struct {
         const pc = try index32(input.pc);
         const memory_size = try index32(input.memory_size);
         const stack_before_len = std.math.cast(u16, input.stack_len) orelse return error.TraceIndexOverflow;
+        const requested_stack_prefix_len = std.math.cast(u16, input.stack_prefix_len) orelse return error.TraceIndexOverflow;
+        const stack_prefix_len = if (requested_stack_prefix_len <= stack_before_len) requested_stack_prefix_len else 0;
         const row_index = try index32(self.table.steps.items.len);
         const transition_offset = try relativeIndex(
             self.transitions.step_refs.items.len,
@@ -533,6 +538,7 @@ pub const TraceTape = struct {
             .generation = self.generation,
             .index = row_index,
             .stack_before_len = stack_before_len,
+            .stack_prefix_len = stack_prefix_len,
             .memory_before_size = memory_size,
             .return_data_before = input.return_data,
         };
@@ -550,7 +556,7 @@ pub const TraceTape = struct {
         std.debug.assert(transition_index < self.transitions.step_refs.items.len);
         const transition_ref = &self.transitions.step_refs.items[transition_index];
         const capture_stack = self.capturesStack();
-        const keep_len = if (capture_stack) stackKeepLen(handle.stack_before_len, row.opcode, completion) else 0;
+        const keep_len = if (capture_stack) stackPrefixLen(handle.stack_prefix_len, completion) else 0;
         const appended = if (capture_stack) completion.stack[keep_len..] else &.{};
         const memory_write_input = if (self.capturesMemoryWrites()) completion.memory_write else null;
         const append_range = try relativeRange(
@@ -880,31 +886,11 @@ fn relativeMemoryWriteRange(absolute_start: usize, operation_start: usize, len: 
     return .{ .offset = range.offset, .len = range.len };
 }
 
-fn stackKeepLen(before_len_value: u16, opcode_byte: u8, completion: StepFinish) usize {
-    const before_len: usize = before_len_value;
+fn stackPrefixLen(prefix_len_value: u16, completion: StepFinish) usize {
+    const prefix_len: usize = prefix_len_value;
     const after_len = completion.stack.len;
     if (completion.outcome == .invalid or completion.outcome == .out_of_gas) return 0;
-
-    if (opcode_byte >= @intFromEnum(opcode.Opcode.DUP1) and
-        opcode_byte <= @intFromEnum(opcode.Opcode.DUP16))
-    {
-        return if (after_len == before_len + 1) before_len else 0;
-    }
-
-    // The Amsterdam variable-depth forms encode their affected suffix in an
-    // immediate byte. They are rare and can safely fall back to one complete
-    // post-stack transition until prepared-code metadata exposes that depth.
-    if (opcode_byte == @intFromEnum(opcode.Opcode.DUPN) or
-        opcode_byte == @intFromEnum(opcode.Opcode.SWAPN) or
-        opcode_byte == @intFromEnum(opcode.Opcode.EXCHANGE))
-    {
-        return 0;
-    }
-
-    const info = opcode.info(opcode_byte);
-    if (!info.defined or before_len < info.stack_in) return 0;
-    const keep_len = before_len - info.stack_in;
-    return if (keep_len <= after_len) keep_len else 0;
+    return if (prefix_len <= after_len) prefix_len else 0;
 }
 
 test "trace tape appends patches and exposes one stable replay span" {
@@ -986,7 +972,7 @@ test "trace cursor owns replay order and sparse state transitions" {
     const step = try tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(opcode.Opcode.STOP),
+        .opcode = 0x00,
         .gas_before = 1,
         .refund_before = 0,
         .stack_len = 0,
@@ -1034,7 +1020,7 @@ test "capture profile omits stack payload and reports unavailable capabilities" 
     const step = try tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(opcode.Opcode.ADD),
+        .opcode = 0x01,
         .gas_before = 3,
         .refund_before = 0,
         .stack_len = 2,
@@ -1138,7 +1124,7 @@ test "bounded trace tape reports capacity without partial append" {
     const step = try tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(opcode.Opcode.PUSH0),
+        .opcode = 0x5f,
         .gas_before = 0,
         .refund_before = 0,
         .stack_len = 0,

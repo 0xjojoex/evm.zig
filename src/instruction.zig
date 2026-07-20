@@ -8,6 +8,7 @@ const support = @import("./protocol/support.zig");
 const protocol_types = @import("./protocol/types.zig");
 const evmz = @import("./evm.zig");
 const Interpreter = @import("./Interpreter.zig");
+const trace = @import("./trace.zig");
 const CallFrame = Interpreter.CallFrame;
 
 pub const call_value_cost = 9000;
@@ -141,7 +142,7 @@ test "execute uses definition availability from support window" {
 }
 
 test "execute uses resolved dispatch target for hot opcodes" {
-    const OverrideProtocol = DispatchOverrideProtocol(.invalid);
+    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -164,7 +165,7 @@ test "execute uses resolved dispatch target for hot opcodes" {
 }
 
 test "untraced interpreter raw fallback respects resolved dispatch target" {
-    const OverrideProtocol = DispatchOverrideProtocol(.invalid);
+    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -193,7 +194,7 @@ test "untraced interpreter raw fallback respects resolved dispatch target" {
 }
 
 test "untraced interpreter tail dispatch respects resolved dispatch target" {
-    const OverrideProtocol = DispatchOverrideProtocol(.invalid);
+    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -230,7 +231,7 @@ test "execute calls custom dispatch target directly" {
             return frame.stack.push(42);
         }
     };
-    const OverrideProtocol = DispatchOverrideProtocol(.{ .custom = CustomHandler });
+    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .{ .custom = CustomHandler });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -253,8 +254,51 @@ test "execute calls custom dispatch target directly" {
     try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
 }
 
-fn DispatchOverrideProtocol(comptime add_target: dispatcher.ExecutionTarget) type {
-    const target_for_add = add_target;
+test "captured custom MSTORE handler retains inherited trace effects" {
+    const CustomMstore = struct {
+        pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
+            if (!Instructions.chargeStaticGas(frame, .MSTORE)) return;
+            return memory.mstore(frame);
+        }
+    };
+    const OverrideProtocol = DispatchOverrideProtocol(.MSTORE, .{ .custom = CustomMstore });
+    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .STOP });
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
+    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+        .revision = .latest,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+
+    const captured = try interpreter.capture(&tape, .{ .memory = .writes });
+    defer tape.resolve(captured.span) catch unreachable;
+    try std.testing.expectEqual(Interpreter.Status.success, captured.result.status);
+
+    var cursor = trace.TraceCursor.init(captured.span);
+    cursor.enterFrame(captured.span.frames[0]);
+    const writes = for (captured.span.steps) |row| {
+        cursor.finishStep(row);
+        if (row.opcode == @intFromEnum(Opcode.MSTORE)) break try cursor.memoryWrites();
+    } else unreachable;
+    try std.testing.expectEqual(@as(usize, 1), writes.len);
+    const bytes = cursor.memoryWriteBytes(writes[0]);
+    try std.testing.expectEqual(@as(usize, 32), bytes.len);
+    try std.testing.expectEqual(@as(u8, 0x2a), bytes[31]);
+}
+
+fn DispatchOverrideProtocol(comptime overridden_opcode: Opcode, comptime override_target: dispatcher.ExecutionTarget) type {
+    const opcode_to_override = overridden_opcode;
+    const target_for_override = override_target;
     return struct {
         pub const Revision = evmz.eth.Revision;
         pub const hot_cold_dispatch_enabled = true;
@@ -274,8 +318,8 @@ fn DispatchOverrideProtocol(comptime add_target: dispatcher.ExecutionTarget) typ
 
         pub fn dispatchEntryByte(comptime opcode_byte: u8) dispatcher.DispatchEntry {
             const info = opcode_info.info(opcode_byte);
-            const target: dispatcher.ExecutionTarget = if (comptime opcode_byte == @intFromEnum(Opcode.ADD))
-                target_for_add
+            const target: dispatcher.ExecutionTarget = if (comptime opcode_byte == @intFromEnum(opcode_to_override))
+                target_for_override
             else if (comptime info.defined)
                 .{ .builtin = @enumFromInt(opcode_byte) }
             else
@@ -286,9 +330,9 @@ fn DispatchOverrideProtocol(comptime add_target: dispatcher.ExecutionTarget) typ
                 .info = info,
                 .availability = if (comptime info.defined) .always else .never,
                 .static_gas = .{ .constant = @intCast(info.static_gas) },
-                .tier = if (comptime opcode_byte == @intFromEnum(Opcode.ADD)) .hot else .cold,
+                .tier = if (comptime opcode_byte == @intFromEnum(opcode_to_override)) .hot else .cold,
                 .execution_target = target,
-                .hot_path = opcode_byte == @intFromEnum(Opcode.ADD),
+                .hot_path = opcode_byte == @intFromEnum(opcode_to_override),
             };
         }
 
