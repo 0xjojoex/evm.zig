@@ -6,7 +6,7 @@
 //!
 //! Layer note: most declarations here are protocol *data and derivations*.
 //! `eth.block_stf` is the concrete Ethereum block-transition layer above
-//! the bound `Vm.BlockProgram`; raw message execution still lives under
+//! the bound `Vm.BlockExecution`; raw message execution still lives under
 //! `executor/` and opcode behavior under `instruction/`.
 
 const std = @import("std");
@@ -19,7 +19,6 @@ pub const instruction = @import("eth/instruction.zig");
 pub const transaction = @import("eth/transaction.zig");
 pub const transaction_prepare = @import("eth/transaction_prepare.zig");
 pub const transaction_validation = @import("eth/transaction_validation.zig");
-pub const transition = @import("eth/transition.zig");
 pub const authorization = @import("eth/authorization.zig");
 pub const settlement = @import("eth/settlement.zig");
 pub const precompile = @import("eth/precompile.zig");
@@ -27,7 +26,6 @@ pub const system = @import("eth/system.zig");
 pub const header = @import("eth/header.zig");
 pub const trie = @import("eth/trie.zig");
 pub const block_stf = @import("eth/block_stf.zig");
-pub const block_program = @import("eth/block_program.zig");
 pub const eip6110 = @import("eth/eip/6110.zig");
 pub const eip7002 = @import("eth/eip/7002.zig");
 pub const eip7702 = @import("eth/eip/7702.zig");

@@ -8,8 +8,8 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
-const definition = @import("../definition.zig");
 const execution = @import("../execution.zig");
+const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
 const Interpreter = @import("../Interpreter.zig");
 const state = @import("../state.zig");
@@ -29,60 +29,6 @@ pub fn TransactOutcome(comptime Executed: type, comptime Rejection: type) type {
     };
 }
 
-/// First-class transaction program with flat lexical carriers for ZLS.
-/// `Impl.Input` is the complete invocation value and must contain a `tx: Tx`
-/// field. `Impl.For(Context).transact` receives that concrete transaction.
-pub fn Transaction(
-    comptime TxT: type,
-    comptime OutputT: type,
-    comptime RejectionT: type,
-    comptime ImplT: type,
-) type {
-    const TxType = TxT;
-    const Input = ImplT.Input;
-    const OutputType = OutputT;
-    const RejectionType = RejectionT;
-    const ImplementationType = ImplT;
-    comptime {
-        if (!@hasField(Input, "tx"))
-            @compileError("transaction program input must contain a tx field");
-        if (@FieldType(Input, "tx") != TxType)
-            @compileError("transaction program input tx field has the wrong type");
-    }
-
-    return struct {
-        pub const Transaction = TxType;
-        pub const TransactInput = Input;
-        pub const Output = OutputType;
-        pub const Rejection = RejectionType;
-        pub const Implementation = ImplementationType;
-
-        pub fn For(comptime ContextType: type) type {
-            const Bound = bindTransition(ContextType, Implementation);
-            comptime validateTransition(ContextType, TxType, OutputType, RejectionType, Bound);
-            return Bound;
-        }
-
-        /// Bind transaction semantics to one engine family. The family carries
-        /// both the reusable Executor and the matching transaction protocol.
-        pub fn bind(comptime FamilyType: type) type {
-            comptime validateFamilyBinding(FamilyType);
-            return BoundTransaction(
-                FamilyType.Executor,
-                FamilyType.TransactionProtocol,
-                FamilyType.TransactionPolicy,
-                FamilyType.transaction_policy,
-                TxType,
-                Input,
-                OutputType,
-                RejectionType,
-                ImplementationType,
-                error{},
-            );
-        }
-    };
-}
-
 const ContractError = error{
     InvalidTransactionOutcome,
     TransactionPreludeAlreadyRun,
@@ -90,18 +36,45 @@ const ContractError = error{
     TransactionPreludeNotRun,
 };
 
-/// Concrete family-authoring context. Custom transitions can name this type at
-/// file scope; library presets may continue to expose `For(Context)`.
-pub fn Context(
-    comptime Family: type,
-    comptime Input: type,
+/// Bind transaction semantics using flat engine-family and program carriers.
+/// Concrete VM types expose this through `VM.Program(...)`.
+pub fn bind(
+    comptime RevisionType: type,
+    comptime ExecutorType: type,
+    comptime TransactionProtocolType: type,
+    comptime TransactionPolicyType: type,
+    comptime default_transaction_policy: TransactionPolicyType,
+    comptime TransactionType: type,
+    comptime InputType: type,
+    comptime OutputType: type,
+    comptime RejectionType: type,
+    comptime ImplementationType: type,
 ) type {
-    comptime validateFamilyBinding(Family);
-    return TransactionContext(
-        Family.Executor,
-        Family.TransactionProtocol,
-        Family.TransactionPolicy,
-        Input,
+    comptime {
+        std.debug.assert(@hasField(InputType, "tx"));
+        std.debug.assert(@FieldType(InputType, "tx") == TransactionType);
+    }
+    const ContextType = Context(
+        RevisionType,
+        ExecutorType,
+        TransactionProtocolType,
+        TransactionPolicyType,
+        InputType,
+    );
+    comptime validateTransition(ContextType, TransactionType, OutputType, RejectionType, ImplementationType);
+    return BoundTransaction(
+        RevisionType,
+        ExecutorType,
+        TransactionProtocolType,
+        TransactionPolicyType,
+        default_transaction_policy,
+        ContextType,
+        TransactionType,
+        InputType,
+        OutputType,
+        RejectionType,
+        ImplementationType,
+        error{},
     );
 }
 
@@ -110,9 +83,11 @@ fn RuntimeState(
     comptime TransactionPolicyType: type,
     comptime InputType: type,
 ) type {
-    const Error = ExecutorType.Error || ContractError;
+    const Error = executor_errors.Error || ContractError;
 
     return struct {
+        const Self = @This();
+
         const PreludeBinding = struct {
             handle: *anyopaque,
             run: *const fn (*anyopaque, *anyopaque) anyerror!void,
@@ -131,25 +106,25 @@ fn RuntimeState(
         attempt: ?ExecutorType.TransactionAttempt = null,
         prelude: PreludeState = .none,
 
-        fn discardIfActive(self: *RuntimeState) void {
+        fn discardIfActive(self: *Self) void {
             const attempt = self.attempt orelse return;
             attempt.discardIfCurrent();
             self.attempt = null;
         }
 
-        fn complete(self: *RuntimeState) Error!ExecutorType.ExecutionLease {
+        fn complete(self: *Self) Error!ExecutorType.ExecutionLease {
             switch (self.prelude) {
                 .pending => return error.TransactionPreludeNotRun,
                 .failed => return error.TransactionPreludeFailed,
                 .none, .consumed => {},
             }
             const attempt = self.attempt orelse return error.InvalidTransactionOutcome;
-            const executed = attempt.completeLease() catch |err| return ExecutorType.normalizeError(err);
+            const executed = attempt.completeLease() catch |err| return executor_errors.normalize(err);
             self.attempt = null;
             return executed;
         }
 
-        fn preludeFailure(self: *const RuntimeState) ?anyerror {
+        fn preludeFailure(self: *const Self) ?anyerror {
             return switch (self.prelude) {
                 .failed => |err| err,
                 else => null,
@@ -160,159 +135,155 @@ fn RuntimeState(
 
 fn AttemptType(
     comptime ExecutorType: type,
-    comptime TransactionPolicyType: type,
-    comptime InputType: type,
+    comptime Runtime: type,
 ) type {
-    const Error = ExecutorType.Error || ContractError;
-    const Runtime = RuntimeState(ExecutorType, TransactionPolicyType, InputType);
+    const Error = executor_errors.Error || ContractError;
 
     return struct {
         handle: *anyopaque,
 
-        fn runtimeState(self: AttemptType) *Runtime {
+        const Self = @This();
+
+        fn runtimeState(self: Self) *Runtime {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: AttemptType) Error!ExecutorType.TransactionAttempt {
+        fn token(self: Self) Error!ExecutorType.TransactionAttempt {
             return self.runtimeState().attempt orelse error.NoCurrentTransaction;
         }
 
-        pub fn allocator(self: AttemptType) Error!std.mem.Allocator {
-            return (try self.token()).allocator() catch |err| return ExecutorType.normalizeError(err);
+        pub fn allocator(self: Self) Error!std.mem.Allocator {
+            return (try self.token()).allocator() catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn checkpoint(self: AttemptType) Error!ExecutorType.ExecutionCheckpoint {
-            return (try self.token()).checkpoint() catch |err| return ExecutorType.normalizeError(err);
+        pub fn checkpoint(self: Self) Error!ExecutorType.ExecutionCheckpoint {
+            return (try self.token()).checkpoint() catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn executeRequest(self: AttemptType, request: execution.EvmExecutionRequest) Error!Interpreter.Result {
-            return (try self.token()).executeRequest(request) catch |err| return ExecutorType.normalizeError(err);
+        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) Error!Interpreter.Result {
+            return (try self.token()).executeRequest(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn executeRequestPhased(
-            self: AttemptType,
+            self: Self,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
-            return (try self.token()).executeRequestPhased(request) catch |err| return ExecutorType.normalizeError(err);
+            return (try self.token()).executeRequestPhased(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn runPayload(
-            self: AttemptType,
+            self: Self,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
-            return (try self.token()).runPayload(request) catch |err| return ExecutorType.normalizeError(err);
+            return (try self.token()).runPayload(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn beginExecution(
-            self: AttemptType,
+            self: Self,
             request: execution.EvmExecutionRequest,
             init_value: execution.ExecutionScopeInit,
         ) Error!void {
-            return (try self.token()).beginExecution(request, init_value) catch |err| return ExecutorType.normalizeError(err);
+            return (try self.token()).beginExecution(request, init_value) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn accountSummary(self: AttemptType, account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
-            return (try self.token()).accountSummary(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn accountSummary(self: Self, account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
+            return (try self.token()).accountSummary(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn code(self: AttemptType, account_address: Address) Error![]const u8 {
-            return (try self.token()).code(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn code(self: Self, account_address: Address) Error![]const u8 {
+            return (try self.token()).code(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn balance(self: AttemptType, account_address: Address) Error!u256 {
-            return (try self.token()).balance(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn balance(self: Self, account_address: Address) Error!u256 {
+            return (try self.token()).balance(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn accountAccess(self: AttemptType, account_address: Address) Error!void {
-            return (try self.token()).accountAccess(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn accountAccess(self: Self, account_address: Address) Error!void {
+            return (try self.token()).accountAccess(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn touchAccount(self: AttemptType, account_address: Address) Error!void {
-            return (try self.token()).touchAccount(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn touchAccount(self: Self, account_address: Address) Error!void {
+            return (try self.token()).touchAccount(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn addBalance(self: AttemptType, account_address: Address, value: u256) Error!void {
-            return (try self.token()).addBalance(account_address, value) catch |err| return ExecutorType.normalizeError(err);
+        pub fn addBalance(self: Self, account_address: Address, value: u256) Error!void {
+            return (try self.token()).addBalance(account_address, value) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn subtractBalance(self: AttemptType, account_address: Address, value: u256) Error!bool {
-            return (try self.token()).subtractBalance(account_address, value) catch |err| return ExecutorType.normalizeError(err);
+        pub fn subtractBalance(self: Self, account_address: Address, value: u256) Error!bool {
+            return (try self.token()).subtractBalance(account_address, value) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn setNonce(self: AttemptType, account_address: Address, nonce: u64) Error!void {
-            return (try self.token()).setNonce(account_address, nonce) catch |err| return ExecutorType.normalizeError(err);
+        pub fn setNonce(self: Self, account_address: Address, nonce: u64) Error!void {
+            return (try self.token()).setNonce(account_address, nonce) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn incrementNonce(self: AttemptType, account_address: Address) Error!void {
-            return (try self.token()).incrementNonce(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn incrementNonce(self: Self, account_address: Address) Error!void {
+            return (try self.token()).incrementNonce(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn setCode(self: AttemptType, account_address: Address, code_bytes: []const u8) Error!void {
-            return (try self.token()).setCode(account_address, code_bytes) catch |err| return ExecutorType.normalizeError(err);
+        pub fn setCode(self: Self, account_address: Address, code_bytes: []const u8) Error!void {
+            return (try self.token()).setCode(account_address, code_bytes) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn clearCode(self: AttemptType, account_address: Address) Error!void {
-            return (try self.token()).clearCode(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn clearCode(self: Self, account_address: Address) Error!void {
+            return (try self.token()).clearCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn warmAccount(self: AttemptType, account_address: Address) Error!void {
-            return (try self.token()).warmAccount(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn warmAccount(self: Self, account_address: Address) Error!void {
+            return (try self.token()).warmAccount(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn warmStorage(self: AttemptType, account_address: Address, key: u256) Error!void {
-            return (try self.token()).warmStorage(account_address, key) catch |err| return ExecutorType.normalizeError(err);
+        pub fn warmStorage(self: Self, account_address: Address, key: u256) Error!void {
+            return (try self.token()).warmStorage(account_address, key) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn finalizeState(self: AttemptType) Error!void {
-            return (try self.token()).finalizeState() catch |err| return ExecutorType.normalizeError(err);
+        pub fn finalizeState(self: Self) Error!void {
+            return (try self.token()).finalizeState() catch |err| return executor_errors.normalize(err);
         }
     };
 }
 
 fn PreludeContext(
+    comptime RevisionType: type,
     comptime ExecutorType: type,
-    comptime TransactionPolicyType: type,
-    comptime InputType: type,
+    comptime RuntimeType: type,
     comptime PreludeErrorType: type,
 ) type {
-    const ContextError = ExecutorType.Error || ContractError || PreludeErrorType;
-    const Runtime = RuntimeState(ExecutorType, TransactionPolicyType, InputType);
+    const ContextError = executor_errors.Error || ContractError || PreludeErrorType;
 
     return struct {
         handle: *anyopaque,
 
-        pub const Error = ContextError;
+        const Self = @This();
 
-        fn runtimeState(self: PreludeContext) *Runtime {
+        pub const Error = ContextError;
+        pub const Revision = RevisionType;
+
+        fn runtimeState(self: Self) *RuntimeType {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: PreludeContext) ContextError!ExecutorType.TransactionAttempt {
+        fn token(self: Self) ContextError!ExecutorType.TransactionAttempt {
             return self.runtimeState().attempt orelse error.NoCurrentTransaction;
         }
 
-        pub fn revision(self: PreludeContext) ContextError!ExecutorType.Protocol.Revision {
-            return (try self.token()).revision() catch |err| return ExecutorType.normalizeError(err);
+        pub fn revision(self: Self) ContextError!RevisionType {
+            return (try self.token()).revision() catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn code(self: PreludeContext, account_address: Address) ContextError![]const u8 {
-            return (try self.token()).code(account_address) catch |err| return ExecutorType.normalizeError(err);
+        pub fn code(self: Self, account_address: Address) ContextError![]const u8 {
+            return (try self.token()).code(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn executeRequest(self: PreludeContext, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
-            return (try self.token()).executePreludeRequest(request) catch |err| return ExecutorType.normalizeError(err);
+        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
+            return (try self.token()).executePreludeRequest(request) catch |err| return executor_errors.normalize(err);
         }
     };
 }
 
-fn Prelude(
-    comptime ExecutorType: type,
-    comptime TransactionPolicyType: type,
-    comptime InputType: type,
-    comptime PreludeErrorType: type,
-) type {
-    const ContextError = ExecutorType.Error || ContractError || PreludeErrorType;
-    const ContextType = PreludeContext(ExecutorType, TransactionPolicyType, InputType, PreludeErrorType);
+fn Prelude(comptime ContextType: type) type {
+    const ContextError = ContextType.Error;
 
     return struct {
         handle: *anyopaque,
@@ -347,15 +318,17 @@ fn Prelude(
     };
 }
 
-fn TransactionContext(
+/// Concrete family-authoring context assembled from flat lexical carriers.
+pub fn Context(
+    comptime RevisionType: type,
     comptime ExecutorType: type,
     comptime TransactionProtocolType: type,
     comptime TransactionPolicyType: type,
     comptime InputType: type,
 ) type {
-    const ContextError = ExecutorType.Error || ContractError;
+    const ContextError = executor_errors.Error || ContractError;
     const RuntimeType = RuntimeState(ExecutorType, TransactionPolicyType, InputType);
-    const Attempt = AttemptType(ExecutorType, TransactionPolicyType, InputType);
+    const Attempt = AttemptType(ExecutorType, RuntimeType);
 
     return struct {
         handle: *anyopaque,
@@ -363,9 +336,9 @@ fn TransactionContext(
         const Self = @This();
 
         pub const Error = ContextError;
+        pub const Revision = RevisionType;
         pub const Executor = ExecutorType;
         pub const Input = InputType;
-        pub const RuntimeState = RuntimeType;
         pub const AttemptCapability = Attempt;
         pub const TransactionProtocol = TransactionProtocolType;
         pub const TransactionPolicy = TransactionPolicyType;
@@ -378,7 +351,7 @@ fn TransactionContext(
             return self.runtimeState().input_value;
         }
 
-        pub fn revision(self: *const Self) ExecutorType.Protocol.Revision {
+        pub fn revision(self: *const Self) RevisionType {
             return self.runtimeState().executor.revision();
         }
 
@@ -400,7 +373,7 @@ fn TransactionContext(
         pub fn beginAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
             if (runtime.attempt != null) return error.TransactionAttemptActive;
-            runtime.attempt = runtime.executor.beginTransactionAttemptLifetime() catch |err| return ExecutorType.normalizeError(err);
+            runtime.attempt = runtime.executor.beginTransactionAttemptLifetime() catch |err| return executor_errors.normalize(err);
             return .{ .handle = runtime };
         }
 
@@ -429,12 +402,12 @@ fn TransactionContext(
         }
 
         pub fn infrastructureError(_: *const Self, err: anyerror) ContextError {
-            return ExecutorType.normalizeError(err);
+            return executor_errors.normalize(err);
         }
 
         fn preparationAccountSummary(ptr: *anyopaque, account_address: Address) !?tx.PreparationAccount {
             const runtime: *RuntimeType = @ptrCast(@alignCast(ptr));
-            const account = (runtime.executor.getAccountOrLoad(account_address) catch |err| return ExecutorType.normalizeError(err)) orelse return null;
+            const account = (runtime.executor.getAccountOrLoad(account_address) catch |err| return executor_errors.normalize(err)) orelse return null;
             return .{
                 .nonce = account.nonce,
                 .balance = account.balance,
@@ -444,7 +417,7 @@ fn TransactionContext(
 
         fn preparationCode(ptr: *anyopaque, account_address: Address, expected_hash: [32]u8) ![]const u8 {
             const runtime: *RuntimeType = @ptrCast(@alignCast(ptr));
-            const code_bytes = runtime.executor.getCode(account_address) catch |err| return ExecutorType.normalizeError(err);
+            const code_bytes = runtime.executor.getCode(account_address) catch |err| return executor_errors.normalize(err);
             if (!std.mem.eql(u8, &crypto.keccak256(code_bytes), &expected_hash))
                 return error.CodeHashMismatch;
             return code_bytes;
@@ -457,44 +430,13 @@ fn TransactionContext(
     };
 }
 
-fn bindTransition(comptime ContextType: type, comptime Implementation: type) type {
-    if (comptime @hasDecl(Implementation, "For")) return Implementation.For(ContextType);
-    return Implementation;
-}
-
-fn transitionContext(comptime GeneratedContext: type, comptime Implementation: type) type {
-    if (comptime @hasDecl(Implementation, "For")) return GeneratedContext;
-    const params = @typeInfo(@TypeOf(Implementation.transact)).@"fn".params;
-    if (params.len < 2) @compileError("concrete transaction transition must accept context and transaction");
-    const ContextPointer = params[0].type orelse
-        @compileError("concrete transaction transition context must have a declared type");
-    const pointer = switch (@typeInfo(ContextPointer)) {
-        .pointer => |info| info,
-        else => @compileError("concrete transaction transition context must be a pointer"),
-    };
-    if (pointer.size != .one or pointer.is_const)
-        @compileError("concrete transaction transition context must be a mutable single-item pointer");
-    const Concrete = pointer.child;
-    inline for (.{ "Executor", "Input", "TransactionProtocol", "TransactionPolicy", "RuntimeState" }) |name| {
-        if (!@hasDecl(Concrete, name))
-            @compileError("concrete transaction context is missing " ++ name);
-    }
-    if (Concrete.Executor != GeneratedContext.Executor)
-        @compileError("concrete transaction context Executor does not match the bound family");
-    if (Concrete.Input != GeneratedContext.Input)
-        @compileError("concrete transaction context Input does not match the bound program");
-    if (Concrete.TransactionProtocol != GeneratedContext.TransactionProtocol)
-        @compileError("concrete transaction context TransactionProtocol does not match the bound family");
-    if (Concrete.TransactionPolicy != GeneratedContext.TransactionPolicy)
-        @compileError("concrete transaction context TransactionPolicy does not match the bound family");
-    return Concrete;
-}
-
 fn BoundTransaction(
+    comptime RevisionType: type,
     comptime ExecutorType: type,
     comptime TransactionProtocolType: type,
     comptime TransactionPolicyType: type,
     comptime default_transaction_policy: TransactionPolicyType,
+    comptime ContextType: type,
     comptime TransactionType: type,
     comptime TransactInputType: type,
     comptime OutputType: type,
@@ -502,36 +444,17 @@ fn BoundTransaction(
     comptime ImplementationType: type,
     comptime PreludeErrorType: type,
 ) type {
-    const ContextError = ExecutorType.Error || ContractError;
-
-    comptime {
-        if (TransactionPolicyType != definition.TransactionPolicy(TransactionProtocolType.Revision))
-            @compileError("transaction runtime policy has the wrong nominal type");
-    }
+    const ContextError = executor_errors.Error || ContractError;
+    const Runtime = RuntimeState(ExecutorType, TransactionPolicyType, TransactInputType);
 
     const PreludeContextType = PreludeContext(
+        RevisionType,
         ExecutorType,
-        TransactionPolicyType,
-        TransactInputType,
+        Runtime,
         PreludeErrorType,
     );
-    const PreludeType = Prelude(
-        ExecutorType,
-        TransactionPolicyType,
-        TransactInputType,
-        PreludeErrorType,
-    );
-    const GeneratedContext = TransactionContext(
-        ExecutorType,
-        TransactionProtocolType,
-        TransactionPolicyType,
-        TransactInputType,
-    );
-    const ContextType = transitionContext(GeneratedContext, ImplementationType);
-    const Runtime = ContextType.RuntimeState;
-    const BoundImpl = bindTransition(ContextType, ImplementationType);
-    comptime validateTransition(ContextType, TransactionType, OutputType, RejectionType, BoundImpl);
-    const ProgramError = ContextError || BoundImpl.Error || PreludeErrorType;
+    const PreludeType = Prelude(PreludeContextType);
+    const ProgramError = ContextError || ImplementationType.Error || PreludeErrorType;
 
     const ExecutedType = struct {
         lease: ExecutorType.ExecutionLease,
@@ -564,16 +487,16 @@ fn BoundTransaction(
             return self.lease.logs();
         }
 
-        pub fn changeset(self: @This()) ExecutorType.Error!state.Changeset {
-            return self.lease.changeset() catch |err| return ExecutorType.normalizeError(err);
+        pub fn changeset(self: @This()) executor_errors.Error!state.Changeset {
+            return self.lease.changeset() catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn retain(self: @This()) ExecutorType.Error!void {
-            self.lease.retain() catch |err| return ExecutorType.normalizeError(err);
+        pub fn retain(self: @This()) executor_errors.Error!void {
+            self.lease.retain() catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn discard(self: @This()) ExecutorType.Error!void {
-            return self.lease.discard() catch |err| return ExecutorType.normalizeError(err);
+        pub fn discard(self: @This()) executor_errors.Error!void {
+            return self.lease.discard() catch |err| return executor_errors.normalize(err);
         }
 
         pub fn discardIfCurrent(self: @This()) void {
@@ -584,9 +507,11 @@ fn BoundTransaction(
     const OutcomeType = TransactOutcome(ExecutedType, RejectionType);
 
     return struct {
+        pub const Revision = RevisionType;
         pub const Executor = ExecutorType;
         pub const TransactionProtocol = TransactionProtocolType;
         pub const TransactionPolicy = TransactionPolicyType;
+        pub const transaction_policy = default_transaction_policy;
         pub const Context = ContextType;
         pub const Transaction = TransactionType;
         pub const TransactInput = TransactInputType;
@@ -625,10 +550,12 @@ fn BoundTransaction(
         pub fn withPreludeError(comptime AdditionalError: type) type {
             if (AdditionalError == error{}) return @This();
             return BoundTransaction(
+                RevisionType,
                 ExecutorType,
                 TransactionProtocolType,
                 TransactionPolicyType,
                 default_transaction_policy,
+                ContextType,
                 TransactionType,
                 TransactInputType,
                 OutputType,
@@ -701,7 +628,7 @@ fn BoundTransaction(
             };
             errdefer runtime.discardIfActive();
             var context: ContextType = .{ .handle = &runtime };
-            const outcome = BoundImpl.transact(&context, input_value.tx) catch |err| {
+            const outcome = ImplementationType.transact(&context, input_value.tx) catch |err| {
                 if (err != error.TransactionPreludeFailed) return err;
                 const prelude_error = runtime.preludeFailure() orelse
                     return error.TransactionPreludeFailed;
@@ -723,27 +650,6 @@ fn BoundTransaction(
     };
 }
 
-fn validateFamilyBinding(comptime Family: type) void {
-    if (!@hasDecl(Family, "Executor"))
-        @compileError("transaction program binding must declare Executor");
-    if (!@hasDecl(Family, "TransactionProtocol"))
-        @compileError("transaction program binding must declare TransactionProtocol");
-    if (!@hasDecl(Family, "TransactionPolicy"))
-        @compileError("transaction program binding must declare TransactionPolicy");
-    if (!@hasDecl(Family, "transaction_policy"))
-        @compileError("transaction program binding must declare transaction_policy");
-    if (!@hasDecl(Family.Executor, "Protocol"))
-        @compileError("transaction program Executor must declare Protocol");
-    if (!@hasDecl(Family.TransactionProtocol, "ExecutionProtocol"))
-        @compileError("transaction protocol must declare ExecutionProtocol");
-    if (Family.Executor.Protocol != Family.TransactionProtocol.ExecutionProtocol)
-        @compileError("transaction program Executor and TransactionProtocol do not share one execution protocol");
-    if (Family.TransactionPolicy != definition.TransactionPolicy(Family.TransactionProtocol.Revision))
-        @compileError("transaction program family has the wrong transaction policy type");
-    if (@TypeOf(Family.transaction_policy) != Family.TransactionPolicy)
-        @compileError("transaction program family has the wrong default transaction policy value");
-}
-
 fn validateTransition(
     comptime ContextType: type,
     comptime TransactionType: type,
@@ -751,13 +657,14 @@ fn validateTransition(
     comptime RejectionType: type,
     comptime Bound: type,
 ) void {
-    if (!@hasDecl(Bound, "Error"))
-        @compileError("transaction implementation must declare Error");
-    const actual = @TypeOf(Bound.transact(
-        @as(*ContextType, undefined),
-        @as(TransactionType, undefined),
-    ));
-    const expected = Bound.Error!TransitionOutcome(OutputType, RejectionType);
-    if (actual != expected)
-        @compileError("transaction implementation has the wrong signature");
+    comptime {
+        std.debug.assert(@hasDecl(Bound, "Error"));
+        const actual = @TypeOf(Bound.transact(
+            @as(*ContextType, undefined),
+            @as(TransactionType, undefined),
+        ));
+        const expected = Bound.Error!TransitionOutcome(OutputType, RejectionType);
+
+        std.debug.assert(actual == expected);
+    }
 }

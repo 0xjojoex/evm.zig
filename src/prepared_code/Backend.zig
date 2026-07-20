@@ -12,6 +12,9 @@ const Bytecode = @import("../code/Bytecode.zig");
 const ExecutionConfig = @import("../ExecutionConfig.zig");
 const RevisionId = @import("../protocol.zig").RevisionId;
 
+/// Identifies the variant an artifact was prepared under. Bytecode preparation
+/// depends on both the active revision and the execution config, so lookups and
+/// admissions are keyed by this pair.
 pub const PreparationKey = struct {
     revision_id: RevisionId,
     config: ExecutionConfig,
@@ -23,9 +26,17 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
+    /// Open an execution scope. Pointers returned by `lookup`/`admit` under
+    /// `key` stay valid until the matching `endExecution`.
     beginExecution: *const fn (ptr: *anyopaque, key: PreparationKey) anyerror!void,
+    /// Close the scope opened by `beginExecution`, releasing any artifacts
+    /// borrowed during it.
     endExecution: *const fn (ptr: *anyopaque) void,
+    /// Return the retained artifact for `code_hash` under `key`, or `null` when
+    /// it has not been admitted.
     lookup: *const fn (ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8) anyerror!?*const Bytecode,
+    /// Prepare and retain `raw_code` under `key`, returning the artifact, or
+    /// `null` when backend policy declines it.
     admit: *const fn (ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8, raw_code: []const u8) anyerror!?*const Bytecode,
 };
 

@@ -104,18 +104,10 @@ pub const OpInput = struct {
     progress: evmz.transaction.PreparationBlockProgress = .{},
 };
 
-const OpContext = evmz.transaction.Context(evmz.Evm, OpInput);
-const TransactionProtocol = OpContext.TransactionProtocol;
-const TransactionPolicy = OpContext.TransactionPolicy;
-const Gas = evmz.transaction.GasRuntime(
-    TransactionProtocol,
-    @FieldType(TransactionPolicy, "transaction"),
-);
-const Settlement = evmz.transaction.SettlementRuntime(
-    TransactionProtocol,
-    TransactionPolicy,
-);
-const EthereumTransition = evmz.Evm.TransactionProgram.For(OpContext);
+const OpContext = evmz.Evm.Context(OpInput);
+const Gas = evmz.Evm.Gas;
+const Settlement = evmz.Evm.Settlement;
+const EthereumTransition = evmz.Evm.Transition(OpInput);
 
 /// OP owns deposit policy; the shared transaction program owns the attempt,
 /// rollback, and retain/discard lifetime around it.
@@ -250,7 +242,6 @@ const DepositTransition = struct {
 };
 
 const OpTransition = struct {
-    pub const Input = OpInput;
     pub const Error = EthereumTransition.Error || DepositTransition.Error;
 
     pub fn transact(
@@ -272,16 +263,15 @@ const OpTransition = struct {
     }
 };
 
-pub const OpProgram = evmz.transaction.Program(
+/// One typed OP-family transaction runtime. Both variants share the exact
+/// Ethereum Executor while keeping the root `evmz.Evm.Transaction` unchanged.
+pub const OpVm = evmz.Evm.Program(
     OpTransaction,
+    OpInput,
     OpOutput,
     OpRejection,
     OpTransition,
 );
-
-/// One typed OP-family transaction runtime. Both variants share the exact
-/// Ethereum Executor while keeping the root `evmz.Evm.Transaction` unchanged.
-pub const OpVm = OpProgram.bind(evmz.Evm);
 
 // TODO: A shared helper needs an explicit contract for output slices borrowed
 // from the executor; keep retention and variant typing demo-local for now.
@@ -546,7 +536,6 @@ test "OP transaction program composes Ethereum and deposit without widening root
     try std.testing.expect(OpVm.Rejection == OpRejection);
     try std.testing.expect(OpVm.TransactInput == OpInput);
     try std.testing.expect(OpVm.Executor == evmz.Evm.Executor);
-    try std.testing.expect(OpVm.TransactionProtocol == evmz.Evm.TransactionProtocol);
     try std.testing.expect(OpVm.Error != anyerror);
 }
 

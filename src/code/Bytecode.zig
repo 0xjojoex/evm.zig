@@ -15,6 +15,11 @@ const Bytecode = @This();
 pub const zero_padding_len = 33;
 const empty_read_bytes = [_]u8{0} ** zero_padding_len;
 
+/// Owned source bytes followed by a zero-filled readable tail.
+///
+/// `bytes` is the semantic code; `read_bytes` is the same allocation extended
+/// by `zero_padding_len` zero bytes so opcode readers can over-read past the
+/// end of the code without a bounds check.
 pub const ZeroPaddedCode = struct {
     bytes: []u8,
     read_bytes: []u8,
@@ -37,6 +42,8 @@ pub const ZeroPaddedCode = struct {
 };
 
 bytes: []const u8,
+/// `bytes` extended by `zero_padding_len` zero bytes, letting opcode readers
+/// over-read past the end of the code without a bounds check.
 read_bytes: []const u8,
 jumpdests: JumpDestMap,
 needs_action_loop: bool,

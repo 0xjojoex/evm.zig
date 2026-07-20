@@ -2,7 +2,6 @@ const std = @import("std");
 
 pub const address = @import("./address.zig");
 pub const BlockHashSource = @import("./BlockHashSource.zig");
-pub const block_program = @import("./block_program.zig");
 pub const c_api = @import("./c_api.zig");
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
@@ -56,7 +55,6 @@ pub fn EvmWith(comptime options: vm.OptionsFor(eth.execution_definition)) type {
 pub const addr = address.addr;
 pub const Address = address.Address;
 pub const Bytecode = code.Bytecode;
-pub const BlockProgram = block_program.BlockProgram;
 pub const Committer = vm.Committer;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;

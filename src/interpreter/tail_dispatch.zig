@@ -278,7 +278,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         } else undefined;
 
         fn TracedHandler(comptime opcode_byte: u8) type {
-            if (!traced) @compileError("traced handlers require tail_dispatch.TraceFor");
+            comptime std.debug.assert(traced);
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const opcode_ip = ip - 1;
@@ -348,7 +348,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         }
 
         pub fn execute(frame: *CallFrame, read_bytes: []const u8) anyerror!void {
-            if (comptime traced) @compileError("use executeTraced with tail_dispatch.TraceFor");
+            comptime std.debug.assert(!traced);
             return executeAt(frame, read_bytes.ptr);
         }
 
@@ -1226,4 +1226,8 @@ fn invalidStatusError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+test {
+    _ = @import("./tail_dispatch_test.zig");
 }

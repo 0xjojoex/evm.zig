@@ -16,16 +16,16 @@ fn nextDepth(depth: u16) u16 {
     return if (depth == std.math.maxInt(u16)) depth else depth + 1;
 }
 
-pub fn stop(frame: *CallFrame) !void {
+pub inline fn stop(frame: *CallFrame) !void {
     frame.status = .success;
 }
 
-pub fn invalid(frame: *CallFrame) !void {
+pub inline fn invalid(frame: *CallFrame) !void {
     frame.failWithStatus(.invalid);
 }
 
 /// `RETURN` Halt the execution returning the output data
-pub fn ret(frame: *CallFrame) !void {
+pub inline fn ret(frame: *CallFrame) !void {
     const offset, const size = try frame.stack.popN(2);
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
@@ -39,7 +39,7 @@ pub fn ret(frame: *CallFrame) !void {
 }
 
 /// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
-pub fn revert(frame: *CallFrame) !void {
+pub inline fn revert(frame: *CallFrame) !void {
     const offset, const size = try frame.stack.popN(2);
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
@@ -63,9 +63,7 @@ pub fn For(comptime ProtocolType: type) type {
         }
 
         pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
-            if (op != Opcode.CALL and op != Opcode.STATICCALL and op != Opcode.DELEGATECALL and op != Opcode.CALLCODE) {
-                @compileError("Invalid opcode for " ++ @tagName(op));
-            }
+            comptime std.debug.assert(op == Opcode.CALL or op == Opcode.STATICCALL or op == Opcode.DELEGATECALL or op == Opcode.CALLCODE);
 
             const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size = if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
                 const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);

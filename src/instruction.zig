@@ -37,10 +37,6 @@ pub const system = @import("./instruction/system.zig");
 pub const memory = @import("./instruction/memory.zig");
 pub const logic = @import("./instruction/logic.zig");
 
-test {
-    _ = @import("./instruction/tail_dispatch_test.zig");
-}
-
 pub const Instruction = struct {
     opcode: Opcode,
     static_gas: u16,

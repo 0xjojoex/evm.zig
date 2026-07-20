@@ -374,7 +374,7 @@ pub fn staticGasByte(comptime opcode_byte: u8, comptime support_window: Support)
 }
 
 pub fn staticGasByteFor(comptime Definition: type, comptime opcode_byte: u8, comptime support_window: Definition.Support) support.StaticGas {
-    if (Definition.Revision != Revision) @compileError("eth.instruction static gas requires eth.Revision");
+    comptime std.debug.assert(Definition.Revision == Revision);
     support_window.assertValid();
     const info = comptime opcodeInfoByte(opcode_byte);
     if (!info.defined) return .{ .constant = 0 };

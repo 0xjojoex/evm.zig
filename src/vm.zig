@@ -3,14 +3,14 @@
 //! `Vm(...)` binds revision, protocol semantics, and instruction configuration.
 //! Its runtime lifetimes are explicit: `Executor` owns one mutable execution
 //! branch, `transact` owns one transaction attempt, and
-//! `BlockProgram.bind(TransactionRuntime, BlockPolicy, default_policy)` owns
-//! sequential block progress over a caller-provided Executor. `Sequential` is
-//! the family-hook convenience path.
+//! `Program.Block(...)` owns sequential block progress over a caller-provided
+//! Executor. `Sequential` is the family-hook convenience path.
 
 const std = @import("std");
 
 const evmz = @import("evm.zig");
 const address = @import("./address.zig");
+const block_program_module = @import("./block_program.zig");
 const definition_module = @import("./definition.zig");
 const eth_block_program = @import("./eth/block_program.zig");
 const eth_transition = @import("./eth/transition.zig");
@@ -24,6 +24,7 @@ const protocol_binding = @import("./protocol/binding.zig");
 const protocol_dispatcher = @import("./protocol/dispatcher.zig");
 const protocol_module = @import("./protocol.zig");
 const transaction = @import("./transaction.zig");
+const transaction_program = @import("./transaction/program.zig");
 const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 
 const Address = address.Address;
@@ -49,6 +50,7 @@ pub const Env = struct {
     blob_base_fee: u256 = 0,
     /// Optional dynamic chain/fixture override for blob gas rules.
     /// When null, transaction validation and settlement use the protocol schedule for the active revision.
+    // TODO: consider removing it in favor of policy
     blob_schedule: ?transaction.BlobSchedule = null,
 
     pub fn txContext(
@@ -140,10 +142,7 @@ pub const AccountView = struct {
 
 pub const Call = executor_module.Call;
 pub const Create = executor_module.Create;
-pub const Message = executor_module.Message;
 pub const EvmResult = executor_module.EvmResult;
-pub const RuntimeResources = executor_module.RuntimeResources;
-pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
 
 /// Explicit non-transaction system call for block-hook style operations.
 pub const SystemCall = struct {
@@ -209,7 +208,6 @@ pub fn Vm(
         BlockP,
         ExecutionP.Support,
         OptionsFor(execution_definition),
-        ExecutionP.Instruction.Value,
         TransactionP.transaction.ValidationError,
         transaction.Prepared(TransactionP),
         transaction.PrepareResult(TransactionP),
@@ -218,6 +216,166 @@ pub fn Vm(
         transaction_policy,
         block_policy,
     );
+}
+
+fn ProgramFacade(
+    comptime TransactionRuntimeType: type,
+    comptime RevisionType: type,
+    comptime ExecutorType: type,
+    comptime TransactionProtocolType: type,
+    comptime TransactionPolicyType: type,
+    comptime default_transaction_policy: TransactionPolicyType,
+    comptime ContextType: type,
+    comptime TransactionType: type,
+    comptime InputType: type,
+    comptime OutputType: type,
+    comptime RejectionType: type,
+    comptime ExecutedType: type,
+    comptime PreludeType: type,
+    comptime PreludeContextType: type,
+    comptime OutcomeType: type,
+    comptime ErrorType: type,
+    comptime BlockProtocolType: type,
+    comptime BlockPolicyType: type,
+    comptime default_block_policy: BlockPolicyType,
+) type {
+    comptime {
+        std.debug.assert(TransactionRuntimeType.Revision == RevisionType);
+        std.debug.assert(TransactionRuntimeType.Executor == ExecutorType);
+        std.debug.assert(TransactionRuntimeType.TransactionProtocol == TransactionProtocolType);
+        std.debug.assert(TransactionRuntimeType.TransactionPolicy == TransactionPolicyType);
+        std.debug.assert(TransactionRuntimeType.Context == ContextType);
+        std.debug.assert(TransactionRuntimeType.Transaction == TransactionType);
+        std.debug.assert(TransactionRuntimeType.TransactInput == InputType);
+        std.debug.assert(TransactionRuntimeType.Output == OutputType);
+        std.debug.assert(TransactionRuntimeType.TransactionLog == Log);
+        std.debug.assert(TransactionRuntimeType.Rejection == RejectionType);
+        std.debug.assert(TransactionRuntimeType.Executed == ExecutedType);
+        std.debug.assert(TransactionRuntimeType.Prelude == PreludeType);
+        std.debug.assert(TransactionRuntimeType.PreludeContext == PreludeContextType);
+        std.debug.assert(TransactionRuntimeType.Outcome == OutcomeType);
+        std.debug.assert(TransactionRuntimeType.Error == ErrorType);
+    }
+
+    return struct {
+        const Self = @This();
+
+        pub const TransactionRuntime = TransactionRuntimeType;
+        pub const Revision = RevisionType;
+        pub const Executor = ExecutorType;
+        pub const TransactionProtocol = TransactionProtocolType;
+        pub const TransactionPolicy = TransactionPolicyType;
+        pub const transaction_policy = default_transaction_policy;
+        pub const BlockProtocol = BlockProtocolType;
+        pub const BlockPolicy = BlockPolicyType;
+        pub const block_policy = default_block_policy;
+        pub const Context = ContextType;
+        pub const Transaction = TransactionType;
+        pub const TransactInput = InputType;
+        pub const Output = OutputType;
+        pub const TransactionLog = Log;
+        pub const Rejection = RejectionType;
+        pub const Executed = ExecutedType;
+        pub const Prelude = PreludeType;
+        pub const PreludeContext = PreludeContextType;
+        pub const Outcome = OutcomeType;
+        pub const Error = ErrorType;
+
+        transaction_runtime: TransactionRuntimeType,
+
+        pub fn init(executor: *Executor) Self {
+            return initWithPolicy(executor, default_transaction_policy);
+        }
+
+        pub fn initWithPolicy(executor: *Executor, policy: TransactionPolicy) Self {
+            return .{ .transaction_runtime = TransactionRuntimeType.initWithPolicy(executor, policy) };
+        }
+
+        pub fn executorPtr(self: *const Self) *Executor {
+            return self.transaction_runtime.executorPtr();
+        }
+
+        pub fn withPreludeError(comptime PreludeError: type) type {
+            if (PreludeError == error{}) return Self;
+            const WidenedRuntime = TransactionRuntimeType.withPreludeError(PreludeError);
+            return ProgramFacade(
+                WidenedRuntime,
+                RevisionType,
+                ExecutorType,
+                TransactionProtocolType,
+                TransactionPolicyType,
+                default_transaction_policy,
+                ContextType,
+                TransactionType,
+                InputType,
+                OutputType,
+                RejectionType,
+                WidenedRuntime.Executed,
+                WidenedRuntime.Prelude,
+                WidenedRuntime.PreludeContext,
+                WidenedRuntime.Outcome,
+                WidenedRuntime.Error,
+                BlockProtocolType,
+                BlockPolicyType,
+                default_block_policy,
+            );
+        }
+
+        pub fn rebindPreludeError(
+            self: Self,
+            comptime PreludeError: type,
+        ) withPreludeError(PreludeError) {
+            return .{
+                .transaction_runtime = self.transaction_runtime.rebindPreludeError(PreludeError),
+            };
+        }
+
+        pub fn transact(self: *Self, input: TransactInput) Error!Outcome {
+            return self.transaction_runtime.transact(input);
+        }
+
+        pub fn transactInBlock(
+            self: *Self,
+            input: TransactInput,
+            claim: Executor.BlockExecutionClaim,
+        ) Error!Outcome {
+            return self.transaction_runtime.transactInBlock(input, claim);
+        }
+
+        pub fn transactInBlockWithPrelude(
+            self: *Self,
+            input: TransactInput,
+            claim: Executor.BlockExecutionClaim,
+            prelude: Prelude,
+        ) Error!Outcome {
+            return self.transaction_runtime.transactInBlockWithPrelude(input, claim, prelude);
+        }
+
+        /// Bind one block fold above this exact transaction program while the
+        /// parent VM supplies the coherent block policy and default snapshot.
+        pub fn Block(
+            comptime EnvironmentType: type,
+            comptime IncludedType: type,
+            comptime ResultType: type,
+            comptime ImplementationType: type,
+        ) type {
+            return block_program_module.bind(
+                Self,
+                ExecutorType,
+                BlockProtocolType,
+                BlockPolicyType,
+                default_block_policy,
+                TransactionType,
+                InputType,
+                OutputType,
+                RejectionType,
+                EnvironmentType,
+                IncludedType,
+                ResultType,
+                ImplementationType,
+            );
+        }
+    };
 }
 
 /// Internal ZLS carrier. Keep definition-dependent public types flat: wrapping
@@ -230,7 +388,6 @@ fn Typed(
     comptime BlockProtocolType: type,
     comptime SupportType: type,
     comptime OptionsType: type,
-    comptime InstructionValueType: type,
     comptime ValidationErrorType: type,
     comptime PreparedTransactionType: type,
     comptime PreparedTransactionResultType: type,
@@ -239,19 +396,20 @@ fn Typed(
     comptime default_transaction_policy: definition_module.TransactionPolicy(RevisionType),
     comptime default_block_policy: definition_module.BlockPolicy(RevisionType),
 ) type {
-    if (ExecutionProtocolType.Revision != RevisionType) @compileError("Protocol revision mismatch");
-    if (ExecutionProtocolType.BaseRevision != BaseRevisionType) @compileError("Protocol base revision mismatch");
-    if (ExecutionProtocolType.Support != SupportType) @compileError("Protocol support mismatch");
-    if (ExecutionProtocolType.Instruction.Value != InstructionValueType) @compileError("Protocol instruction value mismatch");
-    if (TransactionProtocolType.ExecutionProtocol != ExecutionProtocolType) @compileError("Transaction protocol execution mismatch");
-    if (BlockProtocolType.TransactionProtocol != TransactionProtocolType) @compileError("Block protocol transaction mismatch");
-    if (TransactionProtocolType.Tx.Value != transaction.Transaction) @compileError("Protocol transaction mismatch");
-    if (TransactionProtocolType.Tx.View != transaction.TransactionView) @compileError("Protocol transaction view mismatch");
-    if (TransactionProtocolType.transaction.ValidationError != ValidationErrorType) @compileError("Protocol validation error mismatch");
-    if (transaction.Prepared(TransactionProtocolType) != PreparedTransactionType) @compileError("Prepared transaction mismatch");
-    if (transaction.PrepareResult(TransactionProtocolType) != PreparedTransactionResultType) @compileError("Prepared transaction result mismatch");
-    if (executor_module.Executor(ExecutionProtocolType) != ExecutorType) @compileError("Executor mismatch");
-    if (interpreter_module.For(ExecutionProtocolType) != InterpreterType) @compileError("Interpreter mismatch");
+    comptime {
+        std.debug.assert(ExecutionProtocolType.Revision == RevisionType);
+        std.debug.assert(ExecutionProtocolType.BaseRevision == BaseRevisionType);
+        std.debug.assert(ExecutionProtocolType.Support == SupportType);
+        std.debug.assert(TransactionProtocolType.ExecutionProtocol == ExecutionProtocolType);
+        std.debug.assert(BlockProtocolType.TransactionProtocol == TransactionProtocolType);
+        std.debug.assert(TransactionProtocolType.Tx.Value == transaction.Transaction);
+        std.debug.assert(TransactionProtocolType.Tx.View == transaction.TransactionView);
+        std.debug.assert(TransactionProtocolType.transaction.ValidationError == ValidationErrorType);
+        std.debug.assert(transaction.Prepared(TransactionProtocolType) == PreparedTransactionType);
+        std.debug.assert(transaction.PrepareResult(TransactionProtocolType) == PreparedTransactionResultType);
+        std.debug.assert(executor_module.Executor(ExecutionProtocolType) == ExecutorType);
+        std.debug.assert(interpreter_module.For(ExecutionProtocolType) == InterpreterType);
+    }
 
     const ProtocolInstruction = ExecutionProtocolType.Instruction;
     const GasBoundPlanner = gas_bound_plan.For(TransactionProtocolType);
@@ -263,18 +421,29 @@ fn Typed(
         tx: transaction.Transaction,
         progress: transaction.PreparationBlockProgress = .{},
     };
-    const EthereumTransactionProgram = eth_transition.Program(
+    const PublicTransactionContext = transaction_program.Context(
+        RevisionType,
+        ExecutorType,
         TransactionProtocolType,
+        TransactionPolicyType,
+        PublicTransactInput,
+    );
+    const EthereumTransactionImplementation = eth_transition.Implementation(
+        TransactionProtocolType,
+        TxExecutionResult,
+    ).For(PublicTransactionContext);
+    const BoundTransactionProgram = transaction_program.bind(
+        RevisionType,
+        ExecutorType,
+        TransactionProtocolType,
+        TransactionPolicyType,
+        default_transaction_policy,
+        transaction.Transaction,
         PublicTransactInput,
         TxExecutionResult,
+        ValidationErrorType,
+        EthereumTransactionImplementation,
     );
-    const TransactionBinding = struct {
-        pub const Executor = ExecutorType;
-        pub const TransactionProtocol = TransactionProtocolType;
-        pub const TransactionPolicy = TransactionPolicyType;
-        pub const transaction_policy = default_transaction_policy;
-    };
-    const BoundTransactionProgram = EthereumTransactionProgram.bind(TransactionBinding);
     const EthereumBlock = eth_block_program.For(
         BlockPolicyType,
         BoundTransactionProgram,
@@ -283,7 +452,7 @@ fn Typed(
         BlockResult,
     );
     const BeforeTransactionPrelude = EthereumBlock.Prelude;
-    const EthereumBlockProgram = EthereumBlock.Program;
+    const EthereumBlockImplementation = EthereumBlock.Implementation;
 
     return struct {
         const Self = @This();
@@ -298,82 +467,18 @@ fn Typed(
         pub const Support = SupportType;
         pub const Revision = RevisionType;
         pub const BaseRevision = BaseRevisionType;
-        /// Editor-facing instruction API rebuilt around the flat Value carrier.
-        pub const Instruction = struct {
-            pub const Value = InstructionValueType;
-            pub const Context = ProtocolInstruction.Context;
-
-            pub fn fromByte(comptime opcode_byte: u8) Value {
-                return ProtocolInstruction.fromByte(opcode_byte);
-            }
-
-            pub fn context(comptime value: Value) Context {
-                return ProtocolInstruction.context(value);
-            }
-
-            pub fn entry(comptime value: Value) protocol_module.DispatchEntry {
-                return ProtocolInstruction.entry(value);
-            }
-
-            pub fn info(comptime value: Value) opcode_info.OpInfo {
-                return ProtocolInstruction.info(value);
-            }
-
-            pub fn rawAvailability(comptime value: Value) ExecutionProtocolType.Availability {
-                return ProtocolInstruction.rawAvailability(value);
-            }
-
-            pub fn availability(comptime value: Value) protocol_module.Resolution {
-                return ProtocolInstruction.availability(value);
-            }
-
-            pub fn staticGasForRevision(revision: RevisionType, comptime value: Value) i64 {
-                return ProtocolInstruction.staticGasForRevision(revision, value);
-            }
-
-            pub fn tier(comptime value: Value) protocol_module.OpcodeTier {
-                return ProtocolInstruction.tier(value);
-            }
-
-            pub fn executionTarget(comptime value: Value) protocol_module.ExecutionTarget {
-                return ProtocolInstruction.executionTarget(value);
-            }
-
-            pub fn staticGas(comptime value: Value) protocol_module.StaticGas {
-                return ProtocolInstruction.staticGas(value);
-            }
-
-            pub fn staticGasConstant(comptime value: Value) ?i64 {
-                return ProtocolInstruction.staticGasConstant(value);
-            }
-
-            pub fn expByteGas(revision: RevisionType) i64 {
-                return ProtocolInstruction.expByteGas(revision);
-            }
-
-            pub fn accountReadColdAccessGas(revision: RevisionType) ?i64 {
-                return ProtocolInstruction.accountReadColdAccessGas(revision);
-            }
-
-            pub fn codeAccountAccessGas(revision: RevisionType, status: protocol_module.AccountAccessStatus) ?i64 {
-                return ProtocolInstruction.codeAccountAccessGas(revision, status);
-            }
-        };
+        pub const Instruction = ProtocolInstruction;
         pub const Transaction = transaction.Transaction;
         pub const Output = TxExecutionResult;
         pub const TransactionView = transaction.TransactionView;
         pub const Rejection = ValidationErrorType;
-        pub const Environment = Env;
         pub const TransactionLog = Log;
         pub const TxStatus = TxStatusType;
-        pub const PreparedTransaction = PreparedTransactionType;
-        pub const PreparedTransactionResult = PreparedTransactionResultType;
         pub const Executor = ExecutorType;
         pub const Interpreter = InterpreterType;
-        pub const TransactionProgram = EthereumTransactionProgram;
+        pub const TransactionRuntime = BoundTransactionProgram;
         pub const Prelude = BoundTransactionProgram.Prelude;
         pub const PreludeContext = BoundTransactionProgram.PreludeContext;
-        pub const BlockProgram = EthereumBlockProgram;
         /// Operational failures from the transaction program. Protocol
         /// rejection remains the `.rejected` outcome, not an error.
         pub const Error = BoundTransactionProgram.Error;
@@ -402,15 +507,37 @@ fn Typed(
 
         pub fn withPreludeError(comptime PreludeError: type) type {
             if (PreludeError == error{}) return Self;
-            return BoundTransactionProgram.withPreludeError(PreludeError);
+            const WidenedRuntime = BoundTransactionProgram.withPreludeError(PreludeError);
+            return ProgramFacade(
+                WidenedRuntime,
+                RevisionType,
+                ExecutorType,
+                TransactionProtocolType,
+                TransactionPolicyType,
+                default_transaction_policy,
+                PublicTransactionContext,
+                transaction.Transaction,
+                PublicTransactInput,
+                TxExecutionResult,
+                ValidationErrorType,
+                WidenedRuntime.Executed,
+                WidenedRuntime.Prelude,
+                WidenedRuntime.PreludeContext,
+                WidenedRuntime.Outcome,
+                WidenedRuntime.Error,
+                BlockProtocolType,
+                BlockPolicyType,
+                default_block_policy,
+            );
         }
 
         pub fn rebindPreludeError(
             self: Self,
             comptime PreludeError: type,
         ) withPreludeError(PreludeError) {
-            if (PreludeError == error{}) return self;
-            return self.transaction_runtime.rebindPreludeError(PreludeError);
+            return .{
+                .transaction_runtime = self.transaction_runtime.rebindPreludeError(PreludeError),
+            };
         }
 
         /// Checked transaction lease and semantic outcome come directly from
@@ -438,18 +565,41 @@ fn Typed(
 
         pub const BlockBound = BlockBoundType;
 
-        pub const RuntimeResources = executor_module.RuntimeResources;
-        pub const BoundedRuntimeResources = executor_module.BoundedRuntimeResources;
         pub const BlockGas = transaction.BlockGas;
         pub const ResultGas = transaction.ResultGas;
 
-        /// Direct block-program binding. This is the block fold boundary used
-        /// by execution strategies and the family BlockSTF. It owns an
-        /// exclusive, generation-checked claim over one stable Executor.
-        pub const BlockExecution = EthereumBlockProgram.bind(
-            Self,
-            BlockPolicyType,
-            default_block_policy,
+        /// Bind one block fold above this default transaction program. Custom
+        /// programs returned by `Program(...)` expose the same constructor.
+        pub fn Block(
+            comptime EnvironmentType: type,
+            comptime IncludedType: type,
+            comptime ResultType: type,
+            comptime ImplementationType: type,
+        ) type {
+            return block_program_module.bind(
+                Self,
+                ExecutorType,
+                BlockProtocolType,
+                BlockPolicyType,
+                default_block_policy,
+                transaction.Transaction,
+                PublicTransactInput,
+                TxExecutionResult,
+                ValidationErrorType,
+                EnvironmentType,
+                IncludedType,
+                ResultType,
+                ImplementationType,
+            );
+        }
+
+        /// Ethereum's prewired block fold. It owns an exclusive,
+        /// generation-checked claim over one stable Executor.
+        pub const BlockExecution = Block(
+            Env,
+            IncludedTransactionViewType,
+            BlockResult,
+            EthereumBlockImplementation,
         );
 
         /// One-worker lifecycle wrapper over `BlockExecution` with
@@ -793,6 +943,87 @@ fn Typed(
             const left: u64 = @intCast(gas_left);
             return gas -| @min(gas, left);
         }
+
+        /// Construct a transaction context using this VM's flat lexical type
+        /// carriers so editor tooling does not need to recover nested family
+        /// declarations through another comptime type constructor.
+        pub fn Context(comptime Input: type) type {
+            return transaction_program.Context(
+                RevisionType,
+                ExecutorType,
+                TransactionProtocolType,
+                TransactionPolicyType,
+                Input,
+            );
+        }
+
+        /// Bind Ethereum's transaction transition from the original input type;
+        /// callers never have to pass the generated context into another binder.
+        pub fn Transition(comptime Input: type) type {
+            return eth_transition.Implementation(
+                TransactionProtocolType,
+                TxExecutionResult,
+            ).For(Context(Input));
+        }
+
+        /// Gas planner runtime bound to this VM's transaction protocol and the
+        /// transaction sub-policy, built from the VM's flat carriers so callers
+        /// never thread the protocol and policy field types by hand.
+        pub const Gas = transaction.GasRuntime(
+            TransactionProtocolType,
+            @FieldType(TransactionPolicyType, "transaction"),
+        );
+
+        /// Settlement runtime bound to this VM's transaction protocol and full
+        /// transaction policy.
+        pub const Settlement = transaction.SettlementRuntime(
+            TransactionProtocolType,
+            TransactionPolicyType,
+        );
+
+        /// Construct and bind a transaction program from flat semantic types;
+        /// no generated program carrier crosses this comptime boundary.
+        pub fn Program(
+            comptime TransactionType: type,
+            comptime InputType: type,
+            comptime OutputType: type,
+            comptime RejectionType: type,
+            comptime ImplementationType: type,
+        ) type {
+            const Runtime = transaction_program.bind(
+                RevisionType,
+                ExecutorType,
+                TransactionProtocolType,
+                TransactionPolicyType,
+                default_transaction_policy,
+                TransactionType,
+                InputType,
+                OutputType,
+                RejectionType,
+                ImplementationType,
+            );
+            return ProgramFacade(
+                Runtime,
+                RevisionType,
+                ExecutorType,
+                TransactionProtocolType,
+                TransactionPolicyType,
+                default_transaction_policy,
+                Context(InputType),
+                TransactionType,
+                InputType,
+                OutputType,
+                RejectionType,
+                Runtime.Executed,
+                Runtime.Prelude,
+                Runtime.PreludeContext,
+                Runtime.Outcome,
+                Runtime.Error,
+                BlockProtocolType,
+                BlockPolicyType,
+                default_block_policy,
+            );
+        }
     };
 }
 
@@ -862,16 +1093,24 @@ test "Env execution context derives opcode-visible gas limit from the environmen
 }
 
 test "Vm defines the engine-family scopes" {
+    const DefaultContext = Default.Context(Default.TransactInput);
+    const DefaultTransition = Default.Transition(Default.TransactInput);
+    const TransitionContextPointer = @typeInfo(@TypeOf(DefaultTransition.transact)).@"fn".params[0].type.?;
+    const TransitionContext = @typeInfo(TransitionContextPointer).pointer.child;
+
     try std.testing.expect(@sizeOf(Default) >= @sizeOf(Default.TransactionPolicy));
     try std.testing.expectEqual(@as(usize, 1), @typeInfo(Default).@"struct".fields.len);
     try std.testing.expect(@hasDecl(Default, "transact"));
     try std.testing.expect(@hasDecl(Default, "TransactInput"));
     try std.testing.expect(!@hasDecl(Default, "BlockTransactResult"));
-    try std.testing.expect(@hasDecl(Default.TransactionProgram, "TransactInput"));
-    try std.testing.expect(!@hasDecl(Default.TransactionProgram, "Invocation"));
+    try std.testing.expect(@hasDecl(Default, "Transition"));
+    try std.testing.expect(!@hasDecl(Default, "TransactionProgram"));
     try std.testing.expect(Default.Error != anyerror);
     try std.testing.expect(Default.BlockExecution.Error != anyerror);
-    try std.testing.expect(Default.Error == Default.TransactionProgram.bind(Default).Error);
+    try std.testing.expect(DefaultContext.Revision == Default.Revision);
+    try std.testing.expect(TransitionContext == DefaultContext);
+    try std.testing.expect(@hasDecl(Default, "Program"));
+    try std.testing.expect(@hasDecl(Default, "Block"));
     try std.testing.expect(@hasDecl(Default, "BlockExecution"));
     try std.testing.expect(@hasDecl(Default, "Sequential"));
     try std.testing.expect(!@hasDecl(Default, "BlockSession"));
@@ -885,24 +1124,17 @@ test "Vm defines the engine-family scopes" {
     try std.testing.expect(@hasDecl(Default.Executed, "discard"));
     try std.testing.expect(!@hasDecl(Default.Executed, "accept"));
     try std.testing.expect(!@hasDecl(Default.Executed, "reject"));
+    try std.testing.expect(!@hasDecl(evmz, "BlockProgram"));
+    try std.testing.expect(!@hasDecl(transaction, "Program"));
+    try std.testing.expect(!@hasDecl(transaction, "Context"));
 }
 
-test "production binders preserve flat public carriers" {
+test "production binding preserves public carrier identity" {
     comptime {
         if (@typeInfo(@TypeOf(Default.transact)).@"fn".return_type.? != Default.Error!Default.Outcome)
             @compileError("Vm transact return drifted");
-        if (Default.BlockExecution != Default.BlockProgram.bind(
-            Default,
-            Default.BlockPolicy,
-            Default.block_policy,
-        ))
-            @compileError("Vm BlockExecution is not the direct block-program binding");
-        if (Default.BlockProgram.Transaction != Default.Transaction)
-            @compileError("block program transaction carrier drifted");
-        if (Default.BlockProgram.Output != Default.Output)
-            @compileError("block program output carrier drifted");
-        if (Default.BlockProgram.Rejection != Default.Rejection)
-            @compileError("block program rejection carrier drifted");
+        if (@hasDecl(Default, "BlockProgram"))
+            @compileError("Vm still exposes the reverse block-program descriptor");
         if (Default.BlockExecution.TransactionRuntime != Default)
             @compileError("block transaction runtime identity drifted");
         if (Default.BlockExecution.Transaction != Default.Transaction)
@@ -941,6 +1173,13 @@ test "transaction and block customization preserve Executor identity" {
         AlternateBlock,
         .{},
     );
+    const AlternateBlockOnly = evmz.Vm(
+        evmz.eth.Revision,
+        evmz.eth.execution_definition,
+        evmz.eth.transaction_definition,
+        AlternateBlock,
+        .{},
+    );
     comptime {
         if (Default == Alternate)
             @compileError("family customization collapsed to the base Vm");
@@ -952,6 +1191,10 @@ test "transaction and block customization preserve Executor identity" {
             @compileError("execution protocol leaked transaction policy");
         if (@hasDecl(Default.Executor.Protocol, "block"))
             @compileError("execution protocol leaked block policy");
+        if (Default.TransactionRuntime != AlternateBlockOnly.TransactionRuntime)
+            @compileError("block customization changed transaction-runtime identity");
+        if (Default.BlockExecution == AlternateBlockOnly.BlockExecution)
+            @compileError("block customization did not change block-runtime identity");
     }
 }
 
@@ -963,7 +1206,7 @@ test "Executed carries family output beside the checked lease" {
 }
 
 test "transaction prelude is narrow and replaces the prepared block bridge" {
-    const Bound = Default.TransactionProgram.bind(Default);
+    const Bound = Default;
     try std.testing.expect(@hasDecl(Bound, "Prelude"));
     try std.testing.expect(@hasDecl(Default.BlockExecution, "transactWithPrelude"));
     try std.testing.expect(!@hasDecl(Bound, "transactPreparedInBlock"));
@@ -1006,41 +1249,36 @@ test "transaction program wrapper extends Ethereum before Vm completes attempt" 
         ethereum: TxExecutionResult,
         family_credit: u256,
     };
+    const WrappedContext = Default.Context(WrappedInput);
+    const BaseWrappedTransition = Default.Transition(WrappedInput);
     const WrappedTransition = struct {
-        pub const Input = WrappedInput;
+        pub const Error = BaseWrappedTransition.Error || error{WrappedPolicyFailure};
 
-        pub fn For(comptime Context: type) type {
-            const Base = Default.TransactionProgram.For(Context);
-            return struct {
-                pub const Error = Base.Error || error{WrappedPolicyFailure};
-
-                pub fn transact(
-                    context: *Context,
-                    tx_value: WrappedTx,
-                ) Error!transaction.TransitionOutcome(WrappedOutput, Default.Rejection) {
-                    const base = try Base.transact(context, tx_value.ethereum);
-                    return switch (base) {
-                        .rejected => |reason| .{ .rejected = reason },
-                        .completed => |output| blk: {
-                            const attempt = try context.activeAttempt();
-                            try attempt.addBalance(addr(0xfee), tx_value.family_credit);
-                            break :blk .{ .completed = .{
-                                .ethereum = output,
-                                .family_credit = tx_value.family_credit,
-                            } };
-                        },
-                    };
-                }
+        pub fn transact(
+            context: *WrappedContext,
+            tx_value: WrappedTx,
+        ) Error!transaction.TransitionOutcome(WrappedOutput, Default.Rejection) {
+            const base = try BaseWrappedTransition.transact(context, tx_value.ethereum);
+            return switch (base) {
+                .rejected => |reason| .{ .rejected = reason },
+                .completed => |output| blk: {
+                    const attempt = try context.activeAttempt();
+                    try attempt.addBalance(addr(0xfee), tx_value.family_credit);
+                    break :blk .{ .completed = .{
+                        .ethereum = output,
+                        .family_credit = tx_value.family_credit,
+                    } };
+                },
             };
         }
     };
-    const WrappedProgram = transaction.Program(
+    const WrappedVm = Default.Program(
         WrappedTx,
+        WrappedInput,
         WrappedOutput,
         Default.Rejection,
         WrappedTransition,
     );
-    const WrappedVm = WrappedProgram.bind(Default);
     const WrappedIncluded = struct {
         output: WrappedOutput,
         cumulative_transactions: u64,
@@ -1093,33 +1331,23 @@ test "transaction program wrapper extends Ethereum before Vm completes attempt" 
             return state.*;
         }
     };
-    const WrappedBlockProgram = evmz.BlockProgram(
-        WrappedTx,
-        WrappedOutput,
-        Default.Rejection,
+    const WrappedBlockExecution = WrappedVm.Block(
         Env,
         WrappedIncluded,
         u64,
         WrappedBlockImpl,
     );
-    const WrappedBlockExecution = WrappedBlockProgram.bind(
-        WrappedVm,
-        Default.BlockPolicy,
-        Default.block_policy,
-    );
     comptime {
         if (WrappedVm.Executor != Default.Executor)
             @compileError("transaction program changed Executor identity");
+        if (WrappedVm.Context != Default.Context(WrappedInput))
+            @compileError("program facade changed its canonical Context identity");
         if (WrappedVm.Transaction != WrappedTx)
             @compileError("wrapped transaction type was lost");
         if (WrappedVm.Output != WrappedOutput)
             @compileError("wrapped output type was lost");
         if (WrappedBlockExecution.TransactionRuntime != WrappedVm)
             @compileError("wrapped block program changed transaction runtime identity");
-        if (WrappedBlockExecution.Transaction != WrappedTx)
-            @compileError("wrapped block transaction type was lost");
-        if (WrappedBlockExecution.Output != WrappedOutput)
-            @compileError("wrapped block output type was lost");
         if (WrappedVm.Error == anyerror)
             @compileError("wrapped transaction program reopened anyerror");
         if (WrappedBlockExecution.Error == anyerror)
@@ -1295,64 +1523,58 @@ test "block programs vary independently above one transaction runtime" {
         pub const applyInclude = Fold.applyInclude;
         pub const finish = Fold.finish;
     };
-    const Program = Default.BlockProgram;
-    const CountingProgram = evmz.BlockProgram(
-        Default.Transaction,
-        Default.Output,
-        Default.Rejection,
+    const Bound = Default.Block(
+        Env,
+        Default.IncludedTransactionView,
+        BlockResult,
+        Fold,
+    );
+    const CountingBound = Default.Block(
         Env,
         Default.IncludedTransactionView,
         BlockResult,
         CountingFold,
     );
-    const PreludeProgram = evmz.BlockProgram(
-        Default.Transaction,
-        Default.Output,
-        Default.Rejection,
-        Env,
-        Default.IncludedTransactionView,
-        BlockResult,
-        PreludeFold,
-    );
-    const ConcreteContext = transaction.Context(Default, Default.TransactInput);
-    const ConcreteEthereum = Default.TransactionProgram.For(ConcreteContext);
+    const ConcreteContext = Default.Context(Default.TransactInput);
+    const ConcreteEthereum = Default.Transition(Default.TransactInput);
+    const RuntimePolicyProbe = struct {
+        fn totalGasLimit(_: Default.Revision) ?u64 {
+            return null;
+        }
+    };
     const ConcreteTransition = struct {
-        pub const Input = Default.TransactInput;
-        pub const Error = ConcreteEthereum.Error;
+        pub const Error = ConcreteEthereum.Error || error{TransactionPolicySnapshotLost};
 
         pub fn transact(
             context: *ConcreteContext,
             tx_value: Default.Transaction,
         ) Error!transaction.TransitionOutcome(Default.Output, Default.Rejection) {
+            if (context.policy().transaction.totalGasLimit != RuntimePolicyProbe.totalGasLimit)
+                return error.TransactionPolicySnapshotLost;
             return ConcreteEthereum.transact(context, tx_value);
         }
     };
-    const ConcreteProgram = transaction.Program(
+    const ConcreteRuntime = Default.Program(
         Default.Transaction,
+        Default.TransactInput,
         Default.Output,
         Default.Rejection,
         ConcreteTransition,
     );
-    const ConcreteRuntime = ConcreteProgram.bind(Default);
-    const Bound = Program.bind(Default, Default.BlockPolicy, Default.block_policy);
-    const CountingBound = CountingProgram.bind(Default, Default.BlockPolicy, Default.block_policy);
-    const PreludeBound = PreludeProgram.bind(Default, Default.BlockPolicy, Default.block_policy);
-    const ConcretePreludeBound = PreludeProgram.bind(
-        ConcreteRuntime,
-        Default.BlockPolicy,
-        Default.block_policy,
+    const ConcretePreludeBound = ConcreteRuntime.Block(
+        Env,
+        Default.IncludedTransactionView,
+        BlockResult,
+        PreludeFold,
     );
     comptime {
-        if (Bound.TransactionRuntime != Default)
-            @compileError("block program changed transaction runtime identity");
-        if (CountingBound.TransactionRuntime != Default)
-            @compileError("alternate block program changed transaction runtime identity");
-        if (Bound == CountingBound) @compileError("distinct block programs collapsed to one type");
-        if (ConcretePreludeBound.TransactionRuntime.Context != ConcreteContext)
-            @compileError("block prelude error changed the concrete transaction context identity");
-        const prelude_error: PreludeBound.Error = error.CustomPreludeFailure;
-        if (prelude_error != error.CustomPreludeFailure)
-            @compileError("block prelude error was lost");
+        std.debug.assert(Bound.TransactionRuntime == Default);
+        std.debug.assert(CountingBound.TransactionRuntime == Default);
+        std.debug.assert(Bound != CountingBound);
+        std.debug.assert(ConcretePreludeBound.TransactionRuntime == ConcreteRuntime.withPreludeError(PreludeFold.PreludeError));
+        std.debug.assert(ConcretePreludeBound.BlockProtocol == Default.BlockProtocol);
+        const prelude_error: ConcretePreludeBound.Error = error.CustomPreludeFailure;
+        std.debug.assert(prelude_error == error.CustomPreludeFailure);
     }
 
     var executor = Default.Executor.init(std.testing.allocator, .{ .revision = .cancun });
@@ -1380,33 +1602,32 @@ test "block programs vary independently above one transaction runtime" {
 
     var prelude_executor = Default.Executor.init(std.testing.allocator, .{ .revision = .cancun });
     defer prelude_executor.deinit();
-    var prelude_block = try PreludeBound.init(
-        &prelude_executor,
+    var transaction_policy = Default.transaction_policy;
+    transaction_policy.transaction.totalGasLimit = RuntimePolicyProbe.totalGasLimit;
+    const concrete_runtime = ConcreteRuntime.initWithPolicy(&prelude_executor, transaction_policy);
+    var prelude_block = try ConcretePreludeBound.initWithRuntime(
+        concrete_runtime,
         .{ .gas_limit = 100_000 },
     );
     defer prelude_block.discardIfUnfinished();
     const FailingPrelude = struct {
         pub fn run(
             _: *@This(),
-            _: PreludeBound.PreludeContext,
-        ) PreludeBound.PreludeContext.Error!void {
+            _: ConcretePreludeBound.PreludeContext,
+        ) ConcretePreludeBound.PreludeContext.Error!void {
             return error.CustomPreludeFailure;
         }
     };
     var failing_prelude = FailingPrelude{};
     try std.testing.expectError(error.CustomPreludeFailure, prelude_block.transactWithPrelude(
         .{ .sender = addr(0xaaaa), .to = addr(0xbbbb), .gas_limit = 30_000 },
-        PreludeBound.Prelude.init(&failing_prelude),
+        ConcretePreludeBound.Prelude.init(&failing_prelude),
     ));
     try std.testing.expectEqual(@as(u64, 0), (try prelude_block.finish()).tx_count);
 }
 
 test "block claim cannot authorize another Executor" {
-    const Bound = Default.BlockProgram.bind(
-        Default,
-        Default.BlockPolicy,
-        Default.block_policy,
-    );
+    const Bound = Default.BlockExecution;
     var claimed_executor = Default.Executor.init(std.testing.allocator, .{ .revision = .cancun });
     defer claimed_executor.deinit();
     var other_executor = Default.Executor.init(std.testing.allocator, .{ .revision = .cancun });

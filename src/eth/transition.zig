@@ -15,12 +15,11 @@ const transaction = @import("../transaction.zig");
 
 const Address = address.Address;
 
-/// Build the Ethereum transaction program for one bound transaction protocol.
-/// `Input` carries the public block environment and progress; `Output` is the
-/// family-facing executed transaction result.
-pub fn Program(
+/// Build the Ethereum transaction implementation for one bound transaction
+/// protocol. The bound Context carries the public block environment and
+/// progress; `Output` is the family-facing executed transaction result.
+pub fn Implementation(
     comptime TransactionProtocol: type,
-    comptime InputType: type,
     comptime Output: type,
 ) type {
     const PreparedTransaction = transaction.Prepared(TransactionProtocol);
@@ -28,11 +27,9 @@ pub fn Program(
     const Revision = TransactionProtocol.Revision;
 
     const Transition = struct {
-        pub const Input = InputType;
-
         pub fn For(comptime Context: type) type {
-            if (Context.TransactionProtocol != TransactionProtocol)
-                @compileError("Ethereum transaction program bound to a different transaction protocol");
+            comptime std.debug.assert(Context.TransactionProtocol == TransactionProtocol);
+
             return struct {
                 const Settlement = transaction.SettlementRuntime(
                     TransactionProtocol,
@@ -548,10 +545,5 @@ pub fn Program(
         }
     };
 
-    return transaction.Program(
-        transaction.Transaction,
-        Output,
-        Rejection,
-        Transition,
-    );
+    return Transition;
 }

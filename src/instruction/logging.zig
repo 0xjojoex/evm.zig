@@ -6,9 +6,7 @@ const Host = @import("../Host.zig");
 const CallFrame = Interpreter.CallFrame;
 
 pub fn log(frame: *CallFrame, comptime n: u8) !void {
-    if (n > 4) {
-        @compileError("logN only supports up to 4 topics");
-    }
+    comptime std.debug.assert(n <= 4);
 
     if (frame.msg.is_static) {
         return error.StaticCallViolation;

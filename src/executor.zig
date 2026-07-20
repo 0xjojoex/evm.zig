@@ -311,10 +311,6 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub const RuntimeResources = RuntimeResourcesType;
         pub const BoundedRuntimeResources = BoundedRuntimeResourcesType;
 
-        pub fn normalizeError(err: anyerror) Error {
-            return errors.normalize(err);
-        }
-
         allocator: std.mem.Allocator,
         state: StateOverlay,
         frame_store: FrameStore,

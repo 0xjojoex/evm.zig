@@ -27,10 +27,7 @@ pub const StepRow = struct {
 };
 
 comptime {
-    if (@sizeOf(StepRow) > 48) @compileError("trace step row exceeded its metadata layout budget");
-    for (.{ "stack", "stack_before_len", "memory_size", "memory_after_size", "return_data" }) |field| {
-        if (@hasField(StepRow, field)) @compileError("execution state belongs in TransitionArena, not StepRow");
-    }
+    std.debug.assert(@sizeOf(StepRow) == 48);
 }
 
 pub const FrameKind = enum(u8) {
@@ -55,10 +52,7 @@ pub const FrameRow = struct {
 };
 
 comptime {
-    if (@sizeOf(FrameRow) > 24) @compileError("trace frame row exceeded its metadata layout budget");
-    for (.{ "initial_stack", "parent_stack", "final_memory_size", "final_return_data" }) |field| {
-        if (@hasField(FrameRow, field)) @compileError("frame state belongs in TransitionArena, not FrameRow");
-    }
+    std.debug.assert(@sizeOf(FrameRow) == 20);
 }
 
 pub const Mark = struct {

@@ -4,6 +4,9 @@
 //! planning, and included/result representation. The bound runtime owns one
 //! exclusive Executor block claim. Scheduling and whole-block validation stay
 //! above this layer.
+const std = @import("std");
+
+const executor_errors = @import("./executor/error.zig");
 
 pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
     return union(enum) {
@@ -12,75 +15,58 @@ pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
     };
 }
 
-/// First-class block fold program with lexical public carriers for ZLS.
-pub fn BlockProgram(
-    comptime TxT: type,
-    comptime OutputT: type,
-    comptime RejectionT: type,
-    comptime EnvT: type,
-    comptime IncludedT: type,
-    comptime ResultT: type,
-    comptime ImplT: type,
+/// Internal flat binder used by a concrete VM program's `Block(...)` closure.
+pub fn bind(
+    comptime TransactionRuntimeType: type,
+    comptime ExecutorType: type,
+    comptime BlockProtocolType: type,
+    comptime BlockPolicyType: type,
+    comptime default_block_policy: BlockPolicyType,
+    comptime TransactionType: type,
+    comptime TransactInputType: type,
+    comptime OutputType: type,
+    comptime RejectionType: type,
+    comptime EnvironmentType: type,
+    comptime IncludedType: type,
+    comptime ResultType: type,
+    comptime ImplementationType: type,
 ) type {
-    const TransactionType = TxT;
-    const OutputType = OutputT;
-    const RejectionType = RejectionT;
-    const EnvironmentType = EnvT;
-    const IncludedType = IncludedT;
-    const ResultType = ResultT;
-    const ImplementationType = ImplT;
+    comptime {
+        std.debug.assert(@hasDecl(ImplementationType, "PreludeError"));
+    }
 
-    return struct {
-        pub const Transaction = TransactionType;
-        pub const Output = OutputType;
-        pub const Rejection = RejectionType;
-        pub const Environment = EnvironmentType;
-        pub const Included = IncludedType;
-        pub const Result = ResultType;
-        pub const Implementation = ImplementationType;
-
-        pub fn bind(
-            comptime TransactionRuntimeType: type,
-            comptime BlockPolicyType: type,
-            comptime default_block_policy: BlockPolicyType,
-        ) type {
-            comptime {
-                if (TransactionRuntimeType.Transaction != TransactionType)
-                    @compileError("block transaction type does not match transaction runtime");
-                if (TransactionRuntimeType.Output != OutputType)
-                    @compileError("block output type does not match transaction runtime");
-                if (TransactionRuntimeType.Rejection != RejectionType)
-                    @compileError("block rejection type does not match transaction runtime");
-                if (!@hasDecl(ImplementationType, "PreludeError"))
-                    @compileError("block program implementation must declare PreludeError");
-            }
-            const RuntimeWithPrelude = if (ImplementationType.PreludeError == error{})
-                TransactionRuntimeType
-            else
-                TransactionRuntimeType.withPreludeError(ImplementationType.PreludeError);
-            return BoundBlockProgram(
-                TransactionRuntimeType,
-                RuntimeWithPrelude,
-                TransactionType,
-                OutputType,
-                RejectionType,
-                EnvironmentType,
-                IncludedType,
-                ResultType,
-                ImplementationType,
-                BlockPolicyType,
-                default_block_policy,
-            );
-        }
-    };
+    const RuntimeWithPrelude = TransactionRuntimeType.withPreludeError(ImplementationType.PreludeError);
+    return BoundBlockProgram(
+        TransactionRuntimeType,
+        RuntimeWithPrelude,
+        ExecutorType,
+        BlockProtocolType,
+        TransactionType,
+        TransactInputType,
+        OutputType,
+        RejectionType,
+        RuntimeWithPrelude.Prelude,
+        RuntimeWithPrelude.PreludeContext,
+        EnvironmentType,
+        IncludedType,
+        ResultType,
+        ImplementationType,
+        BlockPolicyType,
+        default_block_policy,
+    );
 }
 
 fn BoundBlockProgram(
     comptime BaseTransactionRuntimeType: type,
     comptime TransactionRuntimeType: type,
+    comptime ExecutorType: type,
+    comptime BlockProtocolType: type,
     comptime TransactionType: type,
+    comptime TransactInputType: type,
     comptime OutputType: type,
     comptime RejectionType: type,
+    comptime PreludeType: type,
+    comptime PreludeContextType: type,
     comptime EnvironmentType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
@@ -93,10 +79,12 @@ fn BoundBlockProgram(
         UncommittedChanges,
     };
     const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ContractError;
+    const TransactionLog = TransactionRuntimeType.TransactionLog;
     comptime validateImplementation(
-        TransactionRuntimeType,
         TransactionType,
+        TransactInputType,
         OutputType,
+        TransactionLog,
         EnvironmentType,
         IncludedType,
         ResultType,
@@ -107,12 +95,13 @@ fn BoundBlockProgram(
         const Self = @This();
 
         pub const TransactionRuntime = TransactionRuntimeType;
-        pub const Executor = TransactionRuntimeType.Executor;
+        pub const Executor = ExecutorType;
+        pub const BlockProtocol = BlockProtocolType;
         pub const Transaction = TransactionType;
         pub const Output = OutputType;
         pub const Rejection = RejectionType;
-        pub const Prelude = TransactionRuntimeType.Prelude;
-        pub const PreludeContext = TransactionRuntimeType.PreludeContext;
+        pub const Prelude = PreludeType;
+        pub const PreludeContext = PreludeContextType;
         pub const Environment = EnvironmentType;
         pub const Included = IncludedType;
         pub const Result = ResultType;
@@ -177,7 +166,7 @@ fn BoundBlockProgram(
             return .{
                 .transaction_runtime = runtime,
                 .policy_value = policy_value_arg,
-                .claim = executor.claimBlockExecution() catch |err| return Executor.normalizeError(err),
+                .claim = executor.claimBlockExecution() catch |err| return executor_errors.normalize(err),
                 .environment = environment,
                 .state = ImplementationType.init(environment),
             };
@@ -274,48 +263,46 @@ fn BoundBlockProgram(
 }
 
 fn validateImplementation(
-    comptime TransactionRuntimeType: type,
     comptime TransactionType: type,
+    comptime TransactInputType: type,
     comptime OutputType: type,
+    comptime TransactionLogType: type,
     comptime EnvironmentType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
     comptime Implementation: type,
 ) void {
-    if (!@hasDecl(Implementation, "State"))
-        @compileError("block program implementation must declare State");
-    if (!@hasDecl(Implementation, "InclusionPlan"))
-        @compileError("block program implementation must declare InclusionPlan");
-    if (!@hasDecl(Implementation, "Error"))
-        @compileError("block program implementation must declare Error");
-    if (!@hasDecl(Implementation, "PreludeError"))
-        @compileError("block program implementation must declare PreludeError");
-    if (@TypeOf(Implementation.init(@as(EnvironmentType, undefined))) != Implementation.State)
-        @compileError("block program init has the wrong signature");
-    if (@TypeOf(Implementation.transactInput(
-        @as(*const EnvironmentType, undefined),
-        @as(*const Implementation.State, undefined),
-        @as(*const TransactionType, undefined),
-    )) != TransactionRuntimeType.TransactInput) @compileError("block program transactInput has the wrong signature");
-    if (@TypeOf(Implementation.planInclude(
-        @as(*const EnvironmentType, undefined),
-        @as(*const Implementation.State, undefined),
-        @as(*const TransactionType, undefined),
-        @as(*const OutputType, undefined),
-        @as([]const TransactionRuntimeType.TransactionLog, undefined),
-    )) != Implementation.Error!Implementation.InclusionPlan) @compileError("block program planInclude has the wrong signature");
-    if (@TypeOf(Implementation.included(
-        @as(*const TransactionType, undefined),
-        @as(*const OutputType, undefined),
-        @as([]const TransactionRuntimeType.TransactionLog, undefined),
-        @as(Implementation.InclusionPlan, undefined),
-    )) != IncludedType) @compileError("block program included has the wrong signature");
-    if (@TypeOf(Implementation.applyInclude(
-        @as(*Implementation.State, undefined),
-        @as(Implementation.InclusionPlan, undefined),
-    )) != void) @compileError("block program applyInclude must be infallible");
-    if (@TypeOf(Implementation.finish(
-        @as(*const EnvironmentType, undefined),
-        @as(*const Implementation.State, undefined),
-    )) != ResultType) @compileError("block program finish has the wrong signature");
+    comptime {
+        std.debug.assert(@hasDecl(Implementation, "State"));
+        std.debug.assert(@hasDecl(Implementation, "InclusionPlan"));
+        std.debug.assert(@hasDecl(Implementation, "Error"));
+
+        std.debug.assert(@TypeOf(Implementation.init(@as(EnvironmentType, undefined))) == Implementation.State);
+        std.debug.assert(@TypeOf(Implementation.transactInput(
+            @as(*const EnvironmentType, undefined),
+            @as(*const Implementation.State, undefined),
+            @as(*const TransactionType, undefined),
+        )) == TransactInputType);
+        std.debug.assert(@TypeOf(Implementation.planInclude(
+            @as(*const EnvironmentType, undefined),
+            @as(*const Implementation.State, undefined),
+            @as(*const TransactionType, undefined),
+            @as(*const OutputType, undefined),
+            @as([]const TransactionLogType, undefined),
+        )) == Implementation.Error!Implementation.InclusionPlan);
+        std.debug.assert(@TypeOf(Implementation.included(
+            @as(*const TransactionType, undefined),
+            @as(*const OutputType, undefined),
+            @as([]const TransactionLogType, undefined),
+            @as(Implementation.InclusionPlan, undefined),
+        )) == IncludedType);
+        std.debug.assert(@TypeOf(Implementation.applyInclude(
+            @as(*Implementation.State, undefined),
+            @as(Implementation.InclusionPlan, undefined),
+        )) == void);
+        std.debug.assert(@TypeOf(Implementation.finish(
+            @as(*const EnvironmentType, undefined),
+            @as(*const Implementation.State, undefined),
+        )) == ResultType);
+    }
 }

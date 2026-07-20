@@ -137,27 +137,22 @@ const MyVM = evmz.Vm(
 );
 ```
 
-The returned type carries matching `ExecutionProtocol`, `TransactionProtocol`,
-and `BlockProtocol` bindings alongside its `Executor`, `Interpreter`,
-`Transaction`, `Outcome`, and `Executed` types. Lowercase modules such as
-`evmz.execution` and `evmz.executor` remain available for low-level work.
-`Executor` is the reusable mutable execution substrate.
-`MyVM.BlockExecution.init(&executor, env)` creates the block lifetime and its
-default transaction runtime in one step. Advanced composition can pass an
-already configured transaction runtime to `initWithRuntime` instead.
-Alternate transaction programs bind the complete family with
-`TransactionProgram.bind(MyVM)`, keeping their transaction rules and Executor
-protocol matched at comptime. Family-specific runtimes can build typed facades;
-[`examples/op-deposit.zig`](examples/op-deposit.zig) is a compact example.
+`MyVM` exposes its `Executor`, `Interpreter`, `Transaction`, `Outcome`, and
+`Executed` types plus the matching protocol bindings; the lowercase modules
+(`evmz.execution`, `evmz.executor`, ...) stay available for low-level work.
+`MyVM.BlockExecution.init(&executor, env)` opens a block with its default
+transaction runtime, or pass a preconfigured runtime to `initWithRuntime`.
+Alternate transaction programs come from
+`MyVM.Program(Transaction, Input, Output, Rejection, Implementation)`, which
+shares the VM's `Executor` and exposes
+`Program.Block(Environment, Included, Result, Implementation)` for a matching
+block fold. See [`examples/op-deposit.zig`](examples/op-deposit.zig).
 
-Authored definitions provide the defaults. `initWithPolicy` on a transaction
-runtime, or `initWithPolicies` on block and sequential runtimes, selects other
-policy values without changing the generated `MyVM` or `Executor` type.
-
-`evmz.protocol.assertExecutionContract` and
-`evmz.protocol.assertTransactionContract` report what authored execution and
-transaction definitions must provide. `examples/custom-fork/` is a compiled
-downstream-style template of the complete composition.
+Authored definitions set the defaults; `initWithPolicy` (transaction runtimes)
+and `initWithPolicies` (block and sequential runtimes) pick other policy values
+without changing the generated types. `evmz.protocol.assertExecutionContract`
+and `assertTransactionContract` report what authored definitions must provide,
+and `examples/custom-fork/` is a compiled downstream template.
 
 ## C / EVMC
 

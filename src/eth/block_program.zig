@@ -1,17 +1,16 @@
-//! Ethereum sequential block fold bound above one transaction runtime.
+//! Ethereum sequential block fold implementation for one transaction runtime.
 //!
-//! The generic block-program binder owns executor claims and retain/discard.
-//! This module owns Ethereum inclusion accounting and the journaled
+//! The VM-owned block binder owns executor claims and retain/discard. This
+//! module owns Ethereum inclusion accounting and the journaled
 //! before-transaction system-call prelude.
 
 const std = @import("std");
 
 const address = @import("../address.zig");
-const block_program = @import("../block_program.zig");
 const executor = @import("../executor.zig");
 
-/// Build the Ethereum block program and its transaction prelude for one bound
-/// block protocol and transaction runtime.
+/// Build Ethereum's block fold implementation and transaction prelude for one
+/// bound transaction runtime.
 pub fn For(
     comptime BlockPolicy: type,
     comptime TransactionRuntime: type,
@@ -116,14 +115,5 @@ pub fn For(
     return struct {
         pub const Prelude = BeforeTransactionPrelude;
         pub const Implementation = ImplementationType;
-        pub const Program = block_program.BlockProgram(
-            Transaction,
-            TransactionOutput,
-            TransactionRuntime.Rejection,
-            Environment,
-            IncludedTransaction,
-            BlockResult,
-            ImplementationType,
-        );
     };
 }

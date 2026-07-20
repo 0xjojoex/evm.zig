@@ -9,9 +9,7 @@ pub fn push0(frame: *CallFrame) !void {
 }
 
 pub inline fn push(frame: *CallFrame, comptime n: u8) !void {
-    if (n < 1 or n > 32) {
-        @compileError("pushN: n must be in the range 1..32");
-    }
+    comptime std.debug.assert(n >= 1 and n <= 32);
 
     const start = frame.pc;
     if (comptime n >= 3) {
@@ -41,9 +39,7 @@ pub fn pop(frame: *CallFrame) !void {
 }
 
 pub fn dup(frame: *CallFrame, comptime n: u8) !void {
-    if (n < 1 or n > 16) {
-        @compileError("dup: n must be in the range 1..16");
-    }
+    comptime std.debug.assert(n >= 1 and n <= 16);
     try frame.stack.dup(n);
 }
 
@@ -106,9 +102,7 @@ test "PUSH decodes full immediates" {
 }
 
 pub fn swap(frame: *CallFrame, comptime n: u8) !void {
-    if (n < 1 or n > 16) {
-        @compileError("swap: n must be in the range 1..16");
-    }
+    comptime std.debug.assert(n >= 1 and n <= 16);
     try frame.stack.swap(n);
 }
 

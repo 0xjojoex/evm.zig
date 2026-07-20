@@ -953,10 +953,9 @@ test "transaction definition projects to one runtime-only policy type" {
     const strict = projectTransactionPolicy(R, strict_definition);
 
     comptime {
-        if (@TypeOf(generous) != TransactionPolicy(R))
-            @compileError("transaction policy lost its nominal type");
-        if (@TypeOf(strict) != @TypeOf(generous))
-            @compileError("policy values unexpectedly change transaction runtime identity");
+        std.debug.assert(@TypeOf(generous) == TransactionPolicy(R));
+        std.debug.assert(@TypeOf(strict) == @TypeOf(generous));
+
         if (@hasField(TransactionPolicyConfig(R), "Preparation"))
             @compileError("preparation type escaped into runtime policy");
         if (@hasField(TransactionPolicyConfig(R), "ValidationError"))
