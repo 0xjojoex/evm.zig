@@ -48,7 +48,6 @@ test "Amsterdam value-to-empty account state gas is not intrinsic" {
     });
 
     try std.testing.expect(gas_plan.execution != null);
-    try std.testing.expectEqual(@as(u64, 0), gas_plan.intrinsic_state_gas);
 }
 
 test "Amsterdam top-frame value-to-empty account spends state gas on success" {
@@ -119,7 +118,96 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
 }
 
-test "Amsterdam top-frame delegated target charges cold even when warm" {
+test "Amsterdam authorization state-gas OOG is included and rolls back authorization" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const target = evmz.addr(0xdddd);
+    var executor = try executorWithSender(sender, 1_000_000);
+    defer executor.deinit();
+
+    const authorization_list = [_]transaction.AuthorizationTuple{.{
+        .chain_id = 0,
+        .target = target,
+        .signer = authority,
+        .nonce = 0,
+        .y_parity = 0,
+        .legacy_v = null,
+        .r = 1,
+        .s = 1,
+    }};
+    var vm = evmz.Evm.init(&executor);
+    const executed = try expectExecuted(try vm.transact(.{
+        .env = .{ .gas_limit = 300_000 },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 30_000,
+            .max_fee_per_gas = 1,
+            .max_priority_fee_per_gas = 0,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+    const result = try executed.result();
+
+    try std.testing.expectEqual(evmz.TxStatus.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(u64, 30_000), result.gas.used);
+    try std.testing.expectEqual(@as(u64, 0), result.gas.block.state);
+    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
+    try std.testing.expect(!try executor.state.accountExists(authority));
+}
+
+test "Amsterdam dispatch state-gas OOG rolls back completed authorization" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const target = evmz.addr(0xdddd);
+    var executor = try executorWithSender(sender, 1_000_000);
+    defer executor.deinit();
+
+    var authority_account = MemoryAccount.init(std.testing.allocator);
+    authority_account.balance = 1;
+    try executor.state.seedAccount(authority, authority_account);
+
+    const authorization_list = [_]transaction.AuthorizationTuple{.{
+        .chain_id = 0,
+        .target = target,
+        .signer = authority,
+        .nonce = 0,
+        .y_parity = 0,
+        .legacy_v = null,
+        .r = 1,
+        .s = 1,
+    }};
+    var vm = evmz.Evm.init(&executor);
+    const executed = try expectExecuted(try vm.transact(.{
+        .env = .{ .gas_limit = 300_000 },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 200_000,
+            .max_fee_per_gas = 1,
+            .max_priority_fee_per_gas = 0,
+            .value = 1,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+    const result = try executed.result();
+
+    try std.testing.expectEqual(evmz.TxStatus.out_of_gas, result.status);
+    try std.testing.expectEqual(@as(u64, 200_000), result.gas.used);
+    try std.testing.expectEqual(@as(u64, 0), result.gas.block.state);
+    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), executor.getAccount(authority).?.nonce);
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
+    try std.testing.expect(!try executor.state.accountExists(recipient));
+}
+
+test "Amsterdam top-frame delegated target honors transaction warmth" {
     const sender = evmz.addr(0xaaaa);
     const authority = evmz.addr(0xbbbb);
     const target = evmz.addr(0xcccc);
@@ -143,7 +231,7 @@ test "Amsterdam top-frame delegated target charges cold even when warm" {
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 7_000), result.gas_left);
+    try std.testing.expectEqual(@as(i64, 9_900), result.gas_left);
 }
 
 fn executorWithSender(sender: Address, balance: u256) !Executor {

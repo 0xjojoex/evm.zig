@@ -61,13 +61,17 @@ pub const FeeFields = struct {
     max_fee_per_blob_gas: ?u256 = null,
 };
 
-/// Ethereum-shaped transaction value used by Definition-backed `Vm` types.
-/// Representation-changing families own a concrete facade above the executor
-/// rather than replacing this engine transaction value.
+/// Unvalidated Ethereum-shaped ingress value used by Definition-backed `Vm`
+/// types. Representation-changing families own a concrete facade above the
+/// executor rather than replacing this engine transaction value.
 pub const Transaction = struct {
     kind: TxKind = .legacy,
     sender: Address,
-    nonce: ?u64 = null,
+    /// Retain the encoded domain until Transaction validation classifies it.
+    /// Account and executable nonces are `u64`; this wider input-only value lets
+    /// an encoded nonce at or above the account limit receive the protocol
+    /// rejection instead of being misclassified as a decode failure.
+    nonce: ?u256 = null,
     gas_limit: u64,
     to: ?Address = null,
     value: u256 = 0,
@@ -82,10 +86,12 @@ pub const Transaction = struct {
     authorization_count: ?usize = null,
 };
 
+/// Read-only projection of unvalidated transaction input. Wide nonce data must
+/// not cross the Transaction validation boundary into `Prepared`.
 pub const TransactionView = struct {
     kind: TxKind = .legacy,
     sender: Address,
-    nonce: ?u64 = null,
+    nonce: ?u256 = null,
     gas_limit: u64,
     to: ?Address = null,
     value: u256 = 0,
@@ -246,10 +252,10 @@ pub fn executionRequest(context: execution.ExecutionContext, message: execution.
 }
 
 /// A validated transaction ready to execute: the pipeline output of `prepare`.
+/// The raw transaction nonce is intentionally absent; execution consumes only
+/// the validated account state and the derived message identity.
 pub fn Prepared(comptime Protocol: type) type {
     return struct {
-        /// Create-transaction target address, resolved up front; null for calls.
-        created_address: ?Address = null,
         /// Transaction-scope environment (context + access/authorization lists).
         scope: TransactionScope,
         /// The top-level call/create identity the executor runs.

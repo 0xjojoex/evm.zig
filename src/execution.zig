@@ -27,6 +27,9 @@ pub const Call = struct {
 /// A top-level create or create2 message.
 pub const Create = struct {
     sender: Address,
+    /// Family-resolved account to create. Execution consumes this identity;
+    /// it does not derive a second target from mutable state.
+    recipient: Address,
     init_code: []const u8,
     value: u256 = 0,
     salt: ?u256 = null,
@@ -46,7 +49,8 @@ pub const Message = union(enum) {
         input: []const u8 = &.{},
         value: u256 = 0,
         create2_salt: ?u256 = null,
-    }) Message {
+        create_recipient: ?Address = null,
+    }) error{MissingCreateRecipient}!Message {
         if (message_input.to) |recipient| {
             return .{ .call = .{
                 .sender = message_input.sender,
@@ -57,6 +61,7 @@ pub const Message = union(enum) {
         }
         return .{ .create = .{
             .sender = message_input.sender,
+            .recipient = message_input.create_recipient orelse return error.MissingCreateRecipient,
             .init_code = message_input.input,
             .value = message_input.value,
             .salt = message_input.create2_salt,
@@ -192,8 +197,10 @@ test "execution request and scope initialization contain no family policy" {
 
 test "message identity is independent from gas and preserves create2 salt" {
     const sender = [_]u8{0x11} ** 20;
-    const message = Message.init(.{
+    const recipient = [_]u8{0x22} ** 20;
+    const message = try Message.init(.{
         .sender = sender,
+        .create_recipient = recipient,
         .input = &.{0x42},
         .value = 7,
         .create2_salt = 9,
@@ -204,6 +211,13 @@ test "message identity is independent from gas and preserves create2 salt" {
     try std.testing.expectEqualSlices(u8, &.{0x42}, message.input());
     try std.testing.expectEqual(@as(u256, 7), message.value());
     try std.testing.expectEqual(@as(?u256, 9), message.create.salt);
+    try std.testing.expectEqual(recipient, message.create.recipient);
+}
+
+test "create message construction requires a family-resolved recipient" {
+    try std.testing.expectError(error.MissingCreateRecipient, Message.init(.{
+        .sender = [_]u8{0x11} ** 20,
+    }));
 }
 
 test "concrete request literals expose call and warm-set fields" {

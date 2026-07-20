@@ -78,7 +78,7 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     try std.testing.expectEqual(@as(u256, 2), executor.getAccount(beneficiary).?.balance);
 }
 
-test "Amsterdam top-level create to alive target refills intrinsic state gas" {
+test "Amsterdam top-level create to alive target skips new-account state gas" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
@@ -97,6 +97,7 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
 
     const message = evmz.execution.Message{ .create = .{
         .sender = sender,
+        .recipient = create_address,
         .init_code = &init_code,
     } };
 
@@ -107,8 +108,8 @@ test "Amsterdam top-level create to alive target refills intrinsic state gas" {
     const result = try executor.executeTransactionRequest(request);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(-@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
 }
 
 test "Amsterdam created contract selfdestruct clears code and keeps account at commit" {

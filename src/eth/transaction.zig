@@ -29,7 +29,6 @@ pub const amsterdam_code_deposit_word_cost = eip8037.code_deposit_word_cost;
 pub const amsterdam_regular_per_auth_base_cost = eip8037.regular_per_auth_base_cost;
 pub const amsterdam_auth_base_state_gas = eip8037.auth_base_state_gas;
 pub const amsterdam_authorization_state_gas = eip8037.authorization_state_gas;
-pub const amsterdam_authorization_intrinsic_gas = eip8037.authorization_intrinsic_gas;
 pub const access_list_address_gas: u64 = 2_400;
 pub const access_list_storage_key_gas: u64 = 1_900;
 pub const amsterdam_access_list_address_gas = eip8037.access_list_address_gas;
@@ -194,20 +193,8 @@ pub const Transaction = struct {
 
     pub fn authorizationIntrinsicGas(revision: Revision) u64 {
         if (!revision.isImpl(.prague)) return 0;
-        if (revision.isImpl(.amsterdam)) return amsterdam_account_write_cost + amsterdam_regular_per_auth_base_cost;
+        if (revision.isImpl(.amsterdam)) return amsterdam_regular_per_auth_base_cost;
         return authorization_intrinsic_gas;
-    }
-
-    pub fn intrinsicStateGas(revision: Revision, options: tx_gas.IntrinsicGasOptions) ?u64 {
-        if (!revision.isImpl(.amsterdam)) return 0;
-
-        var gas: u64 = 0;
-        if (options.is_create) {
-            gas = std.math.add(u64, gas, amsterdam_new_account_state_gas) catch return null;
-        }
-        const auth_count = std.math.cast(u64, options.authorization_count) orelse return null;
-        gas = std.math.add(u64, gas, std.math.mul(u64, auth_count, amsterdam_authorization_state_gas) catch return null) catch return null;
-        return gas;
     }
 
     pub fn floorGas(revision: Revision, input: tx_gas.FloorGasInput) ?u64 {
@@ -220,7 +207,14 @@ pub const Transaction = struct {
             const tokens = calldataTokenCount(input.input) orelse return null;
             break :blk std.math.mul(u64, tokens, 10) catch return null;
         };
-        const floor_base_gas = if (revision.isImpl(.amsterdam)) amsterdam_tx_base_cost else 21_000;
+        // EIP-2780 anchors Amsterdam's calldata floor on the decomposed regular
+        // transaction base: TX_BASE plus recipient access and value-transfer
+        // primitives. intrinsicBaseGas contains exactly that subset; initcode,
+        // authorization, and state-gas charges remain outside the floor.
+        const floor_base_gas = if (revision.isImpl(.amsterdam))
+            intrinsicBaseGas(revision, input.options) orelse return null
+        else
+            21_000;
         var gas = std.math.add(u64, floor_base_gas, floor_data_cost) catch return null;
         if (revision.isImpl(.amsterdam)) {
             gas = std.math.add(u64, gas, accessListDataCost(input.options.access_list_counts) orelse return null) catch return null;

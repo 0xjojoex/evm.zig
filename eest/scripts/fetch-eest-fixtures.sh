@@ -23,7 +23,7 @@ Environment overrides:
 Example:
   scripts/fetch-eest-fixtures.sh
   EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
-  zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/path/to/test.json
+  zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/state_tests/path/to/test.json
 
 State fixture defaults come from eest.lock. The current lock tracks the
 Glamsterdam devnet EEST release for Amsterdam work; override
@@ -84,7 +84,7 @@ lock_url="$(lock_value url || true)"
 lock_sha256="$(lock_value sha256 || true)"
 
 repo="${EEST_REPO:-${lock_repo:-ethereum/execution-specs}}"
-version="${EEST_VERSION:-${lock_version:-tests-glamsterdam-devnet@v6.1.0}}"
+version="${EEST_VERSION:-${lock_version:-tests-glamsterdam-devnet@v7.2.0}}"
 artifact="${EEST_ARTIFACT:-${lock_artifact:-fixtures_glamsterdam-devnet.tar.gz}}"
 version_slug="${version//@/-}"
 url_version="${version//@/%40}"

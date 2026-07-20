@@ -491,7 +491,7 @@ fn parseLegacyTransaction(allocator: std.mem.Allocator, object: *const JsonObjec
     const gas_price = try u256FieldAny(object, &.{ "gasPrice", "gas_price" });
     const gas_limit = try u64FieldAny(object, &.{ "gasLimit", "gas_limit" });
     const value = try u256FieldAny(object, &.{"value"});
-    const nonce = try u64FieldAny(object, &.{"nonce"});
+    const nonce = try u256FieldAny(object, &.{"nonce"});
     const encoded = try encodeLegacyTransaction(allocator, object, nonce, gas_price, gas_limit, recipient, value, input);
 
     return .{
@@ -521,7 +521,7 @@ fn transactionRecipient(object: *const JsonObject) !?evmz.Address {
 fn encodeLegacyTransaction(
     allocator: std.mem.Allocator,
     object: *const JsonObject,
-    nonce: u64,
+    nonce: u256,
     gas_price: u256,
     gas_limit: u64,
     recipient: ?evmz.Address,
@@ -531,7 +531,7 @@ fn encodeLegacyTransaction(
     var fields = rlp.Writer.alloc(allocator);
     defer fields.deinit();
 
-    try fields.int(u64, nonce);
+    try fields.int(u256, nonce);
     try fields.int(u256, gas_price);
     try fields.int(u64, gas_limit);
     if (recipient) |to| {

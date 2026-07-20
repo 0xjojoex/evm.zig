@@ -321,7 +321,7 @@ test "Sequential does not run before-transaction hooks for rejected transactions
             return error.UnexpectedExecution;
         },
         .rejected => |err| try std.testing.expectEqual(
-            evmz.Evm.Rejection.nonce_mismatch,
+            evmz.Evm.Rejection.nonce_too_high,
             err,
         ),
     }

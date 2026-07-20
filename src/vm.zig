@@ -1550,6 +1550,7 @@ test "Executor runs low-level standalone create" {
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create = Create{
         .sender = sender,
+        .recipient = create_address,
         .init_code = init_code,
     };
     const result = (try executor.runStandalone(
@@ -2013,7 +2014,7 @@ test "transaction STF returns rejected validation result" {
             .gas_limit = 300_000,
         },
     });
-    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(result));
+    try std.testing.expectEqual(EthValidationError.nonce_too_low, try expectRejected(result));
 
     var diff = try executor.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -2055,7 +2056,7 @@ test "rejected transaction preserves the retained Executor overlay" {
             .gas_limit = 100_000,
         },
     });
-    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
 
     var diff = try executor.changeset();
     defer diff.deinit(std.testing.allocator);
@@ -2240,7 +2241,7 @@ test "rejected transaction clears the Executor log surface" {
             .value = 7,
         },
     });
-    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
     try std.testing.expectEqual(@as(usize, 0), executor.logs().len);
 }
 
@@ -2441,7 +2442,7 @@ test "Sequential validation rejection skips rollback snapshot" {
         .to = recipient,
         .gas_limit = 300_000,
     });
-    try std.testing.expectEqual(EthValidationError.nonce_mismatch, try expectRejected(rejected));
+    try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
     try std.testing.expect(!failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), (try block.finish()).tx_count);
 }

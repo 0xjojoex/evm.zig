@@ -273,8 +273,9 @@ fn runEvmcHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize)
         .input_data = null,
         .input_size = 0,
         .value = evmc_common.toEvmcBytes32(0),
-        .create2_salt = evmc_common.toEvmcBytes32(0),
         .code_address = address,
+        .code = null,
+        .code_size = 0,
     };
 
     counting_host.resetCounters();

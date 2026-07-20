@@ -35,6 +35,7 @@ const StorageSlot = struct {
 pub const HostCounters = struct {
     account_exists: u64 = 0,
     balance: u64 = 0,
+    nonce: u64 = 0,
     code_size: u64 = 0,
     code_hash: u64 = 0,
     copy_code: u64 = 0,
@@ -119,6 +120,7 @@ pub const CountingHost = struct {
         return .{ .ptr = self, .vtable = &.{
             .accountExists = accountExists,
             .getBalance = getBalance,
+            .getNonce = getNonce,
             .copyCode = copyCode,
             .getCodeSize = getCodeSize,
             .getCodeHash = getCodeHash,
@@ -150,6 +152,13 @@ pub const CountingHost = struct {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.balance += 1;
+        return 0;
+    }
+
+    noinline fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+        const self: *CountingHost = @ptrCast(@alignCast(ptr));
+        _ = address;
+        self.counters.nonce += 1;
         return 0;
     }
 

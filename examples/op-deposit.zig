@@ -186,10 +186,15 @@ const DepositTransition = struct {
             gas_plan.execution
         else
             null;
+        const created_address = if (tx.to == null)
+            evmz.address.create(tx.from, deposit_nonce)
+        else
+            null;
         const request = executionRequest(
             input.chain_id,
             input.block,
             tx,
+            created_address,
             execution_gas orelse evmz.execution.ExecutionGas.legacy(0),
         );
 
@@ -367,6 +372,7 @@ fn executionRequest(
     chain_id: u256,
     block: evmz.execution.BlockEnvironment,
     tx: DepositTransaction,
+    created_address: ?Address,
     gas: evmz.execution.ExecutionGas,
 ) evmz.execution.EvmExecutionRequest {
     const message: evmz.execution.Message = if (tx.to) |recipient|
@@ -379,6 +385,7 @@ fn executionRequest(
     else
         .{ .create = .{
             .sender = tx.from,
+            .recipient = created_address.?,
             .init_code = tx.input,
             .value = tx.value,
         } };

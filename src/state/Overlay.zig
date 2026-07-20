@@ -527,6 +527,17 @@ pub fn getBalance(self: *Overlay, address: Address) !u256 {
     return balance;
 }
 
+pub fn getNonce(self: *Overlay, address: Address) !u64 {
+    const nonce = if (try self.getAccountOrLoad(address)) |account| account.nonce else 0;
+    try self.traceStateRead(.{
+        .nonce = .{
+            .address = address,
+            .value = nonce,
+        },
+    });
+    return nonce;
+}
+
 pub fn setBalance(self: *Overlay, address: Address, value: u256) !void {
     const mutation_checkpoint = self.journal.checkpoint(self.logs.items.len);
     errdefer self.rollbackInternalCheckpoint(mutation_checkpoint);

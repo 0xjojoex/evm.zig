@@ -12,6 +12,7 @@ const opcode_info = @import("../opcode.zig");
 const protocol_types = @import("../protocol/types.zig");
 const protocol_binding = @import("../protocol/binding.zig");
 const support = @import("../protocol/support.zig");
+const authorization = @import("authorization.zig");
 const instruction = @import("instruction.zig");
 const precompile = @import("precompile.zig");
 const revision = @import("revision.zig");
@@ -40,7 +41,7 @@ pub fn TransactionOptions(comptime R: type) type {
     return struct {
         transaction: transaction_config.Patch(R) = .{},
         settlement: settlement.Settlement.Patch(R) = .{},
-        authorization: settlement.Authorization.Patch(R) = .{},
+        authorization: authorization.Authorization.Patch(R) = .{},
     };
 }
 
@@ -77,7 +78,7 @@ pub fn transactionFor(comptime R: type, comptime cfg: TransactionOptions(R)) def
     return .{
         .transaction = mergePatch(transaction_config.config(R), cfg.transaction),
         .settlement = mergePatch(settlement.Settlement.config(R), cfg.settlement),
-        .authorization = mergePatch(settlement.Authorization.config(R), cfg.authorization),
+        .authorization = mergePatch(authorization.Authorization.config(R), cfg.authorization),
     };
 }
 

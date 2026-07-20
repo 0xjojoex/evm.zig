@@ -15,7 +15,8 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
         .insufficient_max_fee_per_blob_gas => "TransactionException.INSUFFICIENT_MAX_FEE_PER_BLOB_GAS",
         .gas_allowance_exceeded => "TransactionException.GAS_ALLOWANCE_EXCEEDED",
         .nonce_is_max => "TransactionException.NONCE_IS_MAX",
-        .nonce_mismatch => "TransactionException.NONCE_MISMATCH",
+        .nonce_too_low => "TransactionException.NONCE_MISMATCH_TOO_LOW",
+        .nonce_too_high => "TransactionException.NONCE_MISMATCH_TOO_HIGH",
         .type_1_tx_pre_fork => "TransactionException.TYPE_1_TX_PRE_FORK",
         .type_2_tx_pre_fork => "TransactionException.TYPE_2_TX_PRE_FORK",
         .type_3_tx_pre_fork => "TransactionException.TYPE_3_TX_PRE_FORK",
@@ -54,7 +55,7 @@ pub fn rawValidationErrorMatchesEest(error_value: transaction_envelope.RawValida
     return exceptionNameMatches(rawEestExceptionName(error_value), expected);
 }
 
-fn exceptionNameMatches(name: []const u8, expected: []const u8) bool {
+pub fn exceptionNameMatches(name: []const u8, expected: []const u8) bool {
     var it = std.mem.splitScalar(u8, expected, '|');
     while (it.next()) |part| {
         if (std.mem.eql(u8, std.mem.trim(u8, part, " \t\r\n"), name)) return true;
@@ -82,5 +83,13 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
     try std.testing.expect(validationErrorMatchesEest(
         .gas_allowance_exceeded,
         "TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",
+    ));
+    try std.testing.expect(validationErrorMatchesEest(
+        .nonce_too_low,
+        "TransactionException.NONCE_MISMATCH_TOO_LOW",
+    ));
+    try std.testing.expect(validationErrorMatchesEest(
+        .nonce_too_high,
+        "TransactionException.NONCE_MISMATCH_TOO_HIGH",
     ));
 }

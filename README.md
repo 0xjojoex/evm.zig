@@ -11,7 +11,7 @@ evm.zig is a fast and composable EVM execution engine, as a Zig library:
 
 ## Current Status
 
-- glamsterdam: `66,668/66,668` EEST state vectors passing (`tests-glamsterdam-devnet@v6.1.0`)
+- glamsterdam devnet-7: `67,066/67,066` EEST state vectors passing (`tests-glamsterdam-devnet@v7.2.0`)
 
 ## Ongoing Work
 
@@ -171,7 +171,7 @@ entrypoint. Public headers are in `include/`.
 ## Benchmarks
 
 State execution is validated against the locked Ethereum Execution Spec Tests
-corpus: `66,668` state vectors, `0` failed, `0` skipped. The EEST runner and
+corpus: `67,066` state vectors, `0` failed, `0` skipped. The EEST runner and
 fixture tooling live in `eest/`.
 
 Fixed-Osaka benchmark snapshots use native ReleaseFast builds and explicitly

@@ -23,7 +23,6 @@ pub const DefaultPlan = struct {
     payer: ?Address = null,
     gas_limit: u64,
     intrinsic_gas: u64,
-    intrinsic_state_gas: u64,
     floor_gas: u64,
     gas_price: u256,
     priority_fee: u256,
@@ -145,6 +144,9 @@ const EthereumSettlementProtocol = struct {
         pub fn usesStateGasAccounting(revision: Revision) bool {
             return revision.isImpl(.amsterdam);
         }
+        pub fn appliesCalldataFloorToBlockRegularGas(revision: Revision) bool {
+            return revision.isImpl(.amsterdam);
+        }
     };
 };
 
@@ -178,7 +180,6 @@ pub fn Runtime(
                 .payer = fees.payer,
                 .gas_limit = gas_limit,
                 .intrinsic_gas = plan.intrinsic_gas,
-                .intrinsic_state_gas = plan.intrinsic_state_gas,
                 .floor_gas = plan.floor_gas,
                 .gas_price = fees.gas_price,
                 .priority_fee = fees.priority_fee,
@@ -286,10 +287,7 @@ fn calculateDefaultCosts(
     const refund_gas = @min(raw_refund, refund_cap);
     const gas_used_after_refund = pre_refund_gas_used - @min(pre_refund_gas_used, refund_gas);
     const gas_used = @max(gas_used_after_refund, settlement.floor_gas);
-    const block_state_gas_used = if (uses_state_gas_accounting)
-        settledStateGas(settlement.intrinsic_state_gas, result.state_gas_spent)
-    else
-        0;
+    const block_state_gas_used = if (uses_state_gas_accounting) positiveGas(result.state_gas_spent) else 0;
     const block_regular_before_floor = pre_refund_gas_used - @min(pre_refund_gas_used, block_state_gas_used);
     const block_regular_gas_used = if (uses_state_gas_accounting)
         if (applies_calldata_floor_to_block_regular_gas)
@@ -322,13 +320,6 @@ pub fn checkedGasCost(gas: u64, price: u256) !u256 {
 fn positiveGas(gas: i64) u64 {
     if (gas <= 0) return 0;
     return std.math.cast(u64, gas) orelse std.math.maxInt(u64);
-}
-
-fn settledStateGas(intrinsic_state_gas: u64, execution_state_gas: i64) u64 {
-    if (execution_state_gas >= 0) {
-        return intrinsic_state_gas +| (std.math.cast(u64, execution_state_gas) orelse std.math.maxInt(u64));
-    }
-    return intrinsic_state_gas -| (std.math.cast(u64, -execution_state_gas) orelse std.math.maxInt(u64));
 }
 
 test "effective priority fee follows legacy and dynamic fee policy" {
@@ -396,7 +387,6 @@ test "settlement costs cap gas refund by fork" {
         .revision_id = definition_support.revisionId(EthRevision.london),
         .gas_limit = 100,
         .intrinsic_gas = 20,
-        .intrinsic_state_gas = 0,
         .floor_gas = 0,
         .gas_price = 5,
         .priority_fee = 2,
@@ -437,7 +427,6 @@ test "settlement costs use runtime gas accounting policy" {
         .revision_id = definition_support.revisionId(CustomRevision.custom),
         .gas_limit = 100,
         .intrinsic_gas = 20,
-        .intrinsic_state_gas = 10,
         .floor_gas = 30,
         .gas_price = 5,
         .priority_fee = 2,
@@ -451,9 +440,9 @@ test "settlement costs use runtime gas accounting policy" {
     });
 
     try std.testing.expectEqual(@as(u64, 38), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 33), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 33), costs.gas.block.regular);
-    try std.testing.expectEqual(@as(u64, 17), costs.gas.block.state);
+    try std.testing.expectEqual(@as(u64, 43), costs.gas.block.total);
+    try std.testing.expectEqual(@as(u64, 43), costs.gas.block.regular);
+    try std.testing.expectEqual(@as(u64, 7), costs.gas.block.state);
     try std.testing.expectEqual(@as(u64, 62), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 310), costs.payer_refund);
     try std.testing.expectEqual(@as(u256, 76), costs.fee_payment);
@@ -493,7 +482,6 @@ test "settlement policy selects calldata floor contribution to dimensional block
         .revision_id = definition_support.revisionId(CustomRevision.custom),
         .gas_limit = 100,
         .intrinsic_gas = 20,
-        .intrinsic_state_gas = 0,
         .floor_gas = 30,
         .gas_price = 5,
         .priority_fee = 2,
@@ -521,7 +509,6 @@ test "settlement costs enforce Prague calldata floor after refunds" {
         .revision_id = definition_support.revisionId(EthRevision.prague),
         .gas_limit = 21_100,
         .intrinsic_gas = 21_016,
-        .intrinsic_state_gas = 0,
         .floor_gas = 21_040,
         .gas_price = 7,
         .priority_fee = 0,
@@ -546,7 +533,6 @@ test "Amsterdam block gas accounting excludes refunds" {
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 100,
         .intrinsic_gas = 20,
-        .intrinsic_state_gas = 0,
         .floor_gas = 0,
         .gas_price = 5,
         .priority_fee = 2,
@@ -572,7 +558,6 @@ test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 120_000_000,
         .intrinsic_gas = 21_000,
-        .intrinsic_state_gas = 0,
         .floor_gas = 21_000,
         .gas_price = 10,
         .priority_fee = 3,
@@ -596,10 +581,9 @@ test "Amsterdam failed create refills state gas before floor charge" {
     const eth_tx = @import("../eth/transaction.zig");
     const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),
-        .gas_limit = 271_798,
-        .intrinsic_gas = 271_798,
-        .intrinsic_state_gas = eth_tx.amsterdam_new_account_state_gas,
-        .floor_gas = 271_776,
+        .gas_limit = 282_798,
+        .intrinsic_gas = 88_198,
+        .floor_gas = 282_776,
         .gas_price = 10,
         .priority_fee = 3,
         .fee_recipient = address.addr(0xbeef),
@@ -608,14 +592,14 @@ test "Amsterdam failed create refills state gas before floor charge" {
         .gas_left = 0,
         .gas_refund = 0,
         .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
-        .state_gas_spent = -@as(i64, eth_tx.amsterdam_new_account_state_gas),
+        .state_gas_spent = 0,
     });
 
-    try std.testing.expectEqual(@as(u64, 271_776), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 88_198), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 88_198), costs.gas.block.regular);
+    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.used);
+    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.block.total);
+    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.block.regular);
     try std.testing.expectEqual(@as(u64, 0), costs.gas.block.state);
     try std.testing.expectEqual(@as(u64, 22), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 220), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 815_328), costs.fee_payment);
+    try std.testing.expectEqual(@as(u256, 848_328), costs.fee_payment);
 }

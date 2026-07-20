@@ -43,6 +43,21 @@ pub const Snapshot = StateOverlay.Snapshot;
 pub const TransientSnapshot = StateOverlay.TransientSnapshot;
 pub const EvmResult = Host.Result;
 const EvmResultType = EvmResult;
+
+/// Root execution reports whether the VM reached payload execution so the
+/// transaction program can place its preparation checkpoint without
+/// duplicating CALL/CREATE dispatch semantics.
+pub const TransactionExecutionStage = enum {
+    preparation,
+    payload,
+};
+
+pub const TransactionExecutionOutcome = struct {
+    stage: TransactionExecutionStage,
+    result: Interpreter.Result,
+};
+
+const TransactionExecutionOutcomeType = TransactionExecutionOutcome;
 const SnapshotType = Snapshot;
 const TransientSnapshotType = TransientSnapshot;
 const call_runtime = @import("./executor/call_runtime.zig");
@@ -288,6 +303,7 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub const Create = CreateType;
         pub const Message = MessageType;
         pub const EvmResult = EvmResultType;
+        pub const TransactionExecutionOutcome = TransactionExecutionOutcomeType;
         pub const Snapshot = SnapshotType;
         pub const TransientSnapshot = TransientSnapshotType;
         pub const code_deposit_gas = code_deposit_gas_value;
@@ -376,6 +392,14 @@ pub fn Executor(comptime ProtocolType: type) type {
             ) !Interpreter.Result {
                 try self.requireActive();
                 return self.executor.executeTransactionRequest(request);
+            }
+
+            pub fn executeRequestPhased(
+                self: TransactionAttempt,
+                request: execution_values.EvmExecutionRequest,
+            ) !TransactionExecutionOutcomeType {
+                try self.requireActive();
+                return self.executor.executeTransactionRequestPhased(request);
             }
 
             /// Execute a nested prelude request under this attempt's outer
@@ -1395,11 +1419,12 @@ pub fn Executor(comptime ProtocolType: type) type {
         pub fn executeCreateTransaction(
             self: *Self,
             sender: Address,
+            recipient: Address,
             init_code: []const u8,
             gas: execution_values.ExecutionGas,
             value: u256,
         ) !Self.EvmResult {
-            return runtime.executeCreateTransaction(self, sender, init_code, gas, value);
+            return runtime.executeCreateTransaction(self, sender, recipient, init_code, gas, value);
         }
 
         /// Execute a raw create/create2 message inside an already-open tx scope.
@@ -1471,9 +1496,20 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// The caller owns transaction charging, nonce/access/auth handling, settlement,
         /// and final commit/rollback. Transaction programs compose those pieces.
         pub fn executeTransactionRequest(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
+            return (try self.executeTransactionRequestPhased(request)).result;
+        }
+
+        /// Execute one root request and report whether dispatch preparation
+        /// completed. The result remains an EVM result; the stage is only the
+        /// neutral fact needed by a family transaction coordinator to choose
+        /// its outer rollback boundary.
+        pub fn executeTransactionRequestPhased(
+            self: *Self,
+            request: execution_values.EvmExecutionRequest,
+        ) !TransactionExecutionOutcomeType {
             try self.validateScopeContext(request.context);
             try self.validateScopeRoot(.fromMessage(request.message));
-            return self.executeTransactionRequestTrusted(request);
+            return self.executeTransactionRequestTrustedPhased(request);
         }
 
         /// Execute and finalize one family prelude request in its own execution
@@ -1503,34 +1539,31 @@ pub fn Executor(comptime ProtocolType: type) type {
         }
 
         fn executeTransactionRequestTrusted(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
+            return (try self.executeTransactionRequestTrustedPhased(request)).result;
+        }
+
+        fn executeTransactionRequestTrustedPhased(
+            self: *Self,
+            request: execution_values.EvmExecutionRequest,
+        ) !TransactionExecutionOutcomeType {
             switch (request.message) {
                 .call => |call| try self.traceAccountAccess(call.recipient, 0),
-                .create => {},
+                .create => |create| try self.traceAccountAccess(create.recipient, 0),
             }
-            const result = try self.executeMessage(request.message, request.gas);
-            return switch (result) {
-                .call => |call_result| .{
-                    .status = call_result.status,
-                    .gas_left = call_result.gas_left,
-                    .gas_refund = call_result.gas_refund,
-                    .gas_reservoir = call_result.gas_reservoir,
-                    .state_gas_spent = call_result.state_gas_spent,
-                    .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
-                    .output_data = self.lastOutputData(),
-                },
-                .create => |create_result| blk: {
-                    var interpreter_result = Interpreter.Result{
-                        .status = create_result.status,
-                        .gas_left = create_result.gas_left,
-                        .gas_refund = create_result.gas_refund,
-                        .gas_reservoir = create_result.gas_reservoir,
-                        .state_gas_spent = create_result.state_gas_spent,
-                        .state_gas_from_gas_left = create_result.state_gas_from_gas_left,
-                        .output_data = self.lastOutputData(),
-                    };
-                    interpreter_result.refillIntrinsicStateGas(create_result.state_gas_refund);
-                    break :blk interpreter_result;
-                },
+            return switch (request.message) {
+                .call => |call| runtime.executeCallTransactionPhased(
+                    self,
+                    call.sender,
+                    call.recipient,
+                    call.input,
+                    request.gas,
+                    call.value,
+                ),
+                .create => |create| runtime.executeCreateTransactionPhased(
+                    self,
+                    create,
+                    request.gas,
+                ),
             };
         }
 
@@ -1801,6 +1834,7 @@ test "CREATE initcode preparation remains execution-local" {
     try executor.beginCreateTransaction(tx_context, sender);
     const result = (try executor.executeCreate(.{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
     }, .legacy(100_000))).expectCreate();
     executor.closeTransaction();
@@ -3318,7 +3352,13 @@ test "top-level transaction execution requires begin tx context" {
     );
     try std.testing.expectError(
         error.MissingTxContext,
-        executor.executeCreateTransaction(evmz.addr(0xaaaa), &.{}, .legacy(100_000), 0),
+        executor.executeCreateTransaction(
+            evmz.addr(0xaaaa),
+            evmz.address.create(evmz.addr(0xaaaa), 0),
+            &.{},
+            .legacy(100_000),
+            0,
+        ),
     );
     try std.testing.expectError(
         error.MissingTxContext,
@@ -3331,6 +3371,7 @@ test "top-level transaction execution requires begin tx context" {
         error.MissingTxContext,
         executor.executeCreate(.{
             .sender = evmz.addr(0xaaaa),
+            .recipient = evmz.address.create(evmz.addr(0xaaaa), 0),
             .init_code = &.{},
         }, .legacy(100_000)),
     );
@@ -3379,6 +3420,7 @@ test "executor executes top-level create transaction" {
     try executor.beginCreateTransaction(tx_context, sender);
     const result = (try executor.executeCreate(.{
         .sender = sender,
+        .recipient = create_address,
         .init_code = init_code,
     }, .legacy(100_000))).expectCreate();
 
@@ -3574,6 +3616,7 @@ test "Amsterdam raises create runtime code size limit" {
 
     const osaka_result = (try osaka.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_osaka,
     } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, osaka_result.status);
@@ -3586,6 +3629,7 @@ test "Amsterdam raises create runtime code size limit" {
 
     const amsterdam_result = (try amsterdam.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_osaka,
     } }, .{
         .regular_left = 20_000_000,
@@ -3603,6 +3647,7 @@ test "Amsterdam raises create runtime code size limit" {
 
     const amsterdam_over_result = (try amsterdam_over.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_amsterdam,
     } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, amsterdam_over_result.status);
@@ -3631,6 +3676,7 @@ test "protocol definition drives create runtime code size limit" {
 
     const result = (try executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &two_byte_runtime,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
@@ -3662,6 +3708,7 @@ test "protocol definition drives create runtime prefix rejection" {
 
     const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.invalid, default_result.status);
@@ -3675,6 +3722,7 @@ test "protocol definition drives create runtime prefix rejection" {
 
     const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, custom_result.status);
@@ -3704,6 +3752,7 @@ test "protocol definition drives create deposit gas" {
 
     const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, default_result.status);
@@ -3718,6 +3767,7 @@ test "protocol definition drives create deposit gas" {
 
     const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status);
@@ -3746,6 +3796,7 @@ test "protocol definition drives created account initial nonce" {
 
     const result = (try executor.runStandalone(tx_context, .{ .create = .{
         .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -3919,7 +3970,7 @@ test "create warms created address from Berlin" {
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, init_code, .legacy(100_000), 0)).expectCreate();
+    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expect(executor.state.warm_accounts.contains(create_address));
@@ -3992,7 +4043,7 @@ test "create address collision closes checkpoint without rolling back nonce or w
 
     try executor.beginCreateTransaction(tx_context, sender);
 
-    const result = (try executor.executeCreateTransaction(sender, &.{0x00}, .legacy(100_000), 1)).expectCreate();
+    const result = (try executor.executeCreateTransaction(sender, create_address, &.{0x00}, .legacy(100_000), 1)).expectCreate();
     try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
@@ -4313,7 +4364,7 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 
     const init_code = &.{ 0x60, 0xef, 0x60, 0x00, 0x53, 0x60, 0x10, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, init_code, .legacy(100_000), 0)).expectCreate();
+    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);

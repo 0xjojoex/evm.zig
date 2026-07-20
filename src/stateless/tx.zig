@@ -28,7 +28,7 @@ fn decodeLegacy(allocator: std.mem.Allocator, bytes: []const u8, sender: Address
     var fields = try cursor.nextList();
     try cursor.expectDone();
 
-    const nonce = try fields.nextInt(u64);
+    const nonce = try fields.nextInt(u256);
     const gas_price = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
     const to = try nextTo(&fields);
@@ -68,7 +68,7 @@ fn decodeTyped(allocator: std.mem.Allocator, typed: transaction_envelope.TypedEn
 
 fn decodeAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!Evm.Transaction {
     _ = try fields.nextInt(u256);
-    const nonce = try fields.nextInt(u64);
+    const nonce = try fields.nextInt(u256);
     const gas_price = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
     const to = try nextTo(fields);
@@ -95,7 +95,7 @@ fn decodeAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
 
 fn decodeDynamicFee(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!Evm.Transaction {
     _ = try fields.nextInt(u256);
-    const nonce = try fields.nextInt(u64);
+    const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
@@ -124,7 +124,7 @@ fn decodeDynamicFee(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
 
 fn decodeBlob(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!Evm.Transaction {
     _ = try fields.nextInt(u256);
-    const nonce = try fields.nextInt(u64);
+    const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
@@ -157,7 +157,7 @@ fn decodeBlob(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address
 
 fn decodeSetCode(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!Evm.Transaction {
     _ = try fields.nextInt(u256);
-    const nonce = try fields.nextInt(u64);
+    const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
@@ -293,10 +293,19 @@ test "raw stateless tx decoder parses EIP-155 legacy transaction" {
 
     const tx = try decodeRaw(std.testing.allocator, &bytes);
     try std.testing.expectEqual(transaction.TxKind.legacy, tx.kind);
-    try std.testing.expectEqual(@as(u64, 9), tx.nonce.?);
+    try std.testing.expectEqual(@as(u256, 9), tx.nonce.?);
     try std.testing.expectEqual(@as(u64, 21_000), tx.gas_limit);
     try std.testing.expectEqual(@as(u256, 20_000_000_000), tx.gas_price);
     try std.testing.expectEqual(@as(u256, 1_000_000_000_000_000_000), tx.value);
+}
+
+test "raw stateless tx decoder preserves oversized nonce for validation" {
+    const hex = "f86a890100000000000000000a840100000094c0f6dc9e5836f54caadbf59cc69346c508e1992b80801ba0cd04d88708bbad530786430987e9667cba97f605f4819110969e251ef1eeb93aa040f1a49cc61090cefdfdea2f53a8db89c229fad178f469a86dcebefe63e56fbc";
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, hex);
+
+    const tx = try decodeRaw(std.testing.allocator, &bytes);
+    try std.testing.expectEqual(@as(u256, 1) << 64, tx.nonce.?);
 }
 
 test "raw stateless tx decoder counts but skips unrecoverable authorization tuples" {

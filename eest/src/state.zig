@@ -227,6 +227,7 @@ fn runVector(
     const indexes = asObject(post_obj.get("indexes") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&tx, &.{
         "nonce",
+        "chainId",
         "gasLimit",
         "to",
         "value",
@@ -286,10 +287,34 @@ fn runVector(
     defer allocator.free(blob_hashes);
     const recipient = if (is_create) null else try parseAddress(to_string);
     const vm_env = try parseVmEnv(revision, &env, config);
+    if (expected_exception) |expected| {
+        if (try serializedTransactionExceptionMatches(allocator, &post_obj, expected)) {
+            var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
+            defer host.deinit();
+            try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
+            return;
+        }
+    }
+    if (try optionalU256(&tx, "chainId")) |tx_chain_id| {
+        if (tx_chain_id != vm_env.chain_id) {
+            var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
+            defer host.deinit();
+            if (expected_exception) |expected| {
+                if (tx_validation.exceptionNameMatches("TransactionException.INVALID_CHAINID", expected)) {
+                    try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
+                } else {
+                    summary.countFail(.expected_transaction_exception);
+                }
+            } else {
+                summary.countFail(.unexpected_status);
+            }
+            return;
+        }
+    }
     const public_tx = evmz.Transaction{
         .kind = inferTxKind(&tx),
         .sender = sender,
-        .nonce = try optionalU64(&tx, "nonce"),
+        .nonce = try optionalU256(&tx, "nonce"),
         .gas_limit = gas_limit,
         .to = recipient,
         .input = input,
@@ -313,6 +338,24 @@ fn runVector(
     defer host.deinit();
     const result = try host.transact(public_tx);
     try finishVectorResult(allocator, fixture, &post_obj, &host, result, expected_exception, summary);
+}
+
+fn serializedTransactionExceptionMatches(
+    allocator: std.mem.Allocator,
+    post_obj: *const std.json.ObjectMap,
+    expected: []const u8,
+) !bool {
+    if (!tx_validation.exceptionNameMatches("TransactionException.INVALID_SIGNATURE_VRS", expected)) return false;
+
+    const value = post_obj.get("txbytes") orelse return false;
+    const tx_bytes = try parseBytesFromValue(allocator, value);
+    defer allocator.free(tx_bytes);
+
+    _ = evmz.transaction.recoverSender(allocator, tx_bytes) catch |err| return switch (err) {
+        error.InvalidSignature, error.UnsupportedLegacyV => true,
+        else => false,
+    };
+    return false;
 }
 
 fn finishVectorResult(
@@ -347,7 +390,7 @@ fn finishVectorResult(
 
 fn validationFailReason(err: EthTransactionProtocol.Tx.ValidationError) FailReason {
     return switch (err) {
-        .nonce_mismatch => .transaction_nonce_mismatch,
+        .nonce_too_low, .nonce_too_high => .transaction_nonce_mismatch,
         else => .unexpected_status,
     };
 }
@@ -1088,6 +1131,19 @@ test "EEST expected transaction validation exception passes" {
     try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
 }
 
+test "EEST expected invalid signature is proven from serialized transaction bytes" {
+    const summary = try runMinimalStateFixture(
+        "",
+        "0x0186a0",
+        "0x",
+        ",\"txbytes\":\"0xf841800a840100000094f89a03b42ea1412874da2cf1ae48956f73d0603901801b01a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1\",\"expectException\":\"TransactionException.INVALID_SIGNATURE_VRS\"",
+        "\"storage\":{}",
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
+}
+
 fn runMinimalStateFixture(
     tx_extra: []const u8,
     gas_limit: []const u8,
@@ -1183,6 +1239,19 @@ test "EEST transaction nonce mismatch fails" {
     );
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.transaction_nonce_mismatch)]);
+}
+
+test "EEST oversized transaction nonce reaches protocol validation" {
+    const summary = try runMinimalStateFixture(
+        ",\"nonce\":\"0x010000000000000000\"",
+        "0x0186a0",
+        "0x",
+        ",\"expectException\":\"TransactionException.NONCE_IS_MAX\"",
+        "\"storage\":{}",
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
 }
 
 test "EEST post balance and nonce mismatches fail" {

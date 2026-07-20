@@ -69,12 +69,14 @@ pub const ValueTransferInput = struct {
 pub const AuthorizationSuccessInput = struct {
     /// Whether the authority account existed before this tuple was applied.
     account_exists: bool,
+    /// Whether this transaction has already paid to write the authority leaf.
+    account_already_written: bool,
     /// Whether this tuple removes, rather than installs, delegation code.
     clears_delegation: bool,
-    /// Whether the authority was delegated immediately before this tuple.
-    delegated_before_tuple: bool,
-    /// Whether the authority was delegated before its first tuple in this transaction.
-    delegated_before_first_tuple: bool,
+    /// Whether the authority was delegated before transaction execution began.
+    delegated_before_transaction: bool,
+    /// Whether an earlier tuple installed a delegation for this authority.
+    delegation_set_before: bool,
 };
 
 /// Facts deciding whether CALL charges for materializing its recipient.
@@ -82,6 +84,12 @@ pub const CallNewAccountInput = struct {
     value: u256,
     /// Actual recipient existence observed before the call.
     account_exists: bool,
+};
+
+/// Facts deciding whether CREATE charges for materializing its derived target.
+pub const CreateAccountStateGasInput = struct {
+    /// Whether the derived target is alive before creation begins.
+    target_alive: bool,
 };
 
 /// Facts deciding top-frame value-transfer state gas.
@@ -237,12 +245,20 @@ pub const DelegatedAccountAccess = struct {
 };
 
 pub const AuthorizationGasAdjustment = struct {
+    /// State gas charged before writing a newly-created authority account.
+    account_state_charge: u64 = 0,
+    /// Regular gas charged for the transaction's first authority-leaf write.
+    account_write_charge: u64 = 0,
+    /// State gas charged for the transaction's first new delegation indicator.
+    delegation_state_charge: u64 = 0,
+    /// Legacy regular-gas refund retained for pre-Amsterdam authorization rules.
     regular_refund: u64 = 0,
-    state_refund: u64 = 0,
 
     pub fn add(self: *AuthorizationGasAdjustment, other: AuthorizationGasAdjustment) void {
+        self.account_state_charge = std.math.add(u64, self.account_state_charge, other.account_state_charge) catch std.math.maxInt(u64);
+        self.account_write_charge = std.math.add(u64, self.account_write_charge, other.account_write_charge) catch std.math.maxInt(u64);
+        self.delegation_state_charge = std.math.add(u64, self.delegation_state_charge, other.delegation_state_charge) catch std.math.maxInt(u64);
         self.regular_refund = std.math.add(u64, self.regular_refund, other.regular_refund) catch std.math.maxInt(u64);
-        self.state_refund = std.math.add(u64, self.state_refund, other.state_refund) catch std.math.maxInt(u64);
     }
 };
 

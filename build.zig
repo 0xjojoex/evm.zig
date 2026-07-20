@@ -242,6 +242,10 @@ pub fn build(b: *std.Build) void {
             c_api_tests_mod.addImport("mpt", mpt_mod);
             c_api_tests_mod.addIncludePath(b.path("include"));
             c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
+            c_api_tests_mod.addCSourceFile(.{
+                .file = b.path("src/c_api/evmc_abi18_smoke.c"),
+                .flags = &.{ "-Wall", "-Wextra", "-pedantic", "-std=c23" },
+            });
             addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
             addNativeKeccak(c_api_tests_mod, xkcp_object);
             addNativeSecp256k1(c_api_tests_mod, libsecp256k1_object);
@@ -452,7 +456,7 @@ pub fn build(b: *std.Build) void {
                     "-Wall",
                     "-Wextra",
                     "-pedantic",
-                    "-std=c99",
+                    "-std=c23",
                 },
             });
             example_c.root_module.linkLibrary(static_c_lib.?);

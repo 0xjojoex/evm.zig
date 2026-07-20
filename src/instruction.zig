@@ -643,8 +643,9 @@ test "interpreter executes with non-Ethereum revision protocol" {
                 return 0;
             }
 
-            pub fn createAccountStateGas(revision_value: CustomRevision) i64 {
+            pub fn createAccountStateGas(revision_value: CustomRevision, input: protocol_types.CreateAccountStateGasInput) i64 {
                 _ = revision_value;
+                _ = input;
                 return 0;
             }
         };

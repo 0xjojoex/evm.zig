@@ -63,6 +63,7 @@ pub fn getInterface() evmc.evmc_host_interface {
         .get_storage = getStorage,
         .set_storage = setStorage,
         .get_balance = getBalance,
+        .get_nonce = getNonce,
         .get_code_size = getCodeSize,
         .get_code_hash = getCodeHash,
         .copy_code = copyCode,
@@ -77,9 +78,9 @@ pub fn getInterface() evmc.evmc_host_interface {
         .set_transient_storage = setTransientStorage,
     };
 }
-fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) bool {
+fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u8 {
     const host = HostContext.getHostFromContext(context);
-    return host.accountExists(fromEvmcAddress(address.*)) catch false;
+    return @intFromBool(host.accountExists(fromEvmcAddress(address.*)) catch false);
 }
 
 fn getStorage(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address, key: [*c]const evmc.evmc_bytes32) callconv(.c) evmc.evmc_bytes32 {
@@ -104,6 +105,11 @@ fn getBalance(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_ad
     const host = HostContext.getHostFromContext(context);
     const b = host.getBalance(fromEvmcAddress(address.*)) catch 0;
     return toEvmcBytes32(b);
+}
+
+fn getNonce(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u64 {
+    const host = HostContext.getHostFromContext(context);
+    return host.getNonce(fromEvmcAddress(address.*)) catch 0;
 }
 
 fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) usize {
@@ -131,9 +137,9 @@ fn selfDestruct(
     context: ?*evmc.evmc_host_context,
     address: [*c]const evmc.evmc_address,
     beneficiary: [*c]const evmc.evmc_address,
-) callconv(.c) bool {
+) callconv(.c) u8 {
     const host = HostContext.getHostFromContext(context);
-    return host.selfDestruct(fromEvmcAddress(address.*), fromEvmcAddress(beneficiary.*)) catch false;
+    return @intFromBool(host.selfDestruct(fromEvmcAddress(address.*), fromEvmcAddress(beneficiary.*)) catch false);
 }
 
 fn call(
@@ -155,7 +161,6 @@ fn call(
         .value = fromEvmcBytes32(msg.*.value),
         .is_static = msg.*.flags & evmc.EVMC_STATIC != 0,
         .code_address = fromEvmcAddress(msg.*.code_address),
-        .create2_salt = fromEvmcBytes32(msg.*.create2_salt),
     };
 
     const result = host.call(message) catch return failureResult(evmc.EVMC_FAILURE);
@@ -171,7 +176,6 @@ fn call(
                 .gas_refund = 0,
                 .output_data = null,
                 .output_size = 0,
-                .create_address = std.mem.zeroes(evmc.evmc_address),
                 .release = null,
             };
         };
@@ -180,18 +184,12 @@ fn call(
         release_fn = releaseResult;
     }
 
-    const create_address = switch (result) {
-        .call => std.mem.zeroes(evmc.evmc_address),
-        .create => |create| toEvmcAddress(create.address),
-    };
-
     return evmc.evmc_result{
         .status_code = statusToEvmc(result.status()),
         .gas_left = result.gasLeft(),
         .gas_refund = result.gasRefund(),
         .output_data = output_ptr,
         .output_size = output_data.len,
-        .create_address = create_address,
         .release = release_fn,
     };
 }
@@ -203,7 +201,6 @@ fn failureResult(status_code: evmc.evmc_status_code) evmc.evmc_result {
         .gas_refund = 0,
         .output_data = null,
         .output_size = 0,
-        .create_address = std.mem.zeroes(evmc.evmc_address),
         .release = null,
     };
 }

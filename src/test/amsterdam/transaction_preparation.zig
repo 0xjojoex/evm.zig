@@ -99,14 +99,14 @@ test "Amsterdam prepare reads sender code only after nonce and funds checks" {
         .fail_code = true,
     };
 
-    const nonce_mismatch = try prepare(&probe, .{
+    const nonce_too_high = try prepare(&probe, .{
         .sender = evmz.addr(0xaaaa),
         .nonce = 1,
         .to = evmz.addr(0xbbbb),
         .gas_limit = 30_000,
         .gas_price = 1,
     }, .{});
-    try std.testing.expectEqual(Protocol.Tx.ValidationError.nonce_mismatch, try rejected(nonce_mismatch));
+    try std.testing.expectEqual(Protocol.Tx.ValidationError.nonce_too_high, try rejected(nonce_too_high));
     try probe.expectReads(&.{.account_summary});
 
     probe.resetReads();

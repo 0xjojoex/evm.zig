@@ -7,7 +7,6 @@ const Journal = @import("../state/Journal.zig");
 pub const ChildCreate = struct {
     checkpoint_state: Journal.Checkpoint,
     address: evmz.Address,
-    account_pre_existing: bool,
     kind: evmz.Host.CallKind,
     msg: evmz.Host.Message,
     init_code: []const u8,

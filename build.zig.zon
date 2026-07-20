@@ -13,8 +13,8 @@
             .hash = "N-V-__8AAN0aOwD_n2xFB-Q0eBNtvIKtGPfGZSVt0DdbmfH2",
         },
         .evmone = .{
-            .url = "https://github.com/ethereum/evmone/archive/v0.22.0.tar.gz",
-            .hash = "N-V-__8AADOYGwC_FdEquM666Mq-QPmuIaokolG11necs8NL",
+            .url = "https://github.com/ipsilon/evmone/archive/786c96f1c9dfde702e303260a504af93916d9574.tar.gz",
+            .hash = "N-V-__8AAPbMGwBbPwVga0NrOYojtKqDH0mpHAS9Abv4oYKn",
         },
         .mcl = .{
             .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.06.tar.gz",

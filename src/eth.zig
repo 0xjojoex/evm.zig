@@ -20,6 +20,7 @@ pub const transaction = @import("eth/transaction.zig");
 pub const transaction_prepare = @import("eth/transaction_prepare.zig");
 pub const transaction_validation = @import("eth/transaction_validation.zig");
 pub const transition = @import("eth/transition.zig");
+pub const authorization = @import("eth/authorization.zig");
 pub const settlement = @import("eth/settlement.zig");
 pub const precompile = @import("eth/precompile.zig");
 pub const system = @import("eth/system.zig");

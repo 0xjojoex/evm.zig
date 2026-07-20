@@ -215,7 +215,38 @@ pub fn For(comptime ProtocolType: type) type {
             if (frame.status != .running) return;
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
-            const account_state_gas = Protocol.create.createAccountStateGas(revision);
+            try frame.replaceReturnData(&.{});
+            if (frame.msg.depth >= Host.max_call_depth) {
+                frame.stack.pushUnchecked(0);
+                return;
+            }
+
+            const creator = frame.msg.recipient;
+            if (value != 0 and try frame.host.getBalance(creator) < value) {
+                frame.stack.pushUnchecked(0);
+                return;
+            }
+            const creator_nonce = try frame.host.getNonce(creator);
+            if (creator_nonce == std.math.maxInt(u64)) {
+                frame.stack.pushUnchecked(0);
+                return;
+            }
+            const target = if (is_create2)
+                evmz.address.create2(creator, salt, init_code)
+            else
+                evmz.address.create(creator, creator_nonce);
+            try frame.host.observeAccountAccess(target, nextDepth(frame.msg.depth));
+            const target_alive = if (try frame.host.getNonce(target) != 0)
+                true
+            else if (try frame.host.getBalance(target) != 0)
+                true
+            else blk: {
+                const code_hash = try frame.host.getCodeHash(target);
+                break :blk code_hash != 0 and code_hash != evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
+            };
+            const account_state_gas = Protocol.create.createAccountStateGas(revision, .{
+                .target_alive = target_alive,
+            });
             frame.trackStateGas(account_state_gas);
             if (frame.status != .running) return;
 
@@ -225,9 +256,9 @@ pub fn For(comptime ProtocolType: type) type {
                 .input_data = init_code,
                 .gas = frame.gas_left,
                 .gas_reservoir = frame.gas_reservoir,
+                .recipient = target,
                 .sender = frame.msg.recipient,
                 .value = value,
-                .create2_salt = salt,
             };
 
             const child_gas = Protocol.call.childGas(revision, .{
@@ -239,12 +270,6 @@ pub fn For(comptime ProtocolType: type) type {
                 return;
             }
             msg.gas = child_gas.gas;
-
-            if (frame.msg.depth >= Host.max_call_depth) {
-                frame.refillStateGas(account_state_gas);
-                frame.stack.pushUnchecked(0);
-                return;
-            }
 
             const continuation = Interpreter.CreateResume{
                 .gas_limit = msg.gas,

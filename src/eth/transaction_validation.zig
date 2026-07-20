@@ -25,7 +25,8 @@ pub const ValidationError = enum {
     insufficient_max_fee_per_blob_gas,
     gas_allowance_exceeded,
     nonce_is_max,
-    nonce_mismatch,
+    nonce_too_low,
+    nonce_too_high,
     type_1_tx_pre_fork,
     type_2_tx_pre_fork,
     type_3_tx_pre_fork,
@@ -40,6 +41,20 @@ pub const ValidationError = enum {
     type_4_empty_authorization_list,
     type_4_tx_contract_creation,
 };
+
+/// Transaction-owned classification of the encoded nonce domain. The raw
+/// `u256` exists only before this boundary; all usable nonce values are `u64`.
+pub const ClassifiedTransactionNonce = union(enum) {
+    absent,
+    valid: u64,
+    at_or_above_limit,
+};
+
+pub fn classifyTransactionNonce(encoded: ?u256) ClassifiedTransactionNonce {
+    const nonce = encoded orelse return .absent;
+    if (nonce >= std.math.maxInt(u64)) return .at_or_above_limit;
+    return .{ .valid = @intCast(nonce) };
+}
 
 /// Ethereum transaction facts consumed by the ordered preparation program.
 fn ValidationInput(comptime Protocol: type) type {
@@ -62,7 +77,7 @@ fn ValidationInput(comptime Protocol: type) type {
         max_fee_per_blob_gas: ?u256 = null,
         sender_balance: u256 = 0,
         sender_nonce: u64 = 0,
-        tx_nonce: ?u64 = null,
+        tx_nonce: ClassifiedTransactionNonce = .absent,
         sender_code_kind: SenderCodeKind = .empty,
         authorization_count: usize = 0,
         access_list_counts: AccessListCounts = .{},
@@ -106,21 +121,19 @@ pub fn Runtime(
             const transaction = &self.policy.transaction;
             if (self.inactiveTransactionKindError(input.revision, input.kind)) |err| return err;
 
-            if (gas_plan.intrinsic_regular_gas == std.math.maxInt(u64) or
-                gas_plan.intrinsic_state_gas == std.math.maxInt(u64) or
-                gas_plan.intrinsic_gas == std.math.maxInt(u64))
-            {
+            if (gas_plan.intrinsic_gas == std.math.maxInt(u64)) {
                 return .intrinsic_gas_too_low;
             }
 
             if (transaction.intrinsicRegularGasLimit(input.revision)) |regular_intrinsic_limit| {
-                const capped_intrinsic = @max(gas_plan.intrinsic_regular_gas, gas_plan.floor_gas);
+                const capped_intrinsic = @max(gas_plan.intrinsic_gas, gas_plan.floor_gas);
                 if (capped_intrinsic > regular_intrinsic_limit) return .intrinsic_gas_too_low;
             }
             if (input.gas_limit < gas_plan.intrinsic_gas) return .intrinsic_gas_too_low;
             if (input.gas_limit < gas_plan.floor_gas) return .intrinsic_gas_below_floor_gas_cost;
-            if (input.tx_nonce) |tx_nonce| {
-                if (tx_nonce == std.math.maxInt(u64)) return .nonce_is_max;
+            switch (input.tx_nonce) {
+                .at_or_above_limit => return .nonce_is_max,
+                .absent, .valid => {},
             }
             if (input.is_create and input.input.len > self.gasPlanner().maxInitcodeSize(input.revision))
                 return .initcode_size_exceeded;
@@ -174,8 +187,13 @@ pub fn Runtime(
                 if (!transaction.allowsContractCreation(input.revision, input.kind) and input.is_create) return .type_4_tx_contract_creation;
                 if (transaction.requiresAuthorizationList(input.revision, input.kind) and input.authorization_count == 0) return .type_4_empty_authorization_list;
             }
-            if (input.tx_nonce) |tx_nonce| {
-                if (tx_nonce != input.sender_nonce) return .nonce_mismatch;
+            switch (input.tx_nonce) {
+                .valid => |tx_nonce| {
+                    if (tx_nonce < input.sender_nonce) return .nonce_too_low;
+                    if (tx_nonce > input.sender_nonce) return .nonce_too_high;
+                },
+                .absent => {},
+                .at_or_above_limit => return .nonce_is_max,
             }
             const required_balance = self.maxPrepaymentCost(input) orelse return .insufficient_account_funds;
             if (input.sender_balance < required_balance) return .insufficient_account_funds;
@@ -400,13 +418,13 @@ test "transaction validation applies Amsterdam calldata floor" {
     }));
     try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
-        .gas_limit = 16_031,
+        .gas_limit = 19_031,
         .input = &amsterdam_floor_input,
         .sender_balance = 1_000_000,
     }).?);
     try std.testing.expectEqual(@as(?ValidationError, null), For(ethereumProtocol()).validate(.{
         .revision = .amsterdam,
-        .gas_limit = 16_032,
+        .gas_limit = 19_032,
         .input = &amsterdam_floor_input,
         .sender_balance = 1_000_000,
     }));
@@ -474,24 +492,52 @@ test "transaction validation rejects non-EOA sender after London" {
     }));
 }
 
-test "transaction validation rejects nonce overflow" {
+test "transaction validation rejects nonce at or above the account limit" {
     try std.testing.expectEqual(ValidationError.nonce_is_max, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .is_create = true,
         .gas_limit = 100_000,
         .gas_price = 1,
-        .tx_nonce = std.math.maxInt(u64),
+        .tx_nonce = classifyTransactionNonce(std.math.maxInt(u64)),
+        .sender_balance = 100_000,
+    }).?);
+    try std.testing.expectEqual(ValidationError.nonce_is_max, For(ethereumProtocol()).validate(.{
+        .revision = .cancun,
+        .is_create = true,
+        .gas_limit = 100_000,
+        .gas_price = 1,
+        .tx_nonce = classifyTransactionNonce(@as(u256, std.math.maxInt(u64)) + 1),
         .sender_balance = 100_000,
     }).?);
 }
 
-test "transaction validation rejects nonce mismatch" {
-    try std.testing.expectEqual(ValidationError.nonce_mismatch, For(ethereumProtocol()).validate(.{
+test "transaction nonce classification narrows valid encoded input to u64" {
+    const max_valid = @as(u256, std.math.maxInt(u64)) - 1;
+    switch (classifyTransactionNonce(max_valid)) {
+        .valid => |nonce| try std.testing.expectEqual(std.math.maxInt(u64) - 1, nonce),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (classifyTransactionNonce(std.math.maxInt(u64))) {
+        .at_or_above_limit => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "transaction validation preserves nonce mismatch direction" {
+    try std.testing.expectEqual(ValidationError.nonce_too_high, For(ethereumProtocol()).validate(.{
         .revision = .cancun,
         .gas_limit = 21_000,
         .gas_price = 1,
         .sender_nonce = 7,
-        .tx_nonce = 8,
+        .tx_nonce = .{ .valid = 8 },
+        .sender_balance = 21_000,
+    }).?);
+    try std.testing.expectEqual(ValidationError.nonce_too_low, For(ethereumProtocol()).validate(.{
+        .revision = .cancun,
+        .gas_limit = 21_000,
+        .gas_price = 1,
+        .sender_nonce = 7,
+        .tx_nonce = .{ .valid = 6 },
         .sender_balance = 21_000,
     }).?);
 }
@@ -676,12 +722,6 @@ test "transaction validation uses comptime policy" {
 
             pub fn authorizationIntrinsicGas(revision: Revision) u64 {
                 _ = revision;
-                return 0;
-            }
-
-            pub fn intrinsicStateGas(revision: Revision, options: gas.IntrinsicGasOptions) ?u64 {
-                _ = revision;
-                _ = options;
                 return 0;
             }
 

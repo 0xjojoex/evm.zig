@@ -276,6 +276,11 @@ pub const MockHost = struct {
         return 0;
     }
 
+    fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return if (self.local_account.get(address)) |account| account.nonce else 0;
+    }
+
     fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         var buf: [1024]u8 = undefined;
@@ -404,6 +409,7 @@ pub const MockHost = struct {
             .call = call,
             .accountExists = accountExists,
             .getBalance = getBalance,
+            .getNonce = getNonce,
             .copyCode = copyCode,
             .getCodeSize = getCodeSize,
             .getCodeHash = getCodeHash,

@@ -6,8 +6,8 @@ const types = @import("../../protocol/types.zig");
 pub const builder_deposit_request_type: u8 = 0x03;
 pub const builder_exit_request_type: u8 = 0x04;
 
-pub const builder_deposit_predeploy_address = address.addr(0x0000884d2aa32eaa155f59a2f24efa73d9008282);
-pub const builder_exit_predeploy_address = address.addr(0x000014574a74c805590aff9499fc7a690f008282);
+pub const builder_deposit_predeploy_address = address.addr(0x0000bff46984e3725691fa540a8c7589300d8282);
+pub const builder_exit_predeploy_address = address.addr(0x000064d678505ad48f8ccb093bc65613800e8282);
 
 pub fn builderDepositFinalizeSystemCall(system_address: address.Address, gas: u64) types.FinalizeSystemCall {
     return .{

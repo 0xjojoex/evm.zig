@@ -265,13 +265,11 @@ pub const Create = struct {
             createDepositRegularGas: ?*const fn (R, i64) ?i64 = null,
             createDepositStateGas: ?*const fn (R, i64) ?i64 = null,
             createDepositRegularGasOogCommits: ?*const fn (R) bool = null,
-            createAccountStateGasRefund: ?*const fn (R, bool) i64 = null,
-            createTransactionRollbackStateGasRefund: ?*const fn (R) i64 = null,
             createWarmsCreatedAddress: ?*const fn (R) bool = null,
             createInitialNonce: ?*const fn (R) u64 = null,
             createInitCodeSizeLimit: ?*const fn (R) ?usize = null,
             createInitCodeWordGas: ?*const fn (R, bool) i64 = null,
-            createAccountStateGas: ?*const fn (R) i64 = null,
+            createAccountStateGas: ?*const fn (R, types.CreateAccountStateGasInput) i64 = null,
         };
         definition.assertPatchMirrors(definition.CreateConfig(R), PatchType);
         return PatchType;
@@ -285,8 +283,6 @@ pub const Create = struct {
             .createDepositRegularGas = @This().createDepositRegularGas,
             .createDepositStateGas = @This().createDepositStateGas,
             .createDepositRegularGasOogCommits = @This().createDepositRegularGasOogCommits,
-            .createAccountStateGasRefund = @This().createAccountStateGasRefund,
-            .createTransactionRollbackStateGasRefund = @This().createTransactionRollbackStateGasRefund,
             .createWarmsCreatedAddress = @This().createWarmsCreatedAddress,
             .createInitialNonce = @This().createInitialNonce,
             .createInitCodeSizeLimit = @This().createInitCodeSizeLimit,
@@ -321,16 +317,6 @@ pub const Create = struct {
         return !revision.isImpl(.homestead);
     }
 
-    pub fn createAccountStateGasRefund(revision: Revision, account_pre_existing: bool) i64 {
-        if (!revision.isImpl(.amsterdam) or !account_pre_existing) return 0;
-        return std.math.cast(i64, tx.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64);
-    }
-
-    pub fn createTransactionRollbackStateGasRefund(revision: Revision) i64 {
-        if (!revision.isImpl(.amsterdam)) return 0;
-        return std.math.cast(i64, tx.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64);
-    }
-
     pub fn createWarmsCreatedAddress(revision: Revision) bool {
         return revision.isImpl(.berlin);
     }
@@ -355,8 +341,8 @@ pub const Create = struct {
         return cost;
     }
 
-    pub fn createAccountStateGas(revision: Revision) i64 {
-        if (!revision.isImpl(.amsterdam)) return 0;
+    pub fn createAccountStateGas(revision: Revision, input: types.CreateAccountStateGasInput) i64 {
+        if (!revision.isImpl(.amsterdam) or input.target_alive) return 0;
         return std.math.cast(i64, tx.amsterdam_new_account_state_gas) orelse std.math.maxInt(i64);
     }
 };
@@ -447,10 +433,10 @@ pub const Call = struct {
 
     pub fn topLevelDelegatedAccountAccess(revision: Revision, input: types.TopLevelDelegatedAccountAccessInput) ?types.DelegatedAccountAccess {
         if (!revision.isImpl(.amsterdam)) return null;
-        _ = input;
+        const already_warm = input.target_is_precompile or input.already_warm;
         return .{
-            .status = .cold,
-            .gas = @This().delegatedAccountAccessGas(revision, true),
+            .status = if (already_warm) .warm else .cold,
+            .gas = @This().delegatedAccountAccessGas(revision, !already_warm),
         };
     }
 

@@ -7,13 +7,13 @@ scripts/fetch-eest-fixtures.sh
 EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
 zig build eest-scope
 zig build eest
-zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/path/to/test.json
+zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/state_tests/path/to/test.json
 zig build eest-classify
 zig build eest-tx
 ```
 
 The default state-test corpus comes from `eest.lock`, currently
-`tests-glamsterdam-devnet@v6.1.0` from `ethereum/execution-specs` for Amsterdam
+`tests-glamsterdam-devnet@v7.2.0` from `ethereum/execution-specs` for Amsterdam
 work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
 `fixtures/state_tests`.
 
@@ -149,10 +149,10 @@ normalized decoding is correct.
 
 ```sh
 EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
-zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/blockchain_tests_sync
+zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/blockchain_tests_sync
 
 scripts/fetch-eest-zkevm-fixtures.sh
-zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.5.0/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
+zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
 ```
 
 The broader Glamsterdam block corpus is still the golden regular source. In the

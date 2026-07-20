@@ -7,9 +7,6 @@ int main(void) {
   printf("EVMC ABI version: %d\n", vm->abi_version);
   printf("EVMC name: %s\n", vm->name);
 
-  enum evmc_capabilities capabilities = vm->get_capabilities(vm);
-  printf("EVMC capabilities: %d\n", capabilities);
-
   const uint8_t code[] = "\x43\x60\x00\x55\x43\x60\x00\x52\x59\x60\x00\xf3";
   const size_t code_size = sizeof(code) - 1;
   const uint8_t input[] = "Hello World!";

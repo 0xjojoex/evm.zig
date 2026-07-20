@@ -47,7 +47,6 @@ const Evmz = struct {
                 .version = "0.0.0",
                 .destroy = destroy,
                 .execute = execute,
-                .get_capabilities = getCapabilities,
                 .set_option = setOption,
             },
         };
@@ -57,11 +56,6 @@ const Evmz = struct {
 fn destroy(vm: [*c]evmc.evmc_vm) callconv(.c) void {
     const self: *allowzero Evmz = @alignCast(@fieldParentPtr("vm", vm));
     std.heap.c_allocator.destroy(self);
-}
-
-fn getCapabilities(vm: [*c]evmc.struct_evmc_vm) callconv(.c) evmc.evmc_capabilities {
-    _ = vm;
-    return evmc.EVMC_CAPABILITY_EVM1;
 }
 
 fn execute(
@@ -83,7 +77,6 @@ fn execute(
             .gas_refund = 0,
             .output_data = null,
             .output_size = 0,
-            .create_address = std.mem.zeroes(evmc.evmc_address),
             .release = release,
         };
     };
@@ -95,15 +88,15 @@ fn execute(
 
     const kind = common.callKindFromEvmc(msg.*.kind) catch |err| {
         log.err("execute failed: {}", .{err});
-        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{});
     };
     const depth = std.math.cast(u16, msg.*.depth) orelse {
         log.err("execute failed: invalid message depth {}", .{msg.*.depth});
-        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{});
     };
     const input_data = common.evmcInputData(msg.*.input_data, msg.*.input_size) catch |err| {
         log.err("execute failed: {}", .{err});
-        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{});
     };
 
     const message = evmz.Host.Message{
@@ -125,7 +118,7 @@ fn execute(
         .revision = revision,
     }) catch |err| {
         log.err("execute failed: {}", .{err});
-        return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+        return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{});
     };
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -135,12 +128,12 @@ fn execute(
             evmc.EVMC_OUT_OF_MEMORY
         else
             evmc.EVMC_FAILURE;
-        return makeResult(status_code, 0, 0, &.{}, std.mem.zeroes(evmc.evmc_address));
+        return makeResult(status_code, 0, 0, &.{});
     };
 
     const status_code = statusToEvmc(result.status);
     const output_data = if (hasOutput(status_code)) result.output_data else &.{};
-    return makeResult(status_code, result.gas_left, result.gas_refund, output_data, std.mem.zeroes(evmc.evmc_address));
+    return makeResult(status_code, result.gas_left, result.gas_refund, output_data);
 }
 
 fn release(result: [*c]const evmc.evmc_result) callconv(.c) void {
@@ -157,7 +150,6 @@ fn makeResult(
     gas_left: i64,
     gas_refund: i64,
     output_data: []const u8,
-    create_address: evmc.evmc_address,
 ) evmc.evmc_result {
     var output_ptr: [*c]const u8 = null;
     var output_size: usize = 0;
@@ -171,7 +163,6 @@ fn makeResult(
                 .gas_refund = 0,
                 .output_data = null,
                 .output_size = 0,
-                .create_address = std.mem.zeroes(evmc.evmc_address),
                 .release = null,
             };
         };
@@ -187,7 +178,6 @@ fn makeResult(
         .gas_refund = if (status_code == evmc.EVMC_SUCCESS) gas_refund else 0,
         .output_data = output_ptr,
         .output_size = output_size,
-        .create_address = create_address,
         .release = release_fn,
     };
 }
@@ -278,6 +268,7 @@ const ToHost = struct {
                 .loadStorage = loadStorage,
                 .storeStorage = storeStorage,
                 .getBalance = getBalance,
+                .getNonce = getNonce,
                 .getCodeSize = getCodeSize,
                 .getCodeHash = getCodeHash,
                 .copyCode = copyCode,
@@ -287,6 +278,7 @@ const ToHost = struct {
                 .accessAccount = accessAccount,
                 .accessStorage = accessStorage,
                 .accessDelegatedAccount = accessDelegatedAccount,
+                .observeAccountAccess = observeAccountAccess,
                 .call = call,
                 .selfDestruct = selfDestruct,
                 .getTransientStorage = getTransientStorage,
@@ -298,7 +290,7 @@ const ToHost = struct {
     fn accountExists(ptr: *anyopaque, address: Address) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const evmc_address = toEvmcAddress(address);
-        return self.host_interfcace.*.account_exists.?(self.context, &evmc_address);
+        return self.host_interfcace.*.account_exists.?(self.context, &evmc_address) != 0;
     }
 
     fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
@@ -338,6 +330,16 @@ const ToHost = struct {
         const evmc_address = toEvmcAddress(address);
         const balance = self.host_interfcace.*.get_balance.?(self.context, &evmc_address);
         return fromEvmcBytes32(balance);
+    }
+
+    fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const evmc_address = toEvmcAddress(address);
+        return self.host_interfcace.*.get_nonce.?(self.context, &evmc_address);
+    }
+
+    fn observeAccountAccess(ptr: *anyopaque, address: Address, _: u16) !void {
+        _ = try accessAccount(ptr, address);
     }
 
     fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
@@ -418,7 +420,6 @@ const ToHost = struct {
         const recipient = toEvmcAddress(msg.recipient);
         const sender = toEvmcAddress(msg.sender);
         const value = toEvmcBytes32(msg.value);
-        const create2_salt = toEvmcBytes32(msg.create2_salt);
         var flags: u32 = if (msg.is_static) evmc.EVMC_STATIC else 0;
         var code_address = msg.code_address;
         if (msg.kind != .create and msg.kind != .create2) {
@@ -439,7 +440,8 @@ const ToHost = struct {
             .sender = sender,
             .value = value,
             .code_address = evmc_code_address,
-            .create2_salt = create2_salt,
+            .code = null,
+            .code_size = 0,
         });
         defer if (result.release) |release_result| release_result(&result);
 
@@ -453,7 +455,7 @@ const ToHost = struct {
             .gas_refund = result.gas_refund,
         };
         return switch (msg.kind) {
-            .create, .create2 => evmz.Host.Result.fromCreate(fromEvmcAddress(result.create_address), call_result),
+            .create, .create2 => evmz.Host.Result.fromCreate(msg.recipient, call_result),
             else => evmz.Host.Result.fromCall(call_result),
         };
     }
@@ -462,7 +464,7 @@ const ToHost = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const evmc_address = toEvmcAddress(address);
         const evmc_beneficiary = toEvmcAddress(beneficiary);
-        return self.host_interfcace.*.selfdestruct.?(self.context, &evmc_address, &evmc_beneficiary);
+        return self.host_interfcace.*.selfdestruct.?(self.context, &evmc_address, &evmc_beneficiary) != 0;
     }
 
     fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
@@ -528,7 +530,6 @@ fn evmcRevisionToEthereumRevision(rev: evmc.evmc_revision) error{UnmatchedRevisi
         evmc.EVMC_TANGERINE_WHISTLE => .tangerine_whistle,
         evmc.EVMC_SPURIOUS_DRAGON => .spurious_dragon,
         evmc.EVMC_BYZANTIUM => .byzantium,
-        evmc.EVMC_CONSTANTINOPLE => .constantinople,
         evmc.EVMC_PETERSBURG => .petersburg,
         evmc.EVMC_ISTANBUL => .istanbul,
         evmc.EVMC_BERLIN => .berlin,
@@ -541,6 +542,52 @@ fn evmcRevisionToEthereumRevision(rev: evmc.evmc_revision) error{UnmatchedRevisi
         evmc.EVMC_AMSTERDAM => .amsterdam,
         else => return error.UnmatchedRevision,
     };
+}
+
+extern fn evmz_evmc_abi18_smoke(
+    host: [*c]const evmc.evmc_host_interface,
+    context: ?*evmc.evmc_host_context,
+    account: [*c]const evmc.evmc_address,
+    beneficiary: [*c]const evmc.evmc_address,
+) callconv(.c) c_int;
+
+test "EVMC ABI 18 callbacks cross the real C23 boundary" {
+    const account_address = evmz.addr(0x18);
+    const beneficiary_address = evmz.addr(0x19);
+    var mock_host = t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    try mock_host.local_account.put(account_address, .{ .nonce = 7, .balance = 1 });
+
+    var native_host = mock_host.host();
+    var bridge = host2c.HostContext.borrowed(&native_host);
+    const interface = host2c.getInterface();
+    const evmc_address = toEvmcAddress(account_address);
+    const evmc_beneficiary = toEvmcAddress(beneficiary_address);
+
+    try std.testing.expectEqual(@as(c_int, 0), evmz_evmc_abi18_smoke(
+        &interface,
+        bridge.toContext(),
+        &evmc_address,
+        &evmc_beneficiary,
+    ));
+}
+
+test "EVMC ABI 18 nonce callback round-trips through both host adapters" {
+    const account_address = evmz.addr(0x18);
+    var mock_host = t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    try mock_host.local_account.put(account_address, .{ .nonce = 7, .balance = 0 });
+
+    var native_host = mock_host.host();
+    var bridge = host2c.HostContext.borrowed(&native_host);
+    const interface = host2c.getInterface();
+    const evmc_address = toEvmcAddress(account_address);
+    try std.testing.expectEqual(@as(u64, 7), interface.get_nonce.?(bridge.toContext(), &evmc_address));
+
+    var wrapper = ToHost.init(&interface, bridge.toContext());
+    defer wrapper.deinit();
+    var round_tripped_host = wrapper.toHost();
+    try std.testing.expectEqual(@as(u64, 7), try round_tripped_host.getNonce(account_address));
 }
 
 test "EVMC execute returns owned output through mock host" {
@@ -748,7 +795,6 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
                 .gas_refund = 0,
                 .output_data = &self.output,
                 .output_size = self.output.len,
-                .create_address = std.mem.zeroes(evmc.evmc_address),
                 .release = null,
             };
         }

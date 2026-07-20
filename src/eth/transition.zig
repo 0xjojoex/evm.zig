@@ -46,6 +46,83 @@ pub fn Program(
                     SettlementRevisionMismatch,
                 };
 
+                /// Private gas capability for Ethereum's ordered pre-execution
+                /// phase. It transports the same two pools as ExecutionGas while
+                /// retaining the state-gas dimensions Settlement must observe.
+                const PreExecutionGas = struct {
+                    initial: execution.ExecutionGas,
+                    gas: execution.ExecutionGas,
+                    regular_refund: u64 = 0,
+                    state_spent: u64 = 0,
+                    state_from_regular: u64 = 0,
+
+                    fn init(gas: execution.ExecutionGas) @This() {
+                        return .{ .initial = gas, .gas = gas };
+                    }
+
+                    fn apply(self: *@This(), adjustment: protocol.AuthorizationGasAdjustment) bool {
+                        // The integrated Amsterdam sequence charges a new
+                        // authority leaf, its first write, then a new delegation.
+                        if (!self.chargeState(adjustment.account_state_charge)) return false;
+                        if (!self.chargeRegular(adjustment.account_write_charge)) return false;
+                        if (!self.chargeState(adjustment.delegation_state_charge)) return false;
+                        self.regular_refund = std.math.add(
+                            u64,
+                            self.regular_refund,
+                            adjustment.regular_refund,
+                        ) catch std.math.maxInt(u64);
+                        return true;
+                    }
+
+                    fn chargeRegular(self: *@This(), amount: u64) bool {
+                        if (amount > self.gas.regular_left) return false;
+                        self.gas.regular_left -= amount;
+                        return true;
+                    }
+
+                    fn chargeState(self: *@This(), amount: u64) bool {
+                        const from_reservoir = @min(self.gas.reservoir, amount);
+                        const from_regular = amount - from_reservoir;
+                        if (from_regular > self.gas.regular_left) return false;
+                        self.gas.reservoir -= from_reservoir;
+                        self.gas.regular_left -= from_regular;
+                        self.state_spent = std.math.add(u64, self.state_spent, amount) catch std.math.maxInt(u64);
+                        self.state_from_regular = std.math.add(u64, self.state_from_regular, from_regular) catch std.math.maxInt(u64);
+                        return true;
+                    }
+
+                    fn foldInto(self: @This(), result: *interpreter.Result) void {
+                        const regular_refund = std.math.cast(i64, self.regular_refund) orelse std.math.maxInt(i64);
+                        result.gas_refund = std.math.add(i64, result.gas_refund, regular_refund) catch std.math.maxInt(i64);
+                        const state_spent = std.math.cast(i64, self.state_spent) orelse std.math.maxInt(i64);
+                        result.state_gas_spent = std.math.add(i64, result.state_gas_spent, state_spent) catch std.math.maxInt(i64);
+                        const state_from_regular = std.math.cast(i64, self.state_from_regular) orelse std.math.maxInt(i64);
+                        result.state_gas_from_gas_left = std.math.add(
+                            i64,
+                            result.state_gas_from_gas_left,
+                            state_from_regular,
+                        ) catch std.math.maxInt(i64);
+                    }
+
+                    fn includedOutOfGas(self: @This()) interpreter.Result {
+                        return .{
+                            .status = .out_of_gas,
+                            .gas_left = 0,
+                            .gas_refund = 0,
+                            // Pre-execution rollback refills all state gas. The
+                            // regular pool is consumed by the exceptional halt.
+                            .gas_reservoir = std.math.cast(i64, self.initial.reservoir) orelse std.math.maxInt(i64),
+                            .output_data = &.{},
+                        };
+                    }
+                };
+
+                const AuthorizationTupleOutcome = enum {
+                    invalid,
+                    applied,
+                    out_of_gas,
+                };
+
                 fn settlementPlanner(context: *const Context) Settlement {
                     return .{ .policy = context.policy() };
                 }
@@ -115,10 +192,10 @@ pub fn Program(
                         .invalid => .invalid,
                         .out_of_gas => .out_of_gas,
                     };
-                    const created_address = if (result.status == .success)
-                        executable.created_address
-                    else
-                        null;
+                    const created_address = if (result.status == .success) switch (executable.message) {
+                        .call => null,
+                        .create => |create| create.recipient,
+                    } else null;
                     return .{ .completed = .{
                         .status = status,
                         .gas = result.gas,
@@ -140,46 +217,17 @@ pub fn Program(
                     try validateSettlementRevision(context, revision, executable.settlement);
 
                     const sender = executable.message.sender();
-                    var execution_gas = executable.execution_gas;
+                    const execution_gas = executable.execution_gas;
                     const transaction_charged = if (execution_gas != null)
                         try chargeTransactionCosts(context, attempt, sender, executable.settlement)
                     else
                         false;
-                    var authorization_gas = protocol.AuthorizationGasAdjustment{};
                     if (transaction_charged) {
                         if (!executable.message.isCreate()) {
                             try attempt.incrementNonce(sender);
                         }
                         try warmAccessList(attempt, executable.scope.access_list);
-                        authorization_gas = try applyAuthorizationList(
-                            context,
-                            attempt,
-                            revision,
-                            executable.scope.context.chain.chain_id,
-                            executable.scope.authorization_list,
-                        );
-                        authorization_gas.add(malformedAuthorizationGasAdjustment(
-                            context,
-                            revision,
-                            executable.scope,
-                        ));
-                        if (authorization_gas.state_refund != 0) {
-                            if (execution_gas) |current_gas| {
-                                execution_gas = .{
-                                    .regular_left = current_gas.regular_left,
-                                    .reservoir = std.math.add(
-                                        u64,
-                                        current_gas.reservoir,
-                                        authorization_gas.state_refund,
-                                    ) catch std.math.maxInt(u64),
-                                };
-                            }
-                        }
-                        try warmDelegatedTransactionTarget(context, attempt, revision, executable.message);
                     }
-
-                    var execution_checkpoint = try attempt.checkpoint();
-                    defer execution_checkpoint.deinit();
 
                     var result = interpreter.Result{
                         .status = .out_of_gas,
@@ -191,31 +239,13 @@ pub fn Program(
                         if (!transaction_charged) {
                             result.status = .invalid;
                         } else {
-                            result = try attempt.executeRequest(transaction.executionRequest(
-                                executable.scope.context,
-                                executable.message,
-                                gas,
-                            ));
+                            const has_authorization_phase = context.policy().authorization.active(revision) and
+                                executable.scope.authorizationCount() != 0;
+                            result = if (has_authorization_phase)
+                                try executeAuthorizedPayload(context, attempt, revision, executable, gas, sender)
+                            else
+                                try executePayload(context, attempt, executable, gas, sender);
                         }
-                    }
-                    const authorization_refund_i64 = std.math.cast(i64, authorization_gas.regular_refund) orelse std.math.maxInt(i64);
-                    result.gas_refund = std.math.add(i64, result.gas_refund, authorization_refund_i64) catch std.math.maxInt(i64);
-                    if (authorization_gas.state_refund != 0) {
-                        const state_refund_i64 = std.math.cast(i64, authorization_gas.state_refund) orelse std.math.maxInt(i64);
-                        result.state_gas_spent = std.math.sub(i64, result.state_gas_spent, state_refund_i64) catch std.math.minInt(i64);
-                    }
-
-                    if (executionRolledBack(result.status)) {
-                        if (executable.message.isCreate() and transaction_charged) {
-                            result.refillIntrinsicStateGas(TransactionProtocol.ExecutionProtocol.create.createTransactionRollbackStateGasRefund(revision));
-                        }
-                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
-                        if (executable.message.isCreate() and transaction_charged) {
-                            try attempt.incrementNonce(sender);
-                        }
-                    } else {
-                        execution_checkpoint.commit() catch |err| return context.infrastructureError(err);
-                        try attempt.finalizeState();
                     }
 
                     const result_gas = if (transaction_charged)
@@ -234,6 +264,87 @@ pub fn Program(
                         .gas = result_gas,
                         .output_data = result.output_data,
                     };
+                }
+
+                fn executeAuthorizedPayload(
+                    context: *Context,
+                    attempt: Context.AttemptCapability,
+                    revision: Revision,
+                    executable: PreparedTransaction,
+                    initial_gas: execution.ExecutionGas,
+                    sender: Address,
+                ) Error!interpreter.Result {
+                    var preparation_checkpoint = try attempt.checkpoint();
+                    defer preparation_checkpoint.deinit();
+
+                    var gas = PreExecutionGas.init(initial_gas);
+                    const authorized = try applyAuthorizationList(
+                        context,
+                        attempt,
+                        revision,
+                        executable.scope.context.chain.chain_id,
+                        executable.message,
+                        executable.scope,
+                        &gas,
+                    );
+                    if (!authorized) {
+                        preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
+                        return gas.includedOutOfGas();
+                    }
+                    try warmDelegatedTransactionTarget(context, attempt, revision, executable.message);
+
+                    var execution_checkpoint = try attempt.checkpoint();
+                    defer execution_checkpoint.deinit();
+                    const outcome = try attempt.executeRequestPhased(transaction.executionRequest(
+                        executable.scope.context,
+                        executable.message,
+                        gas.gas,
+                    ));
+                    if (outcome.stage == .preparation) {
+                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                        preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
+                        return gas.includedOutOfGas();
+                    }
+
+                    var result = outcome.result;
+                    gas.foldInto(&result);
+                    if (executionRolledBack(result.status)) {
+                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                        preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
+                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
+                    } else {
+                        execution_checkpoint.commit() catch |err| return context.infrastructureError(err);
+                        preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
+                        try attempt.finalizeState();
+                    }
+                    return result;
+                }
+
+                fn executePayload(
+                    context: *Context,
+                    attempt: Context.AttemptCapability,
+                    executable: PreparedTransaction,
+                    gas: execution.ExecutionGas,
+                    sender: Address,
+                ) Error!interpreter.Result {
+                    var execution_checkpoint = try attempt.checkpoint();
+                    defer execution_checkpoint.deinit();
+                    const outcome = try attempt.executeRequestPhased(transaction.executionRequest(
+                        executable.scope.context,
+                        executable.message,
+                        gas,
+                    ));
+                    const result = outcome.result;
+                    if (executionRolledBack(result.status)) {
+                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
+                    } else {
+                        execution_checkpoint.commit() catch |err| return context.infrastructureError(err);
+                        try attempt.finalizeState();
+                    }
+                    return result;
                 }
 
                 fn validateSettlementRevision(
@@ -308,24 +419,38 @@ pub fn Program(
                     attempt: Context.AttemptCapability,
                     revision: Revision,
                     chain_id: u256,
-                    authorization_list: []const transaction.AuthorizationTuple,
-                ) !protocol.AuthorizationGasAdjustment {
-                    if (authorization_list.len == 0) return .{};
-                    if (!context.policy().authorization.active(revision)) return .{};
-                    var adjustment = protocol.AuthorizationGasAdjustment{};
-                    var pre_delegated = std.AutoHashMap(Address, bool).init(try attempt.allocator());
+                    message: execution.Message,
+                    scope: transaction.TransactionScope,
+                    gas: *PreExecutionGas,
+                ) !bool {
+                    if (!context.policy().authorization.active(revision)) return true;
+                    const allocator = try attempt.allocator();
+                    var written_accounts = std.AutoHashMap(Address, void).init(allocator);
+                    defer written_accounts.deinit();
+                    try written_accounts.put(message.sender(), {});
+                    switch (message) {
+                        .call => |call| if (call.value != 0) try written_accounts.put(call.recipient, {}),
+                        .create => {},
+                    }
+                    var pre_delegated = std.AutoHashMap(Address, bool).init(allocator);
                     defer pre_delegated.deinit();
-                    for (authorization_list) |authorization| {
-                        adjustment.add(try applyAuthorizationTuple(
+                    var delegation_set_for = std.AutoHashMap(Address, void).init(allocator);
+                    defer delegation_set_for.deinit();
+                    for (scope.authorization_list) |authorization| {
+                        const outcome = try applyAuthorizationTuple(
                             context,
                             attempt,
                             revision,
                             chain_id,
                             authorization,
+                            gas,
+                            &written_accounts,
                             &pre_delegated,
-                        ));
+                            &delegation_set_for,
+                        );
+                        if (outcome == .out_of_gas) return false;
                     }
-                    return adjustment;
+                    return gas.apply(malformedAuthorizationGasAdjustment(context, revision, scope));
                 }
 
                 fn applyAuthorizationTuple(
@@ -334,8 +459,11 @@ pub fn Program(
                     revision: Revision,
                     chain_id: u256,
                     authorization: transaction.AuthorizationTuple,
+                    gas: *PreExecutionGas,
+                    written_accounts: *std.AutoHashMap(Address, void),
                     pre_delegated_by_authority: *std.AutoHashMap(Address, bool),
-                ) !protocol.AuthorizationGasAdjustment {
+                    delegation_set_for: *std.AutoHashMap(Address, void),
+                ) !AuthorizationTupleOutcome {
                     const eip7702 = executor.eip7702;
                     const authorization_policy = &context.policy().authorization;
                     if (!eip7702.authorizationSignatureShapeValid(
@@ -343,11 +471,11 @@ pub fn Program(
                         authorization.legacy_v,
                         authorization.r,
                         authorization.s,
-                    )) return authorization_policy.invalidGasAdjustment(revision);
+                    )) return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
                     if (authorization.chain_id != 0 and authorization.chain_id != chain_id)
-                        return authorization_policy.invalidGasAdjustment(revision);
+                        return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
                     if (authorization.nonce == std.math.maxInt(u64))
-                        return authorization_policy.invalidGasAdjustment(revision);
+                        return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
 
                     try attempt.warmAccount(authorization.signer);
                     const existing_account = try attempt.accountSummary(authorization.signer);
@@ -362,14 +490,26 @@ pub fn Program(
                     };
                     if (existing_account) |account| {
                         if (existing_code.len != 0 and !currently_delegated)
-                            return authorization_policy.invalidGasAdjustment(revision);
+                            return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
                         if (account.nonce != authorization.nonce)
-                            return authorization_policy.invalidGasAdjustment(revision);
+                            return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
                     } else if (authorization.nonce != 0) {
-                        return authorization_policy.invalidGasAdjustment(revision);
+                        return if (gas.apply(authorization_policy.invalidGasAdjustment(revision))) .invalid else .out_of_gas;
                     }
 
-                    if (std.mem.eql(u8, &authorization.target, &address.zero_address)) {
+                    const clears_delegation = std.mem.eql(u8, &authorization.target, &address.zero_address);
+                    const adjustment = authorization_policy.successGasAdjustment(revision, .{
+                        .account_exists = account_exists,
+                        .account_already_written = written_accounts.contains(authorization.signer),
+                        .clears_delegation = clears_delegation,
+                        .delegated_before_transaction = delegated_before_first,
+                        .delegation_set_before = delegation_set_for.contains(authorization.signer),
+                    });
+                    if (!gas.apply(adjustment)) return .out_of_gas;
+
+                    try written_accounts.put(authorization.signer, {});
+                    if (!clears_delegation) try delegation_set_for.put(authorization.signer, {});
+                    if (clears_delegation) {
                         try attempt.clearCode(authorization.signer);
                     } else {
                         var code: [eip7702.delegation_code_len]u8 = undefined;
@@ -377,12 +517,7 @@ pub fn Program(
                         try attempt.setCode(authorization.signer, &code);
                     }
                     try attempt.setNonce(authorization.signer, authorization.nonce + 1);
-                    return authorization_policy.successGasAdjustment(revision, .{
-                        .account_exists = account_exists,
-                        .clears_delegation = std.mem.eql(u8, &authorization.target, &address.zero_address),
-                        .delegated_before_tuple = currently_delegated,
-                        .delegated_before_first_tuple = delegated_before_first,
-                    });
+                    return .applied;
                 }
 
                 fn malformedAuthorizationGasAdjustment(

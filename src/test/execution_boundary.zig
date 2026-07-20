@@ -156,6 +156,7 @@ test "beginMessageScope derives root identity context and neutral warmth" {
         .context = execution_context,
         .message = .{ .create = .{
             .sender = sender,
+            .recipient = evmz.address.create(sender, 0),
             .init_code = &.{},
         } },
         .gas = .legacy(100_000),

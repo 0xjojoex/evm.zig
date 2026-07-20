@@ -61,13 +61,13 @@ test "EEST lock parser trims comments and values" {
     const bytes =
         \\# comment
         \\ repo = ethereum/execution-specs
-        \\version=tests-glamsterdam-devnet@v6.1.0
+        \\version=tests-glamsterdam-devnet@v7.2.0
         \\artifact = fixtures_glamsterdam-devnet.tar.gz
         \\
     ;
 
     try std.testing.expectEqualStrings("ethereum/execution-specs", parseValue(bytes, "repo").?);
-    try std.testing.expectEqualStrings("tests-glamsterdam-devnet@v6.1.0", parseValue(bytes, "version").?);
+    try std.testing.expectEqualStrings("tests-glamsterdam-devnet@v7.2.0", parseValue(bytes, "version").?);
     try std.testing.expectEqualStrings("fixtures_glamsterdam-devnet.tar.gz", parseValue(bytes, "artifact").?);
     try std.testing.expectEqual(@as(?[]const u8, null), parseValue(bytes, "missing"));
 }

@@ -452,7 +452,6 @@ pub const CallFrame = struct {
         self.gas_reservoir = result.gas_reservoir;
         self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
         self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
-        self.refillStateGas(result.state_gas_refund);
         if (result.status != .success) {
             self.refillStateGas(continuation.state_gas_charged);
         }
@@ -1220,13 +1219,13 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        assertLayout(@sizeOf(CallFrame) == 432, "CallFrame size changed; rerun VM-loop canary benches");
+        assertLayout(@sizeOf(CallFrame) == 400, "CallFrame size changed; rerun VM-loop canary benches");
         assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "stack") == 272, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "memory") == 288, "CallFrame memory moved; rerun memory VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "gas_left") == 336, "CallFrame gas_left moved; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "msg") == 264, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33520, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@offsetOf(CallFrame, "stack") == 240, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "memory") == 256, "CallFrame memory moved; rerun memory VM-loop bench");
+        assertLayout(@offsetOf(CallFrame, "gas_left") == 304, "CallFrame gas_left moved; rerun VM-loop canary benches");
+        assertLayout(@offsetOf(CallFrame, "msg") == 232, "CallFrame msg pointer moved; check message ownership layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33456, "CallFrameSlot size changed; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
         assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");

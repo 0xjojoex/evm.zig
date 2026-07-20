@@ -363,7 +363,7 @@ fn addEvmoneVm(
         "-fomit-frame-pointer",
         "-fno-exceptions",
         "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.22.0\"",
+        "-DPROJECT_VERSION=\"0.23.0-dev\"",
     };
     const c_flags = &[_][]const u8{
         "-Wall",
@@ -377,6 +377,7 @@ fn addEvmoneVm(
         "lib/evmone/baseline_analysis.cpp",
         "lib/evmone/baseline_execution.cpp",
         "lib/evmone/baseline_instruction_table.cpp",
+        "lib/evmone/create_address.cpp",
         "lib/evmone/delegation.cpp",
         "lib/evmone/instructions_calls.cpp",
         "lib/evmone/instructions_storage.cpp",

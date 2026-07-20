@@ -137,10 +137,6 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
             return 0;
         }
 
-        fn intrinsicStateGas(_: R, _: tx_gas.IntrinsicGasOptions) ?u64 {
-            return 0;
-        }
-
         fn floorGas(_: R, _: tx_gas.FloorGasInput) ?u64 {
             return null;
         }
@@ -173,7 +169,6 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
         .accessListDataGas = F.accessListDataGas,
         .initCodeWordGas = F.initCodeWordGas,
         .authorizationIntrinsicGas = F.authorizationIntrinsicGas,
-        .intrinsicStateGas = F.intrinsicStateGas,
         .floorGas = F.floorGas,
         .regularGasLimit = F.regularGasLimit,
         .intrinsicRegularGasLimit = F.intrinsicRegularGasLimit,

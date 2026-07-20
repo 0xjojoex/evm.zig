@@ -152,8 +152,6 @@ pub fn TransactionConfig(comptime R: type) type {
         initCodeWordGas: *const fn (R) u64 = noRevisionGas,
         /// Intrinsic regular gas charged per authorization tuple.
         authorizationIntrinsicGas: *const fn (R) u64 = noRevisionGas,
-        /// Intrinsic state gas for the transaction, when dimensional gas is active.
-        intrinsicStateGas: *const fn (R, tx_gas.IntrinsicGasOptions) ?u64 = noIntrinsicGas,
         /// Transaction floor gas derived from input and intrinsic options.
         floorGas: *const fn (R, tx_gas.FloorGasInput) ?u64 = noFloorGas,
         /// Regular execution-gas allowance derived from the declared gas limit.
@@ -323,7 +321,6 @@ pub fn TransactionPolicyConfig(comptime R: type) type {
         accessListDataGas: @FieldType(Source, "accessListDataGas"),
         initCodeWordGas: @FieldType(Source, "initCodeWordGas"),
         authorizationIntrinsicGas: @FieldType(Source, "authorizationIntrinsicGas"),
-        intrinsicStateGas: @FieldType(Source, "intrinsicStateGas"),
         floorGas: @FieldType(Source, "floorGas"),
         regularGasLimit: @FieldType(Source, "regularGasLimit"),
         intrinsicRegularGasLimit: @FieldType(Source, "intrinsicRegularGasLimit"),
@@ -615,10 +612,6 @@ pub fn CreateConfig(comptime R: type) type {
         createDepositStateGas: *const fn (R, i64) ?i64 = noDepositGas,
         /// Whether regular deposit OOG still commits the successful child call.
         createDepositRegularGasOogCommits: *const fn (R) bool = falseForRevision,
-        /// State-gas refund when creation reuses an existing account.
-        createAccountStateGasRefund: *const fn (R, bool) i64 = noAccountStateGasRefund,
-        /// State-gas refund when a create transaction rolls back.
-        createTransactionRollbackStateGasRefund: *const fn (R) i64 = noRevisionGas,
         /// Whether CREATE immediately warms the derived address.
         createWarmsCreatedAddress: *const fn (R) bool = falseForRevision,
         /// Initial nonce assigned to a newly created account.
@@ -627,8 +620,8 @@ pub fn CreateConfig(comptime R: type) type {
         createInitCodeSizeLimit: *const fn (R) ?usize = noSizeLimit,
         /// Per-word initcode/hash gas for CREATE or CREATE2.
         createInitCodeWordGas: *const fn (R, bool) i64 = noInitCodeWordGas,
-        /// State gas charged to materialize a newly created account.
-        createAccountStateGas: *const fn (R) i64 = noRevisionGas,
+        /// State gas charged to materialize the derived CREATE target.
+        createAccountStateGas: *const fn (R, types.CreateAccountStateGasInput) i64 = noCreateAccountStateGas,
 
         fn noSizeLimit(_: R) ?usize {
             return null;
@@ -642,7 +635,7 @@ pub fn CreateConfig(comptime R: type) type {
         fn falseForRevision(_: R) bool {
             return false;
         }
-        fn noAccountStateGasRefund(_: R, _: bool) i64 {
+        fn noCreateAccountStateGas(_: R, _: types.CreateAccountStateGasInput) i64 {
             return 0;
         }
         fn noRevisionGas(_: R) i64 {

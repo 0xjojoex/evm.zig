@@ -28,6 +28,7 @@ pub const ValueTransferLog = types.ValueTransferLog;
 pub const ValueTransferInput = types.ValueTransferInput;
 pub const AuthorizationSuccessInput = types.AuthorizationSuccessInput;
 pub const CallNewAccountInput = types.CallNewAccountInput;
+pub const CreateAccountStateGasInput = types.CreateAccountStateGasInput;
 pub const TopFrameValueTransferInput = types.TopFrameValueTransferInput;
 pub const TopLevelDelegatedAccountAccessInput = types.TopLevelDelegatedAccountAccessInput;
 pub const ChildGasInput = types.ChildGasInput;

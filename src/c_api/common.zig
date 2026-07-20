@@ -1,11 +1,11 @@
 pub const evmc = @cImport({
-    @cInclude("evmc/evmc.h");
+    @cInclude("evmz/evmc_zig.h");
 });
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
 comptime {
-    if (evmc.EVMC_ABI_VERSION != 13) {
+    if (evmc.EVMC_ABI_VERSION != 18) {
         @compileError("EVMC ABI changed; update the evmz EVMC adapter");
     }
 }

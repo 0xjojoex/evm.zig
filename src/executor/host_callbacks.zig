@@ -15,6 +15,7 @@ pub fn For(comptime Executor: type) type {
                 .call = Callbacks().call,
                 .accountExists = accountExists,
                 .getBalance = getBalance,
+                .getNonce = getNonce,
                 .copyCode = copyCode,
                 .getCodeSize = getCodeSize,
                 .getCodeHash = getCodeHash,
@@ -110,6 +111,11 @@ pub fn For(comptime Executor: type) type {
         fn getBalance(ptr: *anyopaque, address: Address) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.getBalance(address);
+        }
+
+        fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.state.getNonce(address);
         }
 
         fn hostGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {

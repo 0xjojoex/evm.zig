@@ -418,6 +418,24 @@ pub fn For(comptime Executor: type) type {
             gas: ExecutionGas,
             value: u256,
         ) !Interpreter.Result {
+            return (try executeCallTransactionPhased(
+                self,
+                sender,
+                recipient,
+                input,
+                gas,
+                value,
+            )).result;
+        }
+
+        pub fn executeCallTransactionPhased(
+            self: *Executor,
+            sender: Address,
+            recipient: Address,
+            input: []const u8,
+            gas: ExecutionGas,
+            value: u256,
+        ) !executor_module.TransactionExecutionOutcome {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -426,11 +444,14 @@ pub fn For(comptime Executor: type) type {
             const top_frame_state_gas = try chargeTopFrameValueTransferStateGas(self, sender, recipient, value, &execution_gas);
             if (top_frame_state_gas.out_of_gas) {
                 return .{
-                    .status = .out_of_gas,
-                    .gas_left = 0,
-                    .gas_refund = 0,
-                    .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
-                    .output_data = &.{},
+                    .stage = .preparation,
+                    .result = .{
+                        .status = .out_of_gas,
+                        .gas_left = 0,
+                        .gas_refund = 0,
+                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .output_data = &.{},
+                    },
                 };
             }
 
@@ -438,7 +459,7 @@ pub fn For(comptime Executor: type) type {
             if (!resolved.delegated and Protocol.Precompile.active(self.revision(), recipient)) {
                 var result = try runPrecompileCallTransaction(self, sender, recipient, input, execution_gas, value);
                 finishTopFrameStateGas(&result, top_frame_state_gas);
-                return result;
+                return .{ .stage = .payload, .result = result };
             }
             if (resolved.delegated) {
                 const access = try topLevelDelegatedAccountAccess(self, resolved.address);
@@ -455,7 +476,7 @@ pub fn For(comptime Executor: type) type {
                         .output_data = &.{},
                     };
                     finishTopFrameStateGas(&result, top_frame_state_gas);
-                    return result;
+                    return .{ .stage = .preparation, .result = result };
                 }
                 execution_gas.regular_left -= access_cost;
             }
@@ -471,7 +492,7 @@ pub fn For(comptime Executor: type) type {
                 .value = value,
             });
             finishTopFrameStateGas(&result, top_frame_state_gas);
-            return result;
+            return .{ .stage = .payload, .result = result };
         }
 
         fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.protocol.DelegatedAccountAccess {
@@ -512,7 +533,34 @@ pub fn For(comptime Executor: type) type {
                 .same_address = same_address,
                 .creates_account = creates_account,
             });
-            if (charge_i64 == 0) return .{};
+            return chargeTopFrameStateGas(gas, charge_i64);
+        }
+
+        fn chargeTopFrameCreateStateGas(
+            self: *Executor,
+            options: executor_module.Create,
+            gas: *ExecutionGas,
+        ) !TopFrameStateGasCharge {
+            // The integrated rule compares the pre-transaction account to the
+            // empty account value. Storage does not make an account alive.
+            const target_alive = if (try self.state.getAccountOrLoad(options.recipient)) |account|
+                account.nonce != 0 or
+                    account.balance != 0 or
+                    !std.mem.eql(u8, &account.code_hash, &evmz.crypto.keccak256_empty)
+            else
+                false;
+
+            return chargeTopFrameStateGas(
+                gas,
+                Protocol.create.createAccountStateGas(self.revision(), .{ .target_alive = target_alive }),
+            );
+        }
+
+        fn chargeTopFrameStateGas(
+            gas: *ExecutionGas,
+            charge_i64: i64,
+        ) TopFrameStateGasCharge {
+            if (charge_i64 <= 0) return .{};
 
             const charge = std.math.cast(u64, charge_i64) orelse std.math.maxInt(u64);
             const from_reservoir = @min(gas.reservoir, charge);
@@ -637,15 +685,66 @@ pub fn For(comptime Executor: type) type {
         pub fn executeCreateTransaction(
             self: *Executor,
             sender: Address,
+            recipient: Address,
             init_code: []const u8,
             gas: ExecutionGas,
             value: u256,
         ) !Host.Result {
             return executeCreate(self, .{
                 .sender = sender,
+                .recipient = recipient,
                 .init_code = init_code,
                 .value = value,
             }, gas);
+        }
+
+        pub fn executeCreateTransactionPhased(
+            self: *Executor,
+            options: executor_module.Create,
+            gas: ExecutionGas,
+        ) !executor_module.TransactionExecutionOutcome {
+            self.beginPreparedCodeExecution();
+            defer self.endPreparedCodeExecution();
+
+            self.clearLastOutput();
+            _ = try currentTxContext(self);
+            var execution_gas = gas;
+            const top_frame_state_gas = try chargeTopFrameCreateStateGas(self, options, &execution_gas);
+            if (top_frame_state_gas.out_of_gas) {
+                return .{
+                    .stage = .preparation,
+                    .result = .{
+                        .status = .out_of_gas,
+                        .gas_left = 0,
+                        .gas_refund = 0,
+                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .output_data = &.{},
+                    },
+                };
+            }
+
+            const host_result = try executeCreateMessage(self, .{
+                .depth = 0,
+                .kind = if (options.salt == null) .create else .create2,
+                .gas = std.math.cast(i64, execution_gas.regular_left) orelse std.math.maxInt(i64),
+                .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                .recipient = options.recipient,
+                .sender = options.sender,
+                .input_data = options.init_code,
+                .value = options.value,
+            });
+            const create_result = host_result.expectCreate();
+            var result = Interpreter.Result{
+                .status = create_result.status,
+                .gas_left = create_result.gas_left,
+                .gas_refund = create_result.gas_refund,
+                .gas_reservoir = create_result.gas_reservoir,
+                .state_gas_spent = create_result.state_gas_spent,
+                .state_gas_from_gas_left = create_result.state_gas_from_gas_left,
+                .output_data = self.lastOutputData(),
+            };
+            finishTopFrameStateGas(&result, top_frame_state_gas);
+            return .{ .stage = .payload, .result = result };
         }
 
         pub fn executeCreate(
@@ -658,15 +757,16 @@ pub fn For(comptime Executor: type) type {
 
             self.clearLastOutput();
             _ = try currentTxContext(self);
+            try self.traceAccountAccess(options.recipient, 0);
             return executeCreateMessage(self, .{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
                 .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
                 .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.init_code,
                 .value = options.value,
-                .create2_salt = options.salt orelse 0,
             });
         }
 
@@ -826,7 +926,6 @@ pub fn For(comptime Executor: type) type {
                     .gas_reservoir = create_result.gas_reservoir,
                     .state_gas_spent = create_result.state_gas_spent,
                     .state_gas_from_gas_left = create_result.state_gas_from_gas_left,
-                    .state_gas_refund = create_result.state_gas_refund,
                 }),
             };
         }
@@ -1083,11 +1182,7 @@ pub fn For(comptime Executor: type) type {
 
         fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
             const caller = try self.getOrCreateAccount(msg.sender);
-            const create_address = switch (msg.kind) {
-                .create => evmz.address.create(msg.sender, caller.nonce),
-                .create2 => evmz.address.create2(msg.sender, msg.create2_salt, msg.input_data),
-                else => unreachable,
-            };
+            const create_address = msg.recipient;
             if (caller.balance < msg.value) {
                 return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
             }
@@ -1096,9 +1191,6 @@ pub fn For(comptime Executor: type) type {
             if (Protocol.create.createWarmsCreatedAddress(self.revision())) {
                 try self.warmAccount(create_address);
             }
-            try self.traceAccountAccess(create_address, msg.depth);
-            const account_pre_existing = try self.state.accountExists(create_address);
-
             try self.state.setNonce(msg.sender, next_nonce);
             const checkpoint_state = try self.state.checkpoint();
             var checkpoint_open = true;
@@ -1139,7 +1231,6 @@ pub fn For(comptime Executor: type) type {
             return .{ .child = .{
                 .checkpoint_state = checkpoint_state,
                 .address = create_address,
-                .account_pre_existing = account_pre_existing,
                 .kind = msg.kind,
                 .msg = child_msg,
                 .init_code = msg.input_data,
@@ -1153,7 +1244,6 @@ pub fn For(comptime Executor: type) type {
             }
 
             const output = try self.setLastOutput(result.output_data);
-            const account_state_gas_refund = Protocol.create.createAccountStateGasRefund(self.revision(), child.account_pre_existing);
             if (result.status != .success) {
                 try self.state.revertToCheckpoint(child.checkpoint_state);
                 checkpoint_open = false;
@@ -1203,7 +1293,6 @@ pub fn For(comptime Executor: type) type {
                         .gas_reservoir = result.gas_reservoir,
                         .state_gas_spent = result.state_gas_spent,
                         .state_gas_from_gas_left = result.state_gas_from_gas_left,
-                        .state_gas_refund = account_state_gas_refund,
                     });
                 }
                 try self.state.revertToCheckpoint(child.checkpoint_state);
@@ -1237,7 +1326,6 @@ pub fn For(comptime Executor: type) type {
                 .gas_reservoir = deposit_result.gas_reservoir,
                 .state_gas_spent = deposit_result.state_gas_spent,
                 .state_gas_from_gas_left = deposit_result.state_gas_from_gas_left,
-                .state_gas_refund = account_state_gas_refund,
             });
         }
 

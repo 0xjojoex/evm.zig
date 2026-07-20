@@ -2,9 +2,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 const common = @import("common.zig");
 
-const evmc = @cImport({
-    @cInclude("evmc/evmc.h");
-});
+const evmc = evmz.c_api.evmc;
 
 extern fn evmc_create_evmone() ?*evmc.evmc_vm;
 
@@ -43,7 +41,7 @@ pub fn measure(code: []const u8, revision: evmz.eth.Revision, mode: Mode) !Measu
         vm,
         &host,
         context.toContext(),
-        revFromSpec(revision),
+        try revFromSpec(revision),
         &message,
         code_ptr,
         code.len,
@@ -81,6 +79,7 @@ fn interface() evmc.evmc_host_interface {
         .get_storage = getStorage,
         .set_storage = setStorage,
         .get_balance = getBalance,
+        .get_nonce = getNonce,
         .get_code_size = getCodeSize,
         .get_code_hash = getCodeHash,
         .copy_code = copyCode,
@@ -96,10 +95,10 @@ fn interface() evmc.evmc_host_interface {
     };
 }
 
-fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) bool {
+fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u8 {
     _ = address;
     Context.touch(context);
-    return false;
+    return 0;
 }
 
 fn getStorage(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address, key: [*c]const evmc.evmc_bytes32) callconv(.c) evmc.evmc_bytes32 {
@@ -126,6 +125,12 @@ fn getBalance(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_ad
     _ = address;
     Context.touch(context);
     return std.mem.zeroes(evmc.evmc_bytes32);
+}
+
+fn getNonce(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u64 {
+    _ = address;
+    Context.touch(context);
+    return 0;
 }
 
 fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) usize {
@@ -159,11 +164,11 @@ fn selfDestruct(
     context: ?*evmc.evmc_host_context,
     address: [*c]const evmc.evmc_address,
     beneficiary: [*c]const evmc.evmc_address,
-) callconv(.c) bool {
+) callconv(.c) u8 {
     _ = address;
     _ = beneficiary;
     Context.touch(context);
-    return false;
+    return 0;
 }
 
 fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message) callconv(.c) evmc.evmc_result {
@@ -176,7 +181,6 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         .output_data = null,
         .output_size = 0,
         .release = null,
-        .create_address = std.mem.zeroes(evmc.evmc_address),
     };
 }
 
@@ -251,7 +255,7 @@ fn releaseResult(result: *const evmc.evmc_result) void {
     if (result.release) |release| release(result);
 }
 
-fn revFromSpec(revision: evmz.eth.Revision) evmc.evmc_revision {
+fn revFromSpec(revision: evmz.eth.Revision) !evmc.evmc_revision {
     return switch (revision) {
         .frontier => evmc.EVMC_FRONTIER,
         .frontier_thawing => evmc.EVMC_FRONTIER,
@@ -260,7 +264,7 @@ fn revFromSpec(revision: evmz.eth.Revision) evmc.evmc_revision {
         .tangerine_whistle => evmc.EVMC_TANGERINE_WHISTLE,
         .spurious_dragon => evmc.EVMC_SPURIOUS_DRAGON,
         .byzantium => evmc.EVMC_BYZANTIUM,
-        .constantinople => evmc.EVMC_CONSTANTINOPLE,
+        .constantinople => error.UnsupportedEvmcRevision,
         .petersburg => evmc.EVMC_PETERSBURG,
         .istanbul => evmc.EVMC_ISTANBUL,
         .muir_glacier => evmc.EVMC_ISTANBUL,

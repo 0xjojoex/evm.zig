@@ -97,6 +97,12 @@ pub const AccountValueRead = struct {
     value: u256,
 };
 
+pub const NonceRead = struct {
+    depth: u16 = 0,
+    address: Address,
+    value: u64,
+};
+
 pub const CodeRead = struct {
     depth: u16 = 0,
     address: Address,
@@ -114,6 +120,7 @@ pub const StateRead = union(enum) {
     account_exists: AccountExistsRead,
     account_has_storage: AccountExistsRead,
     balance: AccountValueRead,
+    nonce: NonceRead,
     code: CodeRead,
     storage: SlotValueRead,
     transient_storage: SlotValueRead,

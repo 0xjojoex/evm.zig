@@ -49,7 +49,7 @@ pub fn Runtime(
                 .max_fee_per_gas = view.fee.max_fee_per_gas,
                 .max_priority_fee_per_gas = view.fee.max_priority_fee_per_gas,
                 .max_fee_per_blob_gas = view.fee.max_fee_per_blob_gas,
-                .tx_nonce = view.nonce,
+                .tx_nonce = validation.classifyTransactionNonce(view.nonce),
                 .authorization_count = view.authorization_count,
                 .access_list_counts = access_list_counts,
                 .blob_hashes = view.blob_hashes,
@@ -104,19 +104,23 @@ pub fn Runtime(
                 .blob_schedule = input.env.blob_schedule,
             });
 
+            const created_address = if (view.to == null)
+                address.create(view.sender, validation_input.sender_nonce)
+            else
+                null;
             return .{ .executable = .{
-                .created_address = if (view.to == null) address.create(view.sender, validation_input.sender_nonce) else null,
                 .scope = .{
                     .context = tx.executionContext(input.env, view.sender, gas_price, input.env.gas_limit, view.blob_hashes),
                     .access_list = view.access_list,
                     .authorization_list = view.authorization_list,
                     .authorization_count = view.authorization_count,
                 },
-                .message = .init(.{
+                .message = try .init(.{
                     .sender = view.sender,
                     .to = view.to,
                     .input = view.input,
                     .value = view.value,
+                    .create_recipient = created_address,
                 }),
                 .execution_gas = gas_plan.execution,
                 .settlement = settlement_plan,

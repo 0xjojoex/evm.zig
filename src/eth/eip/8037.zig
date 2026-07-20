@@ -67,12 +67,6 @@ pub const storage_set_state_gas: u64 = state_bytes_per_storage_set * cost_per_st
 /// Worst-case state-gas for one EIP-7702 authorization.
 pub const authorization_state_gas: u64 = new_account_state_gas + auth_base_state_gas;
 
-/// Full intrinsic gas for one Amsterdam authorization: regular companion cost plus state-gas.
-pub const authorization_intrinsic_gas: u64 =
-    account_write_cost +
-    regular_per_auth_base_cost +
-    authorization_state_gas;
-
 /// Amsterdam access-list address cost; access-list byte data is accounted separately.
 pub const access_list_address_gas: u64 = 3_000;
 

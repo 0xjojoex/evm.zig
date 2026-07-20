@@ -14,6 +14,7 @@ const Address = evmz.Address;
 pub const max_call_depth: u16 = 1024;
 
 pub const Account = struct {
+    nonce: u64 = 0,
     balance: u256,
 };
 
@@ -56,7 +57,6 @@ pub const Message = struct {
     is_static: bool = false,
     real_sender: Address = addr(0),
     code_address: Address = addr(0),
-    create2_salt: u256 = 0,
 };
 
 pub const CallResult = struct {
@@ -67,7 +67,6 @@ pub const CallResult = struct {
     gas_reservoir: i64 = 0,
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
-    state_gas_refund: i64 = 0,
 };
 
 pub const CreateResult = struct {
@@ -78,7 +77,6 @@ pub const CreateResult = struct {
     gas_reservoir: i64 = 0,
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
-    state_gas_refund: i64 = 0,
     address: Address,
 };
 
@@ -99,7 +97,6 @@ pub const Result = union(enum) {
             .gas_reservoir = result.gas_reservoir,
             .state_gas_spent = result.state_gas_spent,
             .state_gas_from_gas_left = result.state_gas_from_gas_left,
-            .state_gas_refund = result.state_gas_refund,
             .address = address,
         } };
     }
@@ -222,6 +219,7 @@ pub const VTable = struct {
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
     getBalance: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
+    getNonce: *const fn (ptr: *anyopaque, address: Address) anyerror!u64,
     getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
     copyCode: *const fn (ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) anyerror!usize,
@@ -279,6 +277,9 @@ pub fn getCodeHash(self: *Self, address: Address) !u256 {
 }
 pub fn getBalance(self: *Self, address: Address) !u256 {
     return self.vtable.getBalance(self.ptr, address);
+}
+pub fn getNonce(self: *Self, address: Address) !u64 {
+    return self.vtable.getNonce(self.ptr, address);
 }
 pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStatus {
     return self.vtable.setStorage(self.ptr, address, key, value);

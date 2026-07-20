@@ -224,6 +224,12 @@ evmc_bytes32 get_balance(evmc_host_context* context, const evmc_address*) noexce
     return zero_bytes32();
 }
 
+uint64_t get_nonce(evmc_host_context* context, const evmc_address*) noexcept
+{
+    host_from_context(context).record_host_call();
+    return 0;
+}
+
 size_t get_code_size(evmc_host_context* context, const evmc_address*) noexcept
 {
     host_from_context(context).record_host_call();
@@ -308,22 +314,23 @@ void set_transient_storage(evmc_host_context* context, const evmc_address*, cons
 const evmc_host_interface& host_interface() noexcept
 {
     static const evmc_host_interface interface = {
-        account_exists,
-        get_storage,
-        set_storage,
-        get_balance,
-        get_code_size,
-        get_code_hash,
-        copy_code,
-        selfdestruct,
-        call,
-        get_tx_context,
-        get_block_hash,
-        emit_log,
-        access_account,
-        access_storage,
-        get_transient_storage,
-        set_transient_storage,
+        .account_exists = account_exists,
+        .get_storage = get_storage,
+        .set_storage = set_storage,
+        .get_balance = get_balance,
+        .get_nonce = get_nonce,
+        .get_code_size = get_code_size,
+        .get_code_hash = get_code_hash,
+        .copy_code = copy_code,
+        .selfdestruct = selfdestruct,
+        .call = call,
+        .get_tx_context = get_tx_context,
+        .get_block_hash = get_block_hash,
+        .emit_log = emit_log,
+        .access_account = access_account,
+        .access_storage = access_storage,
+        .get_transient_storage = get_transient_storage,
+        .set_transient_storage = set_transient_storage,
     };
     return interface;
 }
@@ -576,8 +583,6 @@ std::optional<evmc_revision> parse_spec(std::string_view value) noexcept
         return EVMC_SPURIOUS_DRAGON;
     if (value == "byzantium")
         return EVMC_BYZANTIUM;
-    if (value == "constantinople")
-        return EVMC_CONSTANTINOPLE;
     if (value == "petersburg")
         return EVMC_PETERSBURG;
     if (value == "istanbul")
@@ -613,8 +618,6 @@ const char* spec_name(evmc_revision spec) noexcept
         return "spurious_dragon";
     case EVMC_BYZANTIUM:
         return "byzantium";
-    case EVMC_CONSTANTINOPLE:
-        return "constantinople";
     case EVMC_PETERSBURG:
         return "petersburg";
     case EVMC_ISTANBUL:

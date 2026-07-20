@@ -25,7 +25,7 @@ Environment:
 
 Examples:
   scripts/classify-eest-fixtures.sh --exclude-static
-  scripts/classify-eest-fixtures.sh ../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0/fixtures/state_tests/cancun
+  scripts/classify-eest-fixtures.sh ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/state_tests/cancun
   scripts/classify-eest-fixtures.sh --limit 50 --timeout 5
 USAGE
 }
@@ -69,7 +69,7 @@ lock_path_value() {
   fi
 }
 
-default_root="$(lock_path_value dest || printf '../.eest/fixtures/tests-glamsterdam-devnet-v6.1.0')/fixtures/state_tests"
+default_root="$(lock_path_value dest || printf '../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0')/fixtures/state_tests"
 root="${EEST_FIXTURE_ROOT:-${default_root}}"
 runner="${EEST_RUNNER:-../.eest/bin/evmz-eest}"
 timeout_seconds=3
