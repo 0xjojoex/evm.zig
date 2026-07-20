@@ -244,7 +244,7 @@ pub fn Program(
                             result = if (has_authorization_phase)
                                 try executeAuthorizedPayload(context, attempt, revision, executable, gas, sender)
                             else
-                                try executePayload(context, attempt, executable, gas, sender);
+                                try executePayload(attempt, executable, gas, sender);
                         }
                     }
 
@@ -294,15 +294,12 @@ pub fn Program(
                     }
                     try warmDelegatedTransactionTarget(context, attempt, revision, executable.message);
 
-                    var execution_checkpoint = try attempt.checkpoint();
-                    defer execution_checkpoint.deinit();
-                    const outcome = try attempt.executeRequestPhased(transaction.executionRequest(
+                    const outcome = try attempt.runPayload(transaction.executionRequest(
                         executable.scope.context,
                         executable.message,
                         gas.gas,
                     ));
                     if (outcome.stage == .preparation) {
-                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
                         preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
                         if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                         return gas.includedOutOfGas();
@@ -311,11 +308,9 @@ pub fn Program(
                     var result = outcome.result;
                     gas.foldInto(&result);
                     if (executionRolledBack(result.status)) {
-                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
                         preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
                         if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                     } else {
-                        execution_checkpoint.commit() catch |err| return context.infrastructureError(err);
                         preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
                         try attempt.finalizeState();
                     }
@@ -323,25 +318,20 @@ pub fn Program(
                 }
 
                 fn executePayload(
-                    context: *Context,
                     attempt: Context.AttemptCapability,
                     executable: PreparedTransaction,
                     gas: execution.ExecutionGas,
                     sender: Address,
                 ) Error!interpreter.Result {
-                    var execution_checkpoint = try attempt.checkpoint();
-                    defer execution_checkpoint.deinit();
-                    const outcome = try attempt.executeRequestPhased(transaction.executionRequest(
+                    const outcome = try attempt.runPayload(transaction.executionRequest(
                         executable.scope.context,
                         executable.message,
                         gas,
                     ));
                     const result = outcome.result;
                     if (executionRolledBack(result.status)) {
-                        execution_checkpoint.restore() catch |err| return context.infrastructureError(err);
                         if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                     } else {
-                        execution_checkpoint.commit() catch |err| return context.infrastructureError(err);
                         try attempt.finalizeState();
                     }
                     return result;

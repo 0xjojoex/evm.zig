@@ -196,6 +196,13 @@ fn AttemptType(
             return (try self.token()).executeRequestPhased(request) catch |err| return ExecutorType.normalizeError(err);
         }
 
+        pub fn runPayload(
+            self: @This(),
+            request: execution.EvmExecutionRequest,
+        ) Error!ExecutorType.TransactionExecutionOutcome {
+            return (try self.token()).runPayload(request) catch |err| return ExecutorType.normalizeError(err);
+        }
+
         pub fn beginExecution(
             self: @This(),
             request: execution.EvmExecutionRequest,

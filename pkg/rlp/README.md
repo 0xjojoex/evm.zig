@@ -46,6 +46,10 @@ packed/extern structs, and non-slice pointers require an explicit codec or a
 type-owned mapping. RLP cannot guess whether these mean omission, tagging, an
 integer policy, or some other application-level representation.
 
+`OptionalFixedBytes(N)` is the explicit Ethereum-style convention where
+`null` is an empty byte string and a present value is exactly `N` bytes. It
+does not make that convention the inferred meaning of every Zig optional.
+
 ## Lower-level surfaces
 
 Three complementary layers sit under the type-driven API:

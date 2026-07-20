@@ -377,7 +377,7 @@ pub fn build(b: *std.Build) void {
     const guest_payload = guestPayloadOption(b);
     addGuestZisk(b, optimize, evmone_dep, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
-    // example
+    // examples
     {
         const example_name = b.option(
             []const u8,
@@ -386,59 +386,15 @@ pub fn build(b: *std.Build) void {
         ) orelse "basic.zig";
 
         const is_zig = std.mem.endsWith(u8, example_name, ".zig");
-        const path = b.fmt("examples/{s}", .{example_name});
-        const root_source_file = b.path(path);
-        const example_exe_name = std.fs.path.stem(std.fs.path.basename(example_name));
-
         if (is_zig) {
-            const example_mod = b.createModule(.{
-                .root_source_file = b.path("src/evm.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libcpp = is_native_profile,
-            });
-            example_mod.addOptions("build_options", build_options);
-            example_mod.addImport("ssz", ssz_mod);
-            example_mod.addImport("rlp", rlp_mod);
-            example_mod.addImport("mpt", mpt_mod);
-            example_mod.addIncludePath(evmone_dep.path("evmc/include"));
-            if (native_precompile_deps) |deps| {
-                addPrecompileNative(b, example_mod, deps, evmone_dep);
-            }
-            addNativeKeccak(example_mod, xkcp_object);
-            addNativeSecp256k1(example_mod, libsecp256k1_object);
-            const example = b.addExecutable(.{
-                .name = example_exe_name,
-                .root_module = b.createModule(.{
-                    .root_source_file = root_source_file,
-                    .target = target,
-                    .optimize = optimize,
-                    .imports = &.{
-                        .{ .name = "evmz", .module = example_mod },
-                    },
-                }),
-            });
-            const run_example = b.addRunArtifact(example);
-            const run_step = b.step("example", "Run the example");
-            run_step.dependOn(&run_example.step);
-
-            const example_tests = b.addTest(.{
-                .root_module = b.createModule(.{
-                    .root_source_file = root_source_file,
-                    .target = target,
-                    .optimize = optimize,
-                    .imports = &.{
-                        .{ .name = "evmz", .module = example_mod },
-                    },
-                }),
-            });
-            example_tests.use_llvm = true;
-            const example_test_step = b.step("example-test", "Run tests in the selected Zig example");
-            example_test_step.dependOn(&b.addRunArtifact(example_tests).step);
+            addExamplesDelegate(b, "example", "Run the selected Zig example", "example", example_name, target, optimize_name, evmz_build);
+            addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build);
         } else {
             if (!is_native_profile) {
                 std.debug.panic("C examples require -Dprofile=native", .{});
             }
+            const path = b.fmt("examples/{s}", .{example_name});
+            const example_exe_name = std.fs.path.stem(std.fs.path.basename(example_name));
             const example_c = b.addExecutable(.{
                 .name = example_exe_name,
                 .root_module = b.createModule(.{
@@ -869,7 +825,7 @@ fn addGuestZisk(
 }
 
 fn pathExists(b: *std.Build, sub_path: []const u8) bool {
-    std.Io.Dir.accessAbsolute(b.graph.io, b.pathFromRoot(sub_path), .{}) catch return false;
+    b.build_root.handle.access(b.graph.io, sub_path, .{}) catch return false;
     return true;
 }
 
@@ -949,6 +905,36 @@ fn addBenchDelegate(
         run.addArgs(args);
     }
     run.setCwd(b.path("bench"));
+
+    const step = b.step(step_name, description);
+    step.dependOn(&run.step);
+}
+
+fn addExamplesDelegate(
+    b: *std.Build,
+    step_name: []const u8,
+    description: []const u8,
+    child_step: []const u8,
+    example_name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize_name: []const u8,
+    config: EvmzBuildConfig,
+) void {
+    const run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}),
+        b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}),
+        b.fmt("-Doptimize={s}", .{optimize_name}),
+        b.fmt("-Dexample-name={s}", .{example_name}),
+    });
+    addEvmzBuildArgs(run, b, config);
+    run.addArg(child_step);
+    if (b.args) |args| {
+        run.addArg("--");
+        run.addArgs(args);
+    }
+    run.setCwd(b.path("examples"));
 
     const step = b.step(step_name, description);
     step.dependOn(&run.step);

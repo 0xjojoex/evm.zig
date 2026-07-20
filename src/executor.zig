@@ -402,6 +402,21 @@ pub fn Executor(comptime ProtocolType: type) type {
                 return self.executor.executeTransactionRequestPhased(request);
             }
 
+            /// Execute one root payload under a managed inner checkpoint.
+            ///
+            /// The payload writes remain in the outer attempt only when dispatch
+            /// reaches payload execution and succeeds. Preparation failure and
+            /// EVM revert/invalid/out-of-gas restore only this inner checkpoint.
+            /// The caller still owns scope opening, family preparation and
+            /// finalization, settlement, and completion of the outer attempt.
+            pub fn runPayload(
+                self: TransactionAttempt,
+                request: execution_values.EvmExecutionRequest,
+            ) !TransactionExecutionOutcomeType {
+                try self.requireActive();
+                return self.executor.runPayloadInOpenScope(request);
+            }
+
             /// Execute a nested prelude request under this attempt's outer
             /// rollback checkpoint while temporarily using the request's own
             /// opcode-visible context and root message.
@@ -1510,6 +1525,24 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.validateScopeContext(request.context);
             try self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrustedPhased(request);
+        }
+
+        /// Resolve one root payload's inner rollback boundary inside an
+        /// already-open transaction-attempt scope.
+        fn runPayloadInOpenScope(
+            self: *Self,
+            request: execution_values.EvmExecutionRequest,
+        ) !TransactionExecutionOutcomeType {
+            var execution_checkpoint = try self.checkpoint();
+            defer execution_checkpoint.deinit();
+
+            const outcome = try self.executeTransactionRequestPhased(request);
+            if (outcome.stage == .preparation or executionRolledBack(outcome.result.status)) {
+                try execution_checkpoint.restore();
+            } else {
+                try execution_checkpoint.commit();
+            }
+            return outcome;
         }
 
         /// Execute and finalize one family prelude request in its own execution
@@ -3328,6 +3361,83 @@ test "transaction attempt completes into existing executed lease" {
     try executed.retain();
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
     try std.testing.expect(!executor.hasCurrentTransaction());
+}
+
+test "transaction attempt runPayload resolves only its inner checkpoint" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = contract,
+        } },
+        .gas = .legacy(100_000),
+    };
+
+    {
+        var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+        defer executor.deinit();
+
+        const revert_code = evmz.t.bytecode(.{
+            .PUSH1, 0x2a,   .PUSH0,  .SSTORE,
+            .PUSH0, .PUSH0, .REVERT,
+        });
+        var contract_account = MemoryAccount.init(std.testing.allocator);
+        try contract_account.setCode(&revert_code);
+        try executor.state.seedAccount(contract, contract_account);
+
+        const attempt = try executor.beginTransactionAttemptLifetime();
+        defer attempt.discardIfCurrent();
+        try attempt.addBalance(sender, 7);
+        try attempt.beginExecution(request, .{});
+
+        var preparation_checkpoint = try attempt.checkpoint();
+        defer preparation_checkpoint.deinit();
+        try attempt.addBalance(sender, 5);
+
+        const outcome = try attempt.runPayload(request);
+        try std.testing.expectEqual(TransactionExecutionStage.payload, outcome.stage);
+        try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status);
+        try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+        try std.testing.expectEqual(@as(u256, 12), try attempt.balance(sender));
+
+        try preparation_checkpoint.commit();
+        const executed = try attempt.completeLease();
+        try executed.retain();
+        try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
+    }
+
+    {
+        var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+        defer executor.deinit();
+
+        const success_code = evmz.t.bytecode(.{
+            .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP,
+        });
+        var contract_account = MemoryAccount.init(std.testing.allocator);
+        try contract_account.setCode(&success_code);
+        try executor.state.seedAccount(contract, contract_account);
+
+        const attempt = try executor.beginTransactionAttemptLifetime();
+        defer attempt.discardIfCurrent();
+        try attempt.addBalance(sender, 7);
+        try attempt.beginExecution(request, .{});
+
+        const outcome = try attempt.runPayload(request);
+        try std.testing.expectEqual(TransactionExecutionStage.payload, outcome.stage);
+        try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
+        try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
+        try std.testing.expectEqual(@as(u256, 7), try attempt.balance(sender));
+
+        try attempt.finalizeState();
+        const executed = try attempt.completeLease();
+        try executed.retain();
+        try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
+    }
 }
 
 test "top-level transaction execution requires begin tx context" {

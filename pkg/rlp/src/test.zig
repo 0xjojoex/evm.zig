@@ -525,6 +525,23 @@ test "integer and boolean codecs enforce Ethereum minimal integers" {
     try std.testing.expectError(error.IntTooLarge, rlp.decode(bool, &.{0x02}));
 }
 
+test "optional fixed bytes distinguish empty from exact-width values" {
+    const OptionalAddress = rlp.OptionalFixedBytes(2);
+    var out: [3]u8 = undefined;
+
+    const absent = try rlp.encodeAs(OptionalAddress, &out, null);
+    try std.testing.expectEqualSlices(u8, &.{0x80}, absent);
+    try std.testing.expectEqual(null, try rlp.decodeAs(OptionalAddress, absent));
+
+    const address = [2]u8{ 0x00, 0x01 };
+    const present = try rlp.encodeAs(OptionalAddress, &out, address);
+    try std.testing.expectEqualSlices(u8, &.{ 0x82, 0x00, 0x01 }, present);
+    try std.testing.expectEqual(address, (try rlp.decodeAs(OptionalAddress, present)).?);
+
+    try std.testing.expectError(error.UnexpectedLength, rlp.decodeAs(OptionalAddress, &.{0x01}));
+    try std.testing.expectError(error.ExpectedBytes, rlp.decodeAs(OptionalAddress, &.{0xc0}));
+}
+
 test "typed byte codecs cover the canonical 55 and 56 byte boundary" {
     const short = [_]u8{0xaa} ** 55;
     const long = [_]u8{0xbb} ** 56;
