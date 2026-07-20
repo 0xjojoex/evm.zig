@@ -325,6 +325,39 @@ pub fn FixedBytes(comptime len: usize) type {
     };
 }
 
+/// An application-selected nullable fixed-width byte string.
+///
+/// `null` is the empty RLP byte string. A present value is exactly `len`
+/// bytes, including any leading zeroes. The codec is explicit because RLP has
+/// no universal optional representation.
+pub fn OptionalFixedBytes(comptime len: usize) type {
+    if (len == 0) @compileError("RLP OptionalFixedBytes requires a nonzero length");
+
+    return struct {
+        pub const Value = ?[len]u8;
+        pub const requires_allocator = false;
+
+        pub fn encodedLen(value: Value) EncodeError!usize {
+            return if (value) |bytes| bytesEncodedLen(&bytes) else 1;
+        }
+
+        pub fn encodeTo(encoder: *Encoder, value: Value) EncodeError!void {
+            if (value) |bytes| {
+                try encoder.bytes(&bytes);
+            } else {
+                try encoder.bytes("");
+            }
+        }
+
+        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Value {
+            const bytes = try decoder.nextBytes();
+            if (bytes.len == 0) return null;
+            if (bytes.len != len) return error.UnexpectedLength;
+            return bytes[0..len].*;
+        }
+    };
+}
+
 fn Uint(comptime T: type) type {
     comptime encoding.assertUnsignedInt(T);
     return struct {
