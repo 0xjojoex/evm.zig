@@ -32,7 +32,7 @@ export fn evmz_create_mock_host_context(tx_context: ?*evmc.evmc_tx_context) ?*ev
 }
 
 // const interface = host2c.getInterface();
-export fn evmz_mock_host_interace() evmc.evmc_host_interface {
+export fn evmz_mock_host_interface() evmc.evmc_host_interface {
     return host2c.getInterface();
 }
 
@@ -599,7 +599,7 @@ test "EVMC execute returns owned output through mock host" {
     const context = evmz_create_mock_host_context(&tx_context) orelse return error.OutOfMemory;
     defer evmz_destroy_mock_host_context(context);
 
-    const host = evmz_mock_host_interace();
+    const host = evmz_mock_host_interface();
     var msg = std.mem.zeroes(evmc.evmc_message);
     msg.kind = evmc.EVMC_CALL;
     msg.gas = 100_000;
@@ -638,7 +638,7 @@ test "EVMC execute carries blob hashes through tx context" {
     const context = evmz_create_mock_host_context(&tx_context) orelse return error.OutOfMemory;
     defer evmz_destroy_mock_host_context(context);
 
-    const host = evmz_mock_host_interace();
+    const host = evmz_mock_host_interface();
     var msg = std.mem.zeroes(evmc.evmc_message);
     msg.kind = evmc.EVMC_CALL;
     msg.gas = 100_000;

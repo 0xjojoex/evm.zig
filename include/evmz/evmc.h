@@ -35,7 +35,7 @@ void evmz_destroy_mock_host_context(struct evmc_host_context *context);
  *
  * @return  The mock host interface.
  */
-const struct evmc_host_interface evmz_mock_host_interace(void);
+const struct evmc_host_interface evmz_mock_host_interface(void);
 
 #ifdef __cplusplus
 }

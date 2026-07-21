@@ -20,7 +20,7 @@ int main(void) {
   };
 
   struct evmc_host_context *ctx = evmz_create_mock_host_context(&tx_context);
-  const struct evmc_host_interface host = evmz_mock_host_interace();
+  const struct evmc_host_interface host = evmz_mock_host_interface();
   struct evmc_message msg = {
       .kind = EVMC_CALL,
       .sender = addr,

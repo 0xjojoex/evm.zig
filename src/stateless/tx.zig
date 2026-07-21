@@ -196,6 +196,7 @@ fn nextTo(fields: *rlp.Cursor) Error!?Address {
     };
 }
 
+// TODO: rework, storage_keys might leak
 fn nextAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor) Error![]const transaction.AccessListEntry {
     var list = try fields.nextList();
     var entries: std.ArrayList(transaction.AccessListEntry) = .empty;
