@@ -1513,10 +1513,13 @@ pub fn Executor(comptime ProtocolType: type) type {
         /// fully-managed raw-message lifecycle.
         pub fn executeMessage(self: *Self, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
             try self.validateScopeRoot(.fromMessage(message));
-            return switch (message) {
+            const call_capture = try runtime.beginRootCapture(self, message, gas);
+            const result = try switch (message) {
                 .call => |call| runtime.executeCall(self, call, gas),
                 .create => |create| runtime.executeCreate(self, create, gas),
             };
+            if (call_capture) |token| try runtime.finishRootHostCapture(self, token, result);
+            return result;
         }
 
         /// Compatibility adapter for one call/create message and flat host context.
@@ -1648,7 +1651,8 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .call => |call| try self.traceAccountAccess(call.recipient, 0),
                 .create => |create| try self.traceAccountAccess(create.recipient, 0),
             }
-            return switch (request.message) {
+            const call_capture = try runtime.beginRootCapture(self, request.message, request.gas);
+            const outcome = try switch (request.message) {
                 .call => |call| runtime.executeCallTransactionPhased(
                     self,
                     call.sender,
@@ -1663,6 +1667,8 @@ pub fn Executor(comptime ProtocolType: type) type {
                     request.gas,
                 ),
             };
+            if (call_capture) |token| try runtime.finishRootCapture(self, token, outcome.result);
+            return outcome;
         }
 
         /// Execute a system call as its own transaction-like scope.

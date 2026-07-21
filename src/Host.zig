@@ -171,12 +171,13 @@ pub const CallKind = enum(u8) {
     callcode = 2,
     create = 3,
     create2 = 4,
-    // eofcreate = 5,
+    staticcall = 5,
+    // eofcreate = 6,
 
     pub fn fromOpcode(opcode: Opcode) CallKind {
         switch (opcode) {
             Opcode.CALL => return CallKind.call,
-            Opcode.STATICCALL => return CallKind.call,
+            Opcode.STATICCALL => return CallKind.staticcall,
             Opcode.DELEGATECALL => return CallKind.delegatecall,
             Opcode.CALLCODE => return CallKind.callcode,
             Opcode.CREATE => return CallKind.create,

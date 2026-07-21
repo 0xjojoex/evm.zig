@@ -3,6 +3,7 @@ const evmz = @import("../evm.zig");
 const FrameStore = @import("./frame_store.zig");
 const Interpreter = evmz.interpreter;
 const Journal = @import("../state/Journal.zig");
+const CallToken = @import("../trace/call_arena.zig").Token;
 
 pub const ChildCreate = struct {
     checkpoint_state: Journal.Checkpoint,
@@ -22,4 +23,5 @@ pub const Frame = struct {
     kind: Kind,
     frame: FrameStore.Lease,
     pending_action: ?Interpreter.Action = null,
+    call_capture: ?CallToken = null,
 };

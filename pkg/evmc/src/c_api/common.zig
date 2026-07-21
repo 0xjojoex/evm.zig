@@ -43,6 +43,21 @@ pub fn callKindFromEvmc(kind: evmc.evmc_call_kind) !evmz.Host.CallKind {
     };
 }
 
+pub fn callKindToEvmc(kind: evmz.Host.CallKind) evmc.evmc_call_kind {
+    return switch (kind) {
+        .call, .staticcall => evmc.EVMC_CALL,
+        .delegatecall => evmc.EVMC_DELEGATECALL,
+        .callcode => evmc.EVMC_CALLCODE,
+        .create => evmc.EVMC_CREATE,
+        .create2 => evmc.EVMC_CREATE2,
+    };
+}
+
+test "EVMC exports STATICCALL as CALL plus the static flag" {
+    const expected: @TypeOf(callKindToEvmc(.staticcall)) = @intCast(evmc.EVMC_CALL);
+    try std.testing.expectEqual(expected, callKindToEvmc(.staticcall));
+}
+
 pub fn evmcInputData(input_data: [*c]const u8, input_size: usize) ![]const u8 {
     if (input_size == 0) return &.{};
     if (input_data == null) return error.InvalidInputData;

@@ -13,6 +13,7 @@ const address = @import("./address.zig");
 
 pub const tape = @import("./trace/tape.zig");
 pub const capture = @import("./trace/capture.zig");
+pub const call_arena = @import("./trace/call_arena.zig");
 pub const eip3155 = @import("./trace/eip3155.zig");
 
 pub const TraceTapeError = tape.Error;
@@ -29,6 +30,13 @@ pub const TraceFrameKind = tape.FrameKind;
 pub const TraceFrameOutcome = tape.FrameOutcome;
 pub const TraceFrameFinish = tape.FrameFinish;
 pub const TraceCapture = capture.TraceCapture;
+pub const CallArena = call_arena.CallArena;
+pub const CallKind = call_arena.Kind;
+pub const CallStatus = call_arena.Status;
+pub const CallStart = call_arena.Start;
+pub const CallFinish = call_arena.Finish;
+pub const CallToken = call_arena.Token;
+pub const CallSpan = call_arena.Span;
 
 /// Runtime-erased consumer for one completed passive trace span.
 ///

@@ -63,6 +63,12 @@ pub fn For(comptime Executor: type) type {
                 fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     const balance = try getBalance(ptr, address);
+                    const call_capture = try call_runtime.beginSelfDestructCapture(
+                        self,
+                        address,
+                        beneficiary,
+                        balance,
+                    );
                     const same_address = std.mem.eql(u8, &address, &beneficiary);
                     const should_refund = !self.state.selfdestructed_accounts.contains(address);
                     const policy = Protocol.self_destruct.selfDestructPolicy(
@@ -93,6 +99,7 @@ pub fn For(comptime Executor: type) type {
                     if (policy.mark_selfdestructed) {
                         try self.state.markSelfdestructed(address);
                     }
+                    if (call_capture) |token| try call_runtime.finishSelfDestructCapture(self, token);
                     return should_refund;
                 }
             };

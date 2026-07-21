@@ -408,7 +408,7 @@ const ToHost = struct {
         }
         const evmc_code_address = toEvmcAddress(code_address);
         const result = self.host_interfcace.*.call.?(self.context, &evmc.evmc_message{
-            .kind = @intFromEnum(msg.kind),
+            .kind = common.callKindToEvmc(msg.kind),
             .flags = flags,
             .input_data = if (msg.input_data.len == 0) null else @ptrCast(msg.input_data.ptr),
             .input_size = msg.input_data.len,

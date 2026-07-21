@@ -151,7 +151,13 @@ pub fn For(comptime Executor: type) type {
                 });
             }
 
-            fn pushChildCall(self: *CallRuntime, msg: Host.Message, checkpoint_state: Journal.Checkpoint, bytecode: *const Bytecode) !void {
+            fn pushChildCall(
+                self: *CallRuntime,
+                msg: Host.Message,
+                checkpoint_state: Journal.Checkpoint,
+                bytecode: *const Bytecode,
+                call_capture: ?evmz.trace.CallToken,
+            ) !void {
                 var frame = try acquireBytecodeFrame(
                     self.executor,
                     self.executor.allocator,
@@ -163,10 +169,11 @@ pub fn For(comptime Executor: type) type {
                 try self.appendFrame(.{
                     .kind = .{ .call = checkpoint_state },
                     .frame = frame,
+                    .call_capture = call_capture,
                 });
             }
 
-            fn pushChildCreate(self: *CallRuntime, child: ChildCreate) !void {
+            fn pushChildCreate(self: *CallRuntime, child: ChildCreate, call_capture: ?evmz.trace.CallToken) !void {
                 const execution = if (self.executor.prepared_code_execution) |*active|
                     active
                 else
@@ -184,6 +191,7 @@ pub fn For(comptime Executor: type) type {
                 try self.appendFrame(.{
                     .kind = .{ .create = child },
                     .frame = frame,
+                    .call_capture = call_capture,
                 });
             }
 
@@ -229,6 +237,11 @@ pub fn For(comptime Executor: type) type {
             inline fn stepCaptureContext(self: *CallRuntime) ?*CaptureContext {
                 const context = self.capture_context orelse return null;
                 return if (context.capturesSteps()) context else null;
+            }
+
+            inline fn callCaptureContext(self: *CallRuntime) ?*CaptureContext {
+                const context = self.capture_context orelse return null;
+                return if (context.capturesCalls()) context else null;
             }
 
             fn run(self: *CallRuntime) !Host.Result {
@@ -343,13 +356,17 @@ pub fn For(comptime Executor: type) type {
                 self.executor.state.trace_depth = msg.depth;
                 defer self.executor.state.trace_depth = previous_depth;
 
+                const call_capture = try beginCallCapture(self.capture_context, msg);
                 switch (try beginCall(self.executor, msg)) {
-                    .immediate => |result| return result,
+                    .immediate => |result| {
+                        if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                        return result;
+                    },
                     .child => |child| {
                         var checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
                         defer checkpoint.deinit();
 
-                        try self.pushChildCall(msg, child.checkpoint_state, child.bytecode);
+                        try self.pushChildCall(msg, child.checkpoint_state, child.bytecode, call_capture);
                         checkpoint.disarm();
                         return null;
                     },
@@ -361,15 +378,23 @@ pub fn For(comptime Executor: type) type {
                 self.executor.state.trace_depth = msg.depth;
                 defer self.executor.state.trace_depth = previous_depth;
 
-                if (msg.depth > Host.max_call_depth) return createFailure(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+                const call_capture = try beginCallCapture(self.capture_context, msg);
+                if (msg.depth > Host.max_call_depth) {
+                    const result = createFailure(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    return result;
+                }
 
                 switch (try beginCreate(self.executor, msg)) {
-                    .immediate => |result| return result,
+                    .immediate => |result| {
+                        if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                        return result;
+                    },
                     .child => |child| {
                         var checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
                         defer checkpoint.deinit();
 
-                        try self.pushChildCreate(child);
+                        try self.pushChildCreate(child, call_capture);
                         checkpoint.disarm();
                         return null;
                     },
@@ -378,6 +403,7 @@ pub fn For(comptime Executor: type) type {
 
             fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
                 const frame_kind = self.frames.items[frame_index].kind;
+                const call_capture = self.frames.items[frame_index].call_capture;
                 var checkpoint: ?CheckpointGuard = switch (frame_kind) {
                     .root_call => null,
                     .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
@@ -393,7 +419,11 @@ pub fn For(comptime Executor: type) type {
                     });
                 }
 
-                return switch (frame_kind) {
+                if (call_capture != null) {
+                    try self.callCaptureContext().?.reserveCallOutput(stable_result.output_data.len);
+                }
+
+                const host_result = switch (frame_kind) {
                     .root_call => Host.Result.fromCall(.{
                         .status = result.status,
                         .output_data = result.output_data,
@@ -424,14 +454,170 @@ pub fn For(comptime Executor: type) type {
                         unreachable;
                     },
                 };
+                if (call_capture) |token| {
+                    finishCallCaptureReserved(self.callCaptureContext().?, token, host_result);
+                }
+                return host_result;
             }
         };
+
+        inline fn beginCallCapture(
+            context: ?*CaptureContext,
+            msg: Host.Message,
+        ) !?evmz.trace.CallToken {
+            const capture = context orelse return null;
+            if (!capture.capturesCalls()) return null;
+
+            const Endpoints = struct { from: Address, to: Address };
+            const endpoints: Endpoints = switch (msg.kind) {
+                .call, .staticcall => .{ .from = msg.sender, .to = msg.recipient },
+                .delegatecall, .callcode => .{ .from = msg.recipient, .to = msg.code_address },
+                .create, .create2 => .{ .from = msg.sender, .to = msg.recipient },
+            };
+            return capture.beginCall(.{
+                .depth = msg.depth,
+                .kind = callCaptureKind(msg.kind),
+                .from = endpoints.from,
+                .to = endpoints.to,
+                .code_address = msg.code_address,
+                .value = msg.value,
+                .gas = msg.gas,
+                .input = msg.input_data,
+            });
+        }
+
+        fn finishCallCapture(
+            context: ?*CaptureContext,
+            token: evmz.trace.CallToken,
+            result: Host.Result,
+        ) !void {
+            try context.?.finishCall(token, callCaptureFinish(result));
+        }
+
+        fn finishCallCaptureReserved(
+            context: *CaptureContext,
+            token: evmz.trace.CallToken,
+            result: Host.Result,
+        ) void {
+            context.finishCallReserved(token, callCaptureFinish(result));
+        }
+
+        fn callCaptureKind(kind: Host.CallKind) evmz.trace.CallKind {
+            return switch (kind) {
+                .call => .call,
+                .staticcall => .staticcall,
+                .delegatecall => .delegatecall,
+                .callcode => .callcode,
+                .create => .create,
+                .create2 => .create2,
+            };
+        }
+
+        fn callCaptureStatus(status: Interpreter.Status) evmz.trace.CallStatus {
+            return switch (status) {
+                .success => .success,
+                .revert => .revert,
+                .out_of_gas => .out_of_gas,
+                .invalid => .invalid,
+            };
+        }
+
+        fn callCaptureFinish(result: Host.Result) evmz.trace.CallFinish {
+            return .{
+                .status = callCaptureStatus(result.status()),
+                .gas_left = result.gasLeft(),
+                .output = result.outputData(),
+            };
+        }
+
+        pub fn beginRootCapture(
+            self: *Executor,
+            message: executor_module.Message,
+            gas: ExecutionGas,
+        ) !?evmz.trace.CallToken {
+            const context = self.capture_context orelse return null;
+            if (!context.capturesCalls()) return null;
+
+            return context.beginCall(switch (message) {
+                .call => |call| .{
+                    .depth = 0,
+                    .kind = .call,
+                    .from = call.sender,
+                    .to = call.recipient,
+                    .code_address = call.recipient,
+                    .value = call.value,
+                    .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                    .input = call.input,
+                },
+                .create => |create| .{
+                    .depth = 0,
+                    .kind = if (create.salt == null) .create else .create2,
+                    .from = create.sender,
+                    .to = create.recipient,
+                    .code_address = create.recipient,
+                    .value = create.value,
+                    .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                    .input = create.init_code,
+                },
+            });
+        }
+
+        pub fn finishRootCapture(
+            self: *Executor,
+            token: evmz.trace.CallToken,
+            result: Interpreter.Result,
+        ) !void {
+            try self.capture_context.?.finishCall(token, .{
+                .status = callCaptureStatus(result.status),
+                .gas_left = result.gas_left,
+                .output = result.output_data,
+            });
+        }
+
+        pub fn finishRootHostCapture(
+            self: *Executor,
+            token: evmz.trace.CallToken,
+            result: Host.Result,
+        ) !void {
+            try finishCallCapture(self.capture_context, token, result);
+        }
+
+        pub fn beginSelfDestructCapture(
+            self: *Executor,
+            address: Address,
+            beneficiary: Address,
+            balance: u256,
+        ) !?evmz.trace.CallToken {
+            const context = self.capture_context orelse return null;
+            if (!context.capturesCalls()) return null;
+            const depth = std.math.add(u16, self.state.trace_depth, 1) catch
+                std.math.maxInt(u16);
+            return context.beginCall(.{
+                .depth = depth,
+                .kind = .selfdestruct,
+                .from = address,
+                .to = beneficiary,
+                .code_address = address,
+                .value = balance,
+            });
+        }
+
+        pub fn finishSelfDestructCapture(
+            self: *Executor,
+            token: evmz.trace.CallToken,
+        ) !void {
+            try self.capture_context.?.finishCall(token, .{
+                .status = .success,
+                .gas_left = 0,
+            });
+        }
 
         fn traceFrameKind(frame: *const RuntimeFrame) evmz.trace.TraceFrameKind {
             return switch (frame.kind) {
                 .root_call => .root,
                 .call => switch (frame.frame.callFrame().msg.kind) {
-                    .call => if (frame.frame.callFrame().msg.is_static) .staticcall else .call,
+                    .call => .call,
+                    .staticcall => .staticcall,
                     .callcode => .callcode,
                     .delegatecall => .delegatecall,
                     .create => .create,
@@ -1170,15 +1356,16 @@ pub fn For(comptime Executor: type) type {
             self.state.trace_depth = msg.depth;
             defer self.state.trace_depth = previous_depth;
 
-            if (msg.kind == .create or msg.kind == .create2) {
+            const call_capture = try beginCallCapture(self.capture_context, msg);
+            const result = if (msg.kind == .create or msg.kind == .create2) result: {
                 // Opcode handlers check the caller frame depth before constructing the
                 // child message. The executor receives that already-incremented child.
-                if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
-                return executeCreateMessage(self, msg);
-            }
-
-            return switch (try beginCall(self, msg)) {
-                .immediate => |result| result,
+                if (msg.depth > Host.max_call_depth) {
+                    break :result createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+                }
+                break :result try executeCreateMessage(self, msg);
+            } else switch (try beginCall(self, msg)) {
+                .immediate => |immediate| immediate,
                 .child => |child| blk: {
                     var checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
                     defer checkpoint.deinit();
@@ -1202,6 +1389,8 @@ pub fn For(comptime Executor: type) type {
                     });
                 },
             };
+            if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+            return result;
         }
 
         fn executeCreateMessage(self: *Executor, msg: Host.Message) !Host.Result {
@@ -1231,7 +1420,7 @@ pub fn For(comptime Executor: type) type {
 
                     var runtime = CallRuntime.init(self);
                     defer runtime.deinit();
-                    try runtime.pushChildCreate(child);
+                    try runtime.pushChildCreate(child, null);
                     const result = try runtime.run();
                     checkpoint.disarm();
                     break :blk result;
