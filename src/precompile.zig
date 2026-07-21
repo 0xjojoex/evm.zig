@@ -9,7 +9,43 @@ const uint256 = @import("uint256.zig");
 
 const Address = address.Address;
 const modexp_osaka_max_input_len: u256 = 1024;
-const p256verify_gas: i64 = 6900;
+
+/// Scalar gas inputs consumed by the precompile formulas below. The catalog
+/// owns these semantic names; Ethereum and derived families own their values.
+pub const GasParameter = enum {
+    ecrecover,
+    sha256_base,
+    sha256_word,
+    ripemd160_base,
+    ripemd160_word,
+    identity_base,
+    identity_word,
+    modexp_osaka_minimum,
+    modexp_berlin_minimum,
+    modexp_berlin_divisor,
+    modexp_byzantium_divisor,
+    bn254_add_before_istanbul,
+    bn254_add_since_istanbul,
+    bn254_mul_before_istanbul,
+    bn254_mul_since_istanbul,
+    bn254_pairing_base_before_istanbul,
+    bn254_pairing_base_since_istanbul,
+    bn254_pairing_pair_before_istanbul,
+    bn254_pairing_pair_since_istanbul,
+    blake2f_round,
+    kzg_point_evaluation,
+    bls12_g1add,
+    bls12_g1msm_multiplication,
+    bls12_g2add,
+    bls12_g2msm_multiplication,
+    bls12_pairing_base,
+    bls12_pairing_pair,
+    bls12_map_fp_to_g1,
+    bls12_map_fp2_to_g2,
+    p256verify,
+};
+
+pub const GasSchedule = std.enums.EnumArray(GasParameter, i64);
 
 pub const Error = std.mem.Allocator.Error || error{
     NotImplemented,
@@ -62,27 +98,49 @@ pub const Contract = enum(u16) {
     }
 };
 
-pub fn executeContract(contract: Contract, call: Call) Error!Result {
+pub fn executeContract(
+    contract: Contract,
+    call: Call,
+    comptime gas: GasSchedule,
+) Error!Result {
+    validateGasSchedule(gas);
     return switch (contract) {
-        .ecrecover => ecrecover(call),
-        .sha256 => sha256(call),
-        .ripemd160 => ripemd160(call),
-        .identity => identity(call),
-        .modexp => modexp(call),
-        .bn254_add => bn254Add(call),
-        .bn254_mul => bn254Mul(call),
-        .bn254_pairing => bn254Pairing(call),
-        .blake2f => blake2f(call),
-        .kzg_point_evaluation => kzgPointEvaluation(call),
-        .bls12_g1add => bls12G1Add(call),
-        .bls12_g1msm => bls12G1Msm(call),
-        .bls12_g2add => bls12G2Add(call),
-        .bls12_g2msm => bls12G2Msm(call),
-        .bls12_pairing_check => bls12PairingCheck(call),
-        .bls12_map_fp_to_g1 => bls12MapFpToG1(call),
-        .bls12_map_fp2_to_g2 => bls12MapFp2ToG2(call),
-        .p256verify => p256Verify(call),
+        .ecrecover => ecrecover(call, gas),
+        .sha256 => sha256(call, gas),
+        .ripemd160 => ripemd160(call, gas),
+        .identity => identity(call, gas),
+        .modexp => modexp(call, gas),
+        .bn254_add => bn254Add(call, gas),
+        .bn254_mul => bn254Mul(call, gas),
+        .bn254_pairing => bn254Pairing(call, gas),
+        .blake2f => blake2f(call, gas),
+        .kzg_point_evaluation => kzgPointEvaluation(call, gas),
+        .bls12_g1add => bls12G1Add(call, gas),
+        .bls12_g1msm => bls12G1Msm(call, gas),
+        .bls12_g2add => bls12G2Add(call, gas),
+        .bls12_g2msm => bls12G2Msm(call, gas),
+        .bls12_pairing_check => bls12PairingCheck(call, gas),
+        .bls12_map_fp_to_g1 => bls12MapFpToG1(call, gas),
+        .bls12_map_fp2_to_g2 => bls12MapFp2ToG2(call, gas),
+        .p256verify => p256Verify(call, gas),
     };
+}
+
+fn validateGasSchedule(comptime gas: GasSchedule) void {
+    inline for (std.enums.values(GasParameter)) |parameter| {
+        const value = comptime gas.get(parameter);
+        if (value < 0) {
+            @compileError("precompile gas parameter must be non-negative: " ++ @tagName(parameter));
+        }
+        switch (parameter) {
+            .modexp_berlin_divisor,
+            .modexp_byzantium_divisor,
+            => if (value == 0) {
+                @compileError("modexp gas divisors must be positive");
+            },
+            else => {},
+        }
+    }
 }
 
 pub fn contractFromAddress(target: Address) ?Contract {
@@ -167,8 +225,8 @@ fn charge(call: Call, cost: i64) ?i64 {
     return call.gas - cost;
 }
 
-fn ecrecover(call: Call) Error!Result {
-    const gas_left = charge(call, 3000) orelse return emptyResult(.out_of_gas);
+fn ecrecover(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.ecrecover)) orelse return emptyResult(.out_of_gas);
     const recovered = recoverAddress(call.input_data) orelse {
         return .{
             .status = .success,
@@ -183,24 +241,24 @@ fn ecrecover(call: Call) Error!Result {
     return successOutput(call, output, gas_left);
 }
 
-fn sha256(call: Call) Error!Result {
-    const cost = linearCost(call.input_data.len, 60, 12) orelse return emptyResult(.out_of_gas);
+fn sha256(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = linearCost(call.input_data.len, gas.get(.sha256_base), gas.get(.sha256_word)) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
 
     const digest = crypto.sha256(call.input_data);
     return successOutput(call, try dupeOutput(call, &digest), gas_left);
 }
 
-fn ripemd160(call: Call) Error!Result {
-    const cost = linearCost(call.input_data.len, 600, 120) orelse return emptyResult(.out_of_gas);
+fn ripemd160(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = linearCost(call.input_data.len, gas.get(.ripemd160_base), gas.get(.ripemd160_word)) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
 
     var output: [32]u8 = undefined;
     return backendResult(call, gas_left, precompile_backend.ripemd160(call.input_data, &output), &output);
 }
 
-fn identity(call: Call) Error!Result {
-    const cost = linearCost(call.input_data.len, 15, 3) orelse return emptyResult(.out_of_gas);
+fn identity(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = linearCost(call.input_data.len, gas.get(.identity_base), gas.get(.identity_word)) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     return .{
         .status = .success,
@@ -210,7 +268,7 @@ fn identity(call: Call) Error!Result {
     };
 }
 
-fn modexp(call: Call) Error!Result {
+fn modexp(call: Call, comptime gas: GasSchedule) Error!Result {
     const base_len = std.mem.readInt(u256, &paddedWord(call.input_data, 0), .big);
     const exponent_len = std.mem.readInt(u256, &paddedWord(call.input_data, 1), .big);
     const modulus_len = std.mem.readInt(u256, &paddedWord(call.input_data, 2), .big);
@@ -220,7 +278,7 @@ fn modexp(call: Call) Error!Result {
 
     const exponent_offset = uint256.checkedAdd(96, base_len) orelse return emptyResult(.out_of_gas);
     const exponent_head = modexpExponentHead(call.input_data, exponent_offset, exponent_len);
-    const cost = modexpGas(call.revision, base_len, exponent_len, modulus_len, exponent_head) orelse {
+    const cost = modexpGas(call.revision, base_len, exponent_len, modulus_len, exponent_head, gas) orelse {
         return emptyResult(.out_of_gas);
     };
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
@@ -268,23 +326,32 @@ fn modexp(call: Call) Error!Result {
     }
 }
 
-fn modexpGas(revision: Revision, base_len: u256, exponent_len: u256, modulus_len: u256, exponent_head: u256) ?i64 {
+fn modexpGas(
+    revision: Revision,
+    base_len: u256,
+    exponent_len: u256,
+    modulus_len: u256,
+    exponent_head: u256,
+    comptime gas: GasSchedule,
+) ?i64 {
     const max_len = @max(base_len, modulus_len);
     if (revision.isImpl(.osaka)) {
         const complexity = modexpOsakaMultComplexity(max_len) orelse return null;
         const iteration_count = modexpOsakaIterationCount(exponent_len, exponent_head) orelse return null;
         const cost = uint256.checkedMul(complexity, iteration_count) orelse return null;
-        return std.math.cast(i64, @max(cost, 500));
+        return std.math.cast(i64, @max(cost, @as(u256, @intCast(gas.get(.modexp_osaka_minimum)))));
     }
 
     if (revision.isImpl(.berlin)) {
         const words = uint256.ceilDiv(max_len, 8);
         const complexity = uint256.checkedMul(words, words) orelse return null;
-        if (complexity == 0) return 200;
+        if (complexity == 0) return gas.get(.modexp_berlin_minimum);
         const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
         const iterations = @max(iteration_count, 1);
         const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
-        const cost = @max(@divFloor(numerator, 3), 200);
+        const divisor: u256 = @intCast(gas.get(.modexp_berlin_divisor));
+        const minimum: u256 = @intCast(gas.get(.modexp_berlin_minimum));
+        const cost = @max(@divFloor(numerator, divisor), minimum);
         return std.math.cast(i64, cost);
     }
 
@@ -293,7 +360,7 @@ fn modexpGas(revision: Revision, base_len: u256, exponent_len: u256, modulus_len
     const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
     const iterations = @max(iteration_count, 1);
     const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
-    const cost = @divFloor(numerator, 20);
+    const cost = @divFloor(numerator, @as(u256, @intCast(gas.get(.modexp_byzantium_divisor))));
     return std.math.cast(i64, cost);
 }
 
@@ -384,8 +451,8 @@ fn allZero(bytes: []const u8) bool {
     return true;
 }
 
-fn bn254Add(call: Call) Error!Result {
-    const gas_left = charge(call, bn254AddGas(call.revision)) orelse return emptyResult(.out_of_gas);
+fn bn254Add(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, bn254AddGas(call.revision, gas)) orelse return emptyResult(.out_of_gas);
     const output = try allocOutput(call, 64);
     errdefer freeOutput(call, output);
     if (precompile_backend.bn254Add(call.input_data, output[0..64]) != .ok) {
@@ -396,8 +463,8 @@ fn bn254Add(call: Call) Error!Result {
     return successOutput(call, output, gas_left);
 }
 
-fn bn254Mul(call: Call) Error!Result {
-    const gas_left = charge(call, bn254MulGas(call.revision)) orelse return emptyResult(.out_of_gas);
+fn bn254Mul(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, bn254MulGas(call.revision, gas)) orelse return emptyResult(.out_of_gas);
     const output = try allocOutput(call, 64);
     errdefer freeOutput(call, output);
     if (precompile_backend.bn254Mul(call.input_data, output[0..64]) != .ok) {
@@ -408,8 +475,8 @@ fn bn254Mul(call: Call) Error!Result {
     return successOutput(call, output, gas_left);
 }
 
-fn bn254Pairing(call: Call) Error!Result {
-    const cost = bn254PairingGas(call.revision, call.input_data.len) orelse return emptyResult(.out_of_gas);
+fn bn254Pairing(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = bn254PairingGas(call.revision, call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len % bn254_pair_size != 0) return emptyResult(.failure);
 
@@ -425,28 +492,29 @@ fn bn254Pairing(call: Call) Error!Result {
 
 const bn254_pair_size = 192;
 
-fn bn254AddGas(revision: Revision) i64 {
-    return if (revision.isImpl(.istanbul)) 150 else 500;
+fn bn254AddGas(revision: Revision, comptime gas: GasSchedule) i64 {
+    return if (revision.isImpl(.istanbul)) gas.get(.bn254_add_since_istanbul) else gas.get(.bn254_add_before_istanbul);
 }
 
-fn bn254MulGas(revision: Revision) i64 {
-    return if (revision.isImpl(.istanbul)) 6000 else 40000;
+fn bn254MulGas(revision: Revision, comptime gas: GasSchedule) i64 {
+    return if (revision.isImpl(.istanbul)) gas.get(.bn254_mul_since_istanbul) else gas.get(.bn254_mul_before_istanbul);
 }
 
-fn bn254PairingGas(revision: Revision, input_size: usize) ?i64 {
+fn bn254PairingGas(revision: Revision, input_size: usize, comptime gas: GasSchedule) ?i64 {
     const pair_count = input_size / bn254_pair_size;
-    const base: i64 = if (revision.isImpl(.istanbul)) 45_000 else 100_000;
-    const per_pair: i64 = if (revision.isImpl(.istanbul)) 34_000 else 80_000;
+    const base = if (revision.isImpl(.istanbul)) gas.get(.bn254_pairing_base_since_istanbul) else gas.get(.bn254_pairing_base_before_istanbul);
+    const per_pair = if (revision.isImpl(.istanbul)) gas.get(.bn254_pairing_pair_since_istanbul) else gas.get(.bn254_pairing_pair_before_istanbul);
     const pair_count_i64 = std.math.cast(i64, pair_count) orelse return null;
     const variable = std.math.mul(i64, per_pair, pair_count_i64) catch return null;
     return std.math.add(i64, base, variable) catch null;
 }
 
-fn blake2f(call: Call) Error!Result {
+fn blake2f(call: Call, comptime gas: GasSchedule) Error!Result {
     if (call.input_data.len != blake2f_input_size) return emptyResult(.failure);
 
     const rounds = std.mem.readInt(u32, call.input_data[0..4], .big);
-    const gas_left = charge(call, @intCast(rounds)) orelse return emptyResult(.out_of_gas);
+    const cost = std.math.mul(i64, @intCast(rounds), gas.get(.blake2f_round)) catch return emptyResult(.out_of_gas);
+    const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
 
     const final_block = switch (call.input_data[212]) {
         0 => false,
@@ -460,8 +528,8 @@ fn blake2f(call: Call) Error!Result {
 
 const blake2f_input_size = 213;
 
-fn kzgPointEvaluation(call: Call) Error!Result {
-    const gas_left = charge(call, kzg_point_evaluation_gas) orelse return emptyResult(.out_of_gas);
+fn kzgPointEvaluation(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.kzg_point_evaluation)) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len != kzg_point_evaluation_input_size) return emptyResult(.failure);
 
     const versioned_hash = call.input_data[0..32];
@@ -481,57 +549,56 @@ fn kzgPointEvaluation(call: Call) Error!Result {
     return successOutput(call, output, gas_left);
 }
 
-fn bls12G1Add(call: Call) Error!Result {
-    const gas_left = charge(call, 375) orelse return emptyResult(.out_of_gas);
+fn bls12G1Add(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.bls12_g1add)) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len != 256) return emptyResult(.failure);
     var output: [128]u8 = undefined;
     return backendResult(call, gas_left, precompile_backend.bls12G1Add(call.input_data, &output), &output);
 }
 
-fn bls12G1Msm(call: Call) Error!Result {
-    const cost = bls12G1MsmGas(call.input_data.len) orelse return emptyResult(.out_of_gas);
+fn bls12G1Msm(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = bls12G1MsmGas(call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     var output: [128]u8 = undefined;
     return backendResult(call, gas_left, try precompile_backend.bls12G1Msm(call.allocator, call.input_data, &output), &output);
 }
 
-fn bls12G2Add(call: Call) Error!Result {
-    const gas_left = charge(call, 600) orelse return emptyResult(.out_of_gas);
+fn bls12G2Add(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.bls12_g2add)) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len != 512) return emptyResult(.failure);
     var output: [256]u8 = undefined;
     return backendResult(call, gas_left, precompile_backend.bls12G2Add(call.input_data, &output), &output);
 }
 
-fn bls12G2Msm(call: Call) Error!Result {
-    const cost = bls12G2MsmGas(call.input_data.len) orelse return emptyResult(.out_of_gas);
+fn bls12G2Msm(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = bls12G2MsmGas(call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     var output: [256]u8 = undefined;
     return backendResult(call, gas_left, try precompile_backend.bls12G2Msm(call.allocator, call.input_data, &output), &output);
 }
 
-fn bls12PairingCheck(call: Call) Error!Result {
-    const cost = bls12PairingGas(call.input_data.len) orelse return emptyResult(.out_of_gas);
+fn bls12PairingCheck(call: Call, comptime gas: GasSchedule) Error!Result {
+    const cost = bls12PairingGas(call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     var output: [32]u8 = undefined;
     return backendResult(call, gas_left, try precompile_backend.bls12Pairing(call.allocator, call.input_data, &output), &output);
 }
 
-fn bls12MapFpToG1(call: Call) Error!Result {
-    const gas_left = charge(call, 5500) orelse return emptyResult(.out_of_gas);
+fn bls12MapFpToG1(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.bls12_map_fp_to_g1)) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len != 64) return emptyResult(.failure);
     var output: [128]u8 = undefined;
     return backendResult(call, gas_left, precompile_backend.bls12MapFpToG1(call.input_data, &output), &output);
 }
 
-fn bls12MapFp2ToG2(call: Call) Error!Result {
-    const gas_left = charge(call, 23800) orelse return emptyResult(.out_of_gas);
+fn bls12MapFp2ToG2(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.bls12_map_fp2_to_g2)) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len != 128) return emptyResult(.failure);
     var output: [256]u8 = undefined;
     return backendResult(call, gas_left, precompile_backend.bls12MapFp2ToG2(call.input_data, &output), &output);
 }
 
 const kzg_point_evaluation_input_size = 192;
-const kzg_point_evaluation_gas = 50_000;
 const kzg_field_elements_per_blob: u256 = 4096;
 const kzg_bls_modulus: u256 = 52435875175126190479447740508185965837690552500527637822603658699938581184513;
 
@@ -554,12 +621,12 @@ fn backendResult(call: Call, gas_left: i64, status: precompile_backend.Status, o
     };
 }
 
-fn bls12G1MsmGas(input_size: usize) ?i64 {
-    return bls12MsmGas(input_size, 160, 12_000, &bls12_g1_msm_discounts, 519);
+fn bls12G1MsmGas(input_size: usize, comptime gas: GasSchedule) ?i64 {
+    return bls12MsmGas(input_size, 160, gas.get(.bls12_g1msm_multiplication), &bls12_g1_msm_discounts, 519);
 }
 
-fn bls12G2MsmGas(input_size: usize) ?i64 {
-    return bls12MsmGas(input_size, 288, 22_500, &bls12_g2_msm_discounts, 524);
+fn bls12G2MsmGas(input_size: usize, comptime gas: GasSchedule) ?i64 {
+    return bls12MsmGas(input_size, 288, gas.get(.bls12_g2msm_multiplication), &bls12_g2_msm_discounts, 524);
 }
 
 fn bls12MsmGas(input_size: usize, len_per_pair: usize, multiplication_cost: i64, discounts: *const [128]u16, max_discount: u16) ?i64 {
@@ -572,11 +639,11 @@ fn bls12MsmGas(input_size: usize, len_per_pair: usize, multiplication_cost: i64,
     return @divFloor(numerator, 1000);
 }
 
-fn bls12PairingGas(input_size: usize) ?i64 {
+fn bls12PairingGas(input_size: usize, comptime gas: GasSchedule) ?i64 {
     const k = input_size / 384;
     const k_i64 = std.math.cast(i64, k) orelse return null;
-    const variable = std.math.mul(i64, 32_600, k_i64) catch return null;
-    return std.math.add(i64, 37_700, variable) catch null;
+    const variable = std.math.mul(i64, gas.get(.bls12_pairing_pair), k_i64) catch return null;
+    return std.math.add(i64, gas.get(.bls12_pairing_base), variable) catch null;
 }
 
 const bls12_g1_msm_discounts = [_]u16{
@@ -601,8 +668,8 @@ const bls12_g2_msm_discounts = [_]u16{
     534,  533,  532, 532, 531, 530, 530, 529, 528, 528, 527, 526, 526, 525, 524, 524,
 };
 
-fn p256Verify(call: Call) Error!Result {
-    const gas_left = charge(call, p256verify_gas) orelse return emptyResult(.out_of_gas);
+fn p256Verify(call: Call, comptime gas: GasSchedule) Error!Result {
+    const gas_left = charge(call, gas.get(.p256verify)) orelse return emptyResult(.out_of_gas);
     if (!precompile_backend.p256Verify(call.input_data)) {
         return .{
             .status = .success,
@@ -651,7 +718,7 @@ fn executeEthereumPrecompileForTest(allocator: std.mem.Allocator, revision: Revi
         .revision = revision,
         .input_data = input_data,
         .gas = gas,
-    });
+    }, eth_precompile.gas_schedule);
 }
 
 test "Ethereum precompile activation follows revisions" {
@@ -688,7 +755,7 @@ test "contract execution is independent from Ethereum activation window" {
         .revision = .frontier,
         .input_data = &.{},
         .gas = 0,
-    });
+    }, @import("eth/precompile.zig").gas_schedule);
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
@@ -851,6 +918,7 @@ test modexp {
 }
 
 test "P256VERIFY precompile" {
+    const ethereum_p256verify_gas = @import("eth/precompile.zig").gas_schedule.get(.p256verify);
     const Scheme = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const Hash = std.crypto.hash.sha2.Sha256;
 
@@ -869,12 +937,12 @@ test "P256VERIFY precompile" {
     @memcpy(input[96..128], public_key[1..33]);
     @memcpy(input[128..160], public_key[33..65]);
 
-    try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.p256verify.toAddress(), &input, p256verify_gas));
+    try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.p256verify.toAddress(), &input, ethereum_p256verify_gas));
 
-    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas - 1)).?;
+    const oog = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, ethereum_p256verify_gas - 1)).?;
     try std.testing.expectEqual(Status.out_of_gas, oog.status);
 
-    const valid = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, p256verify_gas + 1)).?;
+    const valid = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, ethereum_p256verify_gas + 1)).?;
     defer std.testing.allocator.free(valid.output_data);
 
     var expected = [_]u8{0} ** 32;
@@ -885,22 +953,40 @@ test "P256VERIFY precompile" {
 
     var wrong_hash = input;
     wrong_hash[0] ^= 0x01;
-    const invalid_signature = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &wrong_hash, p256verify_gas + 1)).?;
+    const invalid_signature = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &wrong_hash, ethereum_p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_signature.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_signature.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_signature.output_data.len);
 
-    const invalid_length = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), input[0..159], p256verify_gas + 1)).?;
+    const invalid_length = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), input[0..159], ethereum_p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_length.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_length.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_length.output_data.len);
 
     var infinity_key = input;
     @memset(infinity_key[96..160], 0);
-    const invalid_key = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &infinity_key, p256verify_gas + 1)).?;
+    const invalid_key = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &infinity_key, ethereum_p256verify_gas + 1)).?;
     try std.testing.expectEqual(Status.success, invalid_key.status);
     try std.testing.expectEqual(@as(i64, 1), invalid_key.gas_left);
     try std.testing.expectEqual(@as(usize, 0), invalid_key.output_data.len);
+}
+
+test "P256VERIFY gas is selected by a derived gas schedule" {
+    const gas = comptime schedule: {
+        var result = @import("eth/precompile.zig").gas_schedule;
+        result.set(.p256verify, 3_450);
+        break :schedule result;
+    };
+    const result = try executeContract(.p256verify, .{
+        .allocator = std.testing.allocator,
+        .revision = .cancun,
+        .input_data = &.{},
+        .gas = 3_451,
+    }, gas);
+
+    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(@as(i64, 1), result.gas_left);
+    try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
 }
 
 test "bn254 add and mul" {

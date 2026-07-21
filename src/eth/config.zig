@@ -25,7 +25,7 @@ const Opcode = opcode_info.Opcode;
 
 pub fn ExecutionOptions(comptime R: type) type {
     return struct {
-        name: []const u8 = "ethereum",
+        name: ?[]const u8 = null,
         revision: revision.Patch(R) = .{},
         instruction: ?type = null,
         value_transfer_log: ?*const fn (R, protocol_types.ValueTransferInput) ?protocol_types.ValueTransferLog = null,
@@ -56,17 +56,40 @@ pub fn execution(comptime cfg: ExecutionOptions(Revision)) definition.ExecutionD
 }
 
 pub fn executionFor(comptime R: type, comptime cfg: ExecutionOptions(R)) definition.ExecutionDefinition(R) {
+    const base: definition.ExecutionDefinition(R) = .{
+        .name = "ethereum",
+        .revision = defaultRevisionConfig(R),
+        .instruction = domainOrDefault(R, cfg.instruction, instruction, "instruction"),
+        .value_transfer_log = if (R == Revision) system.Execution.valueTransferLog else definition.neutralValueTransferLog(R),
+        .call = system.Call.config(R),
+        .create = system.Create.config(R),
+        .storage = system.Storage.config(R),
+        .self_destruct = system.SelfDestruct.config(R),
+        .precompile = domainOrDefault(R, cfg.precompile, precompile, "precompile"),
+    };
+    return applyExecution(R, base, cfg);
+}
+
+/// Apply the ordinary Ethereum execution-option vocabulary over an already
+/// complete definition. `eth.derive` uses this after lifting and amendment
+/// resolution so direct Ethereum config and derived families cannot drift into
+/// separate semantic-override APIs.
+pub fn applyExecution(
+    comptime R: type,
+    comptime base: definition.ExecutionDefinition(R),
+    comptime cfg: ExecutionOptions(R),
+) definition.ExecutionDefinition(R) {
     validateRevisionPatch(R, cfg.revision);
     return .{
-        .name = cfg.name,
-        .revision = mergePatch(defaultRevisionConfig(R), cfg.revision),
-        .instruction = domainOrDefault(R, cfg.instruction, instruction, "instruction"),
-        .value_transfer_log = cfg.value_transfer_log orelse if (R == Revision) system.Execution.valueTransferLog else definition.neutralValueTransferLog(R),
-        .call = mergePatch(system.Call.config(R), cfg.call),
-        .create = mergePatch(system.Create.config(R), cfg.create),
-        .storage = mergePatch(system.Storage.config(R), cfg.storage),
-        .self_destruct = mergePatch(system.SelfDestruct.config(R), cfg.self_destruct),
-        .precompile = domainOrDefault(R, cfg.precompile, precompile, "precompile"),
+        .name = cfg.name orelse base.name,
+        .revision = mergePatch(base.revision, cfg.revision),
+        .instruction = cfg.instruction orelse base.instruction,
+        .value_transfer_log = cfg.value_transfer_log orelse base.value_transfer_log,
+        .call = mergePatch(base.call, cfg.call),
+        .create = mergePatch(base.create, cfg.create),
+        .storage = mergePatch(base.storage, cfg.storage),
+        .self_destruct = mergePatch(base.self_destruct, cfg.self_destruct),
+        .precompile = cfg.precompile orelse base.precompile,
     };
 }
 
@@ -75,10 +98,24 @@ pub fn transaction(comptime cfg: TransactionOptions(Revision)) definition.Transa
 }
 
 pub fn transactionFor(comptime R: type, comptime cfg: TransactionOptions(R)) definition.TransactionDefinition(R) {
+    const base: definition.TransactionDefinition(R) = .{
+        .transaction = transaction_config.config(R),
+        .settlement = settlement.Settlement.config(R),
+        .authorization = authorization.Authorization.config(R),
+    };
+    return applyTransaction(R, base, cfg);
+}
+
+/// Apply transaction-domain patches over a complete transaction definition.
+pub fn applyTransaction(
+    comptime R: type,
+    comptime base: definition.TransactionDefinition(R),
+    comptime cfg: TransactionOptions(R),
+) definition.TransactionDefinition(R) {
     return .{
-        .transaction = mergePatch(transaction_config.config(R), cfg.transaction),
-        .settlement = mergePatch(settlement.Settlement.config(R), cfg.settlement),
-        .authorization = mergePatch(authorization.Authorization.config(R), cfg.authorization),
+        .transaction = mergePatch(base.transaction, cfg.transaction),
+        .settlement = mergePatch(base.settlement, cfg.settlement),
+        .authorization = mergePatch(base.authorization, cfg.authorization),
     };
 }
 
@@ -87,7 +124,19 @@ pub fn block(comptime cfg: BlockOptions(Revision)) definition.BlockDefinition(Re
 }
 
 pub fn blockFor(comptime R: type, comptime cfg: BlockOptions(R)) definition.BlockDefinition(R) {
-    return .{ .block = mergePatch(system.Block.config(R), cfg.block) };
+    const base: definition.BlockDefinition(R) = .{
+        .block = system.Block.config(R),
+    };
+    return applyBlock(R, base, cfg);
+}
+
+/// Apply block-domain patches over a complete block definition.
+pub fn applyBlock(
+    comptime R: type,
+    comptime base: definition.BlockDefinition(R),
+    comptime cfg: BlockOptions(R),
+) definition.BlockDefinition(R) {
+    return .{ .block = mergePatch(base.block, cfg.block) };
 }
 
 fn mergePatch(comptime base: anytype, comptime overrides: anytype) @TypeOf(base) {

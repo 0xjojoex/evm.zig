@@ -50,6 +50,11 @@ pub fn For(comptime Executor: type) type {
             child: ChildCreate,
         };
 
+        const CreateCallerPreparation = union(enum) {
+            rejected: Host.Result,
+            nonce: u64,
+        };
+
         const ChildCreate = runtime_frames.ChildCreate;
         const RuntimeFrame = runtime_frames.Frame;
 
@@ -759,6 +764,8 @@ pub fn For(comptime Executor: type) type {
             }, gas);
         }
 
+        /// Execute a root transaction CREATE. Transaction lifecycle owns the
+        /// sender nonce; only raw and nested CREATE increment their creator.
         pub fn executeCreateTransactionPhased(
             self: *Executor,
             options: executor_module.Create,
@@ -784,7 +791,7 @@ pub fn For(comptime Executor: type) type {
                 };
             }
 
-            const host_result = try executeCreateMessage(self, .{
+            const host_result = try executeTransactionCreateMessage(self, .{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
                 .gas = std.math.cast(i64, execution_gas.regular_left) orelse std.math.maxInt(i64),
@@ -1200,13 +1207,25 @@ pub fn For(comptime Executor: type) type {
         }
 
         fn executeCreateMessage(self: *Executor, msg: Host.Message) !Host.Result {
+            return executeCreateMessageWith(self, msg, beginCreate);
+        }
+
+        fn executeTransactionCreateMessage(self: *Executor, msg: Host.Message) !Host.Result {
+            return executeCreateMessageWith(self, msg, beginTransactionCreate);
+        }
+
+        fn executeCreateMessageWith(
+            self: *Executor,
+            msg: Host.Message,
+            comptime begin: anytype,
+        ) !Host.Result {
             const previous_depth = self.state.trace_depth;
             self.state.trace_depth = msg.depth;
             defer self.state.trace_depth = previous_depth;
 
             if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
 
-            return switch (try beginCreate(self, msg)) {
+            return switch (try begin(self, msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
                     var checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
@@ -1223,17 +1242,39 @@ pub fn For(comptime Executor: type) type {
         }
 
         fn beginCreate(self: *Executor, msg: Host.Message) !StartedCreate {
+            const caller_nonce = switch (try prepareCreateCaller(self, msg)) {
+                .rejected => |result| return .{ .immediate = result },
+                .nonce => |nonce| nonce,
+            };
+            const next_nonce = std.math.add(u64, caller_nonce, 1) catch
+                return .{ .immediate = createFailure(self, msg.recipient, msg.gas, msg.gas_reservoir, .invalid) };
+            try self.state.setNonce(msg.sender, next_nonce);
+            return beginPreparedCreate(self, msg);
+        }
+
+        fn beginTransactionCreate(self: *Executor, msg: Host.Message) !StartedCreate {
+            switch (try prepareCreateCaller(self, msg)) {
+                .rejected => |result| return .{ .immediate = result },
+                .nonce => {},
+            }
+            return beginPreparedCreate(self, msg);
+        }
+
+        fn prepareCreateCaller(self: *Executor, msg: Host.Message) !CreateCallerPreparation {
             const caller = try self.getOrCreateAccount(msg.sender);
             const create_address = msg.recipient;
             if (caller.balance < msg.value) {
-                return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
+                return .{ .rejected = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
             }
 
-            const next_nonce = std.math.add(u64, caller.nonce, 1) catch return .{ .immediate = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
             if (Protocol.create.createWarmsCreatedAddress(self.revision())) {
                 try self.warmAccount(create_address);
             }
-            try self.state.setNonce(msg.sender, next_nonce);
+            return .{ .nonce = caller.nonce };
+        }
+
+        fn beginPreparedCreate(self: *Executor, msg: Host.Message) !StartedCreate {
+            const create_address = msg.recipient;
             var checkpoint = try CheckpointGuard.begin(&self.state);
             defer checkpoint.deinit();
 
@@ -1380,7 +1421,11 @@ pub fn For(comptime Executor: type) type {
         fn createCollision(self: *Executor, address: Address) !bool {
             if (Protocol.Precompile.active(self.revision(), address)) return true;
             const account = try self.state.getAccountOrLoad(address) orelse return false;
-            return account.nonce != 0 or try self.state.accountHasCode(address) or try self.state.accountHasStorage(address);
+            // EIP-7610 clarifies this rule retroactively for every Ethereum
+            // revision: storage-only destinations also collide.
+            return account.nonce != 0 or
+                try self.state.accountHasCode(address) or
+                try self.state.accountHasStorage(address);
         }
     };
 }
@@ -1407,6 +1452,20 @@ test "CREATE final stabilization reuses already-stable output" {
 
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
+}
+
+test "EIP-7610 creation collision applies retroactively to every revision" {
+    const target = evmz.addr(0x1234);
+    const Runtime = For(evmz.Evm.Executor);
+
+    inline for (std.enums.values(evmz.eth.Revision)) |revision| {
+        var executor = evmz.Evm.Executor.init(std.testing.allocator, .{
+            .revision = revision,
+        });
+        defer executor.deinit();
+        _ = try executor.state.setStorage(target, 1, 1);
+        try std.testing.expect(try Runtime.createCollision(&executor, target));
+    }
 }
 
 test "interior checkpoint guard restores unresolved state and preserves commits" {

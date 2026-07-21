@@ -9,6 +9,41 @@ const Address = address.Address;
 
 pub const Entry = precompile.Contract;
 
+/// Canonical Ethereum values for the generic precompile gas vocabulary.
+/// Derived families may copy this table and replace individual semantic keys.
+pub const gas_schedule = precompile.GasSchedule.init(.{
+    .ecrecover = 3_000,
+    .sha256_base = 60,
+    .sha256_word = 12,
+    .ripemd160_base = 600,
+    .ripemd160_word = 120,
+    .identity_base = 15,
+    .identity_word = 3,
+    .modexp_osaka_minimum = 500,
+    .modexp_berlin_minimum = 200,
+    .modexp_berlin_divisor = 3,
+    .modexp_byzantium_divisor = 20,
+    .bn254_add_before_istanbul = 500,
+    .bn254_add_since_istanbul = 150,
+    .bn254_mul_before_istanbul = 40_000,
+    .bn254_mul_since_istanbul = 6_000,
+    .bn254_pairing_base_before_istanbul = 100_000,
+    .bn254_pairing_base_since_istanbul = 45_000,
+    .bn254_pairing_pair_before_istanbul = 80_000,
+    .bn254_pairing_pair_since_istanbul = 34_000,
+    .blake2f_round = 1,
+    .kzg_point_evaluation = 50_000,
+    .bls12_g1add = 375,
+    .bls12_g1msm_multiplication = 12_000,
+    .bls12_g2add = 600,
+    .bls12_g2msm_multiplication = 22_500,
+    .bls12_pairing_base = 37_700,
+    .bls12_pairing_pair = 32_600,
+    .bls12_map_fp_to_g1 = 5_500,
+    .bls12_map_fp2_to_g2 = 23_800,
+    .p256verify = 6_900,
+});
+
 pub fn resolve(revision: Revision, target: Address) ?Entry {
     const contract = precompile.contractFromAddress(target) orelse return null;
     if (!revision.isImpl(minimumRevision(contract))) return null;
@@ -24,13 +59,24 @@ pub fn execute(
     entry: Entry,
     call: precompile_runtime.PrecompileCall,
 ) precompile.Error!precompile_runtime.PrecompileOutcome {
+    return executeWithGasSchedule(revision, entry, call, gas_schedule);
+}
+
+/// Execute the Ethereum catalog with an already resolved gas schedule.
+/// Activation remains the caller's domain decision.
+pub fn executeWithGasSchedule(
+    revision: Revision,
+    entry: Entry,
+    call: precompile_runtime.PrecompileCall,
+    comptime resolved_gas: precompile.GasSchedule,
+) precompile.Error!precompile_runtime.PrecompileOutcome {
     return .{ .result = try precompile.executeContract(entry, .{
         .allocator = call.allocator,
         .revision = revision,
         .input_data = call.message.input_data,
         .gas = call.message.gas,
         .output_buffer = call.output_buffer,
-    }) };
+    }, resolved_gas) };
 }
 
 fn minimumRevision(contract: Entry) Revision {
@@ -61,6 +107,12 @@ fn minimumRevision(contract: Entry) Revision {
 
         .p256verify => .osaka,
     };
+}
+
+test "Ethereum owns canonical precompile gas parameters" {
+    try std.testing.expectEqual(@as(i64, 3_000), gas_schedule.get(.ecrecover));
+    try std.testing.expectEqual(@as(i64, 50_000), gas_schedule.get(.kzg_point_evaluation));
+    try std.testing.expectEqual(@as(i64, 6_900), gas_schedule.get(.p256verify));
 }
 
 test "precompile activation follows Ethereum revisions" {

@@ -92,5 +92,6 @@ pub fn calcWordSize(comptime T: type, size: T) T {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("./eth/config.zig");
+    _ = @import("./eth/derive.zig");
     _ = @import("./test.zig");
 }

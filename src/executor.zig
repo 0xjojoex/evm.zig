@@ -351,11 +351,16 @@ pub fn Executor(comptime ProtocolType: type) type {
         const TransactionAttemptState = struct {
             checkpoint: TransactionCheckpoint,
             generation: u64,
+            nonce_intent: TransactionNonceIntentState = .unused,
+            payload_started: bool = false,
         };
 
-        pub const TransactionAttemptError = error{
-            NoCurrentTransaction,
-            StaleTransactionExecution,
+        const TransactionNonceIntentState = union(enum) {
+            unused,
+            active: struct {
+                root: ScopeRoot,
+            },
+            completed,
         };
 
         /// Generation-checked mutation capability for one rollback-armed
@@ -372,13 +377,36 @@ pub fn Executor(comptime ProtocolType: type) type {
                 code_hash: [32]u8,
             };
 
-            pub fn revision(self: TransactionAttempt) TransactionAttemptError!Protocol.Revision {
-                try self.requireActive();
+            /// One transaction-owned sender-nonce advancement. The mutation is
+            /// placed outside the payload checkpoint. Root transaction execution
+            /// treats nonce handling as complete; raw and nested CREATE do not.
+            pub const TransactionNonceIntent = struct {
+                executor: *Self,
+                attempt_generation: u64,
+                sender: Address,
+
+                pub fn complete(self: TransactionNonceIntent) void {
+                    const attempt = TransactionAttempt{
+                        .executor = self.executor,
+                        .generation = self.attempt_generation,
+                    };
+                    const attempt_state = attempt.state();
+                    const intent = switch (attempt_state.nonce_intent) {
+                        .active => |intent| intent,
+                        .unused, .completed => unreachable,
+                    };
+                    std.debug.assert(std.mem.eql(u8, &intent.root.sender, &self.sender));
+                    attempt_state.nonce_intent = .completed;
+                }
+            };
+
+            pub fn revision(self: TransactionAttempt) Protocol.Revision {
+                self.requireActive();
                 return self.executor.revision();
             }
 
-            pub fn allocator(self: TransactionAttempt) TransactionAttemptError!std.mem.Allocator {
-                try self.requireActive();
+            pub fn allocator(self: TransactionAttempt) std.mem.Allocator {
+                self.requireActive();
                 return self.executor.allocator;
             }
 
@@ -386,7 +414,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self: TransactionAttempt,
                 request: execution_values.EvmExecutionRequest,
             ) !Interpreter.Result {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.executeTransactionRequest(request);
             }
 
@@ -394,7 +422,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self: TransactionAttempt,
                 request: execution_values.EvmExecutionRequest,
             ) !TransactionExecutionOutcomeType {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.executeTransactionRequestPhased(request);
             }
 
@@ -409,7 +437,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self: TransactionAttempt,
                 request: execution_values.EvmExecutionRequest,
             ) !TransactionExecutionOutcomeType {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.runPayloadInOpenScope(request);
             }
 
@@ -420,7 +448,7 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self: TransactionAttempt,
                 request: execution_values.EvmExecutionRequest,
             ) !Interpreter.Result {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.runTransactionPreludeRequest(request);
             }
 
@@ -431,17 +459,17 @@ pub fn Executor(comptime ProtocolType: type) type {
                 request: execution_values.EvmExecutionRequest,
                 scope_init: execution_values.ExecutionScopeInit,
             ) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.beginMessageScopeInAttempt(request, scope_init);
             }
 
             pub fn checkpoint(self: TransactionAttempt) !ExecutionCheckpoint {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.checkpoint();
             }
 
             pub fn accountSummary(self: TransactionAttempt, account_address: Address) !?AccountSummary {
-                try self.requireActive();
+                self.requireActive();
                 const account = try self.executor.getAccountOrLoad(account_address) orelse return null;
                 return .{
                     .nonce = account.nonce,
@@ -451,86 +479,111 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
 
             pub fn code(self: TransactionAttempt, account_address: Address) ![]const u8 {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.getCode(account_address);
             }
 
             pub fn balance(self: TransactionAttempt, account_address: Address) !u256 {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.getBalance(account_address);
             }
 
             pub fn accountAccess(self: TransactionAttempt, account_address: Address) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.traceAccountAccess(account_address, 0);
             }
 
             pub fn touchAccount(self: TransactionAttempt, account_address: Address) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.state.touchAccount(account_address);
             }
 
             pub fn addBalance(self: TransactionAttempt, account_address: Address, value: u256) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.state.addBalance(account_address, value);
             }
 
             pub fn subtractBalance(self: TransactionAttempt, account_address: Address, value: u256) !bool {
-                try self.requireActive();
+                self.requireActive();
                 return self.executor.state.subtractBalance(account_address, value);
             }
 
             pub fn setNonce(self: TransactionAttempt, account_address: Address, nonce: u64) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.state.setNonce(account_address, nonce);
             }
 
             pub fn incrementNonce(self: TransactionAttempt, account_address: Address) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.incrementNonce(account_address);
             }
 
+            /// Advance the transaction sender nonce exactly once outside the
+            /// payload rollback boundary. Completion is mandatory before the
+            /// attempt can become an execution lease.
+            pub fn advanceTransactionNonce(
+                self: TransactionAttempt,
+                message: MessageType,
+            ) !TransactionNonceIntent {
+                const attempt_state = self.state();
+                std.debug.assert(std.meta.activeTag(attempt_state.nonce_intent) == .unused);
+                std.debug.assert(!attempt_state.payload_started);
+                try self.executor.validateScopeRoot(.fromMessage(message));
+
+                const sender = message.sender();
+                try self.executor.incrementNonce(sender);
+                attempt_state.nonce_intent = .{ .active = .{
+                    .root = .fromMessage(message),
+                } };
+                return .{
+                    .executor = self.executor,
+                    .attempt_generation = self.generation,
+                    .sender = sender,
+                };
+            }
+
             pub fn setCode(self: TransactionAttempt, account_address: Address, code_bytes: []const u8) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.state.setCode(account_address, code_bytes);
             }
 
             pub fn clearCode(self: TransactionAttempt, account_address: Address) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.state.clearCode(account_address);
             }
 
             pub fn warmAccount(self: TransactionAttempt, account_address: Address) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.warmAccount(account_address);
             }
 
             pub fn warmStorage(self: TransactionAttempt, account_address: Address, key: u256) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.warmStorage(account_address, key);
             }
 
             pub fn finalizeState(self: TransactionAttempt) !void {
-                try self.requireActive();
+                self.requireActive();
                 try self.executor.finalizeTransactionState();
             }
 
-            pub fn logs(self: TransactionAttempt) TransactionAttemptError![]const Host.Log {
-                try self.requireActive();
+            pub fn logs(self: TransactionAttempt) []const Host.Log {
+                self.requireActive();
                 return self.executor.logs();
             }
 
             /// Seal the attempt into a neutral retain/discard lease. Family
             /// transaction output stays in the transaction binder.
-            pub fn completeLease(self: TransactionAttempt) TransactionAttemptError!ExecutionLease {
-                const state_value = try self.state();
+            pub fn completeLease(self: TransactionAttempt) ExecutionLease {
+                const state_value = self.state();
+                std.debug.assert(std.meta.activeTag(state_value.nonce_intent) != .active);
                 const checkpoint_value = state_value.checkpoint;
                 self.executor.current_transaction_attempt = null;
                 return self.executor.openExecutionLease(checkpoint_value);
             }
 
             pub fn discard(self: TransactionAttempt) !void {
-                const state_value = try self.state();
+                const state_value = self.state();
                 defer {
                     self.executor.clearLastOutput();
                     self.executor.closeTransactionLifetime();
@@ -545,14 +598,13 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self.discard() catch {};
             }
 
-            fn requireActive(self: TransactionAttempt) TransactionAttemptError!void {
-                _ = try self.state();
+            fn requireActive(self: TransactionAttempt) void {
+                _ = self.state();
             }
 
-            fn state(self: TransactionAttempt) TransactionAttemptError!*TransactionAttemptState {
-                const state_value = if (self.executor.current_transaction_attempt) |*value| value else return error.NoCurrentTransaction;
-                if (state_value.generation != self.generation)
-                    return error.StaleTransactionExecution;
+            fn state(self: TransactionAttempt) *TransactionAttemptState {
+                const state_value = if (self.executor.current_transaction_attempt) |*value| value else unreachable;
+                std.debug.assert(state_value.generation == self.generation);
                 return state_value;
             }
         };
@@ -691,7 +743,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             open: bool = true,
 
             pub fn commit(self: *ExecutionCheckpoint) !void {
-                try self.validateClose();
+                self.validateClose();
                 self.executor.state.commitCheckpoint(self.journal_checkpoint) catch |err| {
                     self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch {};
                     self.finishClose();
@@ -701,7 +753,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
 
             pub fn restore(self: *ExecutionCheckpoint) !void {
-                try self.validateClose();
+                self.validateClose();
                 self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch |err| {
                     self.finishClose();
                     return err;
@@ -718,9 +770,9 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self.* = undefined;
             }
 
-            fn validateClose(self: *const ExecutionCheckpoint) !void {
-                if (!self.open) return error.CheckpointClosed;
-                if (self.executor.checkpoint_top != self.id) return error.CheckpointOrderViolation;
+            fn validateClose(self: *const ExecutionCheckpoint) void {
+                std.debug.assert(self.open);
+                std.debug.assert(self.executor.checkpoint_top == self.id);
             }
 
             fn finishClose(self: *ExecutionCheckpoint) void {
@@ -738,7 +790,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             open: bool = true,
 
             fn commit(self: *TransactionCheckpoint) !void {
-                try self.validateClose();
+                self.validateClose();
                 self.executor.state.commitCheckpoint(self.journal_checkpoint) catch |err| {
                     self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch {};
                     self.finishClose();
@@ -748,7 +800,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             }
 
             fn restore(self: *TransactionCheckpoint) !void {
-                try self.validateClose();
+                self.validateClose();
                 self.executor.state.revertToCheckpoint(self.journal_checkpoint) catch |err| {
                     self.finishClose();
                     return err;
@@ -756,12 +808,10 @@ pub fn Executor(comptime ProtocolType: type) type {
                 self.finishClose();
             }
 
-            fn validateClose(self: *const TransactionCheckpoint) !void {
-                if (!self.open) return error.TransactionCheckpointClosed;
-                if (self.executor.active_transaction_checkpoint_id != self.id) {
-                    return error.TransactionCheckpointOrderViolation;
-                }
-                if (self.executor.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
+            fn validateClose(self: *const TransactionCheckpoint) void {
+                std.debug.assert(self.open);
+                std.debug.assert(self.executor.active_transaction_checkpoint_id == self.id);
+                std.debug.assert(self.executor.checkpoint_top == 0);
             }
 
             fn finishClose(self: *TransactionCheckpoint) void {
@@ -1536,6 +1586,11 @@ pub fn Executor(comptime ProtocolType: type) type {
             self: *Self,
             request: execution_values.EvmExecutionRequest,
         ) !TransactionExecutionOutcomeType {
+            std.debug.assert(self.current_transaction_attempt != null);
+            const attempt_state = if (self.current_transaction_attempt) |*value| value else unreachable;
+            std.debug.assert(!attempt_state.payload_started);
+            attempt_state.payload_started = true;
+
             var execution_checkpoint = try self.checkpoint();
             defer execution_checkpoint.deinit();
 
@@ -3281,7 +3336,7 @@ test "captured span is inspectable before executed transaction resolution" {
     try capture.begin();
     const result = try attempt.executeRequest(request_value);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    var executed = try attempt.completeLease();
+    var executed = attempt.completeLease();
     defer executed.deinit();
 
     const span = (try capture.finish()).?;
@@ -3312,7 +3367,7 @@ test "transaction attempt owns rollback before executed lease" {
     defer executor.deinit();
 
     const first = try executor.beginTransactionAttempt(request, .{});
-    const stale = first;
+    const first_generation = first.generation;
     try first.addBalance(sender, 9);
     try std.testing.expectEqual(@as(u256, 9), try first.balance(sender));
 
@@ -3322,7 +3377,7 @@ test "transaction attempt owns rollback before executed lease" {
 
     const second = try executor.beginTransactionAttempt(request, .{});
     defer second.discardIfCurrent();
-    try std.testing.expectError(error.StaleTransactionExecution, stale.balance(sender));
+    try std.testing.expect(first_generation != second.generation);
 }
 
 test "transaction attempt completes into existing executed lease" {
@@ -3344,11 +3399,171 @@ test "transaction attempt completes into existing executed lease" {
 
     const attempt = try executor.beginTransactionAttempt(request, .{});
     try attempt.addBalance(sender, 7);
-    const executed = try attempt.completeLease();
-    try std.testing.expectError(error.NoCurrentTransaction, attempt.balance(sender));
+    const executed = attempt.completeLease();
     try executed.retain();
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
     try std.testing.expect(!executor.hasCurrentTransaction());
+}
+
+test "transaction nonce intent survives payload rollback" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = contract,
+        } },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.nonce = 7;
+    try executor.state.seedAccount(sender, sender_account);
+    const revert_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .REVERT,
+    });
+    var contract_account = MemoryAccount.init(std.testing.allocator);
+    try contract_account.setCode(&revert_code);
+    try executor.state.seedAccount(contract, contract_account);
+
+    const attempt = try executor.beginTransactionAttemptLifetime();
+    defer attempt.discardIfCurrent();
+    try attempt.beginExecution(request, .{});
+    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
+    const outcome = try attempt.runPayload(request);
+    try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status);
+    try std.testing.expectEqual(@as(u64, 8), (try attempt.accountSummary(sender)).?.nonce);
+
+    nonce_intent.complete();
+    const executed = attempt.completeLease();
+    try executed.retain();
+    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
+}
+
+test "transaction nonce intent completion remains recorded for the attempt" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = recipient,
+        } },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.nonce = 7;
+    try executor.state.seedAccount(sender, sender_account);
+
+    const first_attempt = try executor.beginTransactionAttemptLifetime();
+    try first_attempt.beginExecution(request, .{});
+    const first_intent = try first_attempt.advanceTransactionNonce(request.message);
+    first_intent.complete();
+    try std.testing.expectEqual(
+        .completed,
+        std.meta.activeTag(executor.current_transaction_attempt.?.nonce_intent),
+    );
+    try std.testing.expectEqual(@as(u64, 8), (try first_attempt.accountSummary(sender)).?.nonce);
+    try first_attempt.discard();
+
+    const second_attempt = try executor.beginTransactionAttemptLifetime();
+    defer second_attempt.discardIfCurrent();
+    try second_attempt.beginExecution(request, .{});
+    const current_intent = try second_attempt.advanceTransactionNonce(request.message);
+    current_intent.complete();
+    try std.testing.expectEqual(@as(u64, 8), (try second_attempt.accountSummary(sender)).?.nonce);
+}
+
+test "transaction nonce intent selects the after-advance root create entry" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.address.create(sender, 7);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{
+            .create = .{
+                .sender = sender,
+                .recipient = recipient,
+                // PUSH0 PUSH0 RETURN deploys empty runtime code.
+                .init_code = &.{ 0x5f, 0x5f, 0xf3 },
+            },
+        },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.nonce = 7;
+    try executor.state.seedAccount(sender, sender_account);
+
+    const attempt = try executor.beginTransactionAttemptLifetime();
+    defer attempt.discardIfCurrent();
+    try attempt.beginExecution(request, .{});
+    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
+    const outcome = try attempt.runPayload(request);
+    try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
+    try std.testing.expectEqual(@as(u64, 8), (try attempt.accountSummary(sender)).?.nonce);
+
+    nonce_intent.complete();
+    try attempt.finalizeState();
+    const executed = attempt.completeLease();
+    try executed.retain();
+    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
+}
+
+test "transaction nonce intent leaves max-nonce acceptance to transaction policy" {
+    const sender = evmz.addr(0xaaaa);
+    const max_nonce = std.math.maxInt(u64);
+    const recipient = evmz.address.create(sender, max_nonce);
+    const request = execution_values.EvmExecutionRequest{
+        .context = .{
+            .chain = .{ .chain_id = 1 },
+            .transaction = .{ .origin = sender },
+        },
+        .message = .{
+            .create = .{
+                .sender = sender,
+                .recipient = recipient,
+                .init_code = &.{ 0x5f, 0x5f, 0xf3 },
+            },
+        },
+        .gas = .legacy(100_000),
+    };
+    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+
+    var sender_account = MemoryAccount.init(std.testing.allocator);
+    sender_account.nonce = max_nonce;
+    try executor.state.seedAccount(sender, sender_account);
+
+    const attempt = try executor.beginTransactionAttemptLifetime();
+    defer attempt.discardIfCurrent();
+    try attempt.beginExecution(request, .{});
+    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
+    const outcome = try attempt.runPayload(request);
+    try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
+    try std.testing.expectEqual(max_nonce, (try attempt.accountSummary(sender)).?.nonce);
+
+    nonce_intent.complete();
+    try attempt.finalizeState();
+    const executed = attempt.completeLease();
+    try executed.retain();
+    try std.testing.expectEqual(max_nonce, (try executor.getAccountOrLoad(sender)).?.nonce);
 }
 
 test "transaction attempt runPayload resolves only its inner checkpoint" {
@@ -3394,7 +3609,7 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
         try std.testing.expectEqual(@as(u256, 12), try attempt.balance(sender));
 
         try preparation_checkpoint.commit();
-        const executed = try attempt.completeLease();
+        const executed = attempt.completeLease();
         try executed.retain();
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
     }
@@ -3422,7 +3637,7 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
         try std.testing.expectEqual(@as(u256, 7), try attempt.balance(sender));
 
         try attempt.finalizeState();
-        const executed = try attempt.completeLease();
+        const executed = attempt.completeLease();
         try executed.retain();
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
     }

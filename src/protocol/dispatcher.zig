@@ -25,7 +25,10 @@ pub const ExecutionTarget = execution.ExecutionTarget;
 /// raise the ceiling with `pub const dispatch_eval_branch_quota`.
 fn dispatchEvalBranchQuota(comptime Definition: type) comptime_int {
     if (@hasDecl(Definition, "dispatch_eval_branch_quota")) return Definition.dispatch_eval_branch_quota;
-    return 256 * 128 + Definition.revisions.len * 512;
+    // Revision-mapped definitions add one adapter call per opcode and revision
+    // while folding gas bands. Keep enough headroom for small downstream fork
+    // timelines without requiring each derived family to publish a quota.
+    return 256 * 512 + Definition.revisions.len * 4096;
 }
 
 /// Support-window-independent per-byte attributes, resolved once per Definition

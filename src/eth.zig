@@ -13,6 +13,7 @@ const std = @import("std");
 
 pub const revision = @import("eth/revision.zig");
 pub const config = @import("eth/config.zig");
+const derived = @import("eth/derive.zig");
 pub const bal = @import("eth/bal.zig");
 pub const bal_diff = @import("eth/bal/diff.zig");
 pub const bal_view = @import("eth/bal/ClaimView.zig");
@@ -42,6 +43,8 @@ pub const Revision = revision.Revision;
 pub const ExecutionOptions = config.ExecutionOptions;
 pub const TransactionOptions = config.TransactionOptions;
 pub const BlockOptions = config.BlockOptions;
+pub const DeriveOptions = derived.Options;
+pub const derive = derived.derive;
 
 pub fn defineExecution(comptime options: ExecutionOptions(Revision)) definition_mod.ExecutionDefinition(Revision) {
     return config.execution(options);

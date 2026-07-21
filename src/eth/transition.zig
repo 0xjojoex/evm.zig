@@ -40,7 +40,6 @@ pub fn Implementation(
                     BlockGasLimitExceedsBound,
                     InvalidBlockGasLimit,
                     Overflow,
-                    SettlementRevisionMismatch,
                 };
 
                 /// Private gas capability for Ethereum's ordered pre-execution
@@ -211,7 +210,7 @@ pub fn Implementation(
                     output_data: []const u8,
                 } {
                     const revision = context.revision();
-                    try validateSettlementRevision(context, revision, executable.settlement);
+                    validateSettlementRevision(context, revision, executable.settlement);
 
                     const sender = executable.message.sender();
                     const execution_gas = executable.execution_gas;
@@ -219,10 +218,9 @@ pub fn Implementation(
                         try chargeTransactionCosts(context, attempt, sender, executable.settlement)
                     else
                         false;
+                    var nonce_intent: ?Context.AttemptCapability.TransactionNonceIntent = null;
                     if (transaction_charged) {
-                        if (!executable.message.isCreate()) {
-                            try attempt.incrementNonce(sender);
-                        }
+                        nonce_intent = try attempt.advanceTransactionNonce(executable.message);
                         try warmAccessList(attempt, executable.scope.access_list);
                     }
 
@@ -239,11 +237,13 @@ pub fn Implementation(
                             const has_authorization_phase = context.policy().authorization.active(revision) and
                                 executable.scope.authorizationCount() != 0;
                             result = if (has_authorization_phase)
-                                try executeAuthorizedPayload(context, attempt, revision, executable, gas, sender)
+                                try executeAuthorizedPayload(context, attempt, revision, executable, gas)
                             else
-                                try executePayload(attempt, executable, gas, sender);
+                                try executePayload(attempt, executable, gas);
                         }
                     }
+
+                    if (nonce_intent) |intent| intent.complete();
 
                     const result_gas = if (transaction_charged)
                         try settleTransactionCosts(context, attempt, sender, executable.settlement, result)
@@ -269,7 +269,6 @@ pub fn Implementation(
                     revision: Revision,
                     executable: PreparedTransaction,
                     initial_gas: execution.ExecutionGas,
-                    sender: Address,
                 ) Error!interpreter.Result {
                     var preparation_checkpoint = try attempt.checkpoint();
                     defer preparation_checkpoint.deinit();
@@ -286,7 +285,6 @@ pub fn Implementation(
                     );
                     if (!authorized) {
                         preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
-                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                         return gas.includedOutOfGas();
                     }
                     try warmDelegatedTransactionTarget(context, attempt, revision, executable.message);
@@ -298,7 +296,6 @@ pub fn Implementation(
                     ));
                     if (outcome.stage == .preparation) {
                         preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
-                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                         return gas.includedOutOfGas();
                     }
 
@@ -306,7 +303,6 @@ pub fn Implementation(
                     gas.foldInto(&result);
                     if (executionRolledBack(result.status)) {
                         preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
-                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
                     } else {
                         preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
                         try attempt.finalizeState();
@@ -318,7 +314,6 @@ pub fn Implementation(
                     attempt: Context.AttemptCapability,
                     executable: PreparedTransaction,
                     gas: execution.ExecutionGas,
-                    sender: Address,
                 ) Error!interpreter.Result {
                     const outcome = try attempt.runPayload(transaction.executionRequest(
                         executable.scope.context,
@@ -326,9 +321,7 @@ pub fn Implementation(
                         gas,
                     ));
                     const result = outcome.result;
-                    if (executionRolledBack(result.status)) {
-                        if (executable.message.isCreate()) try attempt.incrementNonce(sender);
-                    } else {
+                    if (!executionRolledBack(result.status)) {
                         try attempt.finalizeState();
                     }
                     return result;
@@ -338,12 +331,11 @@ pub fn Implementation(
                     context: *const Context,
                     revision: Revision,
                     settlement: TransactionProtocol.Settlement.Plan,
-                ) !void {
-                    if (settlementPlanner(context).planRevisionId(settlement) !=
-                        protocol.revisionIdForProtocol(TransactionProtocol, revision))
-                    {
-                        return error.SettlementRevisionMismatch;
-                    }
+                ) void {
+                    std.debug.assert(
+                        settlementPlanner(context).planRevisionId(settlement) ==
+                            protocol.revisionIdForProtocol(TransactionProtocol, revision),
+                    );
                 }
 
                 fn chargeTransactionCosts(

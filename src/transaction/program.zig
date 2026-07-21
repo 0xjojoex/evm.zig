@@ -29,12 +29,9 @@ pub fn TransactOutcome(comptime Executed: type, comptime Rejection: type) type {
     };
 }
 
-const ContractError = error{
-    InvalidTransactionOutcome,
-    TransactionPreludeAlreadyRun,
-    TransactionPreludeFailed,
-    TransactionPreludeNotRun,
-};
+/// Internal transport caught by the binder and replaced with the concrete
+/// block-prelude error before it reaches a program caller.
+const ContractError = error{TransactionPreludeFailed};
 
 /// Bind transaction semantics using flat engine-family and program carriers.
 /// Concrete VM types expose this through `VM.Program(...)`.
@@ -113,13 +110,17 @@ fn RuntimeState(
         }
 
         fn complete(self: *Self) Error!ExecutorType.ExecutionLease {
+            std.debug.assert(switch (self.prelude) {
+                .none, .consumed => true,
+                .pending, .failed => false,
+            });
             switch (self.prelude) {
-                .pending => return error.TransactionPreludeNotRun,
-                .failed => return error.TransactionPreludeFailed,
+                .pending, .failed => unreachable,
                 .none, .consumed => {},
             }
-            const attempt = self.attempt orelse return error.InvalidTransactionOutcome;
-            const executed = attempt.completeLease() catch |err| return executor_errors.normalize(err);
+            std.debug.assert(self.attempt != null);
+            const attempt = self.attempt orelse unreachable;
+            const executed = attempt.completeLease();
             self.attempt = null;
             return executed;
         }
@@ -144,38 +145,46 @@ fn AttemptType(
 
         const Self = @This();
 
+        pub const TransactionNonceIntent = struct {
+            inner: ExecutorType.TransactionAttempt.TransactionNonceIntent,
+
+            pub fn complete(self: TransactionNonceIntent) void {
+                self.inner.complete();
+            }
+        };
+
         fn runtimeState(self: Self) *Runtime {
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: Self) Error!ExecutorType.TransactionAttempt {
-            return self.runtimeState().attempt orelse error.NoCurrentTransaction;
+        fn token(self: Self) ExecutorType.TransactionAttempt {
+            return self.runtimeState().attempt orelse unreachable;
         }
 
         pub fn allocator(self: Self) Error!std.mem.Allocator {
-            return (try self.token()).allocator() catch |err| return executor_errors.normalize(err);
+            return self.token().allocator();
         }
 
         pub fn checkpoint(self: Self) Error!ExecutorType.ExecutionCheckpoint {
-            return (try self.token()).checkpoint() catch |err| return executor_errors.normalize(err);
+            return self.token().checkpoint() catch |err| return executor_errors.normalize(err);
         }
 
         pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) Error!Interpreter.Result {
-            return (try self.token()).executeRequest(request) catch |err| return executor_errors.normalize(err);
+            return self.token().executeRequest(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn executeRequestPhased(
             self: Self,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
-            return (try self.token()).executeRequestPhased(request) catch |err| return executor_errors.normalize(err);
+            return self.token().executeRequestPhased(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn runPayload(
             self: Self,
             request: execution.EvmExecutionRequest,
         ) Error!ExecutorType.TransactionExecutionOutcome {
-            return (try self.token()).runPayload(request) catch |err| return executor_errors.normalize(err);
+            return self.token().runPayload(request) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn beginExecution(
@@ -183,63 +192,72 @@ fn AttemptType(
             request: execution.EvmExecutionRequest,
             init_value: execution.ExecutionScopeInit,
         ) Error!void {
-            return (try self.token()).beginExecution(request, init_value) catch |err| return executor_errors.normalize(err);
+            return self.token().beginExecution(request, init_value) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn accountSummary(self: Self, account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
-            return (try self.token()).accountSummary(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().accountSummary(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn code(self: Self, account_address: Address) Error![]const u8 {
-            return (try self.token()).code(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().code(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn balance(self: Self, account_address: Address) Error!u256 {
-            return (try self.token()).balance(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().balance(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn accountAccess(self: Self, account_address: Address) Error!void {
-            return (try self.token()).accountAccess(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().accountAccess(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn touchAccount(self: Self, account_address: Address) Error!void {
-            return (try self.token()).touchAccount(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().touchAccount(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn addBalance(self: Self, account_address: Address, value: u256) Error!void {
-            return (try self.token()).addBalance(account_address, value) catch |err| return executor_errors.normalize(err);
+            return self.token().addBalance(account_address, value) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn subtractBalance(self: Self, account_address: Address, value: u256) Error!bool {
-            return (try self.token()).subtractBalance(account_address, value) catch |err| return executor_errors.normalize(err);
+            return self.token().subtractBalance(account_address, value) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn setNonce(self: Self, account_address: Address, nonce: u64) Error!void {
-            return (try self.token()).setNonce(account_address, nonce) catch |err| return executor_errors.normalize(err);
+            return self.token().setNonce(account_address, nonce) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn incrementNonce(self: Self, account_address: Address) Error!void {
-            return (try self.token()).incrementNonce(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().incrementNonce(account_address) catch |err| return executor_errors.normalize(err);
+        }
+
+        pub fn advanceTransactionNonce(
+            self: Self,
+            message: execution.Message,
+        ) Error!TransactionNonceIntent {
+            const intent = self.token().advanceTransactionNonce(message) catch |err|
+                return executor_errors.normalize(err);
+            return .{ .inner = intent };
         }
 
         pub fn setCode(self: Self, account_address: Address, code_bytes: []const u8) Error!void {
-            return (try self.token()).setCode(account_address, code_bytes) catch |err| return executor_errors.normalize(err);
+            return self.token().setCode(account_address, code_bytes) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn clearCode(self: Self, account_address: Address) Error!void {
-            return (try self.token()).clearCode(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().clearCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn warmAccount(self: Self, account_address: Address) Error!void {
-            return (try self.token()).warmAccount(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().warmAccount(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn warmStorage(self: Self, account_address: Address, key: u256) Error!void {
-            return (try self.token()).warmStorage(account_address, key) catch |err| return executor_errors.normalize(err);
+            return self.token().warmStorage(account_address, key) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn finalizeState(self: Self) Error!void {
-            return (try self.token()).finalizeState() catch |err| return executor_errors.normalize(err);
+            return self.token().finalizeState() catch |err| return executor_errors.normalize(err);
         }
     };
 }
@@ -264,20 +282,20 @@ fn PreludeContext(
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: Self) ContextError!ExecutorType.TransactionAttempt {
-            return self.runtimeState().attempt orelse error.NoCurrentTransaction;
+        fn token(self: Self) ExecutorType.TransactionAttempt {
+            return self.runtimeState().attempt orelse unreachable;
         }
 
         pub fn revision(self: Self) ContextError!RevisionType {
-            return (try self.token()).revision() catch |err| return executor_errors.normalize(err);
+            return self.token().revision();
         }
 
         pub fn code(self: Self, account_address: Address) ContextError![]const u8 {
-            return (try self.token()).code(account_address) catch |err| return executor_errors.normalize(err);
+            return self.token().code(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
-            return (try self.token()).executePreludeRequest(request) catch |err| return executor_errors.normalize(err);
+            return self.token().executePreludeRequest(request) catch |err| return executor_errors.normalize(err);
         }
     };
 }
@@ -372,14 +390,14 @@ pub fn Context(
 
         pub fn beginAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
-            if (runtime.attempt != null) return error.TransactionAttemptActive;
+            std.debug.assert(runtime.attempt == null);
             runtime.attempt = runtime.executor.beginTransactionAttemptLifetime() catch |err| return executor_errors.normalize(err);
             return .{ .handle = runtime };
         }
 
         pub fn activeAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
-            _ = runtime.attempt orelse return error.NoCurrentTransaction;
+            std.debug.assert(runtime.attempt != null);
             return .{ .handle = runtime };
         }
 
@@ -388,7 +406,7 @@ pub fn Context(
             switch (runtime.prelude) {
                 .none => return,
                 .pending => |binding| {
-                    _ = runtime.attempt orelse return error.NoCurrentTransaction;
+                    std.debug.assert(runtime.attempt != null);
                     runtime.prelude = .consumed;
                     binding.run(binding.handle, runtime) catch |err| {
                         runtime.prelude = .{ .failed = err };
@@ -397,7 +415,7 @@ pub fn Context(
                     runtime.executor.clearLogs();
                     runtime.executor.clearLastOutput();
                 },
-                .consumed, .failed => return error.TransactionPreludeAlreadyRun,
+                .consumed, .failed => unreachable,
             }
         }
 
@@ -634,8 +652,8 @@ fn BoundTransaction(
             var context: ContextType = .{ .handle = &runtime };
             const outcome = ImplementationType.transact(&context, input_value.tx) catch |err| {
                 if (err != error.TransactionPreludeFailed) return err;
-                const prelude_error = runtime.preludeFailure() orelse
-                    return error.TransactionPreludeFailed;
+                std.debug.assert(runtime.preludeFailure() != null);
+                const prelude_error = runtime.preludeFailure() orelse unreachable;
                 return @errorCast(prelude_error);
             };
             if (runtime.preludeFailure()) |prelude_error|
