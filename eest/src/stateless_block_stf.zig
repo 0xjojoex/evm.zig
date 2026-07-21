@@ -337,7 +337,7 @@ fn runBlock(
         if (!std.mem.eql(u8, &expected_bal_hash, &actual_bal_hash)) return error.MalformedFixture;
     }
 
-    return try block_stf.apply(scratch, .{
+    return try block_stf.applyAssumeDecoded(scratch, .{
         .revision = revision,
         .env = .{
             .chain_id = fixture_config.chain_id,
@@ -383,13 +383,13 @@ fn runBlock(
         .block_access_list = encoded_bal,
         .root_checks = .{
             .payload_header = .{
-                .state = block_stf.payloadHeaderRoot(try hashField(&block_header, "stateRoot")),
-                .receipts = block_stf.payloadHeaderRoot(try hashField(&block_header, "receiptTrie")),
+                .state = .fromHash(try hashField(&block_header, "stateRoot")),
+                .receipts = .fromHash(try hashField(&block_header, "receiptTrie")),
             },
             .reconstructed_header = .{
-                .transactions = block_stf.reconstructedHeaderRoot(try hashField(&block_header, "transactionsTrie")),
+                .transactions = .fromHash(try hashField(&block_header, "transactionsTrie")),
                 .withdrawals = if (revision.isImpl(.shanghai))
-                    block_stf.reconstructedHeaderRoot(try hashField(&block_header, "withdrawalsRoot"))
+                    .fromHash(try hashField(&block_header, "withdrawalsRoot"))
                 else
                     null,
             },

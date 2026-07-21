@@ -5,6 +5,13 @@ const Executor = evmz.Evm.Executor;
 const Host = evmz.Host;
 const trace = evmz.trace;
 
+test "execution resource plan and preparer have nominal root aliases" {
+    try std.testing.expectEqual(evmz.execution_resources.Plan, evmz.ExecutionResourcePlan);
+    try std.testing.expectEqual(evmz.execution_resources.Preparer, evmz.ExecutionResourcePreparer);
+    try std.testing.expect(!@hasDecl(evmz.StateReader, "prefetch"));
+    try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
+}
+
 test "execution checkpoints require one stable transaction scope" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
@@ -229,7 +236,6 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     const contract = evmz.addr(0xbbbb);
     const additional = evmz.addr(0xcccc);
     var recorder = CheckpointRecorder{};
-    var sink = recorder.sink();
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .berlin,
     });
@@ -237,7 +243,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     var capture = evmz.executor.CaptureContext.init(
         std.testing.allocator,
         null,
-        evmz.executor.capture_context.stateTargetForSink(&sink),
+        recorder.target(),
     );
     defer capture.deinit();
     executor.setCaptureContext(&capture);
@@ -413,7 +419,6 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
     const precompile = evmz.precompile.Contract.identity.toAddress();
     const input = [_]u8{ 0xde, 0xad };
     var recorder = CheckpointRecorder{};
-    var sink = recorder.sink();
     var executor = try Executor.initWithRuntimeResources(std.testing.allocator, .{
         .revision = .cancun,
     }, .{ .bounded = .{
@@ -425,7 +430,7 @@ test "runStandaloneRequest restores and closes scope on Zig error" {
     var capture = evmz.executor.CaptureContext.init(
         std.testing.allocator,
         null,
-        evmz.executor.capture_context.stateTargetForSink(&sink),
+        recorder.target(),
     );
     defer capture.deinit();
     executor.setCaptureContext(&capture);
@@ -604,15 +609,11 @@ const CheckpointRecorder = struct {
     events: [8]trace.CheckpointKind = undefined,
     len: usize = 0,
 
-    fn sink(self: *CheckpointRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .checkpoint = trace.CheckpointFields.full,
-        }, &.{
-            .checkpoint = checkpointEvent,
-        });
+    fn target(self: *CheckpointRecorder) evmz.executor.CaptureStateTarget {
+        return evmz.executor.CaptureStateTarget.init(self, &.{ .checkpoint = checkpointEvent });
     }
 
-    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) void {
+    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) !void {
         const self: *CheckpointRecorder = @ptrCast(@alignCast(ptr));
         std.debug.assert(self.len < self.events.len);
         self.events[self.len] = event.kind;

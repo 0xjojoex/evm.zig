@@ -240,16 +240,6 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
-        /// Compatibility helper for runtime-selected step consumers. Capture
-        /// remains fixed; only completed rows are dispatched through `Sink`.
-        pub fn executeWithTrace(self: *Self, tape: *trace.TraceTape, sink: *trace.Sink) Error!Result {
-            const captured = try self.capture(tape, trace.captureProfileForSink(sink));
-            try trace.replaySteps(sink, captured.span);
-            try tape.resolve(captured.span);
-            try tape.reset();
-            return captured.result;
-        }
-
         pub fn executeUntilAction(self: *Self) Error!RunResult {
             try self.executeUntraced();
 
@@ -714,7 +704,7 @@ pub fn traceFrameOutcome(status: Status) trace.TraceFrameOutcome {
     };
 }
 
-test "interpreter trace sink records step start and end" {
+test "interpreter trace cursor records step start and end" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.POP) };
     var host: Host = undefined;
     const msg = Host.Message{
@@ -727,8 +717,6 @@ test "interpreter trace sink records step start and end" {
         .value = 0,
     };
 
-    var recorder = TraceRecorder{};
-    var sink = recorder.sink();
     var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -740,27 +728,47 @@ test "interpreter trace sink records step start and end" {
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
 
-    const result = try interpreter.executeWithTrace(&tape, &sink);
+    const captured = try interpreter.capture(&tape, .{ .stack = .full });
+    defer tape.resolve(captured.span) catch unreachable;
+    const result = captured.result;
+
+    var starts: u8 = 0;
+    var ends: u8 = 0;
+    var cursor = trace.TraceCursor.init(captured.span);
+    while (try cursor.next()) |event| switch (event) {
+        .step_start => |view| {
+            if (starts == 0) {
+                try std.testing.expectEqual(@as(usize, 0), view.row.pc);
+                try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), view.row.opcode);
+                try std.testing.expectEqual(@as(?Opcode, .PUSH1), std.enums.fromInt(Opcode, view.row.opcode));
+                try std.testing.expectEqual(@as(u16, 7), view.frame.depth);
+                try std.testing.expectEqual(@as(i64, 100), view.row.gas_before);
+                try std.testing.expectEqual(@as(usize, 0), view.state.stack.?.len);
+            }
+            starts += 1;
+        },
+        .step_end => |view| {
+            if (ends == 0) {
+                try std.testing.expectEqual(@as(usize, 2), view.row.pc_next);
+                try std.testing.expect(!view.terminal);
+                try std.testing.expectEqual(@as(i64, 97), view.row.gas_after);
+                try std.testing.expectEqual(@as(i64, 3), view.row.gas_before - view.row.gas_after);
+                try std.testing.expectEqualSlices(u256, &.{0x2a}, view.state.stack.?);
+            }
+            if (view.terminal) {
+                try std.testing.expectEqual(@as(usize, 2), view.row.pc);
+                try std.testing.expectEqual(@as(usize, 3), view.row.pc_next);
+                try std.testing.expectEqual(trace.TraceFrameOutcome.success, view.frame.outcome);
+                try std.testing.expectEqual(@as(usize, 0), view.state.stack.?.len);
+            }
+            ends += 1;
+        },
+        .frame_enter, .frame_leave => {},
+    };
 
     try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expectEqual(@as(u8, 2), recorder.starts);
-    try std.testing.expectEqual(@as(u8, 2), recorder.ends);
-    try std.testing.expectEqual(@as(usize, 0), recorder.first_start_pc);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), recorder.first_start_opcode);
-    try std.testing.expectEqual(@as(?Opcode, .PUSH1), recorder.first_start_decoded);
-    try std.testing.expectEqual(@as(u16, 7), recorder.first_start_depth);
-    try std.testing.expectEqual(@as(i64, 100), recorder.first_start_gas_left);
-    try std.testing.expectEqual(@as(usize, 0), recorder.first_start_stack_len);
-    try std.testing.expectEqual(@as(usize, 2), recorder.first_end_pc_next);
-    try std.testing.expectEqual(trace.StepStatus.running, recorder.first_end_status);
-    try std.testing.expectEqual(@as(i64, 97), recorder.first_end_gas_left);
-    try std.testing.expectEqual(@as(i64, 3), recorder.first_end_gas_cost);
-    try std.testing.expectEqual(@as(usize, 1), recorder.first_end_stack_len);
-    try std.testing.expectEqual(@as(u256, 0x2a), recorder.first_end_stack_top);
-    try std.testing.expectEqual(@as(usize, 2), recorder.last_end_pc);
-    try std.testing.expectEqual(@as(usize, 3), recorder.last_end_pc_next);
-    try std.testing.expectEqual(trace.StepStatus.success, recorder.last_end_status);
-    try std.testing.expectEqual(@as(usize, 0), recorder.last_end_stack_len);
+    try std.testing.expectEqual(@as(u8, 2), starts);
+    try std.testing.expectEqual(@as(u8, 2), ends);
 }
 
 test "interpreter captured tail table records a replay span" {
@@ -1031,107 +1039,6 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
-
-test "interpreter trace schema controls step emission" {
-    const code = [_]u8{@intFromEnum(Opcode.STOP)};
-    var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
-
-    var recorder = TraceRecorder{};
-    var sink = recorder.sinkWithoutEvents();
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &code,
-        .revision = .latest,
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
-    defer tape.deinit();
-
-    const result = try interpreter.executeWithTrace(&tape, &sink);
-
-    try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expectEqual(@as(u8, 0), recorder.starts);
-    try std.testing.expectEqual(@as(u8, 0), recorder.ends);
-}
-
-const TraceRecorder = struct {
-    starts: u8 = 0,
-    ends: u8 = 0,
-    first_start_pc: usize = 0,
-    first_start_opcode: u8 = 0,
-    first_start_decoded: ?Opcode = null,
-    first_start_depth: u16 = 0,
-    first_start_gas_left: i64 = 0,
-    first_start_stack_len: usize = 0,
-    first_end_pc_next: usize = 0,
-    first_end_status: trace.StepStatus = .running,
-    first_end_gas_left: i64 = 0,
-    first_end_gas_cost: i64 = 0,
-    first_end_stack_len: usize = 0,
-    first_end_stack_top: u256 = 0,
-    last_end_pc: usize = 0,
-    last_end_pc_next: usize = 0,
-    last_end_status: trace.StepStatus = .running,
-    last_end_stack_len: usize = 0,
-
-    fn sink(self: *TraceRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .step_start = trace.StepStartFields.initMany(&.{ .pc, .opcode, .decoded_opcode, .depth, .gas_left, .stack }),
-            .step_end = trace.StepEndFields.initMany(&.{ .pc, .pc_next, .status, .gas_left, .gas_cost, .stack }),
-        }, &.{
-            .stepStart = stepStart,
-            .stepEnd = stepEnd,
-        });
-    }
-
-    fn sinkWithoutEvents(self: *TraceRecorder) trace.Sink {
-        return trace.Sink.init(self, .{}, &.{
-            .stepStart = stepStart,
-            .stepEnd = stepEnd,
-        });
-    }
-
-    fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
-        const self: *TraceRecorder = @ptrCast(@alignCast(ptr));
-        if (self.starts == 0) {
-            self.first_start_pc = event.pc;
-            self.first_start_opcode = event.opcode;
-            self.first_start_decoded = event.decoded_opcode;
-            self.first_start_depth = event.depth;
-            self.first_start_gas_left = event.gas_left;
-            self.first_start_stack_len = event.stack.len;
-        }
-        self.starts += 1;
-    }
-
-    fn stepEnd(ptr: *anyopaque, event: trace.StepEnd) void {
-        const self: *TraceRecorder = @ptrCast(@alignCast(ptr));
-        if (self.ends == 0) {
-            self.first_end_pc_next = event.pc_next;
-            self.first_end_status = event.status;
-            self.first_end_gas_left = event.gas_left;
-            self.first_end_gas_cost = event.gas_cost;
-            self.first_end_stack_len = event.stack.len;
-            self.first_end_stack_top = event.stack[event.stack.len - 1];
-        }
-        self.last_end_pc = event.pc;
-        self.last_end_pc_next = event.pc_next;
-        self.last_end_status = event.status;
-        self.last_end_stack_len = event.stack.len;
-        self.ends += 1;
-    }
-};
 
 pub fn OwnedInitFor(comptime Protocol: type) type {
     return struct {

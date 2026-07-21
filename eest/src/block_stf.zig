@@ -24,6 +24,7 @@ pub const Options = struct {
     test_filter: ?[]const u8 = null,
     limit: usize = 0,
     verbose: bool = false,
+    bal_differential: bool = false,
 };
 
 pub const SkipReason = enum(u8) {
@@ -41,10 +42,12 @@ pub const FailReason = enum(u8) {
     block_number_mismatch,
     blob_versioned_hashes_mismatch,
     pre_state_root_mismatch,
+    bal_differential_mismatch,
 };
 
 pub const UncheckedReason = enum(u8) {
     amsterdam_gas_used,
+    bal_differential_fallback,
 };
 
 pub const Summary = struct {
@@ -218,7 +221,21 @@ fn runPayloadEntry(
     }
 
     summary.fixtures += 1;
-    const result = runPayload(allocator, revision, fixture, &entry, store, block_hashes, parent) catch |err| {
+    var bal_diff_buffer: [64 * 1024]u8 = undefined;
+    var bal_diff_writer: std.Io.Writer = .fixed(&bal_diff_buffer);
+    var bal_report = block_stf.BalDifferentialReport{
+        .mismatch_writer = if (options.bal_differential) &bal_diff_writer else null,
+    };
+    const result = runPayload(
+        allocator,
+        revision,
+        fixture,
+        &entry,
+        store,
+        block_hashes,
+        parent,
+        if (options.bal_differential) &bal_report else null,
+    ) catch |err| {
         if (err == error.ParentHashMismatch) {
             if (options.verbose) std.debug.print("  {s} block={} parent hash mismatch\n", .{ test_name, block_index });
             summary.countFail(.parent_hash_mismatch);
@@ -245,6 +262,12 @@ fn runPayloadEntry(
         summary.countFail(if (err == error.MalformedFixture) .malformed_fixture else .validation_error);
         return;
     };
+    if (bal_diff_writer.buffered().len != 0) {
+        std.debug.print("  {s} block={} BAL diff:\n{s}", .{ test_name, block_index, bal_diff_writer.buffered() });
+    }
+    if (bal_report.mismatch_write_failed) {
+        std.debug.print("  {s} block={} BAL diff truncated at 64 KiB\n", .{ test_name, block_index });
+    }
     if (result.status != .valid) {
         if (options.verbose) {
             std.debug.print("  {s} block={} status={s}\n", .{ test_name, block_index, @tagName(result.status) });
@@ -261,6 +284,31 @@ fn runPayloadEntry(
         return;
     }
 
+    if (options.bal_differential and revision.isImpl(.amsterdam)) {
+        if (!bal_report.status.isFallback() and bal_report.status != .matched) {
+            std.debug.print("  {s} block={} BAL differential={s} tx={?}\n", .{
+                test_name,
+                block_index,
+                @tagName(bal_report.status),
+                bal_report.tx_index,
+            });
+            summary.countFail(.bal_differential_mismatch);
+            return;
+        }
+        if (bal_report.status.isFallback()) {
+            if (options.verbose) {
+                std.debug.print("  {s} block={} BAL differential fallback={s} tx={?} error={s}\n", .{
+                    test_name,
+                    block_index,
+                    @tagName(bal_report.status),
+                    bal_report.tx_index,
+                    if (bal_report.diagnostic_error) |err| @errorName(err) else "none",
+                });
+            }
+            summary.countUnchecked(.bal_differential_fallback);
+        }
+    }
+
     if (options.verbose) std.debug.print("  pass {s} block={}\n", .{ test_name, block_index });
     _ = path;
     summary.passed += 1;
@@ -275,6 +323,7 @@ fn runPayload(
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
     parent: *ParentContext,
+    bal_report: ?*block_stf.BalDifferentialReport,
 ) !block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -310,7 +359,7 @@ fn runPayload(
     };
 
     const block_hash_source = block_hashes.source();
-    const result = try block_stf.apply(scratch, .{
+    const result = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = revision,
         .env = .{
             .chain_id = fixture_config.chain_id,
@@ -333,8 +382,8 @@ fn runPayload(
         .block_access_list = block_access_list,
         .root_checks = .{
             .payload_header = .{
-                .state = block_stf.payloadHeaderRoot(try hashField(&payload, "stateRoot")),
-                .receipts = block_stf.payloadHeaderRoot(try hashField(&payload, "receiptsRoot")),
+                .state = .fromHash(try hashField(&payload, "stateRoot")),
+                .receipts = .fromHash(try hashField(&payload, "receiptsRoot")),
             },
         },
         .header_claims = .{
@@ -360,6 +409,7 @@ fn runPayload(
             else
                 .execution_derived,
         } else null,
+        .bal_differential = bal_report,
     });
 
     if (result.status == .valid) {

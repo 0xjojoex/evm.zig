@@ -15,8 +15,8 @@ pub const validateStatelessBytesWithOptions = v1.validateStatelessBytesWithOptio
 pub const validateStatelessStatusBytes = v1.validateStatelessStatusBytes;
 pub const validateStatelessResultBytes = v1.validateStatelessResultBytes;
 pub const validateStatelessResultBytesWithOptions = v1.validateStatelessResultBytesWithOptions;
-pub const validateStatelessResultBytesWithTrace = v1.validateStatelessResultBytesWithTrace;
-pub const validateStatelessResultBytesWithTraceAndOptions = v1.validateStatelessResultBytesWithTraceAndOptions;
+pub const validateStatelessResultBytesWithCapture = v1.validateStatelessResultBytesWithCapture;
+pub const validateStatelessResultBytesWithCaptureAndOptions = v1.validateStatelessResultBytesWithCaptureAndOptions;
 pub const smokeInput = v1_smoke.smokeInput;
 pub const smokeInputBytes = v1_smoke.smokeInputBytes;
 

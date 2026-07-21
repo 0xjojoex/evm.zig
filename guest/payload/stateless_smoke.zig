@@ -97,29 +97,29 @@ pub fn runStatelessSmoke(allocator: std.mem.Allocator) !StatelessProof {
     });
     const post_state_pairs = [_]evmz.eth.trie.Pair{.{ .key = &account_key, .value = post_account_value }};
     const expected_state_root = try evmz.eth.trie.root(scratch, &post_state_pairs);
-    const first = try block_stf.apply(scratch, .{
+    const first = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = gas_limit },
         .state_backend = try evmz.state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = .{
             .payload_header = .{
-                .state = block_stf.payloadHeaderRoot(expected_state_root),
-                .receipts = block_stf.payloadHeaderRoot([_]u8{0xff} ** 32),
+                .state = .fromHash(expected_state_root),
+                .receipts = .fromHash([_]u8{0xff} ** 32),
             },
         },
     });
     if (first.status != .receipts_root_mismatch) return proofFrom(first);
 
-    return proofFrom(try block_stf.apply(scratch, .{
+    return proofFrom(try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = gas_limit },
         .state_backend = try evmz.state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = .{
             .payload_header = .{
-                .state = block_stf.payloadHeaderRoot(expected_state_root),
-                .receipts = block_stf.payloadHeaderRoot(first.receipts_root),
+                .state = .fromHash(expected_state_root),
+                .receipts = .fromHash(first.receipts_root),
             },
         },
         .header_claims = .{

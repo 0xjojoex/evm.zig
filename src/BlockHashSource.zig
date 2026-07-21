@@ -17,3 +17,19 @@ pub const VTable = struct {
 pub fn getBlockHash(self: BlockHashSource, number: u64) !?u256 {
     return self.vtable.getBlockHash(self.ptr, number);
 }
+
+/// Block-history capability safe for overlapping calls.
+///
+/// The source owns synchronization and the lifetime of any backing snapshot;
+/// evmz only copies this lightweight handle between candidate lanes.
+pub const Concurrent = struct {
+    value: BlockHashSource,
+
+    pub fn initAssumeSafe(value: BlockHashSource) Concurrent {
+        return .{ .value = value };
+    }
+
+    pub fn source(self: Concurrent) BlockHashSource {
+        return self.value;
+    }
+};

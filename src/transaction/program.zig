@@ -487,6 +487,10 @@ fn BoundTransaction(
             return self.lease.logs();
         }
 
+        pub fn allocator(self: @This()) ExecutorType.ExecutionLeaseError!std.mem.Allocator {
+            return self.lease.allocator();
+        }
+
         pub fn changeset(self: @This()) executor_errors.Error!state.Changeset {
             return self.lease.changeset() catch |err| return executor_errors.normalize(err);
         }

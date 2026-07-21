@@ -1,45 +1,26 @@
-//! EIP-7702 runtime codec and authorization-signature validation.
+//! EIP-7702 runtime helpers and authorization-signature validation.
 //!
 //! This is the *behavior* half of EIP-7702, distinct from `eth/eip/7702.zig`,
 //! which owns the *parameter table* (magic byte, gas costs, prefix, lengths).
-//! The split follows the layering: `eth/` declares protocol data, the executor
-//! runs on it. Behavior depends on parameters, so this module imports the eth
-//! table for the delegation prefix and code length and re-exports them for
-//! callers that encode/decode delegation code — but the numbers stay defined in
-//! one place. It is not moved into the eth table because that would pull byte
-//! manipulation and the secp256k1 curve order into the spec-parameter file.
+//! The neutral delegation codec lives under `code/`; signature behavior stays
+//! here in the executor layer.
 const std = @import("std");
 const address = @import("../address.zig");
-const params = @import("../eth/eip/7702.zig");
+const delegation = @import("../code/eip7702.zig");
 
 const Address = address.Address;
 /// Delegation indicator prefix (`0xef0100`); re-exported from the eth table.
-pub const delegation_designator = params.delegation_designator;
+pub const delegation_designator = delegation.delegation_designator;
 /// Byte length of a full delegation indicator; re-exported from the eth table.
-pub const delegation_code_len = params.delegation_code_len;
+pub const delegation_code_len = delegation.delegation_code_len;
 
 /// secp256k1 group order `n`; upper bound for a valid signature `r`/`s` scalar.
 pub const secp256k1n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
 /// `n / 2`; EIP-2 low-`s` bound rejecting malleable signatures.
 pub const secp256k1_half_n = secp256k1n / 2;
 
-/// Decode a delegation target from account code.
-///
-/// Returns the delegated-to address when `code` is a well-formed delegation
-/// indicator (`0xef0100 ++ address`), or `null` when it is any other code.
-pub fn delegationTarget(code: []const u8) ?Address {
-    if (code.len != delegation_code_len) return null;
-    if (!std.mem.eql(u8, code[0..delegation_designator.len], &delegation_designator)) return null;
-    var target: Address = undefined;
-    @memcpy(&target, code[delegation_designator.len..]);
-    return target;
-}
-
-/// Encode `target` into `buffer` as a delegation indicator (`0xef0100 ++ target`).
-pub fn writeDelegationCode(buffer: *[delegation_code_len]u8, target: Address) void {
-    @memcpy(buffer[0..delegation_designator.len], &delegation_designator);
-    @memcpy(buffer[delegation_designator.len..], &target);
-}
+pub const delegationTarget = delegation.delegationTarget;
+pub const writeDelegationCode = delegation.writeDelegationCode;
 
 /// Validate the scalar ranges of an authorization-tuple signature.
 ///

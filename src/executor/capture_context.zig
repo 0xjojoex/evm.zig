@@ -84,49 +84,6 @@ pub const StateFanout = struct {
     }
 };
 
-/// Adapt the state-only portion of the staged runtime sink. Step callbacks are
-/// never invoked here; they are replayed from `TraceSpan`.
-pub fn stateTargetForSink(sink: *trace.Sink) ?StateTarget {
-    const flags = sink.flags();
-    if (!flags.wants_account_access and
-        !flags.wants_state_read and
-        !flags.wants_state_write and
-        !flags.wants_checkpoint)
-    {
-        return null;
-    }
-    return StateTarget.init(sink, &.{
-        .account_access = sinkAccountAccess,
-        .state_read = sinkStateRead,
-        .state_write = sinkStateWrite,
-        .checkpoint = sinkCheckpoint,
-    });
-}
-
-fn sinkAccountAccess(ptr: *anyopaque, event: trace.AccountAccess) !void {
-    const sink: *trace.Sink = @ptrCast(@alignCast(ptr));
-    const fields = sink.events.account_access;
-    sink.accountAccess(.{
-        .depth = if (fields.contains(.depth)) event.depth else 0,
-        .address = if (fields.contains(.address)) event.address else @splat(0),
-    });
-}
-
-fn sinkStateRead(ptr: *anyopaque, event: trace.StateRead) !void {
-    const sink: *trace.Sink = @ptrCast(@alignCast(ptr));
-    sink.stateRead(event);
-}
-
-fn sinkStateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
-    const sink: *trace.Sink = @ptrCast(@alignCast(ptr));
-    sink.stateWrite(event);
-}
-
-fn sinkCheckpoint(ptr: *anyopaque, event: trace.Checkpoint) !void {
-    const sink: *trace.Sink = @ptrCast(@alignCast(ptr));
-    sink.checkpoint(event);
-}
-
 pub const TraceBinding = struct {
     tape: *trace.TraceTape,
     profile: trace.CaptureProfile = .{},
@@ -387,26 +344,6 @@ test "capture context scopes tape and fallible state target together" {
 
     try std.testing.expectEqual(@as(usize, 1), recorder.accesses);
     try std.testing.expectEqual(@as(usize, 1), span.frames.len);
-}
-
-test "runtime state adapter preserves account-access field masks" {
-    const Recorder = struct {
-        last: trace.AccountAccess = .{ .address = @splat(0) },
-
-        fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.last = event;
-        }
-    };
-
-    var recorder = Recorder{};
-    var sink = trace.Sink.init(&recorder, .{
-        .account_access = trace.AccountAccessFields.initOne(.depth),
-    }, &.{ .accountAccess = Recorder.accountAccess });
-    const target = stateTargetForSink(&sink).?;
-    try target.accountAccess(.{ .depth = 7, .address = @splat(0xaa) });
-    try std.testing.expectEqual(@as(u16, 7), recorder.last.depth);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 20), &recorder.last.address);
 }
 
 test "scoped trace detaches from a reusable state capture context" {

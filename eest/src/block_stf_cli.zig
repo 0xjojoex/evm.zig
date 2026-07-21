@@ -37,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
             jobs_explicit = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             options.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--bal-differential")) {
+            options.bal_differential = true;
         } else {
             try paths.append(allocator, try arena.dupe(u8, arg));
         }
@@ -179,7 +181,7 @@ fn parseJobs(value: []const u8) !usize {
 }
 
 fn requiresSequential(options: block_stf.Options) bool {
-    return options.limit > 0 or options.verbose;
+    return options.limit > 0 or options.verbose or options.bal_differential;
 }
 
 fn printSummary(path: []const u8, summary: block_stf.Summary) void {
@@ -203,14 +205,14 @@ fn printSummary(path: []const u8, summary: block_stf.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build eest-block-stf -- [--jobs N] [--test NAME] [--limit N] [--verbose] [path ...]
+        \\usage: zig build eest-block-stf -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--bal-differential] [path ...]
         \\
         \\Runs regular EEST blockchain_tests_sync fixtures through eth.BlockSTF.
         \\The adapter seeds pre/genesis state into MemoryStore and executes
         \\Engine API payloads in order. Witness-backed zkEVM fixtures belong to
         \\eest-stateless-block-stf.
-        \\Uses {d} workers by default (maximum {d}). --limit and --verbose
-        \\require --jobs 1.
+        \\Uses {d} workers by default (maximum {d}). --limit, --verbose, and
+        \\--bal-differential require --jobs 1.
         \\
     , .{ default_jobs, max_jobs });
 }
@@ -226,4 +228,5 @@ test "limited and verbose BlockSTF runs stay sequential" {
     try std.testing.expect(!requiresSequential(.{}));
     try std.testing.expect(requiresSequential(.{ .limit = 1 }));
     try std.testing.expect(requiresSequential(.{ .verbose = true }));
+    try std.testing.expect(requiresSequential(.{ .bal_differential = true }));
 }

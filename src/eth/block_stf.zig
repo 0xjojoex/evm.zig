@@ -13,8 +13,14 @@ const Executor = @import("../executor.zig");
 const Host = @import("../Host.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
-const eth_bal = @import("bal.zig");
-const BalRecorder = @import("bal_recorder.zig").Recorder;
+const eth_bal = @import("bal/model.zig");
+const bal_diff = @import("bal/diff.zig");
+const bal_differential = @import("bal/differential.zig");
+const BalRecorder = @import("bal/recorder.zig").Recorder;
+const ClaimView = @import("bal/ClaimView.zig");
+const bal_witness = @import("bal/witness.zig");
+const candidate_state = @import("bal/candidate_state.zig");
+const execution_resources = @import("../execution_resources.zig");
 const eth_header = @import("header.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
@@ -46,21 +52,299 @@ const Engine = vm.Vm(
     .{},
 );
 const BlockExecution = Engine.BlockExecution;
+const BalDifferentialOperations = struct {
+    pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
+    pub const Withdrawal = @import("Withdrawal.zig");
+
+    pub fn appendCandidateDepositRequestData(
+        allocator: std.mem.Allocator,
+        revision: Revision,
+        output: *std.ArrayList(u8),
+        logs: []const Host.Log,
+    ) !void {
+        if (revision.isImpl(.prague)) try eip6110.appendRequestDataFromLogs(allocator, output, logs);
+    }
+
+    pub fn encodeCandidateReceipt(
+        allocator: std.mem.Allocator,
+        kind: @TypeOf(@as(Engine.Transaction, undefined).kind),
+        receipt: vm.TxReceiptView,
+    ) ![]u8 {
+        return encodeReceipt(allocator, kind, receipt);
+    }
+
+    pub fn candidateLogsBloom(logs: []const Host.Log) [256]u8 {
+        return logsBloom(logs);
+    }
+
+    pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
+        mergeLogsBloom(target, source);
+    }
+
+    pub fn applyCandidateWithdrawals(
+        executor: *Engine.Executor,
+        withdrawals: []const @import("Withdrawal.zig"),
+    ) !void {
+        try applyWithdrawals(executor, withdrawals);
+    }
+
+    pub fn deriveCandidateRequests(
+        allocator: std.mem.Allocator,
+        executor: *Engine.Executor,
+        block_policy: *const Engine.BlockPolicy,
+        env: vm.Env,
+        progress: vm.BlockResult,
+        deposit_request_data: []const u8,
+    ) ![]const []const u8 {
+        return deriveRequests(allocator, executor, block_policy, env, progress, deposit_request_data);
+    }
+
+    pub fn freeCandidateRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
+        freeRequests(allocator, requests);
+    }
+
+    pub fn candidateRequestsHash(allocator: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
+        return requestsHash(allocator, requests);
+    }
+
+    pub fn candidateReceiptsRoot(allocator: std.mem.Allocator, receipts: []const []const u8) ![32]u8 {
+        return trie.receiptRoot(allocator, receipts);
+    }
+
+    pub fn candidateTransactionBlobGasUsed(
+        revision: Revision,
+        blob_schedule: ?transaction.BlobSchedule,
+        tx: Engine.Transaction,
+    ) !u64 {
+        return transactionBlobGasUsed(revision, blob_schedule, tx);
+    }
+
+    pub fn candidateBlockBlobGasLimit(
+        revision: Revision,
+        blob_schedule: ?transaction.BlobSchedule,
+    ) !u64 {
+        return blockBlobGasLimit(revision, blob_schedule);
+    }
+};
+const BalDifferentialRunner = bal_differential.Runner(Engine, BalDifferentialOperations);
 pub const TransactionProtocol = Engine.TransactionProtocol;
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
 pub const ParentBlobGas = transaction.ExcessBlobGasInput;
+pub const BalDifferentialReport = bal_differential.Report;
+pub const BalDifferentialStatus = bal_differential.Status;
+pub const ParallelFallback = bal_differential.ParallelFallback;
 const Env = vm.Env;
 const BlockHashSource = vm.BlockHashSource;
 const TxReceiptView = vm.TxReceiptView;
 const Log = vm.Log;
 const TxStatus = vm.TxStatus;
 
+pub const ParallelStrategy = struct {
+    /// Maximum candidate transactions retained and submitted in one batch.
+    /// `1` exercises identical ownership and ordering without overlap.
+    max_in_flight: usize,
+    submission: Submission = .async,
+
+    pub const Submission = bal_differential.ParallelSubmission;
+
+    pub fn assertRequest(self: ParallelStrategy, report: ?*BalDifferentialReport) void {
+        std.debug.assert(self.max_in_flight > 0);
+        std.debug.assert(report != null);
+    }
+};
+
+pub const ParallelResources = struct {
+    /// Backing allocator for isolated growable task arenas. It must support
+    /// overlapping allocation calls made by the supplied `std.Io` runtime.
+    lane_allocator: std.mem.Allocator,
+    /// Frozen concurrent view of the canonical authenticated pre-state. Null
+    /// explicitly falls back to authoritative serial execution.
+    state_reader: ?state.ConcurrentReader = null,
+    /// Frozen concurrent BLOCKHASH source when the canonical input has one.
+    block_hash_source: ?BlockHashSource.Concurrent = null,
+};
+
+/// Single-use BAL parallel block executor bound to caller-owned runtime
+/// capabilities.
+///
+/// `io` and all borrowed input slices must remain valid through `run`. The
+/// executor takes ownership of `input.state_backend`: `run` releases it on
+/// every result, while `deinit` releases it when execution never starts.
+/// Scheduling the whole `run` call through another task is valid, but the
+/// caller must join or cancel that task before calling `deinit`.
+pub const BalExecutor = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    input: Input,
+    strategy: ParallelStrategy,
+    resources: ParallelResources,
+    lifecycle: Lifecycle = .ready,
+
+    const Input = union(enum) {
+        checked: BlockInput,
+        assume_decoded: AssumeDecodedBlockInput,
+    };
+
+    const Lifecycle = enum {
+        ready,
+        running,
+        finished,
+    };
+
+    /// Bind checked raw transaction input to the caller's I/O runtime.
+    pub fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        input: BlockInput,
+        strategy: ParallelStrategy,
+        resources: ParallelResources,
+    ) BalExecutor {
+        strategy.assertRequest(input.bal_differential);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .input = .{ .checked = input },
+            .strategy = strategy,
+            .resources = resources,
+        };
+    }
+
+    /// Bind values decoded by a trusted adapter to the caller's I/O runtime.
+    pub fn initAssumeDecoded(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        input: AssumeDecodedBlockInput,
+        strategy: ParallelStrategy,
+        resources: ParallelResources,
+    ) BalExecutor {
+        strategy.assertRequest(input.bal_differential);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .input = .{ .assume_decoded = input },
+            .strategy = strategy,
+            .resources = resources,
+        };
+    }
+
+    /// Execute and join all private candidate work before returning.
+    pub fn run(self: *BalExecutor) !Result {
+        std.debug.assert(self.lifecycle == .ready);
+        self.lifecycle = .running;
+        defer self.lifecycle = .finished;
+
+        return switch (self.input) {
+            .checked => |input| self.runChecked(input),
+            .assume_decoded => |input| self.runAssumeDecoded(input),
+        };
+    }
+
+    fn runChecked(self: *const BalExecutor, input: BlockInput) !Result {
+        var state_backend = input.state_backend;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
+            state_backend.deinit();
+            return err;
+        };
+        return self.runAssumeDecoded(assumeDecodedBlockInput(
+            input,
+            state_backend,
+            transactions,
+        ));
+    }
+
+    fn runAssumeDecoded(self: *const BalExecutor, input: AssumeDecodedBlockInput) !Result {
+        resetBalReport(input);
+        const parallel_execution = self.parallelExecution(input);
+        var no_produced_bal: ?[]u8 = null;
+        const result = try serialFold(
+            self.allocator,
+            input,
+            .compare,
+            &no_produced_bal,
+            parallel_execution,
+        );
+        std.debug.assert(no_produced_bal == null);
+        return result;
+    }
+
+    fn parallelExecution(
+        self: *const BalExecutor,
+        input: AssumeDecodedBlockInput,
+    ) ?bal_differential.ParallelExecution {
+        const report = input.bal_differential.?;
+        const concurrent_reader = self.resources.state_reader orelse {
+            report.parallel_fallback = .concurrent_state_reader_unavailable;
+            return null;
+        };
+        if (input.block_hash_source != null and self.resources.block_hash_source == null) {
+            report.parallel_fallback = .concurrent_block_hash_source_unavailable;
+            return null;
+        }
+        return .{
+            .io = self.io,
+            .submission = self.strategy.submission,
+            .max_in_flight = self.strategy.max_in_flight,
+            .lane_allocator = self.resources.lane_allocator,
+            .state_reader = concurrent_reader.reader(),
+            .block_hash_source = if (input.block_hash_source != null)
+                self.resources.block_hash_source.?.source()
+            else
+                null,
+        };
+    }
+
+    /// Release a transferred backend when `run` was never called.
+    pub fn deinit(self: *BalExecutor) void {
+        std.debug.assert(self.lifecycle != .running);
+        if (self.lifecycle == .ready) {
+            switch (self.input) {
+                .checked => self.input.checked.state_backend.deinit(),
+                .assume_decoded => self.input.assume_decoded.state_backend.deinit(),
+            }
+        }
+        self.* = undefined;
+    }
+};
+
 pub const TransactionInput = struct {
     tx: Engine.Transaction,
     encoded: []const u8,
+
+    /// Construct an ingress value when a trusted adapter has already decoded
+    /// `encoded` into `tx`. This does not prove that both representations
+    /// describe the same transaction; prefer the raw-byte `produce` API when
+    /// the bytes are not already inside a trusted boundary.
+    pub fn initAssumeDecoded(tx: Engine.Transaction, encoded: []const u8) TransactionInput {
+        return .{ .tx = tx, .encoded = encoded };
+    }
 };
 
+/// Explicit diagnostic capture for authoritative serial execution.
+///
+/// Semantic state events remain live and fallible through `state_target`.
+/// Step facts are first captured passively into the caller-owned tape, then
+/// delivered as one completed span per payload transaction. Candidate lanes
+/// never receive this caller-owned capture.
+pub const ExecutionCapture = struct {
+    state_target: ?Executor.CaptureStateTarget = null,
+    steps: ?StepCapture = null,
+
+    pub const StepCapture = struct {
+        tape: *trace.TraceTape,
+        profile: trace.CaptureProfile = .{},
+        target: trace.TraceSpanTarget,
+    };
+};
+
+/// Compile-time provenance for one side of a consensus-root comparison.
+///
+/// The tag makes the comparison table auditable: exactly one operand must be
+/// produced by execution and the other must come from an independent payload
+/// or reconstructed-header claim. It labels provenance; it does not
+/// authenticate the wrapped hash.
 pub const RootSource = enum {
     execution_derived,
     payload_header_claim,
@@ -71,19 +355,15 @@ pub fn SourcedRoot(comptime source: RootSource) type {
     return struct {
         pub const root_source = source;
         value: [32]u8,
+
+        pub fn fromHash(hash: [32]u8) SourcedRoot(source) {
+            return .{ .value = hash };
+        }
     };
 }
 
 pub const PayloadHeaderRoot = SourcedRoot(.payload_header_claim);
 pub const ReconstructedHeaderRoot = SourcedRoot(.reconstructed_header_claim);
-
-pub fn payloadHeaderRoot(value: [32]u8) PayloadHeaderRoot {
-    return .{ .value = value };
-}
-
-pub fn reconstructedHeaderRoot(value: [32]u8) ReconstructedHeaderRoot {
-    return .{ .value = value };
-}
 
 /// Roots carried directly by execution-payload/header fields.
 pub const PayloadHeaderRootClaims = struct {
@@ -154,25 +434,104 @@ pub const ParentHeaderContext = struct {
     }
 };
 
-pub const BlockInput = struct {
-    revision: Revision = .latest,
-    config: Config = .base,
-    env: Env = .{},
-    block_hash_source: ?BlockHashSource = null,
-    block_header: ?BlockHeader = null,
+fn BlockInputType(comptime Transactions: type) type {
+    return struct {
+        revision: Revision = .latest,
+        config: Config = .base,
+        env: Env = .{},
+        block_hash_source: ?BlockHashSource = null,
+        block_header: ?BlockHeader = null,
+        state_backend: state.Backend,
+        /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+        prepared_code_backend: ?prepared_code.Backend = null,
+        /// Optional caller-owned service for the validated BAL-derived resource
+        /// plan. Failure falls back to authoritative lazy reads and has no
+        /// consensus meaning.
+        execution_resource_preparer: ?execution_resources.Preparer = null,
+        transactions: Transactions,
+        withdrawals: []const Withdrawal = &.{},
+        parent_header: ?ParentHeaderContext = null,
+        parent_blob_gas: ?ParentBlobGas = null,
+        block_access_list: ?[]const u8 = null,
+        root_checks: RootChecks,
+        header_claims: HeaderClaims = .{},
+        header_hash_claim: ?HeaderHashClaim = null,
+        capture: ?ExecutionCapture = null,
+        /// Optional diagnostic lane. It never supplies canonical block state.
+        bal_differential: ?*BalDifferentialReport = null,
+        /// Synchronously prove every BAL-declared account/storage path is readable.
+        /// This is independent from resource preparation and never changes
+        /// transaction warm/cold gas semantics.
+        precheck_block_access_list_state: bool = false,
+    };
+}
+
+/// Checked validation input. Transactions are canonical raw envelopes decoded
+/// once inside `apply`, then the same bytes feed the transaction trie.
+pub const BlockInput = BlockInputType([]const []const u8);
+
+/// Trusted-adapter validation input. Every decoded transaction must match its
+/// encoded envelope; `applyAssumeDecoded` deliberately does not prove this.
+pub const AssumeDecodedBlockInput = BlockInputType([]const TransactionInput);
+
+fn assumeDecodedBlockInput(
+    input: BlockInput,
     state_backend: state.Backend,
-    /// Caller-owned prepared-artifact service; not part of the VM resource bound.
-    prepared_code_backend: ?prepared_code.Backend = null,
     transactions: []const TransactionInput,
-    withdrawals: []const Withdrawal = &.{},
-    parent_header: ?ParentHeaderContext = null,
-    parent_blob_gas: ?ParentBlobGas = null,
-    block_access_list: ?[]const u8 = null,
-    root_checks: RootChecks,
-    header_claims: HeaderClaims = .{},
-    header_hash_claim: ?HeaderHashClaim = null,
-    trace_sink: ?*trace.Sink = null,
-};
+) AssumeDecodedBlockInput {
+    return .{
+        .revision = input.revision,
+        .config = input.config,
+        .env = input.env,
+        .block_hash_source = input.block_hash_source,
+        .block_header = input.block_header,
+        .state_backend = state_backend,
+        .prepared_code_backend = input.prepared_code_backend,
+        .execution_resource_preparer = input.execution_resource_preparer,
+        .transactions = transactions,
+        .withdrawals = input.withdrawals,
+        .parent_header = input.parent_header,
+        .parent_blob_gas = input.parent_blob_gas,
+        .block_access_list = input.block_access_list,
+        .root_checks = input.root_checks,
+        .header_claims = input.header_claims,
+        .header_hash_claim = input.header_hash_claim,
+        .capture = input.capture,
+        .bal_differential = input.bal_differential,
+        .precheck_block_access_list_state = input.precheck_block_access_list_state,
+    };
+}
+
+fn resetBalReport(input: AssumeDecodedBlockInput) void {
+    if (input.bal_differential) |report| report.reset();
+}
+
+fn ProduceInputType(comptime Transactions: type) type {
+    return struct {
+        revision: Revision = .latest,
+        config: Config = .base,
+        env: Env = .{},
+        block_hash_source: ?BlockHashSource = null,
+        block_header: ?BlockHeader = null,
+        state_backend: state.Backend,
+        /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+        prepared_code_backend: ?prepared_code.Backend = null,
+        transactions: Transactions,
+        withdrawals: []const Withdrawal = &.{},
+        parent_header: ?ParentHeaderContext = null,
+        parent_blob_gas: ?ParentBlobGas = null,
+        capture: ?ExecutionCapture = null,
+    };
+}
+
+/// Checked claim-free block-building input. Transactions are canonical raw
+/// envelopes; `produce` decodes each once and uses that value for execution
+/// while retaining the same bytes for the transaction trie.
+pub const ProduceInput = ProduceInputType([]const []const u8);
+
+/// Trusted-adapter block-building input. The caller must maintain the invariant
+/// that every decoded transaction matches its encoded envelope.
+pub const AssumeDecodedProduceInput = ProduceInputType([]const TransactionInput);
 
 pub const Status = enum {
     valid,
@@ -226,6 +585,68 @@ pub const Result = struct {
     block_hash: [32]u8 = [_]u8{0} ** 32,
 };
 
+/// Execution-derived block fields available before complete header material is
+/// supplied. In particular this deliberately has no block hash.
+pub const DerivedBlockOutput = struct {
+    gas_used: u64,
+    block_gas_used: u64,
+    block_state_gas_used: u64,
+    state_root: [32]u8,
+    transactions_root: [32]u8,
+    receipts_root: [32]u8,
+    withdrawals_root: [32]u8,
+    logs_bloom: [256]u8,
+    blob_gas_used: u64,
+    excess_blob_gas: ?u256,
+    requests_hash: [32]u8,
+    block_access_list_hash: [32]u8,
+
+    fn fromResult(result: Result) DerivedBlockOutput {
+        std.debug.assert(result.status == .valid);
+        return .{
+            .gas_used = result.gas_used,
+            .block_gas_used = result.block_gas_used,
+            .block_state_gas_used = result.block_state_gas_used,
+            .state_root = result.state_root,
+            .transactions_root = result.transactions_root,
+            .receipts_root = result.receipts_root,
+            .withdrawals_root = result.withdrawals_root,
+            .logs_bloom = result.logs_bloom,
+            .blob_gas_used = result.blob_gas_used,
+            .excess_blob_gas = result.excess_blob_gas,
+            .requests_hash = result.requests_hash,
+            .block_access_list_hash = result.block_access_list_hash,
+        };
+    }
+};
+
+/// Successful builder artifact. `encoded_block_access_list` is the exact
+/// canonical RLP byte string transported in the Amsterdam execution payload.
+pub const ProducedBlock = struct {
+    output: DerivedBlockOutput,
+    encoded_block_access_list: []u8,
+
+    pub fn deinit(self: *ProducedBlock, allocator: std.mem.Allocator) void {
+        allocator.free(self.encoded_block_access_list);
+        self.* = undefined;
+    }
+};
+
+/// A rejected candidate carries no BAL bytes, making it impossible to confuse
+/// failure with a successfully produced empty BAL (`0xc0`).
+pub const ProduceOutcome = union(enum) {
+    produced: ProducedBlock,
+    rejected: Result,
+
+    pub fn deinit(self: *ProduceOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .produced => |*produced| produced.deinit(allocator),
+            .rejected => {},
+        }
+        self.* = undefined;
+    }
+};
+
 pub const empty_logs_bloom = [_]u8{0} ** 256;
 pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
@@ -249,10 +670,10 @@ const ConsensusRootComparison = struct {
 };
 
 const consensus_root_comparisons = [_]ConsensusRootComparison{
-    .{ .field = .state, .status = .state_root_mismatch, .claim_source = PayloadHeaderRoot.root_source },
-    .{ .field = .transactions, .status = .transactions_root_mismatch, .claim_source = ReconstructedHeaderRoot.root_source },
-    .{ .field = .receipts, .status = .receipts_root_mismatch, .claim_source = PayloadHeaderRoot.root_source },
-    .{ .field = .withdrawals, .status = .withdrawals_root_mismatch, .claim_source = ReconstructedHeaderRoot.root_source },
+    .{ .field = .state, .status = .state_root_mismatch, .claim_source = .payload_header_claim },
+    .{ .field = .transactions, .status = .transactions_root_mismatch, .claim_source = .reconstructed_header_claim },
+    .{ .field = .receipts, .status = .receipts_root_mismatch, .claim_source = .payload_header_claim },
+    .{ .field = .withdrawals, .status = .withdrawals_root_mismatch, .claim_source = .reconstructed_header_claim },
 };
 
 comptime {
@@ -266,12 +687,135 @@ comptime {
     }
 }
 
-/// Execute one block transition. Ownership of `input.state_backend` transfers
-/// to this call and is released on every return path.
+/// Decode raw transaction envelopes once, then validate one block transition
+/// against payload/header claims. Ownership of `input.state_backend` transfers
+/// to this call and is released on every path, including decode failure.
 pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
+    var state_backend = input.state_backend;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
+        state_backend.deinit();
+        return err;
+    };
+
+    // Ownership transfers here; `applyAssumeDecoded` releases the backend on
+    // both success and error paths.
+    return applyAssumeDecoded(
+        allocator,
+        assumeDecodedBlockInput(input, state_backend, transactions),
+    );
+}
+
+/// Validate values decoded by a trusted adapter. The caller must maintain the
+/// encoded/decoded transaction invariant. Ownership of `input.state_backend`
+/// transfers to this call and is released on every path.
+pub fn applyAssumeDecoded(allocator: std.mem.Allocator, input: AssumeDecodedBlockInput) !Result {
+    resetBalReport(input);
+    var no_produced_bal: ?[]u8 = null;
+    const result = try serialFold(allocator, input, .compare, &no_produced_bal, null);
+    std.debug.assert(no_produced_bal == null);
+    return result;
+}
+
+/// Decode raw transaction envelopes once, then build one Amsterdam block.
+/// A rejected candidate never owns BAL bytes. Ownership of
+/// `input.state_backend` transfers to this call, including decode failures.
+pub fn produce(allocator: std.mem.Allocator, input: ProduceInput) !ProduceOutcome {
+    var state_backend = input.state_backend;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const transactions = decodeRawTransactions(scratch, input.transactions) catch |err| {
+        state_backend.deinit();
+        return err;
+    };
+
+    // Ownership transfers here; `produceAssumeDecoded` releases the backend.
+    return produceAssumeDecoded(allocator, .{
+        .revision = input.revision,
+        .config = input.config,
+        .env = input.env,
+        .block_hash_source = input.block_hash_source,
+        .block_header = input.block_header,
+        .state_backend = state_backend,
+        .prepared_code_backend = input.prepared_code_backend,
+        .transactions = transactions,
+        .withdrawals = input.withdrawals,
+        .parent_header = input.parent_header,
+        .parent_blob_gas = input.parent_blob_gas,
+        .capture = input.capture,
+    });
+}
+
+/// Build one Amsterdam block from transaction values decoded by a trusted
+/// adapter. This skips the encoded/decoded consistency check; callers should
+/// use `produce` for untrusted raw envelopes. Ownership of
+/// `input.state_backend` transfers to this call.
+pub fn produceAssumeDecoded(
+    allocator: std.mem.Allocator,
+    input: AssumeDecodedProduceInput,
+) !ProduceOutcome {
+    var encoded_block_access_list: ?[]u8 = null;
+    errdefer if (encoded_block_access_list) |encoded| allocator.free(encoded);
+
+    const result = try serialFold(allocator, .{
+        .revision = input.revision,
+        .config = input.config,
+        .env = input.env,
+        .block_hash_source = input.block_hash_source,
+        .block_header = input.block_header,
+        .state_backend = input.state_backend,
+        .prepared_code_backend = input.prepared_code_backend,
+        .transactions = input.transactions,
+        .withdrawals = input.withdrawals,
+        .parent_header = input.parent_header,
+        .parent_blob_gas = input.parent_blob_gas,
+        // `.produce` never reads comparison claims; `BlockInput` keeps them
+        // compile-time mandatory for the public validation surface.
+        .root_checks = .{
+            .payload_header = .{
+                .state = .fromHash(trie.empty_root_hash),
+                .receipts = .fromHash(trie.empty_root_hash),
+            },
+        },
+        .capture = input.capture,
+    }, .produce, &encoded_block_access_list, null);
+
+    if (result.status != .valid) {
+        std.debug.assert(encoded_block_access_list == null);
+        return .{ .rejected = result };
+    }
+    return .{ .produced = .{
+        .output = DerivedBlockOutput.fromResult(result),
+        .encoded_block_access_list = encoded_block_access_list.?,
+    } };
+}
+
+const FoldMode = enum { compare, produce };
+
+/// Shared authoritative serial fold for validation and block production.
+fn serialFold(
+    allocator: std.mem.Allocator,
+    input: AssumeDecodedBlockInput,
+    comptime mode: FoldMode,
+    produced_bal: *?[]u8,
+    parallel_execution: ?bal_differential.ParallelExecution,
+) !Result {
     var state_backend = input.state_backend;
     defer state_backend.deinit();
 
+    std.debug.assert(produced_bal.* == null);
+    if (mode == .produce) {
+        std.debug.assert(input.block_access_list == null);
+        std.debug.assert(std.meta.eql(input.header_claims, HeaderClaims{}));
+        std.debug.assert(input.header_hash_claim == null);
+        std.debug.assert(input.bal_differential == null);
+        std.debug.assert(parallel_execution == null);
+        if (!input.revision.isImpl(.amsterdam)) return .{ .status = .invalid_block_body };
+    }
     if (!blockBodyValid(input)) return .{ .status = .invalid_block_body };
     if (parentHeaderStatus(input)) |status| return .{ .status = status };
     if (!blockContextValid(input)) return .{ .status = .header_surface_mismatch };
@@ -279,7 +823,7 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
     var block_access_list_mismatch = false;
-    const record_block_access_list = input.block_access_list != null or
+    const record_block_access_list = mode == .produce or input.block_access_list != null or
         input.header_claims.block_access_list_hash != null or
         input.revision.isImpl(.amsterdam);
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
@@ -303,6 +847,61 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
+
+        if (input.execution_resource_preparer != null or input.precheck_block_access_list_state) {
+            var plan = try bal_witness.planAllocAssumeValidated(
+                allocator,
+                claimed_block_access_list.?.accounts,
+            );
+            defer plan.deinit(allocator);
+
+            // This BlockSTF hook is an optimization. A caller that requires
+            // eager availability can invoke the preparer before `apply` and
+            // choose its own retry/error policy.
+            if (input.execution_resource_preparer) |preparer| {
+                preparer.prepare(plan.resources) catch {};
+            }
+            if (input.precheck_block_access_list_state) {
+                bal_witness.probeState(
+                    state_backend.reader(),
+                    plan.resources.state,
+                ) catch |err| switch (err) {
+                    error.InvalidWitness => return .{ .status = .invalid_witness },
+                    else => return err,
+                };
+            }
+        }
+    }
+
+    var claim_view: ?ClaimView = null;
+    defer if (claim_view) |*view| view.deinit(allocator);
+    var differential_runner: ?BalDifferentialRunner = null;
+    defer if (differential_runner) |*runner| runner.deinit();
+    var differential_candidate: ?BalDifferentialRunner.Artifacts = null;
+    defer if (differential_candidate) |*candidate| candidate.deinit(allocator);
+    if (input.bal_differential) |report| {
+        if (claimed_block_access_list) |*claim| {
+            claim_view = ClaimView.initAssumeValidated(allocator, claim.accounts) catch |err| blk: {
+                report.status = if (err == error.OutOfMemory) .diagnostic_failure else .claim_import_failed;
+                report.diagnostic_error = err;
+                break :blk null;
+            };
+            if (claim_view) |*view| {
+                differential_runner = BalDifferentialRunner.init(
+                    allocator,
+                    input.revision,
+                    input.config,
+                    input.env,
+                    lifecycleTxContext(input.env),
+                    state_backend.reader(),
+                    input.prepared_code_backend,
+                    input.block_hash_source,
+                    view,
+                    report,
+                    parallel_execution,
+                );
+            }
+        }
     }
 
     var observed_block_access_list: ?eth_bal.Decoded = null;
@@ -321,13 +920,8 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     var recorder = BalRecorder.init(allocator);
     defer recorder.deinit();
-    var runtime_tape = trace.TraceTape.initGrowable(allocator);
-    defer runtime_tape.deinit();
-    const runtime_state_target = if (input.trace_sink) |sink|
-        Executor.capture_context.stateTargetForSink(sink)
-    else
-        null;
-    const capture_steps = if (input.trace_sink) |sink| sink.wantsSteps() else false;
+    const runtime_state_target = if (input.capture) |capture| capture.state_target else null;
+    const capture_steps = if (input.capture) |capture| capture.steps != null else false;
     var state_fanout = Executor.capture_context.StateFanout{
         .first = if (record_block_access_list) recorder.stateTarget() else null,
     };
@@ -371,6 +965,9 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             else => return err,
         };
     }
+    if (differential_runner) |*runner| {
+        runner.verifyBeforeBlock(input.block_header, block.policy());
+    }
 
     // Runtime compatibility state events and replayed steps are payload-only;
     // BAL remains active across the complete block transition.
@@ -389,8 +986,8 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     for (input.transactions, 0..) |entry, tx_index| {
         if (capture_steps) try capture_context.beginTrace(.{
-            .tape = &runtime_tape,
-            .profile = trace.captureProfileForSink(input.trace_sink.?),
+            .tape = input.capture.?.steps.?.tape,
+            .profile = input.capture.?.steps.?.profile,
         });
         var step_capture_open = capture_steps;
         defer if (step_capture_open) capture_context.abortTrace() catch {};
@@ -402,6 +999,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
         if (next_blob_gas_used > blob_gas_limit) {
             const progress = block.progress();
+            if (differential_runner) |*runner| if (runner.active) {
+                try runner.verifyRejected(.{
+                    .kind = .blob_gas,
+                    .transaction = entry.tx,
+                    .tx_index = tx_index,
+                    .progress_before = progress,
+                    .blob_gas_used_before = blob_gas_used,
+                    .block_policy = block.policy(),
+                });
+            };
             return .{
                 .status = .blob_gas_limit_exceeded,
                 .tx_index = tx_index,
@@ -412,10 +1019,24 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
                 .requests_hash = computed_requests_hash,
             };
         }
+        const progress_before = if (differential_runner) |*runner|
+            if (runner.active) block.progress() else null
+        else
+            null;
         const tx_result = transactPayload(&block, input.env, entry.tx) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
             error.BlockGasExceeded => {
                 const progress = block.progress();
+                if (differential_runner) |*runner| if (runner.active) {
+                    try runner.verifyRejected(.{
+                        .kind = .block_gas,
+                        .transaction = entry.tx,
+                        .tx_index = tx_index,
+                        .progress_before = progress_before.?,
+                        .blob_gas_used_before = blob_gas_used,
+                        .block_policy = block.policy(),
+                    });
+                };
                 return .{
                     .status = .block_gas_exceeded,
                     .tx_index = tx_index,
@@ -431,6 +1052,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             .included => |value| value,
             .rejected => {
                 const progress = block.progress();
+                if (differential_runner) |*runner| if (runner.active) {
+                    try runner.verifyRejected(.{
+                        .kind = .transaction,
+                        .transaction = entry.tx,
+                        .tx_index = tx_index,
+                        .progress_before = progress_before.?,
+                        .blob_gas_used_before = blob_gas_used,
+                        .block_policy = block.policy(),
+                    });
+                };
                 return .{
                     .status = .transaction_rejected,
                     .tx_index = tx_index,
@@ -442,6 +1073,19 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             },
         };
         const receipt = included.receipt;
+        const progress_after = block.progress();
+        if (differential_runner) |*runner| if (runner.active) {
+            try runner.verifyIncluded(.{
+                .transaction = entry.tx,
+                .tx_index = tx_index,
+                .progress_before = progress_before.?,
+                .progress_after = progress_after,
+                .result = &included.result,
+                .logs = receipt.logs,
+                .block_policy = block.policy(),
+                .blob_gas_used_after = next_blob_gas_used,
+            });
+        };
         mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
         if (input.revision.isImpl(.prague)) {
             eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
@@ -463,7 +1107,6 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         const encoded_receipt = try encodeReceipt(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
-        const progress = block.progress();
         Executor.system_contracts.applyAfterTransaction(
             block.policy(),
             &executor,
@@ -471,12 +1114,12 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
             .{
                 .number = input.env.number,
                 .timestamp = input.env.timestamp,
-                .transaction_index = progress.tx_count - 1,
+                .transaction_index = progress_after.tx_count - 1,
                 .status = receipt.status,
                 .gas_used = receipt.gas_used,
-                .cumulative_gas_used = progress.gas_used,
-                .cumulative_block_gas = progress.block_gas.total,
-                .cumulative_state_gas = progress.block_gas.state,
+                .cumulative_gas_used = progress_after.gas_used,
+                .cumulative_block_gas = progress_after.block_gas.total,
+                .cumulative_state_gas = progress_after.block_gas.state,
             },
         ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
@@ -487,11 +1130,16 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         if (capture_steps) {
             const span = try capture_context.finishTrace();
             step_capture_open = false;
-            try trace.replaySteps(input.trace_sink.?, span);
-            try runtime_tape.resolve(span);
-            try runtime_tape.reset();
+            const steps = input.capture.?.steps.?;
+            var span_outstanding = true;
+            defer if (span_outstanding) steps.tape.resolve(span) catch {};
+            try steps.target.consume(span);
+            try steps.tape.resolve(span);
+            span_outstanding = false;
+            try steps.tape.reset();
         }
     }
+    if (differential_runner) |*runner| try runner.finish();
 
     state_fanout.second = null;
 
@@ -557,8 +1205,23 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         observed_block_access_list_encoded = try eth_bal.encodeAlloc(allocator, observed_block_access_list.?.accounts);
         computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
         if (input.block_access_list) |encoded_claim| {
-            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) block_access_list_mismatch = true;
+            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) {
+                block_access_list_mismatch = true;
+                if (input.bal_differential) |report| {
+                    if (report.mismatch_writer) |writer| {
+                        writer.print("{f}", .{bal_diff.Diff{
+                            .expected = claimed_block_access_list.?.accounts,
+                            .actual = observed_block_access_list.?.accounts,
+                        }}) catch {
+                            report.mismatch_write_failed = true;
+                        };
+                    }
+                }
+            }
         }
+    }
+    if (differential_runner) |*runner| {
+        differential_candidate = runner.finishCandidate(input.withdrawals, block.policy());
     }
 
     const block_result = try block.finish();
@@ -585,6 +1248,42 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         .block_access_list_hash = computed_block_access_list_hash,
     };
 
+    if (differential_candidate) |*candidate| {
+        const report = input.bal_differential.?;
+        if (!candidate_state.changesetsEqual(&candidate.changeset, &changeset)) {
+            report.status = .candidate_artifact_mismatch;
+            report.tx_index = input.transactions.len;
+        } else {
+            const candidate_state_root = state_backend.stateRootAfterChangeset(
+                allocator,
+                &candidate.changeset,
+            ) catch |err| blk: {
+                report.status = .diagnostic_failure;
+                report.tx_index = input.transactions.len;
+                report.diagnostic_error = err;
+                break :blk null;
+            };
+            if (candidate_state_root) |root| {
+                const candidate_matches = candidateArtifactsEqual(
+                    candidate,
+                    result,
+                    root,
+                    encoded_receipts.items,
+                    derived_requests,
+                    observed_block_access_list_encoded.?,
+                );
+                report.status = if (candidate_matches)
+                    .candidate_matched
+                else
+                    .candidate_artifact_mismatch;
+                if (!candidate_matches) report.tx_index = input.transactions.len;
+            }
+        }
+        if (report.status == .candidate_matched and !block_access_list_mismatch) {
+            report.status = .matched;
+        }
+    }
+
     var block_hash_mismatch = false;
     if (input.header_hash_claim) |claim| {
         result.block_hash = reconstructHeaderHash(allocator, input, result, claim) catch |err| switch (err) {
@@ -594,37 +1293,148 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
         block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
     }
 
-    applyConsensusRootComparisons(&result, input.root_checks);
-    if (result.status == .valid and input.header_claims.gas_used != null and result.gas_used != input.header_claims.gas_used.?) result.status = .gas_used_mismatch;
-    if (result.status == .valid and input.header_claims.block_gas_used != null and result.block_gas_used != input.header_claims.block_gas_used.?) result.status = .block_gas_used_mismatch;
-    if (result.status == .valid and input.header_claims.block_state_gas_used != null and result.block_state_gas_used != input.header_claims.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
-    if (result.status == .valid) {
-        if (input.header_claims.logs_bloom) |expected_bloom| {
-            if (!std.mem.eql(u8, &result.logs_bloom, &expected_bloom)) result.status = .logs_bloom_mismatch;
+    if (mode == .compare) {
+        applyConsensusRootComparisons(&result, input.root_checks);
+        if (result.status == .valid and input.header_claims.gas_used != null and result.gas_used != input.header_claims.gas_used.?) result.status = .gas_used_mismatch;
+        if (result.status == .valid and input.header_claims.block_gas_used != null and result.block_gas_used != input.header_claims.block_gas_used.?) result.status = .block_gas_used_mismatch;
+        if (result.status == .valid and input.header_claims.block_state_gas_used != null and result.block_state_gas_used != input.header_claims.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
+        if (result.status == .valid) {
+            if (input.header_claims.logs_bloom) |expected_bloom| {
+                if (!std.mem.eql(u8, &result.logs_bloom, &expected_bloom)) result.status = .logs_bloom_mismatch;
+            }
         }
-    }
-    if (result.status == .valid and input.header_claims.blob_gas_used != null and result.blob_gas_used != input.header_claims.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
-    if (result.status == .valid) {
-        if (input.header_claims.excess_blob_gas) |expected_excess_blob_gas| {
-            if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected_excess_blob_gas) result.status = .excess_blob_gas_mismatch;
+        if (result.status == .valid and input.header_claims.blob_gas_used != null and result.blob_gas_used != input.header_claims.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
+        if (result.status == .valid) {
+            if (input.header_claims.excess_blob_gas) |expected_excess_blob_gas| {
+                if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected_excess_blob_gas) result.status = .excess_blob_gas_mismatch;
+            }
         }
-    }
-    if (result.status == .valid) {
-        if (input.header_claims.requests_hash) |expected_requests_hash| {
-            if (!std.mem.eql(u8, &result.requests_hash, &expected_requests_hash)) result.status = .requests_hash_mismatch;
+        if (result.status == .valid) {
+            if (input.header_claims.requests_hash) |expected_requests_hash| {
+                if (!std.mem.eql(u8, &result.requests_hash, &expected_requests_hash)) result.status = .requests_hash_mismatch;
+            }
         }
-    }
-    if (result.status == .valid and block_access_list_mismatch) result.status = .block_access_list_mismatch;
-    if (result.status == .valid) {
-        if (input.header_claims.block_access_list_hash) |expected_block_access_list_hash| {
-            if (!std.mem.eql(u8, &result.block_access_list_hash, &expected_block_access_list_hash)) result.status = .block_access_list_hash_mismatch;
+        if (result.status == .valid and block_access_list_mismatch) result.status = .block_access_list_mismatch;
+        if (result.status == .valid) {
+            if (input.header_claims.block_access_list_hash) |expected_block_access_list_hash| {
+                if (!std.mem.eql(u8, &result.block_access_list_hash, &expected_block_access_list_hash)) result.status = .block_access_list_hash_mismatch;
+            }
         }
+        if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
     }
-    if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
     if (result.status == .valid) {
         try state_backend.commit(&changeset);
+        if (mode == .produce) {
+            produced_bal.* = observed_block_access_list_encoded.?;
+            observed_block_access_list_encoded = null;
+        }
     }
     return result;
+}
+
+fn candidateArtifactsEqual(
+    candidate: *const BalDifferentialRunner.Artifacts,
+    canonical: Result,
+    candidate_state_root: [32]u8,
+    canonical_receipts: []const []const u8,
+    canonical_requests: []const []const u8,
+    canonical_bal: []const u8,
+) bool {
+    return candidate.gas_used == canonical.gas_used and
+        candidate.block_gas_used == canonical.block_gas_used and
+        candidate.block_state_gas_used == canonical.block_state_gas_used and
+        candidate.blob_gas_used == canonical.blob_gas_used and
+        std.mem.eql(u8, &candidate_state_root, &canonical.state_root) and
+        std.mem.eql(u8, &candidate.receipts_root, &canonical.receipts_root) and
+        std.mem.eql(u8, &candidate.logs_bloom, &canonical.logs_bloom) and
+        std.mem.eql(u8, &candidate.requests_hash, &canonical.requests_hash) and
+        byteSlicesEqual(candidate.encoded_receipts, canonical_receipts) and
+        byteSlicesEqual(candidate.requests, canonical_requests) and
+        std.mem.eql(u8, candidate.encoded_block_access_list, canonical_bal);
+}
+
+fn byteSlicesEqual(lhs: []const []const u8, rhs: []const []const u8) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |lhs_item, rhs_item| {
+        if (!std.mem.eql(u8, lhs_item, rhs_item)) return false;
+    }
+    return true;
+}
+
+test "candidate artifact equality checks every nonzero field" {
+    var receipt = [_]u8{ 0x01, 0x02 };
+    var request = [_]u8{ 0x03, 0x04 };
+    var encoded_bal = [_]u8{ 0xc1, 0x80 };
+    const receipts = [_][]const u8{&receipt};
+    const requests = [_][]const u8{&request};
+    var candidate = BalDifferentialRunner.Artifacts{
+        .changeset = state.Changeset.init(),
+        .gas_used = 1,
+        .block_gas_used = 2,
+        .block_state_gas_used = 3,
+        .receipts_root = [_]u8{0x11} ** 32,
+        .encoded_receipts = &receipts,
+        .logs_bloom = [_]u8{0x22} ** 256,
+        .blob_gas_used = 4,
+        .requests = &requests,
+        .requests_hash = [_]u8{0x33} ** 32,
+        .encoded_block_access_list = &encoded_bal,
+    };
+    var candidate_state_root = [_]u8{0x44} ** 32;
+    const canonical = Result{
+        .status = .valid,
+        .gas_used = candidate.gas_used,
+        .block_gas_used = candidate.block_gas_used,
+        .block_state_gas_used = candidate.block_state_gas_used,
+        .state_root = candidate_state_root,
+        .receipts_root = candidate.receipts_root,
+        .logs_bloom = candidate.logs_bloom,
+        .blob_gas_used = candidate.blob_gas_used,
+        .requests_hash = candidate.requests_hash,
+    };
+    try std.testing.expect(candidateArtifactsEqual(
+        &candidate,
+        canonical,
+        candidate_state_root,
+        &receipts,
+        &requests,
+        &encoded_bal,
+    ));
+
+    candidate.gas_used += 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.gas_used -= 1;
+    candidate.block_gas_used += 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.block_gas_used -= 1;
+    candidate.block_state_gas_used += 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.block_state_gas_used -= 1;
+    candidate.blob_gas_used += 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.blob_gas_used -= 1;
+
+    candidate_state_root[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate_state_root[0] ^= 1;
+    candidate.receipts_root[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.receipts_root[0] ^= 1;
+    candidate.logs_bloom[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.logs_bloom[0] ^= 1;
+    candidate.requests_hash[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
+    candidate.requests_hash[0] ^= 1;
+
+    receipt[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &.{&.{ 0x01, 0x02 }}, &requests, &encoded_bal));
+    receipt[0] ^= 1;
+    request[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &.{&.{ 0x03, 0x04 }}, &encoded_bal));
+    request[0] ^= 1;
+    encoded_bal[0] ^= 1;
+    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &.{ 0xc1, 0x80 }));
 }
 
 /// Keep a definition-owned before-transaction batch in the same rollback
@@ -668,7 +1478,7 @@ fn transactPayload(
     );
 }
 
-fn blockBodyValid(input: BlockInput) bool {
+fn blockBodyValid(input: AssumeDecodedBlockInput) bool {
     if (!input.revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
     if (!input.revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
     if (!input.revision.isImpl(.cancun)) {
@@ -696,7 +1506,7 @@ fn blockBodyValid(input: BlockInput) bool {
 
 fn reconstructHeaderHash(
     allocator: std.mem.Allocator,
-    input: BlockInput,
+    input: AssumeDecodedBlockInput,
     result: Result,
     claim: HeaderHashClaim,
 ) ![32]u8 {
@@ -757,7 +1567,7 @@ fn applyConsensusRootComparisons(result: *Result, checks: RootChecks) void {
         if (result.status != .valid) return;
         if (rootClaimValue(comparison, checks)) |expected| {
             const derived = derivedRootValue(comparison.field, result.*);
-            if (!rootEqual(derived, expected)) result.status = comparison.status;
+            if (!std.mem.eql(u8, &derived, &expected)) result.status = comparison.status;
         }
     }
 }
@@ -789,7 +1599,7 @@ fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transacti
     if (gas_limit != 0) try eth_bal.validateGasLimit(block_access_list, gas_limit);
 }
 
-fn parentHeaderStatus(input: BlockInput) ?Status {
+fn parentHeaderStatus(input: AssumeDecodedBlockInput) ?Status {
     if (!input.revision.isImpl(.merge) or input.env.number == 0) return null;
 
     const parent = input.parent_header orelse return .parent_header_mismatch;
@@ -841,7 +1651,7 @@ fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
     return parent.base_fee_per_gas - base_fee_delta;
 }
 
-fn blockContextValid(input: BlockInput) bool {
+fn blockContextValid(input: AssumeDecodedBlockInput) bool {
     if (input.block_header) |header| {
         if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
     }
@@ -864,6 +1674,20 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
     try encoded.ensureTotalCapacity(allocator, transactions.len);
     for (transactions) |entry| encoded.appendAssumeCapacity(entry.encoded);
     return try trie.transactionRoot(allocator, encoded.items);
+}
+
+fn decodeRawTransactions(
+    allocator: std.mem.Allocator,
+    raw_transactions: []const []const u8,
+) ![]const TransactionInput {
+    const transactions = try allocator.alloc(TransactionInput, raw_transactions.len);
+    for (transactions, raw_transactions) |*decoded, encoded| {
+        decoded.* = TransactionInput.initAssumeDecoded(
+            try transaction.raw.decodeRaw(allocator, encoded),
+            encoded,
+        );
+    }
+    return transactions;
 }
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
@@ -1051,18 +1875,14 @@ fn addBloomEntry(bloom: *[256]u8, entry: []const u8) void {
     }
 }
 
-fn rootEqual(lhs: [32]u8, rhs: [32]u8) bool {
-    return std.mem.eql(u8, &lhs, &rhs);
-}
-
 fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = payloadHeaderRoot(header_state),
-            .receipts = payloadHeaderRoot(header_receipts),
+            .state = .fromHash(header_state),
+            .receipts = .fromHash(header_receipts),
         },
         .reconstructed_header = .{
-            .transactions = reconstructedHeaderRoot(local_transactions),
+            .transactions = .fromHash(local_transactions),
         },
     };
 }
@@ -1070,12 +1890,12 @@ fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_recei
 fn testRootChecksWithWithdrawals(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8, local_withdrawals: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = payloadHeaderRoot(header_state),
-            .receipts = payloadHeaderRoot(header_receipts),
+            .state = .fromHash(header_state),
+            .receipts = .fromHash(header_receipts),
         },
         .reconstructed_header = .{
-            .transactions = reconstructedHeaderRoot(local_transactions),
-            .withdrawals = reconstructedHeaderRoot(local_withdrawals),
+            .transactions = .fromHash(local_transactions),
+            .withdrawals = .fromHash(local_withdrawals),
         },
     };
 }
@@ -1130,7 +1950,7 @@ test "BlockSTF validates a single witnessed transaction" {
     const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try apply(scratch, .{
+    const first_result = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
@@ -1164,38 +1984,46 @@ test "BlockSTF validates a single witnessed transaction" {
         step_ends: usize = 0,
         storage_writes: usize = 0,
 
-        fn stepStart(ptr: *anyopaque, _: trace.StepStart) void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.step_starts += 1;
+        fn stateTarget(self: *@This()) Executor.CaptureStateTarget {
+            return Executor.CaptureStateTarget.init(self, &.{ .state_write = stateWrite });
         }
 
-        fn stepEnd(ptr: *anyopaque, _: trace.StepEnd) void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.step_ends += 1;
+        fn traceTarget(self: *@This()) trace.TraceSpanTarget {
+            return trace.TraceSpanTarget.init(self, consumeTrace);
         }
 
-        fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
+        fn consumeTrace(ptr: *anyopaque, span: trace.TraceSpan) !void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            var cursor = trace.TraceCursor.init(span);
+            while (try cursor.next()) |event| switch (event) {
+                .step_start => self.step_starts += 1,
+                .step_end => self.step_ends += 1,
+                .frame_enter, .frame_leave => {},
+            };
+        }
+
+        fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             if (event == .storage) self.storage_writes += 1;
         }
     };
     var trace_recorder = RuntimeTraceRecorder{};
-    var trace_sink = trace.Sink.init(&trace_recorder, .{
-        .step_start = trace.StepStartFields.initMany(&.{.pc}),
-        .step_end = trace.StepEndFields.initMany(&.{.status}),
-        .state_write = trace.StateWriteKinds.initMany(&.{.storage}),
-    }, &.{
-        .stepStart = RuntimeTraceRecorder.stepStart,
-        .stepEnd = RuntimeTraceRecorder.stepEnd,
-        .stateWrite = RuntimeTraceRecorder.stateWrite,
-    });
+    var trace_tape = trace.TraceTape.initGrowable(scratch);
+    defer trace_tape.deinit();
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
-        .trace_sink = &trace_sink,
+        .capture = .{
+            .state_target = trace_recorder.stateTarget(),
+            .steps = .{
+                .tape = &trace_tape,
+                .profile = .{ .stack = .omitted },
+                .target = trace_recorder.traceTarget(),
+            },
+        },
         .root_checks = testRootChecks(
             expected_state_root,
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
@@ -1215,7 +2043,7 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
     try std.testing.expect(trace_recorder.storage_writes > 0);
 
-    const gas_mismatch = try apply(scratch, .{
+    const gas_mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
@@ -1229,7 +2057,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.gas_used_mismatch, gas_mismatch.status);
 
-    const block_gas_mismatch = try apply(scratch, .{
+    const block_gas_mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
@@ -1243,7 +2071,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.block_gas_used_mismatch, block_gas_mismatch.status);
 
-    const logs_bloom_mismatch = try apply(scratch, .{
+    const logs_bloom_mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
@@ -1313,7 +2141,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     };
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try apply(scratch, .{
+    const first_result = try applyAssumeDecoded(scratch, .{
         .revision = .merge,
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1326,7 +2154,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .merge,
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1359,7 +2187,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
         .encoded = "tx0",
     }};
 
-    const mismatch = try apply(scratch, .{
+    const mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1372,7 +2200,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
 
-    const invalid = try apply(scratch, .{
+    const invalid = try applyAssumeDecoded(scratch, .{
         .revision = .frontier,
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
@@ -1417,7 +2245,7 @@ test "BlockSTF validates withdrawals root" {
     };
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -1432,7 +2260,7 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
-    const mismatch = try apply(scratch, .{
+    const mismatch = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -1486,7 +2314,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
     const parent_hash = [_]u8{0x11} ** 32;
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .cancun,
         .env = .{ .number = 1, .timestamp = timestamp, .gas_limit = 30_000_000 },
         .block_header = .{
@@ -1512,7 +2340,7 @@ test "BlockSTF applies Cancun block-start system contract" {
 }
 
 test "BlockSTF rejects missing or inconsistent parent context" {
-    const missing = try apply(std.testing.allocator, .{
+    const missing = try applyAssumeDecoded(std.testing.allocator, .{
         .revision = .cancun,
         .env = .{ .number = 1, .timestamp = 2 },
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
@@ -1522,7 +2350,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
     const parent_hash = [_]u8{0x11} ** 32;
-    const inconsistent = try apply(std.testing.allocator, .{
+    const inconsistent = try applyAssumeDecoded(std.testing.allocator, .{
         .revision = .cancun,
         .env = .{ .number = 1, .timestamp = 2, .gas_limit = 30_000_000 },
         .block_header = .{
@@ -1548,7 +2376,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
 
 test "BlockSTF validates parent-derived header rules before execution" {
     const parent_hash = [_]u8{0x11} ** 32;
-    var input = BlockInput{
+    var input = AssumeDecodedBlockInput{
         .revision = .merge,
         .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
         .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
@@ -1611,7 +2439,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -1636,7 +2464,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
         const claimed_requests = [_][]const u8{claimed_request};
         const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
 
-        const mismatch = try apply(scratch, .{
+        const mismatch = try applyAssumeDecoded(scratch, .{
             .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
             .transactions = &.{},
             .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -1681,7 +2509,7 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
     const scratch = arena.allocator();
 
     const zero_hash = [_]u8{0} ** 32;
-    const input = BlockInput{
+    const input = AssumeDecodedBlockInput{
         .revision = .amsterdam,
         .env = .{
             .number = 0,
@@ -1706,13 +2534,13 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
         },
     };
 
-    const mismatch = try apply(scratch, input);
+    const mismatch = try applyAssumeDecoded(scratch, input);
     try std.testing.expectEqual(Status.block_hash_mismatch, mismatch.status);
     try std.testing.expect(!std.mem.eql(u8, &zero_hash, &mismatch.block_hash));
 
     var valid_input = input;
     valid_input.header_hash_claim.?.block_hash = mismatch.block_hash;
-    const valid = try apply(scratch, valid_input);
+    const valid = try applyAssumeDecoded(scratch, valid_input);
     try std.testing.expectEqual(Status.valid, valid.status);
     try std.testing.expectEqualSlices(u8, &mismatch.block_hash, &valid.block_hash);
 }
@@ -1724,7 +2552,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
-    const valid = try apply(scratch, .{
+    const valid = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -1736,7 +2564,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
-    const artifact_mismatch = try apply(scratch, .{
+    const artifact_mismatch = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
@@ -1744,7 +2572,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
-    const hash_mismatch = try apply(scratch, .{
+    const hash_mismatch = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -1753,7 +2581,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
-    const malformed_claim = try apply(scratch, .{
+    const malformed_claim = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
@@ -1761,7 +2589,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.invalid_block_access_list, malformed_claim.status);
 
-    const oversized_claim = try apply(scratch, .{
+    const oversized_claim = try applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -1787,7 +2615,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     const claimed_accounts = [_]eth_bal.AccountChanges{.{ .address = withdrawal.address }};
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -1853,7 +2681,7 @@ test "BlockSTF validates blob gas header fields" {
     custom_blob_schedule.max = 12;
     const expected_custom_excess_blob_gas = transaction.calcExcessBlobGasForSchedule(custom_blob_schedule, parent_blob_gas).?;
 
-    const first_result = try apply(scratch, .{
+    const first_result = try applyAssumeDecoded(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1869,7 +2697,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(expected_blob_gas_used, first_result.blob_gas_used);
     try std.testing.expectEqual(expected_excess_blob_gas, first_result.excess_blob_gas.?);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1887,7 +2715,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.valid, result.status);
 
-    const custom_schedule_result = try apply(scratch, .{
+    const custom_schedule_result = try applyAssumeDecoded(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_blob_schedule },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1906,7 +2734,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(Status.valid, custom_schedule_result.status);
     try std.testing.expect(expected_custom_excess_blob_gas != expected_excess_blob_gas);
 
-    const blob_gas_mismatch = try apply(scratch, .{
+    const blob_gas_mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -1921,7 +2749,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.blob_gas_used_mismatch, blob_gas_mismatch.status);
 
-    const excess_blob_gas_mismatch = try apply(scratch, .{
+    const excess_blob_gas_mismatch = try applyAssumeDecoded(scratch, .{
         .revision = .prague,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -2008,7 +2836,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
         .encoded = "oversized-blobtx",
     }};
 
-    const oversized_result = try apply(scratch, .{
+    const oversized_result = try applyAssumeDecoded(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -2019,7 +2847,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(@as(?usize, 0), oversized_result.tx_index);
     try std.testing.expectEqual(@as(u64, 0), oversized_result.blob_gas_used);
 
-    const pre_cancun_result = try apply(scratch, .{
+    const pre_cancun_result = try applyAssumeDecoded(scratch, .{
         .revision = .shanghai,
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -2031,7 +2859,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
 
     var custom_schedule = eth_transaction.Transaction.blobSchedule(.cancun).?;
     custom_schedule.max = 1;
-    const custom_schedule_result = try apply(scratch, .{
+    const custom_schedule_result = try applyAssumeDecoded(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_schedule },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -2041,7 +2869,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, custom_schedule_result.status);
     try std.testing.expectEqual(@as(?usize, 0), custom_schedule_result.tx_index);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .cancun,
         .env = .{ .gas_limit = 42_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
@@ -2074,7 +2902,7 @@ test "BlockSTF applies withdrawals to state balances" {
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
     const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
-    const result = try apply(scratch, .{
+    const result = try applyAssumeDecoded(scratch, .{
         .revision = .shanghai,
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2096,7 +2924,7 @@ test "BlockSTF applies withdrawals to state balances" {
         .amount = withdrawals[0].amount + 1,
     }};
     const mutated_withdrawals_root = try trie.withdrawalsRoot(scratch, &mutated_withdrawals);
-    const mutated = try apply(scratch, .{
+    const mutated = try applyAssumeDecoded(scratch, .{
         .revision = .shanghai,
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2120,7 +2948,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     };
     const roots = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash);
 
-    const pre_shanghai = try apply(std.testing.allocator, .{
+    const pre_shanghai = try applyAssumeDecoded(std.testing.allocator, .{
         .revision = .merge,
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2129,7 +2957,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_shanghai.status);
 
-    const pre_cancun = try apply(std.testing.allocator, .{
+    const pre_cancun = try applyAssumeDecoded(std.testing.allocator, .{
         .revision = .shanghai,
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2142,7 +2970,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_cancun.status);
 
-    const pre_amsterdam = try apply(std.testing.allocator, .{
+    const pre_amsterdam = try applyAssumeDecoded(std.testing.allocator, .{
         .revision = .prague,
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},

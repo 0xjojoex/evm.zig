@@ -2,11 +2,14 @@
 //!
 //! Executor internals deliberately accept type-erased state, capture, prepared-
 //! code, and precompile providers. Their arbitrary errors are normalized to
-//! `InfrastructureFailure`; native executor failures keep their useful names.
+//! `InfrastructureFailure`; native failures keep their useful names. State
+//! readers get one strategy-failure signal and retain provider detail locally.
 
 pub const Error = error{
     InfrastructureFailure,
     OutOfMemory,
+
+    StateReaderStrategyFailure,
 
     AccessCapacityTooLarge,
     AccountCapacityExceeded,
@@ -85,6 +88,13 @@ pub const Error = error{
 pub fn normalize(err: anyerror) Error {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
+
+        error.BlockAccessListAccountNotCovered,
+        error.BlockAccessListStorageNotCovered,
+        error.FoldedStateStorageUnknown,
+        error.PositionedAccountUnknown,
+        error.PositionedStorageUnknown,
+        => error.StateReaderStrategyFailure,
 
         error.AccessCapacityTooLarge => error.AccessCapacityTooLarge,
         error.AccountCapacityExceeded => error.AccountCapacityExceeded,
@@ -193,6 +203,17 @@ test "normalization preserves bounded resource failures and contains provider er
     };
     for (bounded_failures) |failure| {
         try testing.expectEqualStrings(@errorName(failure), @errorName(normalize(failure)));
+    }
+
+    const state_reader_strategy_failures = [_]anyerror{
+        error.BlockAccessListAccountNotCovered,
+        error.BlockAccessListStorageNotCovered,
+        error.FoldedStateStorageUnknown,
+        error.PositionedAccountUnknown,
+        error.PositionedStorageUnknown,
+    };
+    for (state_reader_strategy_failures) |failure| {
+        try testing.expectEqual(error.StateReaderStrategyFailure, normalize(failure));
     }
     try testing.expectEqual(error.InfrastructureFailure, normalize(error.ProviderSpecificFailure));
 }

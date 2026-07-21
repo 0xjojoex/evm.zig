@@ -7,7 +7,7 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
-const bal = @import("../eth/bal.zig");
+const bal = @import("../eth/bal/model.zig");
 const StateOverlay = @import("../state/Overlay.zig");
 
 pub const Source = enum {

@@ -144,13 +144,11 @@ const CheckpointRecorder = struct {
     events: [8]evmz.trace.CheckpointKind = undefined,
     len: usize = 0,
 
-    fn sink(self: *CheckpointRecorder) evmz.trace.Sink {
-        return evmz.trace.Sink.init(self, .{
-            .checkpoint = evmz.trace.CheckpointFields.initMany(&.{.kind}),
-        }, &.{ .checkpoint = checkpoint });
+    fn target(self: *CheckpointRecorder) evmz.executor.CaptureStateTarget {
+        return evmz.executor.CaptureStateTarget.init(self, &.{ .checkpoint = checkpoint });
     }
 
-    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) void {
+    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) !void {
         const self: *CheckpointRecorder = @ptrCast(@alignCast(ptr));
         std.debug.assert(self.len < self.events.len);
         self.events[self.len] = event.kind;
@@ -363,7 +361,6 @@ test "Sequential empty before-transaction prelude adds no execution checkpoint" 
 
     EmptyBeforeTransactionBlock.invocations.store(0, .monotonic);
     var recorder = CheckpointRecorder{};
-    var sink = recorder.sink();
     var executor = EmptyBeforeTransactionVm.Executor.init(std.testing.allocator, .{
         .revision = .amsterdam,
         .state_reader = memory.reader(),
@@ -372,7 +369,7 @@ test "Sequential empty before-transaction prelude adds no execution checkpoint" 
     var capture = evmz.executor.CaptureContext.init(
         std.testing.allocator,
         null,
-        evmz.executor.capture_context.stateTargetForSink(&sink),
+        recorder.target(),
     );
     defer capture.deinit();
     executor.setCaptureContext(&capture);
@@ -416,7 +413,6 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
     try hook_account.setCode(&lifecycle_code);
 
     var recorder = CheckpointRecorder{};
-    var sink = recorder.sink();
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
         .revision = .prague,
         .state_reader = memory.reader(),
@@ -425,7 +421,7 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
     var capture = evmz.executor.CaptureContext.init(
         std.testing.allocator,
         null,
-        evmz.executor.capture_context.stateTargetForSink(&sink),
+        recorder.target(),
     );
     defer capture.deinit();
     executor.setCaptureContext(&capture);

@@ -2,6 +2,7 @@ const std = @import("std");
 const tx = @import("../transaction/types.zig");
 const tx_blob = @import("../transaction/blob.zig");
 const tx_gas = @import("../transaction/gas.zig");
+const delegation_code = @import("../code/eip7702.zig");
 const Revision = @import("revision.zig").Revision;
 const eip7702 = @import("eip/7702.zig");
 const eip8037 = @import("eip/8037.zig");
@@ -84,9 +85,7 @@ pub const Transaction = struct {
     /// pre-Prague EIP-3607 validation continues to reject every coded sender.
     pub fn isDelegationCode(revision: Revision, code: []const u8) bool {
         if (!revision.isImpl(.prague)) return false;
-        const params = @import("eip/7702.zig");
-        return code.len == params.delegation_code_len and
-            std.mem.eql(u8, code[0..params.delegation_designator.len], &params.delegation_designator);
+        return delegation_code.delegationTarget(code) != null;
     }
 
     pub fn blobSchedule(revision: Revision) ?tx_blob.BlobSchedule {

@@ -2035,8 +2035,7 @@ test "code view returns the canonical hash and preserves code-read tracing" {
     try overlay.setCode(address, &code);
 
     var recorder = CodeReadRecorder{};
-    var sink = recorder.sink();
-    var context = CaptureContext.init(std.testing.allocator, null, capture_runtime.stateTargetForSink(&sink));
+    var context = CaptureContext.init(std.testing.allocator, null, recorder.target());
     defer context.deinit();
     overlay.capture_context = &context;
     try context.begin();
@@ -2067,19 +2066,15 @@ const CodeReadRecorder = struct {
     reads: usize = 0,
     last: trace.CodeRead = undefined,
 
-    fn sink(self: *CodeReadRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .state_read = trace.StateReadKinds.initMany(&.{.code}),
-        }, &.{
-            .stateRead = stateRead,
-        });
+    fn target(self: *CodeReadRecorder) capture_runtime.StateTarget {
+        return capture_runtime.StateTarget.init(self, &.{ .state_read = stateRead });
     }
 
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+    fn stateRead(ptr: *anyopaque, event: trace.StateRead) !void {
         const self: *CodeReadRecorder = @ptrCast(@alignCast(ptr));
         self.last = switch (event) {
             .code => |payload| payload,
-            else => unreachable,
+            else => return,
         };
         self.reads += 1;
     }

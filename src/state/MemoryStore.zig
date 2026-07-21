@@ -15,6 +15,7 @@ const MemoryAccount = @import("./MemoryAccount.zig");
 const Changeset = @import("./Changeset.zig");
 const Committer = @import("./Committer.zig");
 const StateReader = @import("./Reader.zig");
+const ConcurrentReader = @import("./ConcurrentReader.zig");
 const trie = @import("../eth/trie.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
@@ -58,6 +59,15 @@ pub fn reader(self: *MemoryStore) StateReader {
         .getStorage = getStorage,
         .accountHasStorage = accountHasStorage,
     } };
+}
+
+/// Borrow a read-concurrent view of this store.
+///
+/// The caller must not mutate or deinitialize the store until every copied
+/// reader handle has finished. Reader methods themselves do not populate
+/// caches, so overlapping calls only inspect stable map and account storage.
+pub fn concurrentReader(self: *MemoryStore) ConcurrentReader {
+    return .initAssumeSafe(self.reader());
 }
 
 pub fn committer(self: *MemoryStore) Committer {
@@ -289,8 +299,7 @@ fn codeForHash(self: *MemoryStore, hash: [32]u8) ![]const u8 {
     while (account_it.next()) |account| {
         if (!std.mem.eql(u8, &accountCodeHash(account), &hash)) continue;
         if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &hash)) return error.CodeHashMismatch;
-        try self.putCode(hash, account.code);
-        return self.codes.get(hash).?;
+        return account.code;
     }
     return error.MissingCode;
 }

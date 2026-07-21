@@ -8,6 +8,7 @@ const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
 const Account = @import("./Account.zig");
 const StateReader = @import("./Reader.zig");
+const ConcurrentReader = @import("./ConcurrentReader.zig");
 
 const Address = address.Address;
 
@@ -42,6 +43,12 @@ pub fn reader(self: *WitnessStateReader) StateReader {
         .ptr = self,
         .vtable = &vtable,
     };
+}
+
+/// Share the sealed witness index across overlapping read-only lanes.
+/// The witness and all borrowed node/code bytes must outlive those lanes.
+pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
+    return .initAssumeSafe(self.reader());
 }
 
 fn loadMptAccount(self: *const WitnessStateReader, target: Address) Error!?trie.Account {

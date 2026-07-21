@@ -13,7 +13,6 @@ const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
 const state = @import("../state.zig");
 const stateless_tx = @import("./tx.zig");
-const trace = @import("../trace.zig");
 const transaction = @import("../transaction.zig");
 
 pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || stateless_tx.Error || error{
@@ -23,31 +22,55 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || sta
     BlockTransitionFailed,
 };
 
+pub const Options = struct {
+    /// Prove every BAL-declared account/storage path before execution. Disabled
+    /// by default because witness-backed readers would otherwise traverse the
+    /// same proofs again during execution.
+    precheck_block_access_list_state: bool = false,
+};
+
 pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
-    return validateWithTrace(allocator, input, null);
+    return validateWithOptions(allocator, input, .{});
 }
 
-pub fn validateWithTrace(
+pub fn validateWithOptions(
     allocator: std.mem.Allocator,
     input: input_mod.Input,
-    trace_sink: ?*trace.Sink,
+    options: Options,
+) Error!block_stf.Result {
+    return validateWithCaptureOptions(allocator, input, null, options);
+}
+
+pub fn validateWithCapture(
+    allocator: std.mem.Allocator,
+    input: input_mod.Input,
+    capture: ?block_stf.ExecutionCapture,
+) Error!block_stf.Result {
+    return validateWithCaptureOptions(allocator, input, capture, .{});
+}
+
+pub fn validateWithCaptureOptions(
+    allocator: std.mem.Allocator,
+    input: input_mod.Input,
+    capture: ?block_stf.ExecutionCapture,
+    options: Options,
 ) Error!block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    return validateWithScratch(arena.allocator(), input, trace_sink);
+    return validateWithScratch(arena.allocator(), input, capture, options);
 }
 
 fn validateWithScratch(
     allocator: std.mem.Allocator,
     input: input_mod.Input,
-    trace_sink: ?*trace.Sink,
+    capture: ?block_stf.ExecutionCapture,
+    options: Options,
 ) Error!block_stf.Result {
     const block = input.block;
     if (!blockShapeValid(input.revision, block)) return .{ .status = .invalid_block_body };
     var header_chain = try HeaderChain.init(allocator, input.witness.headers, block.parent_hash);
     defer header_chain.deinit(allocator);
     const parent_header = header_chain.parent();
-    const transaction_inputs = try transactionInputs(allocator, block.transactions);
     const codes = try witnessCodes(allocator, input.witness.codes);
 
     return block_stf.apply(allocator, .{
@@ -73,7 +96,7 @@ fn validateWithScratch(
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
         .state_backend = try state.Backend.fromWitness(allocator, parent_header.state_root, input.witness.state, codes),
-        .transactions = transaction_inputs,
+        .transactions = block.transactions,
         .withdrawals = block.withdrawals,
         .parent_header = .{
             .hash = parent_header.hash,
@@ -88,8 +111,8 @@ fn validateWithScratch(
         .block_access_list = if (input.revision.isImpl(.amsterdam)) block.block_access_list else null,
         .root_checks = .{
             .payload_header = .{
-                .state = block_stf.payloadHeaderRoot(block.state_root),
-                .receipts = block_stf.payloadHeaderRoot(block.receipts_root),
+                .state = .fromHash(block.state_root),
+                .receipts = .fromHash(block.receipts_root),
             },
         },
         .header_claims = .{
@@ -109,8 +132,19 @@ fn validateWithScratch(
             .parent_beacon_block_root = block.parent_beacon_block_root,
             .extra_data = block.extra_data,
         },
-        .trace_sink = trace_sink,
+        .capture = capture,
+        // Future optimization: verified values can seed the execution overlay
+        // or reader cache, after which this can become the default without
+        // repeating proof traversal. It never changes EVM warmth semantics.
+        .precheck_block_access_list_state = shouldPrecheckBlockAccessListState(
+            input.revision,
+            options,
+        ),
     }) catch |err| return mapBlockError(err);
+}
+
+fn shouldPrecheckBlockAccessListState(revision: Revision, options: Options) bool {
+    return revision.isImpl(.amsterdam) and options.precheck_block_access_list_state;
 }
 
 fn mapBlockError(err: anyerror) Error!block_stf.Result {
@@ -144,20 +178,6 @@ fn blockShapeValid(revision: Revision, block: input_mod.Block) bool {
         return false;
     }
     return true;
-}
-
-fn transactionInputs(
-    allocator: std.mem.Allocator,
-    raw_transactions: []const []const u8,
-) Error![]const block_stf.TransactionInput {
-    const out = try allocator.alloc(block_stf.TransactionInput, raw_transactions.len);
-    for (out, raw_transactions) |*entry, raw| {
-        entry.* = .{
-            .tx = try stateless_tx.decodeRaw(allocator, raw),
-            .encoded = raw,
-        };
-    }
-    return out;
 }
 
 fn currentBlobBaseFee(
@@ -360,4 +380,14 @@ test "stateless block errors preserve witness and body taxonomy" {
         (try mapBlockError(error.WithdrawalBalanceOverflow)).status,
     );
     try std.testing.expectError(error.BlockTransitionFailed, mapBlockError(error.CodeUnavailable));
+}
+
+test "stateless BAL witness precheck is an explicit Amsterdam option" {
+    try std.testing.expect(!shouldPrecheckBlockAccessListState(.amsterdam, .{}));
+    try std.testing.expect(shouldPrecheckBlockAccessListState(.amsterdam, .{
+        .precheck_block_access_list_state = true,
+    }));
+    try std.testing.expect(!shouldPrecheckBlockAccessListState(.prague, .{
+        .precheck_block_access_list_state = true,
+    }));
 }

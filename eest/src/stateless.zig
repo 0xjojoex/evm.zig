@@ -311,44 +311,64 @@ fn printMismatch(allocator: std.mem.Allocator, input: []const u8, actual: []cons
 
 fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
     var printer = GasTracePrinter{};
-    var sink = printer.sink();
-    _ = evmz.stateless.wire.validateStatelessResultBytesWithTrace(allocator, input, &sink) catch |err| {
+    var tape = evmz.trace.TraceTape.initGrowable(allocator);
+    defer tape.deinit();
+    _ = evmz.stateless.wire.validateStatelessResultBytesWithCapture(allocator, input, .{
+        .state_target = printer.stateTarget(),
+        .steps = .{
+            .tape = &tape,
+            .profile = .{ .stack = .omitted },
+            .target = printer.traceTarget(),
+        },
+    }) catch |err| {
         std.debug.print("    trace failed: {s}\n", .{@errorName(err)});
         return;
     };
 }
 
 const GasTracePrinter = struct {
-    fn sink(self: *@This()) evmz.trace.Sink {
-        return evmz.trace.Sink.init(self, .{
-            .step_end = evmz.trace.StepEndFields.initMany(&.{ .pc, .opcode, .decoded_opcode, .depth, .status, .gas_left, .gas_cost }),
-            .state_write = evmz.trace.StateWriteKinds.initMany(&.{ .balance, .nonce, .storage, .warm_account, .warm_storage }),
-        }, &.{
-            .stepEnd = stepEnd,
-            .stateWrite = stateWrite,
-        });
+    fn stateTarget(self: *@This()) evmz.executor.CaptureStateTarget {
+        return evmz.executor.CaptureStateTarget.init(self, &.{ .state_write = stateWrite });
     }
 
-    fn stepEnd(ptr: *anyopaque, event: evmz.trace.StepEnd) void {
-        _ = ptr;
-        const important = if (event.decoded_opcode) |opcode| switch (opcode) {
+    fn traceTarget(self: *@This()) evmz.trace.TraceSpanTarget {
+        return evmz.trace.TraceSpanTarget.init(self, consumeTrace);
+    }
+
+    fn consumeTrace(ptr: *anyopaque, span: evmz.trace.TraceSpan) !void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        var cursor = evmz.trace.TraceCursor.init(span);
+        while (try cursor.next()) |event| switch (event) {
+            .step_end => |view| self.stepEnd(view),
+            .frame_enter, .step_start, .frame_leave => {},
+        };
+    }
+
+    fn stepEnd(_: *@This(), view: evmz.trace.TraceCursor.StepView) void {
+        const decoded_opcode = std.enums.fromInt(evmz.Opcode, view.row.opcode);
+        const important = if (decoded_opcode) |opcode| switch (opcode) {
             .BLOCKHASH, .CALL, .SLOAD, .SSTORE, .MLOAD, .MSTORE => true,
             else => false,
         } else false;
-        if (!important and @abs(event.gas_cost) < 100) return;
+        const gas_cost = if (view.row.gas_before > view.row.gas_after)
+            view.row.gas_before - view.row.gas_after
+        else
+            0;
+        if (!important and @abs(gas_cost) < 100) return;
 
-        const opcode_name = if (event.decoded_opcode) |opcode| @tagName(opcode) else "unknown";
+        const opcode_name = if (decoded_opcode) |opcode| @tagName(opcode) else "unknown";
+        const status = if (view.terminal) @tagName(view.frame.outcome) else "running";
         std.debug.print("    trace step depth={} pc=0x{x} op={s} gas_cost={} gas_left={} status={s}\n", .{
-            event.depth,
-            event.pc,
+            view.frame.depth,
+            view.row.pc,
             opcode_name,
-            event.gas_cost,
-            event.gas_left,
-            @tagName(event.status),
+            gas_cost,
+            view.row.gas_after,
+            status,
         });
     }
 
-    fn stateWrite(ptr: *anyopaque, event: evmz.trace.StateWrite) void {
+    fn stateWrite(ptr: *anyopaque, event: evmz.trace.StateWrite) !void {
         _ = ptr;
         switch (event) {
             .balance => |write| std.debug.print("    trace balance depth={} addr={x} previous={x} value={x}\n", .{

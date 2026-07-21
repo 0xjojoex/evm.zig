@@ -1684,14 +1684,13 @@ test "zero storage write masks state reader value" {
     try std.testing.expectEqual(@as(usize, 1), reader.storage_reads);
 }
 
-test "trace sink receives state and checkpoint events" {
+test "capture target receives state and checkpoint events" {
     const address = evmz.addr(0xabc);
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
 
     var recorder = StateEventRecorder{};
-    var sink = recorder.sink();
-    var context = CaptureContext.init(std.testing.allocator, null, capture_context.stateTargetForSink(&sink));
+    var context = CaptureContext.init(std.testing.allocator, null, recorder.target());
     defer context.deinit();
     overlay.capture_context = &context;
     try context.begin();
@@ -1771,39 +1770,37 @@ const StateEventRecorder = struct {
     last_checkpoint_tag: trace.CheckpointKind = .checkpoint,
     last_checkpoint_depth: u16 = 0,
 
-    fn sink(self: *StateEventRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .state_read = trace.StateReadKinds.initMany(&.{ .balance, .storage }),
-            .state_write = trace.StateWriteKinds.initMany(&.{.storage}),
-            .checkpoint = trace.CheckpointFields.full,
-        }, &.{
-            .stateRead = stateRead,
-            .stateWrite = stateWrite,
+    fn target(self: *StateEventRecorder) capture_context.StateTarget {
+        return capture_context.StateTarget.init(self, &.{
+            .state_read = stateRead,
+            .state_write = stateWrite,
             .checkpoint = checkpointEvent,
         });
     }
 
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+    fn stateRead(ptr: *anyopaque, event: trace.StateRead) !void {
         const self: *StateEventRecorder = @ptrCast(@alignCast(ptr));
+        switch (event) {
+            .balance, .storage => {},
+            else => return,
+        }
         if (self.reads == 0) self.first_read_tag = std.meta.activeTag(event);
         self.reads += 1;
     }
 
-    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
+    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
         const self: *StateEventRecorder = @ptrCast(@alignCast(ptr));
-        self.last_write_tag = std.meta.activeTag(event);
-        self.last_write_depth = event.depth();
-        self.last_write_value = switch (event) {
-            .balance => |payload| payload.value,
-            .nonce => |payload| payload.value,
-            .storage => |payload| payload.value,
-            .transient_storage => |payload| payload.value,
-            else => 0,
+        const payload = switch (event) {
+            .storage => |storage_write| storage_write,
+            else => return,
         };
+        self.last_write_tag = .storage;
+        self.last_write_depth = payload.depth;
+        self.last_write_value = payload.value;
         self.writes += 1;
     }
 
-    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) void {
+    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) !void {
         const self: *StateEventRecorder = @ptrCast(@alignCast(ptr));
         if (self.checkpoints == 0) self.first_checkpoint_tag = event.kind;
         self.last_checkpoint_tag = event.kind;

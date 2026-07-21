@@ -150,10 +150,20 @@ normalized decoding is correct.
 ```sh
 EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
 zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/blockchain_tests_sync
+zig build eest-block-stf -- --bal-differential ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/blockchain_tests_sync
 
 scripts/fetch-eest-zkevm-fixtures.sh
 zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
 ```
+
+`--bal-differential` is a serial diagnostic lane. For each Amsterdam payload
+transaction it compares an isolated `BalClaimReader` execution with the
+authoritative `BlockSTF` fold. Positioned account/storage ambiguity and
+unsupported transaction hooks stop the complete claim lane and leave the
+authoritative serial result untouched. Coverage, outcome, or diagnostic
+infrastructure failures fail the differential gate. Final BAL parity promotes
+matched transaction outcomes to a complete match; mismatches print a bounded,
+deterministic per-account diff.
 
 The broader Glamsterdam block corpus is still the golden regular source. In the
 locked fixture cache it is currently under `fixtures/blockchain_tests_sync`.

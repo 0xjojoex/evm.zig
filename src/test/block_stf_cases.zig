@@ -89,7 +89,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
     const empty_accounts: []const bal.AccountChanges = &.{};
     const empty_claim = try bal.encodeAlloc(scratch, empty_accounts);
 
-    const valid = try block_stf.apply(scratch, .{
+    const valid = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .amsterdam,
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -106,7 +106,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
 
     var wrong_requests_hash = block_stf.empty_requests_hash;
     wrong_requests_hash[31] ^= 1;
-    const mismatch = try block_stf.apply(scratch, .{
+    const mismatch = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .amsterdam,
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -127,7 +127,7 @@ test "BlockSTF semantic case smoke: provided BAL is structurally validated first
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try block_stf.apply(scratch, .{
+    const result = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .amsterdam,
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -146,7 +146,7 @@ test "BlockSTF semantic case smoke: BAL size excess maps to status" {
 
     const accounts = [_]bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const claim = try bal.encodeAlloc(scratch, &accounts);
-    const result = try block_stf.apply(scratch, .{
+    const result = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .amsterdam,
         .env = .{ .gas_limit = bal.item_cost - 1 },
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
@@ -189,7 +189,7 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
     };
     const claimed_bal = try bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try block_stf.apply(scratch, .{
+    const result = try block_stf.applyAssumeDecoded(scratch, .{
         .revision = .amsterdam,
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -300,12 +300,12 @@ fn testRootChecks(header_state: [32]u8, header_transactions: [32]u8, header_rece
 fn testRootChecksWithWithdrawals(header_state: [32]u8, header_transactions: [32]u8, header_receipts: [32]u8, header_withdrawals: [32]u8) block_stf.RootChecks {
     return .{
         .payload_header = .{
-            .state = block_stf.payloadHeaderRoot(header_state),
-            .receipts = block_stf.payloadHeaderRoot(header_receipts),
+            .state = .fromHash(header_state),
+            .receipts = .fromHash(header_receipts),
         },
         .reconstructed_header = .{
-            .transactions = block_stf.reconstructedHeaderRoot(header_transactions),
-            .withdrawals = block_stf.reconstructedHeaderRoot(header_withdrawals),
+            .transactions = .fromHash(header_transactions),
+            .withdrawals = .fromHash(header_withdrawals),
         },
     };
 }

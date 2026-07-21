@@ -605,6 +605,13 @@ pub fn Executor(comptime ProtocolType: type) type {
                 return self.executor.logs();
             }
 
+            /// Allocator that owns materialized lease artifacts such as a
+            /// changeset. It remains caller-owned and must outlive them.
+            pub fn allocator(self: ExecutionLease) ExecutionLeaseError!std.mem.Allocator {
+                _ = try self.state();
+                return self.executor.allocator;
+            }
+
             /// Materialize the eager overlay while rollback remains armed.
             pub fn changeset(self: ExecutionLease) !Changeset {
                 _ = try self.state();
@@ -1865,18 +1872,16 @@ const CacheInvalidatingTrace = struct {
     pool: *evmz.prepared_code.InMemoryPreparedPool,
     replay_cleared: bool = false,
 
-    fn sink(self: *@This()) trace.Sink {
-        return trace.Sink.init(self, .{
-            .step_start = trace.StepStartFields.initMany(&.{.opcode}),
-        }, &.{ .stepStart = stepStart });
-    }
-
-    fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        _ = event;
-        if (self.replay_cleared) return;
-        self.pool.clearRetainingCapacity() catch |err| @panic(@errorName(err));
-        self.replay_cleared = true;
+    fn replay(self: *@This(), span: trace.TraceSpan) !void {
+        var cursor = trace.TraceCursor.init(span);
+        while (try cursor.next()) |event| switch (event) {
+            .step_start => {
+                if (self.replay_cleared) continue;
+                try self.pool.clearRetainingCapacity();
+                self.replay_cleared = true;
+            },
+            .frame_enter, .step_end, .frame_leave => {},
+        };
     }
 };
 
@@ -1905,7 +1910,6 @@ test "trace replay runs after prepared code leaves the live frame" {
     _ = try pool.getOrPrepare(executor.preparedCodeKey(), code_view.code_hash, code_view.bytes);
 
     var recorder = CacheInvalidatingTrace{ .pool = &pool };
-    var sink = recorder.sink();
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
     var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape }, null);
@@ -1924,7 +1928,7 @@ test "trace replay runs after prepared code leaves the live frame" {
 
     const span = (try capture.finish()).?;
     capture_open = false;
-    try trace.replaySteps(&sink, span);
+    try recorder.replay(span);
     try tape.resolve(span);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2320,7 +2324,6 @@ test "top-level call code resolution reuses one traced view" {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     var recorder = CodeReadRecorder{};
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .prague,
     });
@@ -2331,7 +2334,7 @@ test "top-level call code resolution reuses one traced view" {
     try recipient_account.setCode(&.{evmz.Opcode.STOP.toByte()});
     try executor.state.seedAccount(recipient, recipient_account);
     var capture: TestCapture(Default) = undefined;
-    try capture.initSink(&executor, &sink);
+    try capture.init(&executor, recorder.target());
     defer capture.deinit();
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
@@ -2364,7 +2367,6 @@ test "top-level delegated access failure does not read target code" {
     const authority = evmz.addr(0x2222);
     const target = evmz.addr(0x3333);
     var recorder = CodeReadRecorder{};
-    var sink = recorder.sink();
     var executor = ExpensiveExecutor.init(std.testing.allocator, .{
         .revision = .prague,
     });
@@ -2381,7 +2383,7 @@ test "top-level delegated access failure does not read target code" {
     try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
     try executor.state.seedAccount(target, target_account);
     var capture: TestCapture(ExpensiveExecutor) = undefined;
-    try capture.initSink(&executor, &sink);
+    try capture.init(&executor, recorder.target());
     defer capture.deinit();
 
     const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
@@ -2560,13 +2562,11 @@ const CodeReadRecorder = struct {
     count: usize = 0,
     last_address: ?Address = null,
 
-    fn sink(self: *CodeReadRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .state_read = trace.StateReadKinds.initMany(&.{.code}),
-        }, &.{ .stateRead = stateRead });
+    fn target(self: *CodeReadRecorder) CaptureStateTarget {
+        return CaptureStateTarget.init(self, &.{ .state_read = stateRead });
     }
 
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+    fn stateRead(ptr: *anyopaque, event: trace.StateRead) !void {
         const self: *CodeReadRecorder = @ptrCast(@alignCast(ptr));
         switch (event) {
             .code => |read| {
@@ -3232,8 +3232,7 @@ test "captured runtime records nested call and create frames without generic ste
     try std.testing.expect(span.steps[create_index.?].pc_next > span.steps[create_index.?].pc);
 
     var replay = StepOrderRecorder{};
-    var replay_sink = replay.sink();
-    try trace.replaySteps(&replay_sink, span);
+    try replay.consume(span);
     const replay_call_start = replay.firstIndex(.start, .CALL, 0).?;
     const replay_call_end = replay.firstIndex(.end, .CALL, 0).?;
     try std.testing.expect(replay.hasDepthStartBetween(1, replay_call_start, replay_call_end));
@@ -4076,7 +4075,6 @@ test "callcode with insufficient balance fails without executing target code" {
     const target = evmz.addr(0xbbbb);
     const tx_context = testTxContext(caller, 100_000);
     var recorder = CheckpointTraceRecorder{};
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
     });
@@ -4090,7 +4088,7 @@ test "callcode with insufficient balance fails without executing target code" {
     try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
     try executor.state.seedAccount(target, target_account);
     var capture: TestCapture(Default) = undefined;
-    try capture.initSink(&executor, &sink);
+    try capture.init(&executor, recorder.target());
     defer capture.deinit();
 
     try executor.beginTransaction(tx_context, caller, caller);
@@ -4118,7 +4116,6 @@ test "create address collision closes checkpoint without rolling back nonce or w
     const sender = evmz.addr(0xaaaa);
     const tx_context = testTxContext(sender, 100_000);
     var recorder = CheckpointTraceRecorder{};
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
     });
@@ -4133,7 +4130,7 @@ test "create address collision closes checkpoint without rolling back nonce or w
     existing_account.nonce = 1;
     try executor.state.seedAccount(create_address, existing_account);
     var capture: TestCapture(Default) = undefined;
-    try capture.initSink(&executor, &sink);
+    try capture.init(&executor, recorder.target());
     defer capture.deinit();
 
     try executor.beginCreateTransaction(tx_context, sender);
@@ -4601,13 +4598,12 @@ test "delegated precompile targets are warm" {
     }
 }
 
-test "state-only trace sink records state without step tracing" {
+test "state-only capture target records state without a trace tape" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const tx_context = testTxContext(sender, 100_000);
 
     var recorder = StateOnlyTraceRecorder{};
-    var sink = recorder.sink();
     var executor = Default.init(std.testing.allocator, .{
         .revision = .berlin,
     });
@@ -4626,7 +4622,7 @@ test "state-only trace sink records state without step tracing" {
     });
     try executor.state.seedAccount(contract, contract_account);
     var capture: TestCapture(Default) = undefined;
-    try capture.initSink(&executor, &sink);
+    try capture.init(&executor, recorder.target());
     defer capture.deinit();
 
     try executor.beginTransaction(tx_context, sender, contract);
@@ -4634,45 +4630,24 @@ test "state-only trace sink records state without step tracing" {
     try capture.finish();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(u8, 0), recorder.step_starts);
-    try std.testing.expectEqual(@as(u8, 0), recorder.step_ends);
     try std.testing.expect(recorder.storage_reads >= 1);
     try std.testing.expectEqual(@as(u8, 1), recorder.storage_writes);
     try std.testing.expectEqual(@as(u256, 42), recorder.last_storage_write);
 }
 
 const StateOnlyTraceRecorder = struct {
-    step_starts: u8 = 0,
-    step_ends: u8 = 0,
     storage_reads: u8 = 0,
     storage_writes: u8 = 0,
     last_storage_write: u256 = 0,
 
-    fn sink(self: *StateOnlyTraceRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .state_read = trace.StateReadKinds.initMany(&.{.storage}),
-            .state_write = trace.StateWriteKinds.initMany(&.{.storage}),
-        }, &.{
-            .stepStart = stepStart,
-            .stepEnd = stepEnd,
-            .stateRead = stateRead,
-            .stateWrite = stateWrite,
+    fn target(self: *StateOnlyTraceRecorder) CaptureStateTarget {
+        return CaptureStateTarget.init(self, &.{
+            .state_read = stateRead,
+            .state_write = stateWrite,
         });
     }
 
-    fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
-        const self: *StateOnlyTraceRecorder = @ptrCast(@alignCast(ptr));
-        _ = event;
-        self.step_starts += 1;
-    }
-
-    fn stepEnd(ptr: *anyopaque, event: trace.StepEnd) void {
-        const self: *StateOnlyTraceRecorder = @ptrCast(@alignCast(ptr));
-        _ = event;
-        self.step_ends += 1;
-    }
-
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) void {
+    fn stateRead(ptr: *anyopaque, event: trace.StateRead) !void {
         const self: *StateOnlyTraceRecorder = @ptrCast(@alignCast(ptr));
         switch (event) {
             .storage => self.storage_reads += 1,
@@ -4680,7 +4655,7 @@ const StateOnlyTraceRecorder = struct {
         }
     }
 
-    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) void {
+    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
         const self: *StateOnlyTraceRecorder = @ptrCast(@alignCast(ptr));
         switch (event) {
             .storage => |payload| {
@@ -4708,14 +4683,25 @@ const StepOrderRecorder = struct {
     events: [128]Event = undefined,
     len: usize = 0,
 
-    fn sink(self: *StepOrderRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .step_start = trace.StepStartFields.initMany(&.{ .opcode, .depth }),
-            .step_end = trace.StepEndFields.initMany(&.{ .opcode, .depth, .stack, .status }),
-        }, &.{
-            .stepStart = stepStart,
-            .stepEnd = stepEnd,
-        });
+    fn consume(self: *StepOrderRecorder, span: trace.TraceSpan) !void {
+        var cursor = trace.TraceCursor.init(span);
+        while (try cursor.next()) |event| switch (event) {
+            .step_start => |view| self.append(.{
+                .kind = .start,
+                .opcode = view.row.opcode,
+                .depth = view.frame.depth,
+            }),
+            .step_end => |view| self.append(.{
+                .kind = .end,
+                .opcode = view.row.opcode,
+                .depth = view.frame.depth,
+                .stack_top = if (view.state.stack.?.len == 0)
+                    null
+                else
+                    view.state.stack.?[view.state.stack.?.len - 1],
+            }),
+            .frame_enter, .frame_leave => {},
+        };
     }
 
     fn firstIndex(self: *const StepOrderRecorder, kind: StepEventKind, opcode: evmz.Opcode, depth: u16) ?usize {
@@ -4737,25 +4723,6 @@ const StepOrderRecorder = struct {
         self.events[self.len] = event;
         self.len += 1;
     }
-
-    fn stepStart(ptr: *anyopaque, event: trace.StepStart) void {
-        const self: *StepOrderRecorder = @ptrCast(@alignCast(ptr));
-        self.append(.{
-            .kind = .start,
-            .opcode = event.opcode,
-            .depth = event.depth,
-        });
-    }
-
-    fn stepEnd(ptr: *anyopaque, event: trace.StepEnd) void {
-        const self: *StepOrderRecorder = @ptrCast(@alignCast(ptr));
-        self.append(.{
-            .kind = .end,
-            .opcode = event.opcode,
-            .depth = event.depth,
-            .stack_top = if (event.stack.len == 0) null else event.stack[event.stack.len - 1],
-        });
-    }
 };
 
 const CheckpointTraceRecorder = struct {
@@ -4763,15 +4730,11 @@ const CheckpointTraceRecorder = struct {
     first: trace.CheckpointKind = .checkpoint,
     last: trace.CheckpointKind = .checkpoint,
 
-    fn sink(self: *CheckpointTraceRecorder) trace.Sink {
-        return trace.Sink.init(self, .{
-            .checkpoint = trace.CheckpointFields.full,
-        }, &.{
-            .checkpoint = checkpointEvent,
-        });
+    fn target(self: *CheckpointTraceRecorder) CaptureStateTarget {
+        return CaptureStateTarget.init(self, &.{ .checkpoint = checkpointEvent });
     }
 
-    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) void {
+    fn checkpointEvent(ptr: *anyopaque, event: trace.Checkpoint) !void {
         const self: *CheckpointTraceRecorder = @ptrCast(@alignCast(ptr));
         if (self.checkpoints == 0) self.first = event.kind;
         self.last = event.kind;
@@ -4815,10 +4778,6 @@ fn TestCapture(comptime ExecutorType: type) type {
             }
             try self.context.begin();
             self.open = true;
-        }
-
-        fn initSink(self: *Self, executor: *ExecutorType, sink: *trace.Sink) !void {
-            try self.init(executor, capture_context.stateTargetForSink(sink));
         }
 
         fn finish(self: *Self) !void {

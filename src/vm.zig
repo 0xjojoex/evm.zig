@@ -1672,23 +1672,20 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         reads: usize = 0,
         last: evmz.trace.CodeRead = undefined,
 
-        fn sink(self: *@This()) evmz.trace.Sink {
-            return evmz.trace.Sink.init(self, .{
-                .state_read = evmz.trace.StateReadKinds.initMany(&.{.code}),
-            }, &.{ .stateRead = stateRead });
+        fn target(self: *@This()) executor_module.CaptureStateTarget {
+            return executor_module.CaptureStateTarget.init(self, &.{ .state_read = stateRead });
         }
 
-        fn stateRead(ptr: *anyopaque, event: evmz.trace.StateRead) void {
+        fn stateRead(ptr: *anyopaque, event: evmz.trace.StateRead) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.last = switch (event) {
                 .code => |payload| payload,
-                else => unreachable,
+                else => return,
             };
             self.reads += 1;
         }
     };
     var recorder = Recorder{};
-    var sink = recorder.sink();
     var prepared_pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer prepared_pool.deinit();
     var executor = Default.Executor.init(std.testing.allocator, .{
@@ -1703,7 +1700,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     var context = executor_module.CaptureContext.init(
         std.testing.allocator,
         null,
-        executor_module.capture_context.stateTargetForSink(&sink),
+        recorder.target(),
     );
     defer context.deinit();
     executor.setCaptureContext(&context);

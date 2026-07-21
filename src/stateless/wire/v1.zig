@@ -14,7 +14,6 @@ const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const transaction = @import("../../transaction.zig");
-const trace = @import("../../trace.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const schema_id: u16 = 0x0001;
@@ -1117,18 +1116,27 @@ pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const
 }
 
 pub fn validateStatelessResultBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Result {
-    return validateStatelessResultBytesWithTraceAndOptions(allocator, bytes, null, .{});
+    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, null, .{});
 }
 
 pub fn validateStatelessResultBytesWithOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ValidationOptions) Error!block_stf.Result {
-    return validateStatelessResultBytesWithTraceAndOptions(allocator, bytes, null, options);
+    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, null, options);
 }
 
-pub fn validateStatelessResultBytesWithTrace(allocator: std.mem.Allocator, bytes: []const u8, trace_sink: ?*trace.Sink) Error!block_stf.Result {
-    return validateStatelessResultBytesWithTraceAndOptions(allocator, bytes, trace_sink, .{});
+pub fn validateStatelessResultBytesWithCapture(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    capture: ?block_stf.ExecutionCapture,
+) Error!block_stf.Result {
+    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, capture, .{});
 }
 
-pub fn validateStatelessResultBytesWithTraceAndOptions(allocator: std.mem.Allocator, bytes: []const u8, trace_sink: ?*trace.Sink, options: ValidationOptions) Error!block_stf.Result {
+pub fn validateStatelessResultBytesWithCaptureAndOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    capture: ?block_stf.ExecutionCapture,
+    options: ValidationOptions,
+) Error!block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1141,7 +1149,7 @@ pub fn validateStatelessResultBytesWithTraceAndOptions(allocator: std.mem.Alloca
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    return stateless_validate.validateWithTrace(scratch, normalized, trace_sink) catch |err| switch (err) {
+    return stateless_validate.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
         else => .{ .status = .invalid_witness },

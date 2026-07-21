@@ -15,6 +15,9 @@ pub const RootProvider = @import("./state/Backend.zig").RootProvider;
 pub const MemoryAccount = @import("./state/MemoryAccount.zig");
 pub const storage = @import("./state/storage.zig");
 pub const Reader = @import("./state/Reader.zig");
+pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
+// Internal until the BAL differential path locks positioned fallback policy.
+const BalClaimReader = @import("./state/BalClaimReader.zig");
 pub const WitnessStateReader = @import("./state/WitnessStateReader.zig");
 pub const Changeset = @import("./state/Changeset.zig");
 pub const Committer = @import("./state/Committer.zig");
@@ -26,5 +29,6 @@ pub const StorageKey = storage.Key;
 pub const storageStatus = storage.status;
 
 test {
+    std.testing.refAllDecls(BalClaimReader);
     std.testing.refAllDecls(@This());
 }
