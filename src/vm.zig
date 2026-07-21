@@ -883,7 +883,7 @@ fn Typed(
                 call.sender,
                 call.recipient,
                 call.input,
-                call.gas,
+                .legacy(call.gas),
             );
             return Host.Result.fromCall(.{
                 .status = result.status,

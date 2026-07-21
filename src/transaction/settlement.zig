@@ -528,6 +528,39 @@ test "settlement costs enforce Prague calldata floor after refunds" {
     try std.testing.expectEqual(@as(u256, 0), costs.fee_payment);
 }
 
+test "Amsterdam block gas sums dimensions before selecting the header total" {
+    const first = BlockGas.fromDimensions(100, 1);
+    const second = BlockGas.fromDimensions(1, 100);
+    const combined = try first.add(second);
+
+    try std.testing.expectEqual(@as(u64, 101), combined.regular);
+    try std.testing.expectEqual(@as(u64, 101), combined.state);
+    try std.testing.expectEqual(@as(u64, 101), combined.total);
+}
+
+test "Amsterdam block gas keeps receipt floor and state-dominant header gas separate" {
+    const settlement = DefaultPlan{
+        .revision_id = definition_support.revisionId(EthRevision.amsterdam),
+        .gas_limit = 200,
+        .intrinsic_gas = 20,
+        .floor_gas = 30,
+        .gas_price = 5,
+        .priority_fee = 2,
+        .fee_recipient = address.addr(0xbeef),
+    };
+    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+        .gas_left = 20,
+        .gas_refund = 0,
+        .gas_reservoir = 100,
+        .state_gas_spent = 70,
+    });
+
+    try std.testing.expectEqual(@as(u64, 80), costs.gas.used);
+    try std.testing.expectEqual(@as(u64, 30), costs.gas.block.regular);
+    try std.testing.expectEqual(@as(u64, 70), costs.gas.block.state);
+    try std.testing.expectEqual(@as(u64, 70), costs.gas.block.total);
+}
+
 test "Amsterdam block gas accounting excludes refunds" {
     const settlement = DefaultPlan{
         .revision_id = definition_support.revisionId(EthRevision.amsterdam),

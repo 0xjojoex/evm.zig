@@ -1613,7 +1613,7 @@ pub fn Executor(comptime ProtocolType: type) type {
             sender: Address,
             recipient: Address,
             input: []const u8,
-            gas: u64,
+            gas: execution_values.ExecutionGas,
         ) !Interpreter.Result {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
@@ -1635,7 +1635,8 @@ pub fn Executor(comptime ProtocolType: type) type {
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, gas) orelse std.math.maxInt(i64),
+                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
                 .recipient = recipient,
                 .sender = sender,
                 .input_data = input,
@@ -1663,6 +1664,9 @@ pub fn Executor(comptime ProtocolType: type) type {
                 .status = result.status,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
                 .output_data = self.lastOutputData(),
             };
         }

@@ -395,14 +395,6 @@ pub const HeaderClaims = struct {
     block_access_list_hash: ?[32]u8 = null,
 };
 
-/// Selects the gas value inserted into a reconstructed execution header.
-/// `payload_claim` keeps block-hash validation usable while a fork's gas
-/// derivation is incomplete, without presenting that scalar as STF-derived.
-pub const HeaderGasUsed = union(enum) {
-    execution_derived,
-    payload_claim: u64,
-};
-
 /// Claimed block hash plus the payload-only material needed to reconstruct it.
 /// All roots, bloom, blob gas, requests, and BAL commitments come from
 /// execution-derived `Result` fields rather than payload copies.
@@ -411,7 +403,6 @@ pub const HeaderHashClaim = struct {
     parent_hash: [32]u8,
     parent_beacon_block_root: ?[32]u8 = null,
     extra_data: []const u8,
-    gas_used: HeaderGasUsed = .execution_derived,
 };
 
 /// Canonical parent-header facts needed to validate child header rules.
@@ -1523,10 +1514,6 @@ fn reconstructHeaderHash(
         }
     }
 
-    const gas_used = switch (claim.gas_used) {
-        .execution_derived => result.block_gas_used,
-        .payload_claim => |value| value,
-    };
     const excess_blob_gas: ?u64 = if (input.revision.isImpl(.cancun))
         std.math.cast(u64, result.excess_blob_gas orelse return error.InvalidHeaderReconstruction) orelse
             return error.InvalidHeaderReconstruction
@@ -1541,7 +1528,7 @@ fn reconstructHeaderHash(
         .logs_bloom = result.logs_bloom,
         .number = input.env.number,
         .gas_limit = input.env.gas_limit,
-        .gas_used = gas_used,
+        .gas_used = result.block_gas_used,
         .timestamp = input.env.timestamp,
         .extra_data = claim.extra_data,
         .prev_randao = uint256.toBytes32(input.env.prev_randao),

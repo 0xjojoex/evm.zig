@@ -46,7 +46,6 @@ pub const FailReason = enum(u8) {
 };
 
 pub const UncheckedReason = enum(u8) {
-    amsterdam_gas_used,
     bal_differential_fallback,
 };
 
@@ -312,7 +311,6 @@ fn runPayloadEntry(
     if (options.verbose) std.debug.print("  pass {s} block={}\n", .{ test_name, block_index });
     _ = path;
     summary.passed += 1;
-    if (revision.isImpl(.amsterdam)) summary.countUnchecked(.amsterdam_gas_used);
 }
 
 fn runPayload(
@@ -387,10 +385,8 @@ fn runPayload(
             },
         },
         .header_claims = .{
-            // The current Amsterdam gas model derives the fixture's receipt
-            // root but not its payload gasUsed scalar. Keep that known gas
-            // accounting gap separate from this block-transition lane.
             .gas_used = if (revision.isImpl(.amsterdam)) null else try optionalU64Field(&payload, "gasUsed"),
+            .block_gas_used = if (revision.isImpl(.amsterdam)) try optionalU64Field(&payload, "gasUsed") else null,
             .logs_bloom = try bloomField(scratch, &payload, "logsBloom"),
             .blob_gas_used = try optionalU64Field(&payload, "blobGasUsed"),
             .excess_blob_gas = excess_blob_gas,
@@ -401,13 +397,6 @@ fn runPayload(
             .parent_hash = payload_parent_hash,
             .parent_beacon_block_root = block_header.parent_beacon_block_root,
             .extra_data = try parseBytesFromValue(scratch, payload.get("extraData") orelse return error.MalformedFixture),
-            // The current Amsterdam gas derivation is a known separate gap.
-            // Keep the payload scalar's provenance explicit while binding all
-            // other reconstructed fields to the claimed block hash.
-            .gas_used = if (revision.isImpl(.amsterdam))
-                .{ .payload_claim = try u64Field(&payload, "gasUsed") }
-            else
-                .execution_derived,
         } else null,
         .bal_differential = bal_report,
     });

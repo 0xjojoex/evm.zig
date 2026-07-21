@@ -37,6 +37,7 @@ pub fn applyBeforeTransactionPrelude(
             call.recipient,
             call.input.slice(),
             call.gas,
+            call.state_gas,
             call.require_code,
         );
     }
@@ -83,6 +84,7 @@ pub fn applyFinalizeBlock(
             call.recipient,
             call.input.slice(),
             call.gas,
+            call.state_gas,
             finalize_call.output_prefix,
             call.require_code,
         );
@@ -119,6 +121,7 @@ fn applySystemCalls(executor: anytype, tx_context: Host.TxContext, calls: *const
             call.recipient,
             call.input.slice(),
             call.gas,
+            call.state_gas,
             call.require_code,
         );
     }
@@ -134,11 +137,15 @@ fn callSystemContract(
     recipient: Address,
     input: []const u8,
     gas: u64,
+    state_gas: u64,
     require_code: bool,
 ) !void {
     const has_code = (try executor.getCode(recipient)).len != 0;
     if (!has_code and require_code) return error.SystemCallFailed;
-    const result = try executor.executeSystemCall(tx_context, sender, recipient, input, gas);
+    const result = try executor.executeSystemCall(tx_context, sender, recipient, input, .{
+        .regular_left = gas,
+        .reservoir = state_gas,
+    });
     if (has_code and result.status != .success) return error.SystemCallFailed;
 }
 
@@ -149,6 +156,7 @@ fn callSystemContractInPrelude(
     recipient: Address,
     input: []const u8,
     gas: u64,
+    state_gas: u64,
     require_code: bool,
 ) @TypeOf(prelude).Error!void {
     const has_code = (try prelude.code(recipient)).len != 0;
@@ -161,7 +169,10 @@ fn callSystemContractInPrelude(
             .recipient = recipient,
             .input = input,
         } },
-        .gas = .legacy(gas),
+        .gas = .{
+            .regular_left = gas,
+            .reservoir = state_gas,
+        },
     });
     if (has_code and result.status != .success) return error.SystemCallFailed;
 }
@@ -174,12 +185,16 @@ fn callRequestSystemContract(
     recipient: Address,
     input: []const u8,
     gas: u64,
+    state_gas: u64,
     request_type: u8,
     require_code: bool,
 ) !?[]const u8 {
     const has_code = (try executor.getCode(recipient)).len != 0;
     if (!has_code and require_code) return error.SystemCallFailed;
-    const result = try executor.executeSystemCall(tx_context, sender, recipient, input, gas);
+    const result = try executor.executeSystemCall(tx_context, sender, recipient, input, .{
+        .regular_left = gas,
+        .reservoir = state_gas,
+    });
     if (has_code and result.status != .success) return error.SystemCallFailed;
     if (!has_code or result.output_data.len == 0) return null;
 
@@ -227,6 +242,17 @@ test "before block calls Prague and Cancun system contracts" {
     });
     for (calls.slice()) |call| {
         try std.testing.expectEqualSlices(u8, &ethereum.system_address, &call.sender);
+        try std.testing.expectEqual(@as(u64, 0), call.state_gas);
+    }
+
+    const amsterdam_calls = evmz.Evm.block_policy.beforeBlock(.amsterdam, .{
+        .number = 1,
+        .timestamp = 12,
+        .parent_hash = parent_hash,
+        .parent_beacon_block_root = beacon_root,
+    });
+    for (amsterdam_calls.slice()) |call| {
+        try std.testing.expectEqual(ethereum.system_call_state_gas, call.state_gas);
     }
 
     try applyBeforeBlock(&evmz.Evm.block_policy, &executor, tx_context, .{
@@ -245,8 +271,48 @@ test "before block calls Prague and Cancun system contracts" {
         ethereum.system_address,
         evmz.addr(0x1234),
         &parent_hash,
-        ethereum.system_call_gas,
+        .legacy(ethereum.system_call_gas),
     )).status);
+}
+
+test "Amsterdam block hook executes state growth from the system-call reservoir" {
+    const ethereum = evmz.eth;
+    const ReservoirBlock = struct {
+        const recipient = evmz.addr(0x8037);
+
+        fn beforeBlock(revision: ethereum.Revision, _: BeforeBlockContext) evmz.protocol.BlockSystemCalls {
+            var calls = evmz.protocol.BlockSystemCalls{};
+            if (revision.isImpl(.amsterdam)) {
+                calls.append(.{
+                    .sender = ethereum.system_address,
+                    .recipient = recipient,
+                    .gas = 20_000,
+                    .state_gas = ethereum.transaction.amsterdam_storage_set_state_gas,
+                    .require_code = true,
+                });
+            }
+            return calls;
+        }
+    };
+    const block_definition = comptime evmz.eth.defineBlock(.{
+        .block = .{ .beforeBlock = ReservoirBlock.beforeBlock },
+    });
+    const block_policy = evmz.definition.projectBlockPolicy(ethereum.Revision, block_definition);
+
+    var executor = evmz.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
+    defer executor.deinit();
+    try executor.state.setCode(ReservoirBlock.recipient, &.{
+        0x60, 0x01, // PUSH1 1
+        0x5f, // PUSH0
+        0x55, // SSTORE
+        0x00, // STOP
+    });
+
+    try applyBeforeBlock(&block_policy, &executor, testTxContext(), .{
+        .number = 1,
+        .timestamp = 12,
+    });
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(ReservoirBlock.recipient, 0));
 }
 
 test "finalize block copies successful system contract output into typed requests" {

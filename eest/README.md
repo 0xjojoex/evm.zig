@@ -109,18 +109,19 @@ from the locked zkEVM fixture cache.
 The regular adapter targets the locked Glamsterdam block corpus under
 `fixtures/blockchain_tests_sync`. It consumes Engine API `engineNewPayloads` and
 `syncPayload` entries in order, seeds fixture `pre` into `MemoryStore`, and only
-commits a block into that store after `eth.BlockSTF` validates it. Amsterdam
-payload `gasUsed` is not asserted yet: the current gas model derives the fixture
-receipt root but reports a different scalar. Those blocks remain passing for
-the supported checks but are also reported as `unchecked.amsterdam_gas_used`.
+commits a block into that store after `eth.BlockSTF` validates it. Before
+Amsterdam, payload `gasUsed` is checked against cumulative receipt gas. From
+Amsterdam onward, it is checked against the execution-derived block/header gas
+scalar, which may differ from cumulative receipt gas after refunds and
+two-dimensional state-gas accounting.
 
 Transaction and withdrawal roots are currently recorded as local body
 recomputes, not standalone consensus claims. `eth.BlockSTF` now reconstructs the
 full post-Merge execution header from execution-derived roots and compares its
 canonical RLP hash with the fixture's `blockHash`. A valid block's reconstructed
 hash, rather than the unchecked payload value, becomes the next block's parent
-and `BLOCKHASH` source. Amsterdam header reconstruction temporarily uses the
-payload gas scalar, matching the explicit unchecked result above.
+and `BLOCKHASH` source. Header `gasUsed` is execution-derived for every supported
+fork.
 
 Before execution, both fixture lanes also validate parent-derived child-header
 rules: consecutive number, strictly increasing timestamp, gas-limit adjustment

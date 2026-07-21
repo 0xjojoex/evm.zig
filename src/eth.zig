@@ -120,6 +120,7 @@ pub const builder_deposit_request_type = system.builder_deposit_request_type;
 pub const builder_exit_request_type = system.builder_exit_request_type;
 pub const value_transfer_log_topic = system.value_transfer_log_topic;
 pub const system_call_gas = system.system_call_gas;
+pub const system_call_state_gas = system.system_call_state_gas;
 
 test "Ethereum definitions project to runtime policy values" {
     comptime {

@@ -157,7 +157,10 @@ pub const BlockSystemCall = struct {
     sender: Address,
     recipient: Address,
     input: BlockHookInput = .none,
+    /// Regular gas visible to the EVM and the `GAS` opcode.
     gas: u64,
+    /// Additional state-gas reservoir. This is not visible to `GAS`.
+    state_gas: u64 = 0,
     require_code: bool = false,
 };
 

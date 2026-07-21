@@ -5,6 +5,7 @@ const types = @import("../protocol/types.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
+const eip8037 = @import("eip/8037.zig");
 const eip8282 = @import("eip/8282.zig");
 const tx = @import("transaction.zig");
 const Revision = @import("revision.zig").Revision;
@@ -26,6 +27,7 @@ pub const builder_deposit_request_type = eip8282.builder_deposit_request_type;
 pub const builder_exit_request_type = eip8282.builder_exit_request_type;
 pub const value_transfer_log_topic = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 pub const system_call_gas: u64 = 30_000_000;
+pub const system_call_state_gas: u64 = eip8037.storage_set_state_gas * eip8037.system_max_sstores_per_call;
 const call_static_gas_floor: i64 = 40;
 const call_value_cost: i64 = 9000;
 const account_creation_cost: i64 = 25000;
@@ -182,6 +184,7 @@ pub const Block = struct {
                     .recipient = beacon_roots_address,
                     .input = .{ .word = root },
                     .gas = system_call_gas,
+                    .state_gas = systemCallStateGas(revision),
                 });
             }
         }
@@ -193,6 +196,7 @@ pub const Block = struct {
                     .recipient = history_storage_address,
                     .input = .{ .word = hash },
                     .gas = system_call_gas,
+                    .state_gas = systemCallStateGas(revision),
                 });
             }
         }
@@ -213,15 +217,20 @@ pub const Block = struct {
         if (context.number == 0) return calls;
         if (!revision.isImpl(.prague)) return calls;
 
-        calls.append(eip7002.finalizeSystemCall(system_address, system_call_gas));
-        calls.append(eip7251.finalizeSystemCall(system_address, system_call_gas));
+        const state_gas = systemCallStateGas(revision);
+        calls.append(eip7002.finalizeSystemCall(system_address, system_call_gas, state_gas));
+        calls.append(eip7251.finalizeSystemCall(system_address, system_call_gas, state_gas));
         if (revision.isImpl(.amsterdam)) {
-            calls.append(eip8282.builderDepositFinalizeSystemCall(system_address, system_call_gas));
-            calls.append(eip8282.builderExitFinalizeSystemCall(system_address, system_call_gas));
+            calls.append(eip8282.builderDepositFinalizeSystemCall(system_address, system_call_gas, state_gas));
+            calls.append(eip8282.builderExitFinalizeSystemCall(system_address, system_call_gas, state_gas));
         }
         return calls;
     }
 };
+
+fn systemCallStateGas(revision: Revision) u64 {
+    return if (revision.isImpl(.amsterdam)) system_call_state_gas else 0;
+}
 
 const StorageActionCost = struct {
     warm_access: i64,
