@@ -42,6 +42,10 @@ pub const ProgressiveListOf = list.ProgressiveListOf;
 pub const Bitvector = bitfield.Bitvector;
 pub const Bitlist = bitfield.Bitlist;
 pub const ProgressiveBitlist = bitfield.ProgressiveBitlist;
+pub const PackedBitsView = bitfield.PackedBitsView;
+pub const PackedBitvector = bitfield.PackedBitvector;
+pub const PackedBitlist = bitfield.PackedBitlist;
+pub const ProgressivePackedBitlist = bitfield.ProgressivePackedBitlist;
 
 pub const None = union_codec.None;
 pub const Union = union_codec.Union;

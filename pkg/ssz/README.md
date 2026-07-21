@@ -93,7 +93,7 @@ below can infer come for free; the rest you name explicitly.
 | `bool`, `uintN` (8–256)          | eager, no schema                                                                    |
 | `Vector[T, N]` (fixed element)   | plain `[N]T` array                                                                  |
 | `Vector[T, N]` (any element)     | `VectorOf(Codec, N)`                                                                |
-| `Bitvector[N]` / `Bitlist[N]`    | `Bitvector(N)` / `Bitlist(N)`                                                       |
+| `Bitvector[N]` / `Bitlist[N]`    | `Bitvector(N)` / `Bitlist(N)`, or packed borrowed variants                          |
 | `List[byte, N]`                  | `ByteList(N)`                                                                       |
 | `List[T, N]` (fixed element)     | `List(T, N)`                                                                        |
 | `List[T, 1]` represented as `?T` | `OptionalList(T)`                                                                   |
@@ -247,6 +247,36 @@ Note that a value's wire layout and its Zig representation are independent: a
 131072-byte `Vector` is fixed-size on the wire yet can still be decoded into an
 allocated slice via `Alloc`.
 
+### Borrowed views
+
+Borrowed decoding is opt-in when the input buffer already has a stable lifetime.
+`ListOf(ByteList(...), ...).decodeView` validates the complete offset table and
+every child, then provides allocation-free `get` and iterator access. The
+`PackedBitvector`, `PackedBitlist`, and `ProgressivePackedBitlist` codecs retain
+canonical packed bytes and expose semantic bits through `PackedBitsView`:
+
+```zig
+const Items = ssz.ListOf(ssz.ByteList(32), 1_000);
+const items = try Items.decodeView(encoded_items);
+const first = items.get(0).?; // borrows encoded_items
+
+const Flags = ssz.PackedBitlist(4_096);
+const flags = try Flags.decode(encoded_flags);
+if (flags.isSet(7)) {
+    // read without expanding to one bool per bit
+}
+```
+
+Keep the backing bytes alive and unchanged for the entire view lifetime. Views
+are immutable: packed views support reading, hashing, and re-encoding, while a
+lazy list view is a read-only access projection. Use owned list decoding or the
+boolean bitfield codecs for retention and mutation. A lazy list view differs
+from the list codec's ordinary `Value`, so it does not automatically compose
+inside an existing typed `Container` or pass to that codec's `hashTreeRoot`.
+Callers must carry the view-shaped representation end to end. The package-level
+speedup does not imply an application speedup until that integration exists;
+the current evmz stateless wire adapter still uses owned decoding.
+
 ## Custom hashing provider
 
 `hashTreeRoot` defaults to `StdSha256Context`. To supply your own SHA-256,
@@ -290,31 +320,58 @@ zig run tools/generate-zero-roots.zig -- src/merkle/zero_roots.bin
 ```
 
 From the evmz repo root, `zig build ssz-bench` runs the same matrix. Benchmarks
-cover primitives, vectors, containers, large `u64` lists, and a Phase 0
-`BeaconState` at 16K/100K validators, reporting median time and throughput.
+cover primitives, vectors, containers, large `u64` and nested byte lists,
+expanded and packed bitfields, and a Phase 0 `BeaconState` at 16K/100K
+validators, reporting median time and throughput.
 
 ### Performance notes
 
-Early Apple M1 Max results (`ReleaseFast`, median):
+Local Apple M1 Max results (`ReleaseFast`; this-package median, `libssz`
+Criterion estimate):
 
-| Workload                                             | This package | `libssz` |
-| ---------------------------------------------------- | -----------: | -------: |
-| Encode `List[u64, 1K]`, caller buffer                |       102 ns |        - |
-| Decode `List[u64, 1K]`, owned                        |       140 ns |   134 ns |
-| Encode `List[u64, 100K]`, caller buffer              |      12.8 us |        - |
-| Decode `List[u64, 100K]`, owned                      |      13.5 us |  13.4 us |
-| Encode `BeaconState`, 16K validators, caller buffer  |       149 us |        - |
-| Decode `BeaconState`, 16K validators, owned          |       168 us |   166 us |
-| Encode `BeaconState`, 100K validators, caller buffer |       555 us |        - |
-| Decode `BeaconState`, 100K validators, owned         |       564 us |   620 us |
+| Workload                                                      | This package | `libssz` |
+| ------------------------------------------------------------- | -----------: | -------: |
+| Encode `List[u64, 1K]`, caller buffer                         |       102 ns |        - |
+| Decode `List[u64, 1K]`, owned                                 |       140 ns |   134 ns |
+| Encode `List[u64, 100K]`, caller buffer                       |      12.8 us |        - |
+| Decode `List[u64, 100K]`, owned                               |      13.5 us |  13.4 us |
+| Decode `List[ByteList[32], 1K]`, owned                        |      28.7 us |        - |
+| Decode `List[ByteList[32], 1K]`, borrowed view                |      1.09 us |        - |
+| Decode `List[ByteList[32], 100K]`, owned                      |      2.88 ms |        - |
+| Decode `List[ByteList[32], 100K]`, borrowed view              |       107 us |        - |
+| Encode `Bitvector[4096]`, expanded bools, caller buffer       |      3.50 us |        - |
+| Encode `Bitvector[4096]`, packed view, caller buffer          |      8.26 ns |        - |
+| Decode `Bitvector[4096]`, inline bools                        |      2.62 us |        - |
+| Decode `Bitvector[4096]`, borrowed packed view                |      1.14 ns |        - |
+| HTR `Bitvector[4096]`, expanded bools, stdlib SHA-256         |      4.38 us |        - |
+| HTR `Bitvector[4096]`, packed view, stdlib SHA-256            |      1.12 us |        - |
+| Encode `Bitlist[4096]`, expanded bools, caller buffer         |      3.45 us |        - |
+| Encode `Bitlist[4096]`, packed view, caller buffer            |      8.79 ns |        - |
+| Decode `Bitlist[4096]`, owned bools                           |      2.57 us |        - |
+| Decode `Bitlist[4096]`, borrowed packed view                  |      1.32 ns |        - |
+| HTR `Bitlist[4096]`, expanded bools, stdlib SHA-256           |      4.33 us |        - |
+| HTR `Bitlist[4096]`, packed view, stdlib SHA-256              |      1.20 us |        - |
+| Encode `BeaconState`, 16K validators, caller buffer           |       149 us |        - |
+| Decode `BeaconState`, 16K validators, owned                   |       168 us |   166 us |
+| Encode `BeaconState`, 100K validators, caller buffer          |       555 us |        - |
+| Decode `BeaconState`, 100K validators, owned                  |       564 us |   620 us |
 
-`-` means `libssz` has no equivalent arbitrary caller-buffer API or upstream
-`BeaconState` benchmark lane. Its `ssz_append` API can retain `Vec` capacity,
-but that is a different output contract. In the directly comparable owned
-decode lane, large lists are at parity; `BeaconState` is at parity at 16K
-validators and about 1.1x faster at 100K. These are early local measurements,
-not a performance guarantee. `hashTreeRoot` is excluded because results depend
-heavily on the SHA-256 provider.
+`-` means `libssz` has no upstream benchmark lane with the same ownership,
+output, and hashing boundary. Its `ssz_append` API can retain `Vec` capacity,
+which differs from an arbitrary caller buffer. Its byte-array/vector benchmarks
+also do not exercise the offset-bearing `List[ByteList]` shape, and its bitfield
+benchmarks decode to owned packed storage rather than either representation
+shown here. The paired byte-list and bitfield rows therefore compare only this
+package's representations, using identical encoded bytes and semantic values.
+Borrowed list decoding validates every offset and child before returning the
+lazy view; it does not consume the child payload bytes. Owned decoding includes
+destruction and freeing.
+
+In the directly comparable owned decode lanes, large `u64` lists are at parity;
+`BeaconState` is at parity at 16K validators and about 1.1x faster at 100K.
+HTR rows compare expanded and packed values under the same stdlib SHA-256
+provider; no cross-library HTR number is shown because provider choice can
+dominate the result. These are local measurements, not a performance guarantee.
 
 ### Tradeoff
 

@@ -24,8 +24,11 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
     }
     const Element = ElementCodec.Value;
     const element_size = ElementCodec.fixed_size;
+    const supports_borrowed_view = ElementCodec.is_variable_size and
+        Element == []const u8 and
+        std.meta.hasFn(ElementCodec, "decode");
 
-    return struct {
+    const Common = struct {
         pub const Value = []const Element;
         pub const Owned = []Element;
         pub const kind: codec.Kind = if (progressive) .progressive_list else .list;
@@ -136,6 +139,64 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
             if (len > std.math.maxInt(u32)) return error.EncodedLengthOverflow;
         }
     };
+
+    if (!supports_borrowed_view) return Common;
+
+    return struct {
+        pub const Value = Common.Value;
+        pub const Owned = Common.Owned;
+        pub const kind = Common.kind;
+        pub const element_codec = Common.element_codec;
+        pub const max_length = Common.max_length;
+        pub const is_progressive = Common.is_progressive;
+        pub const is_variable_size = Common.is_variable_size;
+        pub const fixed_size = Common.fixed_size;
+        pub const requires_allocator = Common.requires_allocator;
+        pub const encodedLen = Common.encodedLen;
+        pub const encode = Common.encode;
+        pub const decodeAlloc = Common.decodeAlloc;
+        pub const validate = Common.validate;
+        pub const deinit = Common.deinit;
+
+        /// Allocation-free random access over a validated variable-element list.
+        /// The view and every value it returns borrow from the encoded input.
+        /// Keep that input alive and unchanged while using the view.
+        pub const View = struct {
+            encoded: []const u8,
+            len: usize,
+
+            pub fn get(self: View, index: usize) ?Element {
+                if (index >= self.len) return null;
+                return ElementCodec.decode(sequence.elementBytes(self.encoded, self.len, index)) catch
+                    unreachable;
+            }
+
+            pub fn iterator(self: View) Iterator {
+                return .{ .view = self };
+            }
+
+            pub const Iterator = struct {
+                view: View,
+                index: usize = 0,
+
+                pub fn next(self: *Iterator) ?Element {
+                    const value = self.view.get(self.index) orelse return null;
+                    self.index += 1;
+                    return value;
+                }
+            };
+        };
+
+        /// Decode by validating the complete offset table and every element,
+        /// then borrowing the original encoded bytes for lazy access.
+        pub fn decodeView(bytes: []const u8) Error!View {
+            const count = try Common.decodedCount(bytes);
+            for (0..count) |index| {
+                _ = try ElementCodec.decode(sequence.elementBytes(bytes, count, index));
+            }
+            return .{ .encoded = bytes, .len = count };
+        }
+    };
 }
 
 test "SSZ ListOf encodes variable elements with offsets" {
@@ -169,6 +230,112 @@ test "SSZ ListOf decode returns the canonical empty slice" {
     defer Values.deinit(fixed.allocator(), &decoded);
     try std.testing.expectEqual(@as(usize, 0), decoded.len);
     try std.testing.expectEqual(canonical.ptr, decoded.ptr);
+}
+
+test "SSZ ListOf borrowed view aliases encoded elements" {
+    const ByteLists = ssz.ListOf(ssz.ByteList(4), 3);
+    const encoded = [_]u8{ 12, 0, 0, 0, 14, 0, 0, 0, 14, 0, 0, 0, 'a', 'b', 'c' };
+
+    const view = try ByteLists.decodeView(&encoded);
+    try std.testing.expectEqual(@as(usize, 3), view.len);
+    try std.testing.expectEqualSlices(u8, "ab", view.get(0).?);
+    try std.testing.expectEqual(encoded[12..].ptr, view.get(0).?.ptr);
+    try std.testing.expectEqualSlices(u8, "", view.get(1).?);
+    try std.testing.expectEqualSlices(u8, "c", view.get(2).?);
+    try std.testing.expect(view.get(3) == null);
+    try std.testing.expect(view.get(std.math.maxInt(usize)) == null);
+}
+
+test "SSZ ListOf borrowed view handles empty lists and equal offsets" {
+    const ByteLists = ssz.ListOf(ssz.ByteList(4), 3);
+
+    const empty = try ByteLists.decodeView("");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    try std.testing.expect(empty.get(0) == null);
+
+    const encoded = [_]u8{ 8, 0, 0, 0, 8, 0, 0, 0 };
+    const view = try ByteLists.decodeView(&encoded);
+    try std.testing.expectEqual(@as(usize, 2), view.len);
+    try std.testing.expectEqual(@as(usize, 0), view.get(0).?.len);
+    try std.testing.expectEqual(@as(usize, 0), view.get(1).?.len);
+}
+
+test "SSZ ListOf borrowed view iterates in order" {
+    const ByteLists = ssz.ListOf(ssz.ByteList(4), 3);
+    const encoded = [_]u8{ 12, 0, 0, 0, 13, 0, 0, 0, 15, 0, 0, 0, 'a', 'b', 'c' };
+    const expected = [_][]const u8{ "a", "bc", "" };
+
+    const view = try ByteLists.decodeView(&encoded);
+    var iterator = view.iterator();
+    for (expected) |value| {
+        try std.testing.expectEqualSlices(u8, value, iterator.next().?);
+    }
+    try std.testing.expect(iterator.next() == null);
+}
+
+test "SSZ ListOf borrowed view fully validates offsets and limits" {
+    const ByteLists = ssz.ListOf(ssz.ByteList(2), 2);
+
+    try std.testing.expectError(error.InvalidByteLength, ByteLists.decodeView(&.{1}));
+    try std.testing.expectError(error.InvalidFirstOffset, ByteLists.decodeView(&.{ 5, 0, 0, 0, 0 }));
+    try std.testing.expectError(error.OffsetOutOfBounds, ByteLists.decodeView(&.{ 8, 0, 0, 0 }));
+    try std.testing.expectError(
+        error.OffsetsNotMonotonic,
+        ByteLists.decodeView(&.{ 8, 0, 0, 0, 7, 0, 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.ListLimitExceeded,
+        ByteLists.decodeView(&.{ 12, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.ListLimitExceeded,
+        ByteLists.decodeView(&.{ 4, 0, 0, 0, 'a', 'b', 'c' }),
+    );
+}
+
+test "SSZ ListOf borrowed view is additive to owned decoding" {
+    const ByteLists = ssz.ListOf(ssz.ByteList(4), 2);
+    const encoded = [_]u8{ 8, 0, 0, 0, 9, 0, 0, 0, 'a', 'b', 'c' };
+
+    var decoded = try ByteLists.decodeAlloc(std.testing.allocator, &encoded);
+    defer ByteLists.deinit(std.testing.allocator, &decoded);
+    try std.testing.expectEqualSlices(u8, "a", decoded[0]);
+    try std.testing.expectEqualSlices(u8, "bc", decoded[1]);
+    try std.testing.expect(decoded[0].ptr != encoded[8..].ptr);
+}
+
+test "SSZ ListOf borrowed view is capability-gated" {
+    const VariableItem = struct {
+        pub const Value = []const u8;
+        pub const kind: codec.Kind = .list;
+        pub const is_variable_size = true;
+        pub const fixed_size: ?usize = null;
+        pub const requires_allocator = true;
+
+        pub fn encodedLen(value: Value) Error!usize {
+            return value.len;
+        }
+
+        pub fn encode(out: []u8, value: Value) Error![]u8 {
+            if (out.len < value.len) return error.BufferTooSmall;
+            @memcpy(out[0..value.len], value);
+            return out[0..value.len];
+        }
+
+        pub fn validate(_: []const u8) Error!void {}
+
+        pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!Value {
+            return allocator.dupe(u8, bytes);
+        }
+
+        pub fn deinit(allocator: std.mem.Allocator, value: *Value) void {
+            allocator.free(value.*);
+            value.* = "";
+        }
+    };
+    const Items = ssz.ListOf(VariableItem, 2);
+
+    try std.testing.expect(!std.meta.hasFn(Items, "decodeView"));
 }
 
 test "SSZ ListOf composes variable containers" {
