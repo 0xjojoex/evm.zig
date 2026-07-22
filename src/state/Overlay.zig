@@ -1857,16 +1857,23 @@ pub fn changeset(self: *Overlay) !Changeset {
         });
     }
 
+    var code_insert_count: usize = 0;
+    var code_byte_count: usize = 0;
+    var code_count_it = self.code_cache.iterator();
+    while (code_count_it.next()) |entry| {
+        if (!entry.value_ptr.introduced) continue;
+        if (!self.finalStateUsesCodeHash(entry.key_ptr.*)) continue;
+        code_insert_count += 1;
+        code_byte_count = std.math.add(usize, code_byte_count, entry.value_ptr.bytes.len) catch
+            return error.OutOfMemory;
+    }
+    try result.reserveCodeInserts(self.allocator, code_insert_count, code_byte_count);
+
     var code_it = self.code_cache.iterator();
     while (code_it.next()) |entry| {
         if (!entry.value_ptr.introduced) continue;
         if (!self.finalStateUsesCodeHash(entry.key_ptr.*)) continue;
-        const owned = try self.allocator.dupe(u8, entry.value_ptr.bytes);
-        errdefer self.allocator.free(owned);
-        try result.code_inserts.append(self.allocator, .{
-            .code_hash = entry.key_ptr.*,
-            .code = owned,
-        });
+        result.appendCodeInsertAssumeCapacity(entry.key_ptr.*, entry.value_ptr.bytes);
     }
 
     var deleted_it = self.deleted_accounts.keyIterator();

@@ -52,6 +52,8 @@ pub const Result = struct {
     gas_reservoir: i64 = 0,
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
+    /// Borrowed from the frame's EVM memory. Executor entry points copy root
+    /// output into their retained result storage before releasing the frame.
     output_data: []u8,
 
     pub fn refillIntrinsicStateGas(self: *Result, amount: i64) void {
@@ -311,7 +313,7 @@ pub const CallFrame = struct {
     state_gas_from_gas_left: i64 = 0,
     return_data: []u8 = &.{},
     io: *frame_io.Slot = undefined,
-    output_data: []u8 = &.{},
+    output_range: Memory.Range = .{},
     bytecode: *const Bytecode = &Bytecode.empty,
     revision_id: RevisionId = 0,
     pending_action: ?Action = null,
@@ -364,7 +366,7 @@ pub const CallFrame = struct {
         self.io = io;
         self.io.clearFrame();
         self.return_data = self.io.return_data.slice();
-        self.output_data = self.io.output_data.slice();
+        self.output_range = .{};
         self.bytecode = options.bytecode;
         self.status = if (code.len == 0) .success else .running;
         self.revision_id = options.revision_id;
@@ -391,13 +393,12 @@ pub const CallFrame = struct {
         self.return_data = try self.io.return_data.replace(return_data);
     }
 
-    pub fn replaceOutputData(self: *CallFrame, output_data: []const u8) !void {
-        self.output_data = @constCast(output_data);
+    pub fn setOutputRange(self: *CallFrame, offset: usize, len: usize) void {
+        self.output_range = self.memory.range(offset, len);
     }
 
-    pub fn stabilizeOutputData(self: *CallFrame) ![]u8 {
-        self.output_data = try self.io.output_data.replace(self.output_data);
-        return self.output_data;
+    pub fn outputData(self: *const CallFrame) []u8 {
+        return self.memory.readRange(self.output_range);
     }
 
     pub fn setPendingAction(self: *CallFrame, action: Action) void {
@@ -545,12 +546,7 @@ pub const CallFrame = struct {
         if (self.status != .running) {
             return false;
         }
-        self.memory.expandPrepared(expansion) catch |err| switch (err) {
-            error.OutOfMemory => {
-                self.failWithStatus(.out_of_gas);
-                return false;
-            },
-        };
+        try self.memory.expandPrepared(expansion);
         return true;
     }
 
@@ -562,7 +558,7 @@ pub const CallFrame = struct {
             .gas_reservoir = self.gas_reservoir,
             .state_gas_spent = self.state_gas_spent,
             .state_gas_from_gas_left = self.state_gas_from_gas_left,
-            .output_data = self.output_data,
+            .output_data = self.outputData(),
             .status = self.status.toResult(),
         };
         result.finalizeFrameStateGas();
@@ -826,6 +822,71 @@ test "interpreter captured tail table records a replay span" {
     try std.testing.expectEqualSlices(u256, &.{0x2a}, cursor.stack().?);
 }
 
+test "captured tail memory exhaustion remains a resource error" {
+    const code = evmz.t.bytecode(.{
+        .PUSH1, 0x2a, .PUSH1, 0x20, .MSTORE,
+        .STOP,
+    });
+    const no_growth_allocator: std.mem.Allocator = .{
+        .ptr = undefined,
+        .vtable = &.{
+            .alloc = std.mem.Allocator.noAlloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = std.mem.Allocator.noFree,
+        },
+    };
+    var host: Host = undefined;
+    const msg = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100,
+        .recipient = evmz.addr(0),
+        .sender = evmz.addr(0),
+        .input_data = &.{},
+        .value = 0,
+    };
+
+    var bytecode = try Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+    var msg_storage: Host.Message = undefined;
+    var stack_storage: Stack.Storage = undefined;
+    var memory_storage: Memory.Storage = .empty;
+    try Memory.reserveCapacity(&memory_storage, std.testing.allocator, 32);
+    defer memory_storage.deinit(std.testing.allocator);
+    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
+    defer io_storage.deinit();
+    var frame: CallFrame = undefined;
+    try frame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
+        .io = &io_storage,
+        .memory_allocator = no_growth_allocator,
+        .memory_retain_capacity = true,
+    }, &msg_storage, &stack_storage, &memory_storage);
+    defer frame.deinitRetainingMemoryCapacity();
+
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    const mark = try tape.begin(.{});
+    var capture = try trace.TraceCapture.init(&tape, .{
+        .frame_id = 0,
+        .parent_frame_id = null,
+        .depth = 0,
+        .kind = .root,
+    });
+    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
+
+    try std.testing.expectError(error.OutOfMemory, interpreter.executeCapturedUntilAction(&capture));
+    try std.testing.expectEqual(FrameStatus.running, frame.status);
+    try tape.abort(mark);
+
+    const reuse_mark = try tape.begin(.{});
+    try tape.abort(reuse_mark);
+}
+
 test "interpreter captured tail table records optional memory writes" {
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .STOP });
     var host: Host = undefined;
@@ -1007,7 +1068,7 @@ test "interpreter reverts frame-local state gas" {
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
-    frame.output_data = &.{};
+    frame.output_range = .{};
 
     frame.trackStateGas(8);
     frame.failWithStatus(.revert);
@@ -1027,7 +1088,7 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
-    frame.output_data = &.{};
+    frame.output_range = .{};
 
     frame.trackStateGas(8);
     frame.failWithStatus(.invalid);
@@ -1131,7 +1192,7 @@ comptime {
         assertLayout(@offsetOf(CallFrame, "memory") == 256, "CallFrame memory moved; rerun memory VM-loop bench");
         assertLayout(@offsetOf(CallFrame, "gas_left") == 304, "CallFrame gas_left moved; rerun VM-loop canary benches");
         assertLayout(@offsetOf(CallFrame, "msg") == 232, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33456, "CallFrameSlot size changed; check pooled frame/message layout");
+        assertLayout(@sizeOf(CallFrameSlot) == 33408, "CallFrameSlot size changed; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
         assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
         assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");

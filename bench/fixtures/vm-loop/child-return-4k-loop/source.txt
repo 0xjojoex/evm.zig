@@ -1,0 +1,5 @@
+handrolled VM-loop fixture: 256 child CALLs returning 4096 zero bytes
+host: mock
+runtime bytes: 48
+target: 0x3000000000000000000000000000000000000003
+target init code: ../return-4k-target/init.hex via --proxy-target-code-path

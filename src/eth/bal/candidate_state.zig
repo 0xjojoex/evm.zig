@@ -105,7 +105,7 @@ pub const OrderedChangesetFold = struct {
         if (transaction_index != self.next_transaction_index) return error.OutOfOrderTransaction;
         try self.validateLane(lane);
 
-        for (lane.code_inserts.items) |insert| try self.mergeCodeInsert(insert);
+        for (lane.code_inserts.items) |insert| try self.mergeCodeInsert(lane, insert);
         for (lane.account_updates.items) |update| try self.mergeAccountUpdate(update);
         for (lane.storage_writes.items) |write| try self.mergeStorageWrite(write);
         for (lane.account_deletes.items) |address| try self.mergeAccountDelete(address);
@@ -165,22 +165,22 @@ pub const OrderedChangesetFold = struct {
         }
     }
 
-    fn mergeCodeInsert(self: *OrderedChangesetFold, insert: state.Changeset.CodeInsert) Error!void {
+    fn mergeCodeInsert(
+        self: *OrderedChangesetFold,
+        lane: *const state.Changeset,
+        insert: state.Changeset.CodeInsert,
+    ) Error!void {
+        const code = lane.codeBytes(insert);
         if (self.code_insert_indices.get(insert.code_hash)) |index| {
-            if (!std.mem.eql(u8, self.changeset.code_inserts.items[index].code, insert.code))
+            if (!std.mem.eql(u8, self.changeset.codeBytes(self.changeset.code_inserts.items[index]), code))
                 return error.ConflictingCodeInsert;
             return;
         }
 
-        const owned = try self.allocator.dupe(u8, insert.code);
-        errdefer self.allocator.free(owned);
+        try self.code_insert_indices.ensureUnusedCapacity(1);
         const index = self.changeset.code_inserts.items.len;
-        try self.changeset.code_inserts.append(self.allocator, .{
-            .code_hash = insert.code_hash,
-            .code = owned,
-        });
-        errdefer _ = self.changeset.code_inserts.pop();
-        try self.code_insert_indices.put(insert.code_hash, index);
+        try self.changeset.appendCodeInsert(self.allocator, insert.code_hash, code);
+        self.code_insert_indices.putAssumeCapacity(insert.code_hash, index);
     }
 
     fn mergeAccountUpdate(self: *OrderedChangesetFold, update: state.Changeset.AccountUpdate) Error!void {
@@ -233,15 +233,29 @@ pub const OrderedChangesetFold = struct {
 
     fn compactUnusedCode(self: *OrderedChangesetFold) void {
         var write_index: usize = 0;
+        var byte_write_index: usize = 0;
         for (self.changeset.code_inserts.items) |insert| {
-            if (!self.finalStateUsesCodeHash(insert.code_hash)) {
-                self.allocator.free(insert.code);
-                continue;
+            if (!self.finalStateUsesCodeHash(insert.code_hash)) continue;
+
+            const code = self.changeset.codeBytes(insert);
+            std.debug.assert(byte_write_index <= insert.code_offset);
+            if (byte_write_index != insert.code_offset) {
+                std.mem.copyForwards(
+                    u8,
+                    self.changeset.code_bytes.items[byte_write_index..][0..code.len],
+                    code,
+                );
             }
-            self.changeset.code_inserts.items[write_index] = insert;
+            self.changeset.code_inserts.items[write_index] = .{
+                .code_hash = insert.code_hash,
+                .code_offset = byte_write_index,
+                .code_len = code.len,
+            };
             write_index += 1;
+            byte_write_index += code.len;
         }
         self.changeset.code_inserts.items.len = write_index;
+        self.changeset.code_bytes.items.len = byte_write_index;
     }
 
     fn finalStateUsesCodeHash(self: *const OrderedChangesetFold, code_hash: [32]u8) bool {
@@ -270,7 +284,7 @@ pub fn changesetsEqual(lhs: *const state.Changeset, rhs: *const state.Changeset)
     }
     for (lhs.code_inserts.items, rhs.code_inserts.items) |lhs_insert, rhs_insert| {
         if (!std.mem.eql(u8, &lhs_insert.code_hash, &rhs_insert.code_hash) or
-            !std.mem.eql(u8, lhs_insert.code, rhs_insert.code))
+            !std.mem.eql(u8, lhs.codeBytes(lhs_insert), rhs.codeBytes(rhs_insert)))
         {
             return false;
         }
@@ -372,7 +386,7 @@ pub const FoldedStateReader = struct {
     fn loadCode(ptr: *anyopaque, code_hash: [32]u8) ![]const u8 {
         const self = context(ptr);
         if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
-        if (self.codeInsert(code_hash)) |insert| return insert.code;
+        if (self.codeInsert(code_hash)) |insert| return self.changeset.codeBytes(insert.*);
 
         // Delegate through the base vtable so the outer Reader performs the
         // content-hash check exactly once.
@@ -679,10 +693,7 @@ test "ordered changeset fold keeps latest writes in transaction order" {
         .balance = 2,
         .code_hash = code_hash,
     });
-    try first.code_inserts.append(allocator, .{
-        .code_hash = code_hash,
-        .code = try allocator.dupe(u8, &code),
-    });
+    try first.appendCodeInsert(allocator, code_hash, &code);
     try first.storage_writes.append(allocator, .{ .address = account, .key = 3, .value = 4 });
 
     var second = state.Changeset.init();
@@ -708,7 +719,7 @@ test "ordered changeset fold keeps latest writes in transaction order" {
     try std.testing.expectEqual(@as(u64, 2), merged.account_updates.items[0].nonce);
     try std.testing.expectEqual(@as(u256, 5), merged.account_updates.items[0].balance);
     try std.testing.expectEqual(@as(usize, 1), merged.code_inserts.items.len);
-    try std.testing.expectEqualSlices(u8, &code, merged.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(u8, &code, merged.codeBytes(merged.code_inserts.items[0]));
     try std.testing.expectEqual(@as(usize, 2), merged.storage_writes.items.len);
     try std.testing.expectEqual(@as(u256, 6), merged.storage_writes.items[0].value);
     try std.testing.expectEqual(@as(u256, 8), merged.storage_writes.items[1].value);
@@ -716,6 +727,7 @@ test "ordered changeset fold keeps latest writes in transaction order" {
     var owned = fold.takeOwned();
     defer owned.deinit(allocator);
     try std.testing.expectEqual(OrderedChangesetFold.Lifecycle.taken, fold.lifecycle);
+    try std.testing.expectEqualSlices(u8, &code, owned.codeBytes(owned.code_inserts.items[0]));
 }
 
 test "ordered changeset fold deletes prior writes and rejects recreation" {
@@ -732,10 +744,7 @@ test "ordered changeset fold deletes prior writes and rejects recreation" {
         .balance = 2,
         .code_hash = code_hash,
     });
-    try written.code_inserts.append(allocator, .{
-        .code_hash = code_hash,
-        .code = try allocator.dupe(u8, &code),
-    });
+    try written.appendCodeInsert(allocator, code_hash, &code);
     try written.storage_writes.append(allocator, .{ .address = account, .key = 3, .value = 4 });
 
     var deleted = state.Changeset.init();
@@ -783,6 +792,82 @@ test "ordered changeset fold deletes prior writes and rejects recreation" {
     try std.testing.expectError(error.FoldFailed, out_of_order_fold.finish());
 }
 
+test "ordered changeset fold compacts retained code ranges" {
+    const allocator = std.testing.allocator;
+    const first_account = [_]u8{0x11} ** 20;
+    const third_account = [_]u8{0x33} ** 20;
+    const first_code = [_]u8{0xa1};
+    const dropped_code = [_]u8{ 0xb1, 0xb2 };
+    const third_code = [_]u8{ 0xc1, 0xc2, 0xc3 };
+    const first_hash = crypto.keccak256(&first_code);
+    const dropped_hash = crypto.keccak256(&dropped_code);
+    const third_hash = crypto.keccak256(&third_code);
+
+    var lane = state.Changeset.init();
+    defer lane.deinit(allocator);
+    try lane.appendCodeInsert(allocator, first_hash, &first_code);
+    try lane.appendCodeInsert(allocator, dropped_hash, &dropped_code);
+    try lane.appendCodeInsert(allocator, third_hash, &third_code);
+    try lane.account_updates.append(allocator, .{
+        .address = first_account,
+        .nonce = 1,
+        .balance = 0,
+        .code_hash = first_hash,
+    });
+    try lane.account_updates.append(allocator, .{
+        .address = third_account,
+        .nonce = 1,
+        .balance = 0,
+        .code_hash = third_hash,
+    });
+
+    var fold = OrderedChangesetFold.init(allocator);
+    defer fold.deinit();
+    try fold.append(0, &lane);
+    try fold.finish();
+
+    const merged = fold.view();
+    try std.testing.expectEqual(@as(usize, 2), merged.code_inserts.items.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0xa1, 0xc1, 0xc2, 0xc3 }, merged.code_bytes.items);
+    for (merged.code_inserts.items) |insert| {
+        if (std.mem.eql(u8, &insert.code_hash, &first_hash)) {
+            try std.testing.expectEqualSlices(u8, &first_code, merged.codeBytes(insert));
+        } else if (std.mem.eql(u8, &insert.code_hash, &third_hash)) {
+            try std.testing.expectEqualSlices(u8, &third_code, merged.codeBytes(insert));
+        } else {
+            return error.UnexpectedCodeInsert;
+        }
+    }
+}
+
+test "ordered changeset fold deduplicates equal code and rejects conflicting bytes" {
+    const allocator = std.testing.allocator;
+    const code_hash = [_]u8{0x42} ** 32;
+
+    var first = state.Changeset.init();
+    defer first.deinit(allocator);
+    try first.appendCodeInsert(allocator, code_hash, &.{0x01});
+    var equal = state.Changeset.init();
+    defer equal.deinit(allocator);
+    try equal.appendCodeInsert(allocator, code_hash, &.{0x01});
+    var conflicting = state.Changeset.init();
+    defer conflicting.deinit(allocator);
+    try conflicting.appendCodeInsert(allocator, code_hash, &.{0x02});
+
+    var deduplicated = OrderedChangesetFold.init(allocator);
+    defer deduplicated.deinit();
+    try deduplicated.append(0, &first);
+    try deduplicated.append(1, &equal);
+    try std.testing.expectEqual(@as(usize, 1), deduplicated.changeset.code_inserts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), deduplicated.changeset.code_bytes.items.len);
+
+    var rejected = OrderedChangesetFold.init(allocator);
+    defer rejected.deinit();
+    try rejected.append(0, &first);
+    try std.testing.expectError(error.ConflictingCodeInsert, rejected.append(1, &conflicting));
+    try std.testing.expectError(error.FoldFailed, rejected.finish());
+}
+
 test "folded state reader matches a committed ordered changeset" {
     const allocator = std.testing.allocator;
     const updated = [_]u8{0x10} ** 20;
@@ -827,10 +912,7 @@ test "folded state reader matches a committed ordered changeset" {
         .balance = 8,
         .code_hash = new_code_hash,
     });
-    try lane.code_inserts.append(allocator, .{
-        .code_hash = new_code_hash,
-        .code = try allocator.dupe(u8, &new_code),
-    });
+    try lane.appendCodeInsert(allocator, new_code_hash, &new_code);
     try lane.account_deletes.append(allocator, deleted);
     try lane.storage_writes.append(allocator, .{ .address = updated, .key = 1, .value = 0 });
     try lane.storage_writes.append(allocator, .{ .address = updated, .key = 3, .value = 33 });

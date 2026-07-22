@@ -32,9 +32,7 @@ pub inline fn ret(frame: *CallFrame) !void {
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    const data = frame.memory.readBytes(offset_usize, size_usize);
-
-    try frame.replaceOutputData(data);
+    frame.setOutputRange(offset_usize, size_usize);
     frame.status = .success;
 }
 
@@ -46,9 +44,7 @@ pub inline fn revert(frame: *CallFrame) !void {
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    const data = frame.memory.readBytes(offset_usize, size_usize);
-
-    try frame.replaceOutputData(data);
+    frame.setOutputRange(offset_usize, size_usize);
     frame.status = .revert;
 }
 

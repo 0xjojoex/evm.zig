@@ -583,6 +583,33 @@ test "captured CALL publishes return data and parent memory output after resume"
     try std.testing.expectEqualSlices(u8, &.{0xaa}, cursor.returnData());
 }
 
+test "nested CREATE revert output survives child frame release" {
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const code = evmz.t.bytecode(.{
+        // Copy the appended eight-byte initcode into memory and execute it.
+        .PUSH1,          0x08,   .PUSH1,  0x13,            .PUSH0,          .CODECOPY,
+        .PUSH1,          0x08,   .PUSH0,  .PUSH0,          .CREATE,         .POP,
+        // Return the reverted child's payload from the parent frame.
+        .RETURNDATASIZE, .PUSH0, .PUSH0,  .RETURNDATACOPY, .RETURNDATASIZE, .PUSH0,
+        .RETURN,
+        // Child initcode: write 0xaa, then REVERT with that one byte.
+                .PUSH1, 0xaa,    .PUSH0,          .MSTORE8,        .PUSH1,
+        0x01,            .PUSH0, .REVERT,
+    });
+
+    var executor = Executor.init(std.testing.allocator, .{ .revision = .cancun });
+    defer executor.deinit();
+    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try account.setCode(&code);
+    try executor.state.seedAccount(contract, account);
+
+    const result = (try executor.runStandaloneRequest(request(sender, contract), .{})).expectCall();
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+    try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
+}
+
 fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExecutionRequest {
     return .{
         .context = context(sender),

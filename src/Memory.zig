@@ -15,6 +15,13 @@ pub const Expansion = struct {
 
 pub const Storage = ArrayList(u8);
 
+/// Stable coordinates into EVM memory. Resolve only while the owning frame is
+/// alive; the backing allocation may move as memory expands.
+pub const Range = struct {
+    offset: usize = 0,
+    len: usize = 0,
+};
+
 bytes: *Storage,
 allocator: Allocator,
 
@@ -59,6 +66,17 @@ pub fn readBytes(self: *const Memory, offset: usize, size: usize) []u8 {
     assert(offset + size <= self.bytes.items.len);
 
     return self.bytes.items[offset..][0..size];
+}
+
+pub fn range(self: *const Memory, offset: usize, size: usize) Range {
+    assert(offset <= self.bytes.items.len);
+    assert(size <= self.bytes.items.len - offset);
+    return .{ .offset = offset, .len = size };
+}
+
+pub fn readRange(self: *const Memory, memory_range: Range) []u8 {
+    if (memory_range.len == 0) return &.{};
+    return self.readBytes(memory_range.offset, memory_range.len);
 }
 
 pub fn writeSlice(self: *Memory, offset: usize, size: usize) []u8 {

@@ -222,12 +222,20 @@ pub fn build(b: *std.Build) void {
             .root_module = mpt_unit_tests_mod,
             .filters = b.args orelse &.{},
         });
+        const guest_zisk_ab_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("guest/zisk_ab.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+            }),
+        });
 
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_lib_unit_tests.step);
         test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(rlp_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(mpt_unit_tests).step);
+        test_step.dependOn(&b.addRunArtifact(guest_zisk_ab_tests).step);
         if (is_native_profile) {
             const c_api_tests_mod = b.createModule(.{
                 .root_source_file = b.path("src/evmc.zig"),
@@ -375,6 +383,7 @@ pub fn build(b: *std.Build) void {
     const guest_input_path = b.option([]const u8, "guest-input", "Path to ZisK stdin input file for guest-zisk-run");
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
     const guest_payload = guestPayloadOption(b);
+    addGuestZiskAb(b, optimize);
     addGuestZisk(b, optimize, evmone_dep, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
     // examples
@@ -822,6 +831,22 @@ fn addGuestZisk(
 
     const run_step = b.step("guest-zisk-run", "Run the ZisK guest ELF with ziskemu");
     run_step.dependOn(&run.step);
+}
+
+fn addGuestZiskAb(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
+    const runner = b.addExecutable(.{
+        .name = "evmz-guest-zisk-ab",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("guest/zisk_ab.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(runner);
+    run.addArgs(&.{ "--zig", b.graph.zig_exe });
+    if (b.args) |args| run.addArgs(args);
+    const step = b.step("guest-zisk-ab", "Compare verified ZisK guest steps across two source trees");
+    step.dependOn(&run.step);
 }
 
 fn pathExists(b: *std.Build, sub_path: []const u8) bool {

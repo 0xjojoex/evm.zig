@@ -326,6 +326,20 @@ test "caller allocator controls sparse update capacity" {
     );
 }
 
+test "sparse update releases fixed-buffer storage after success" {
+    const updates = [_]mpt.Update{.{ .key = "dog", .value = "puppy" }};
+    var fixed_buffer: [16 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_buffer);
+    const trie = mpt.init(fixed.allocator());
+
+    _ = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
+    const aligned_baseline = fixed.end_index;
+    for (0..32) |_| {
+        _ = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
+        try std.testing.expectEqual(aligned_baseline, fixed.end_index);
+    }
+}
+
 test "allocating APIs clean every allocation failure position" {
     const Harness = struct {
         fn run(allocator: std.mem.Allocator) !void {

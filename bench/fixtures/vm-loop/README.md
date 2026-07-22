@@ -17,6 +17,18 @@ The `*-loop` micro fixtures are handrolled bytecode. They use compact counted
 loops with repeated opcode bodies so VM-loop reports can separate null-host
 interpreter work from mock-host storage and log callbacks.
 
+`child-return-4k-loop` isolates nested output handling by calling a target that
+returns 4096 zero bytes 256 times. Run it through the executor so the real
+frame lifecycle is included:
+
+```sh
+zig build vm-loop -Doptimize=ReleaseFast -- \
+  --engine evmz-executor \
+  --fixture fixtures/vm-loop/child-return-4k-loop \
+  --proxy-target-code-path fixtures/vm-loop/return-4k-target/init.hex \
+  --summary
+```
+
 The log matrix keeps 1000 loop iterations and 8 log operations per loop while
 varying topics and data independently:
 

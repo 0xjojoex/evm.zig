@@ -618,8 +618,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
 
             // Canonical MCOPY expands the source range before the destination.
-            const source_gas = expandMemory(source, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
-            const dest_gas = expandMemory(dest, size, ip, nsp, source_gas, ctx) orelse return .out_of_gas;
+            const source_gas = expandMemory(source, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const dest_gas = expandMemory(dest, size, ip, nsp, source_gas, ctx) orelse return memoryFailureStatus(ctx);
             const copy_gas = copyWordGas(size, ip, nsp, dest_gas, ctx) orelse return .out_of_gas;
             const final_gas = chargeGas(ip, nsp, dest_gas, ctx, copy_gas) orelse return .out_of_gas;
 
@@ -705,7 +705,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                     const size_word = nsp[0];
                     const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
                     const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
-                    const memory_gas = expandMemory(dest_offset, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+                    const memory_gas = expandMemory(dest_offset, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
                     const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .out_of_gas;
                     const final_gas = chargeGas(ip, nsp, memory_gas, ctx, copy_gas) orelse return .out_of_gas;
 
@@ -748,13 +748,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                     const size_word = nsp[0];
                     const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .out_of_gas;
                     const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, nsp, gas, ctx) orelse return .out_of_gas;
-                    const final_gas = expandMemory(offset, size, ip, nsp, gas, ctx) orelse return .out_of_gas;
-                    const output = ctx.frame.memory.readBytes(offset, size);
-                    ctx.frame.replaceOutputData(output) catch |err| {
-                        ctx.spill(ip, nsp, final_gas);
-                        ctx.err = err;
-                        return .thrown;
-                    };
+                    const final_gas = expandMemory(offset, size, ip, nsp, gas, ctx) orelse return memoryFailureStatus(ctx);
+                    ctx.frame.setOutputRange(offset, size);
                     ctx.frame.status = switch (terminal_status) {
                         .success => .success,
                         .revert => .revert,
@@ -780,7 +775,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                     const size_word = args_sp[0];
                     const size = wordToUsizeOrOog(size_word, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
                     const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
-                    const memory_gas = expandMemory(offset, size, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
+                    const memory_gas = expandMemory(offset, size, ip, args_sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
                     const data_gas = logDataGas(size, ip, args_sp, memory_gas, ctx) orelse return .out_of_gas;
                     const final_gas = chargeGas(ip, args_sp, memory_gas, ctx, data_gas) orelse return .out_of_gas;
 
@@ -971,7 +966,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const next_gas = charge(.MLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
             if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
-            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             (sp - 1)[0] = ctx.frame.memory.read(offset);
             return tailNext(ip, sp, mem_gas, ctx);
         }
@@ -980,7 +975,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const next_gas = charge(.MSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
             if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
-            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.write(offset, nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx);
@@ -990,7 +985,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const next_gas = charge(.MSTORE8, ip, sp, gas, ctx) orelse return .out_of_gas;
             if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
-            const mem_gas = expandMemory(offset, 1, ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            const mem_gas = expandMemory(offset, 1, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.write8(offset, nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx);
@@ -1003,7 +998,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const size_word = (sp - 2)[0];
             const size = wordToUsizeOrOog(size_word, ip, sp, next_gas, ctx) orelse return .out_of_gas;
             const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, sp, next_gas, ctx) orelse return .out_of_gas;
-            const mem_gas = expandMemory(offset, size, ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            const mem_gas = expandMemory(offset, size, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .out_of_gas;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
             const input = ctx.frame.memory.readBytes(offset, size);
@@ -1025,6 +1020,10 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return wordToUsizeOrOog(offset, ip, sp, gas, ctx);
         }
 
+        inline fn memoryFailureStatus(ctx: *const Context) TailStatus {
+            return if (ctx.err != null) .thrown else .out_of_gas;
+        }
+
         inline fn expandMemory(offset: usize, byte_size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             if (byte_size == 0) return gas;
             const end = std.math.add(usize, offset, byte_size) catch {
@@ -1041,7 +1040,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const next_gas = chargeGas(ip, sp, gas, ctx, expansion.cost) orelse return null;
             ctx.frame.memory.expandPrepared(expansion) catch |err| switch (err) {
                 error.OutOfMemory => {
-                    _ = fail(ctx, ip, sp, next_gas, .out_of_gas);
+                    ctx.spill(ip, sp, next_gas);
+                    ctx.err = err;
                     return null;
                 },
             };

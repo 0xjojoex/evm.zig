@@ -263,7 +263,7 @@ test "runtime allocation audit sees no traffic for bounded evm memory return" {
     }, .{ .bounded = .{
         .max_live_frames = 1,
         .memory_bytes_per_frame = 32,
-        .io_bytes_per_frame = 32,
+        .io_bytes_per_frame = 0,
         .result_bytes = 32,
     } });
     defer executor.deinit();
@@ -293,6 +293,45 @@ test "runtime allocation audit sees no traffic for bounded evm memory return" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try expectNoAllocatorTraffic(audit.stats);
     executor.closeTransaction();
+}
+
+test "bounded evm memory exhaustion is a resource error, not out of gas" {
+    const allocator = std.testing.allocator;
+    const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
+    const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
+    const tx_context = testTxContext(sender, 100_000);
+    var executor = try Executor.initWithRuntimeResources(allocator, .{
+        .revision = .cancun,
+    }, .{ .bounded = .{
+        .max_live_frames = 1,
+        .memory_bytes_per_frame = 32,
+        .io_bytes_per_frame = 0,
+        .result_bytes = 0,
+    } });
+    defer executor.deinit();
+
+    try executor.state.seedAccount(sender, MemoryAccount.init(allocator));
+
+    const code = evmz.t.bytecode(.{
+        .PUSH1, 0x2a, .PUSH1, 0x20, .MSTORE,
+        .STOP,
+    });
+    var contract_account = MemoryAccount.init(allocator);
+    try contract_account.setCode(&code);
+    try executor.state.seedAccount(contract, contract_account);
+
+    var bytecode = try executor.prepareBytecode(&code);
+    defer bytecode.deinit(allocator);
+
+    try executor.beginTransaction(tx_context, sender, contract);
+    defer executor.closeTransaction();
+    try std.testing.expectError(error.OutOfMemory, executor.executePreparedCallTransaction(.{
+        .bytecode = &bytecode,
+        .sender = sender,
+        .recipient = contract,
+        .gas = 100_000,
+        .value = 0,
+    }));
 }
 
 test "runtime allocation audit exposes omitted log cap as growth" {

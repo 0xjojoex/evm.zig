@@ -313,12 +313,21 @@ fn loadEestBenchmarkFixtures(
                 block.get("blocknumber");
             const block_used_gas_value = if (header) |header_obj| header_obj.get("gasUsed") else null;
 
+            const name = try uniqueFixtureName(allocator, test_name, block_index, &fixture_names);
+            errdefer allocator.free(name);
+            const original_test_name = try allocator.dupe(u8, test_name);
+            errdefer allocator.free(original_test_name);
+            const owned_source_path = try allocator.dupe(u8, source_path);
+            errdefer allocator.free(owned_source_path);
+            const owned_network = try allocator.dupe(u8, network);
+            errdefer allocator.free(owned_network);
+
             try fixtures.append(allocator, .{
-                .name = try uniqueFixtureName(allocator, test_name, block_index, &fixture_names),
-                .original_test_name = try allocator.dupe(u8, test_name),
-                .source_path = try allocator.dupe(u8, source_path),
+                .name = name,
+                .original_test_name = original_test_name,
+                .source_path = owned_source_path,
                 .block_index = block_index,
-                .network = try allocator.dupe(u8, network),
+                .network = owned_network,
                 .chain_id = chain_id,
                 .block_number = try parseOptionalJsonU64(block_number_value),
                 .block_used_gas = try parseOptionalJsonU64(block_used_gas_value),
@@ -571,6 +580,7 @@ fn uniqueFixtureName(
         defer if (index != 1) allocator.free(suffix);
 
         const candidate = try truncateFixtureName(allocator, base, suffix);
+        errdefer allocator.free(candidate);
         if (!fixture_names.contains(candidate)) {
             try fixture_names.put(candidate, {});
             return candidate;
@@ -748,6 +758,23 @@ test "loads EEST benchmark fixtures with upstream-compatible names and metadata"
     try std.testing.expectEqual(@as(u64, 1), fixtures.items[0].chain_id);
     try std.testing.expectEqual(@as(?u64, 1), fixtures.items[0].block_number);
     try std.testing.expectEqual(@as(?u64, 16), fixtures.items[0].block_used_gas);
+}
+
+test "EEST benchmark fixture loading cleans every partial allocation" {
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const fixture =
+                \\{"smoke":{"network":"Amsterdam","config":{"chainid":"1"},"blocks":[{"statelessInputBytes":"0x01","statelessOutputBytes":"0x02","blockHeader":{"number":"1","gasUsed":"0"}}]}}
+            ;
+            var fixtures = try loadEestBenchmarkFixtures(allocator, "smoke.json", ".", fixture, .{});
+            defer {
+                for (fixtures.items) |*item| item.deinit(allocator);
+                fixtures.deinit(allocator);
+            }
+            try std.testing.expectEqual(@as(usize, 1), fixtures.items.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
 }
 
 test "benchmark input reader accepts absolute paths" {

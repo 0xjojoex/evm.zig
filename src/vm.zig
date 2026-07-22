@@ -1795,7 +1795,7 @@ test "Executor runs low-level standalone create" {
     try std.testing.expectEqual(@as(u64, 1), diff.account_updates.items[0].nonce);
     try std.testing.expectEqual(create_address, diff.account_updates.items[1].address);
     try std.testing.expectEqual(@as(usize, 1), diff.code_inserts.items.len);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.codeBytes(diff.code_inserts.items[0]));
     try std.testing.expectEqualSlices(
         u8,
         &diff.account_updates.items[1].code_hash,
@@ -2208,7 +2208,7 @@ test "transaction STF reports successful create address" {
     try std.testing.expectEqual(@as(u64, 1), diff.account_updates.items[0].nonce);
     try std.testing.expectEqual(create_address, diff.account_updates.items[1].address);
     try std.testing.expectEqual(@as(usize, 1), diff.code_inserts.items.len);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(u8, &.{0x00}, diff.codeBytes(diff.code_inserts.items[0]));
     try std.testing.expectEqualSlices(
         u8,
         &diff.account_updates.items[1].code_hash,

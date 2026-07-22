@@ -1,0 +1,2 @@
+handrolled target fixture: expand memory and return 4096 zero bytes
+runtime bytes: 5

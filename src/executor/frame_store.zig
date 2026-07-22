@@ -249,7 +249,6 @@ fn rebindActiveFrames(self: *FrameStore) void {
         self.frames.items[index].memory.rebindStorage(&self.memories.items[index]);
         self.frames.items[index].io = &self.ios.items[index];
         self.frames.items[index].return_data = self.ios.items[index].return_data.slice();
-        self.frames.items[index].output_data = self.ios.items[index].output_data.slice();
     }
 }
 
@@ -394,7 +393,6 @@ test "bounded frame store uses reserved rows without growth" {
     try std.testing.expectEqual(@as(usize, 2), store.memoryRowCapacity());
     try std.testing.expectEqual(@as(usize, 2), store.ioRowCapacity());
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].return_data.capacity());
-    try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].output_data.capacity());
 
     var host: Host = undefined;
     const first_msg = Host.Message{
@@ -440,7 +438,7 @@ test "bounded frame store uses reserved rows without growth" {
     try std.testing.expectEqual(@as(usize, 2), store.rowCapacity());
 }
 
-test "frame store io slot owns frame output and parent returndata without frame allocation" {
+test "frame store owns parent returndata and resolves output from frame memory" {
     var store: FrameStore = .{};
     defer store.deinit(std.testing.allocator);
 
@@ -469,18 +467,16 @@ test "frame store io slot owns frame output and parent returndata without frame 
     try std.testing.expectError(error.FrameIoCapacityExceeded, lease.callFrame().replaceReturnData("abcd"));
     try std.testing.expectEqualSlices(u8, "abc", lease.callFrame().return_data);
 
-    try lease.callFrame().replaceOutputData("xyz");
-    try std.testing.expectEqualSlices(u8, "xyz", lease.callFrame().output_data);
-    try std.testing.expect(lease.callFrame().output_data.ptr != store.ios.items[lease.index].output_data.buf.ptr);
-    _ = try lease.callFrame().stabilizeOutputData();
-    try std.testing.expect(lease.callFrame().output_data.ptr == store.ios.items[lease.index].output_data.buf.ptr);
-    try lease.callFrame().replaceOutputData("xyzz");
-    try std.testing.expectError(error.FrameIoCapacityExceeded, lease.callFrame().stabilizeOutputData());
-    try std.testing.expectEqualSlices(u8, "xyz", store.ios.items[lease.index].output_data.slice());
+    _ = try lease.callFrame().memory.expand(0, 32);
+    lease.callFrame().memory.writeBytes(0, "xyz");
+    lease.callFrame().setOutputRange(0, 3);
+    try std.testing.expectEqualSlices(u8, "xyz", lease.callFrame().getResult().output_data);
+
+    _ = try lease.callFrame().memory.expand(4096, 1);
+    try std.testing.expectEqualSlices(u8, "xyz", lease.callFrame().getResult().output_data);
 
     lease.deinit();
     try std.testing.expectEqual(@as(usize, 0), store.ios.items[0].return_data.slice().len);
-    try std.testing.expectEqual(@as(usize, 0), store.ios.items[0].output_data.slice().len);
 }
 
 test "bounded frame store reconfigures retained growable io slots" {
@@ -509,7 +505,6 @@ test "bounded frame store reconfigures retained growable io slots" {
 
     try store.reserveExact(std.testing.allocator, 1, 3, null);
     try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].return_data.capacity());
-    try std.testing.expectEqual(@as(usize, 3), store.ios.items[0].output_data.capacity());
 
     var bounded = try store.acquire(evmz.Evm.ExecutionProtocol, std.testing.allocator, std.testing.allocator, .{
         .host = &host,
@@ -546,8 +541,9 @@ test "bounded frame store reuses reserved evm memory without allocator growth" {
         .bytecode = &evmz.Bytecode.empty,
         .revision = .latest,
     });
-    try first.callFrame().memory.expandToFit(0, 32);
-    try std.testing.expectError(error.OutOfMemory, first.callFrame().memory.expandToFit(32, 32));
+    first.callFrame().status = .running;
+    try std.testing.expect(try first.callFrame().expandMemory(0, 32));
+    try std.testing.expectError(error.OutOfMemory, first.callFrame().expandMemory(32, 32));
     first.deinit();
 
     try std.testing.expectEqual(@as(usize, 32), store.memories.items[0].capacity);

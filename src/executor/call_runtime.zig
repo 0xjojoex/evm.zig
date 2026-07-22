@@ -386,42 +386,40 @@ pub fn For(comptime Executor: type) type {
                 defer if (checkpoint) |*guard| guard.deinit();
 
                 const call_frame = self.frames.items[frame_index].frame.callFrame();
-                var stable_result = result;
-                stable_result.output_data = try call_frame.stabilizeOutputData();
                 if (self.stepCaptureContext()) |context| {
                     try context.finishCurrentFrame(.{
-                        .outcome = Interpreter.traceFrameOutcome(stable_result.status),
+                        .outcome = Interpreter.traceFrameOutcome(result.status),
                         .memory_size = call_frame.memory.len(),
                     });
                 }
 
                 return switch (frame_kind) {
                     .root_call => Host.Result.fromCall(.{
-                        .status = stable_result.status,
-                        .output_data = stable_result.output_data,
-                        .gas_left = stable_result.gas_left,
-                        .gas_refund = stable_result.gas_refund,
-                        .gas_reservoir = stable_result.gas_reservoir,
-                        .state_gas_spent = stable_result.state_gas_spent,
-                        .state_gas_from_gas_left = stable_result.state_gas_from_gas_left,
+                        .status = result.status,
+                        .output_data = result.output_data,
+                        .gas_left = result.gas_left,
+                        .gas_refund = result.gas_refund,
+                        .gas_reservoir = result.gas_reservoir,
+                        .state_gas_spent = result.state_gas_spent,
+                        .state_gas_from_gas_left = result.state_gas_from_gas_left,
                     }),
                     .call => blk: {
                         if (checkpoint) |*guard| {
-                            try guard.finish(stable_result.status);
+                            try guard.finish(result.status);
                         } else unreachable;
                         break :blk Host.Result.fromCall(.{
-                            .status = stable_result.status,
-                            .output_data = stable_result.output_data,
-                            .gas_left = stable_result.gas_left,
-                            .gas_refund = stable_result.gas_refund,
-                            .gas_reservoir = stable_result.gas_reservoir,
-                            .state_gas_spent = stable_result.state_gas_spent,
-                            .state_gas_from_gas_left = stable_result.state_gas_from_gas_left,
+                            .status = result.status,
+                            .output_data = result.output_data,
+                            .gas_left = result.gas_left,
+                            .gas_refund = result.gas_refund,
+                            .gas_reservoir = result.gas_reservoir,
+                            .state_gas_spent = result.state_gas_spent,
+                            .state_gas_from_gas_left = result.state_gas_from_gas_left,
                         });
                     },
                     .create => |child| blk: {
                         if (checkpoint) |*guard| {
-                            break :blk try finishCreate(self.executor, child, stable_result, guard);
+                            break :blk try finishCreate(self.executor, child, result, guard);
                         }
                         unreachable;
                     },
@@ -1322,7 +1320,7 @@ pub fn For(comptime Executor: type) type {
             result: Interpreter.Result,
             checkpoint: *CheckpointGuard,
         ) !Host.Result {
-            const output = try self.setLastOutput(result.output_data);
+            const output = result.output_data;
             if (result.status != .success) {
                 try checkpoint.restore();
                 return Host.Result.fromCreate(child.address, .{

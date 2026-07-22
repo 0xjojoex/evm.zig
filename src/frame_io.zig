@@ -91,48 +91,38 @@ pub const ByteSlot = struct {
 
 pub const Slot = struct {
     return_data: ByteSlot,
-    output_data: ByteSlot,
 
     pub fn initGrowable(allocator: std.mem.Allocator) Slot {
         return .{
             .return_data = ByteSlot.initGrowable(allocator),
-            .output_data = ByteSlot.initGrowable(allocator),
         };
     }
 
     pub fn initBounded(allocator: std.mem.Allocator, slot_capacity: usize) !Slot {
-        var return_data = try ByteSlot.initBounded(allocator, slot_capacity);
-        errdefer return_data.deinit();
-
         return .{
-            .return_data = return_data,
-            .output_data = try ByteSlot.initBounded(allocator, slot_capacity),
+            .return_data = try ByteSlot.initBounded(allocator, slot_capacity),
         };
     }
 
     pub fn deinit(self: *Slot) void {
         self.return_data.deinit();
-        self.output_data.deinit();
         self.* = undefined;
     }
 
     pub fn setGrowable(self: *Slot) void {
         self.return_data.setGrowable();
-        self.output_data.setGrowable();
     }
 
     pub fn setBounded(self: *Slot, slot_capacity: usize) !void {
         try self.return_data.setBounded(slot_capacity);
-        try self.output_data.setBounded(slot_capacity);
     }
 
     pub fn clearFrame(self: *Slot) void {
         _ = self.return_data.clear();
-        _ = self.output_data.clear();
     }
 };
 
-test "frame io slot overwrites and retains capacity" {
+test "frame return-data slot overwrites and retains capacity" {
     var slot = Slot.initGrowable(std.testing.allocator);
     defer slot.deinit();
 
@@ -143,23 +133,16 @@ test "frame io slot overwrites and retains capacity" {
     try std.testing.expectEqual(@as(usize, 3), slot.return_data.capacity());
     try std.testing.expectEqual(@as(usize, 1), slot.return_data.slice().len);
 
-    try std.testing.expectEqualSlices(u8, "out", try slot.output_data.replace("out"));
     slot.clearFrame();
     try std.testing.expectEqual(@as(usize, 0), slot.return_data.slice().len);
-    try std.testing.expectEqual(@as(usize, 0), slot.output_data.slice().len);
     try std.testing.expectEqual(@as(usize, 3), slot.return_data.capacity());
-    try std.testing.expectEqual(@as(usize, 3), slot.output_data.capacity());
 }
 
-test "bounded frame io slot rejects growth without clobbering previous data" {
+test "bounded frame return-data slot rejects growth without clobbering previous data" {
     var slot = try Slot.initBounded(std.testing.allocator, 3);
     defer slot.deinit();
 
     try std.testing.expectEqualSlices(u8, "abc", try slot.return_data.replace("abc"));
     try std.testing.expectError(error.FrameIoCapacityExceeded, slot.return_data.replace("abcd"));
     try std.testing.expectEqualSlices(u8, "abc", slot.return_data.slice());
-
-    try std.testing.expectEqualSlices(u8, "def", try slot.output_data.replace("def"));
-    try std.testing.expectError(error.FrameIoCapacityExceeded, slot.output_data.replace("defg"));
-    try std.testing.expectEqualSlices(u8, "def", slot.output_data.slice());
 }

@@ -228,8 +228,9 @@ pub fn applyChangeset(self: *MemoryStore, changeset: *const Changeset) !void {
 
 fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void {
     for (changeset.code_inserts.items) |insert| {
-        if (!std.mem.eql(u8, &evmz.crypto.keccak256(insert.code), &insert.code_hash)) return error.CodeHashMismatch;
-        try self.putCode(insert.code_hash, insert.code);
+        const code = changeset.codeBytes(insert);
+        if (!std.mem.eql(u8, &evmz.crypto.keccak256(code), &insert.code_hash)) return error.CodeHashMismatch;
+        try self.putCode(insert.code_hash, code);
     }
 
     for (changeset.account_deletes.items) |address| {
@@ -512,10 +513,8 @@ test "memory store applies changeset updates and storage writes" {
             .balance = 9,
             .code_hash = evmz.crypto.keccak256(code),
         });
-        try delta.code_inserts.append(std.testing.allocator, .{
-            .code_hash = evmz.crypto.keccak256(code),
-            .code = code,
-        });
+        try delta.appendCodeInsert(std.testing.allocator, evmz.crypto.keccak256(code), code);
+        std.testing.allocator.free(code);
     }
     try delta.storage_writes.append(std.testing.allocator, .{
         .address = address,

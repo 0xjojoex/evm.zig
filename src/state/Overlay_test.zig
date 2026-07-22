@@ -1376,7 +1376,7 @@ test "changeset emits sorted account updates and storage writes" {
     try std.testing.expectEqual(@as(u64, 1), delta.account_updates.items[0].nonce);
     try std.testing.expectEqual(@as(u256, 10), delta.account_updates.items[0].balance);
     try std.testing.expectEqual(@as(usize, 1), delta.code_inserts.items.len);
-    try std.testing.expectEqualSlices(u8, &.{0xaa}, delta.code_inserts.items[0].code);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, delta.codeBytes(delta.code_inserts.items[0]));
 
     try std.testing.expectEqual(@as(usize, 2), delta.storage_writes.items.len);
     try std.testing.expectEqualSlices(u8, &low_address, &delta.storage_writes.items[0].address);

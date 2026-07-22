@@ -133,6 +133,8 @@ pub const BoundedRuntimeResources = struct {
     max_block_gas: ?u64 = null,
     max_live_frames: usize = default_max_live_frames,
     memory_bytes_per_frame: ?usize = null,
+    /// Per-frame RETURNDATA capacity retained after a child frame is released.
+    /// Terminal frame output is a range into that frame's EVM memory.
     io_bytes_per_frame: ?usize = null,
     scratch_bytes_per_frame: ?usize = null,
     /// Transaction-scoped storage for transient prepared bytecode and metadata.

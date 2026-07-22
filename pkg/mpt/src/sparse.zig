@@ -16,6 +16,22 @@ const node_codec = @import("node.zig");
 const proof = @import("proof.zig");
 const Allocator = std.mem.Allocator;
 const AllocUpdateError = Allocator.Error || UpdateError;
+const NodeId = u32;
+
+const PathRange = struct {
+    start: usize,
+    len: usize,
+
+    fn suffix(self: PathRange, start: usize) PathRange {
+        std.debug.assert(start <= self.len);
+        return .{ .start = self.start + start, .len = self.len - start };
+    }
+
+    fn prefix(self: PathRange, len: usize) PathRange {
+        std.debug.assert(len <= self.len);
+        return .{ .start = self.start, .len = len };
+    }
+};
 
 /// A single update: set `key` to `value`, or delete `key` when `value` is null.
 pub const Update = struct {
@@ -36,17 +52,17 @@ const SparseNode = struct {
     };
 
     const Leaf = struct {
-        path: []const u8,
+        path: PathRange,
         value: []const u8,
     };
 
     const Extension = struct {
-        path: []const u8,
-        child: *SparseNode,
+        path: PathRange,
+        child: NodeId,
     };
 
     const Branch = struct {
-        children: [16]?*SparseNode,
+        children: [16]?NodeId,
         value: ?[]const u8,
     };
 };
@@ -64,21 +80,21 @@ const Reference = union(enum) {
 };
 
 const DecodeTask = struct {
-    target: *SparseNode,
+    target: NodeId,
     encoded: []const u8,
     require_branch: bool,
 };
 
 const DeleteFrame = union(enum) {
-    extension: *SparseNode,
+    extension: NodeId,
     branch: struct {
-        parent: *SparseNode,
+        parent: NodeId,
         child_index: u8,
     },
 };
 
 const EncodeFrame = struct {
-    node: *SparseNode,
+    node: NodeId,
     expanded: bool,
     is_root: bool,
 };
@@ -94,14 +110,17 @@ fn Context(comptime KeccakContext: type) type {
         allocator: Allocator,
         keccak_context: KeccakContext,
         index: *const proof.NodeIndex,
+        nodes: std.ArrayList(SparseNode) = .empty,
+        path_bytes: std.ArrayList(u8) = .empty,
         compact_buffer: std.ArrayList(u8) = .empty,
         node_buffer: std.ArrayList(u8) = .empty,
         steps: usize = 0,
-        nodes: usize = 0,
 
         const Self = @This();
 
         fn deinit(self: *Self) void {
+            self.nodes.deinit(self.allocator);
+            self.path_bytes.deinit(self.allocator);
             self.compact_buffer.deinit(self.allocator);
             self.node_buffer.deinit(self.allocator);
         }
@@ -111,16 +130,53 @@ fn Context(comptime KeccakContext: type) type {
                 return error.ResourceLimitExceeded;
         }
 
-        fn newNode(self: *Self, kind: SparseNode.Kind) AllocUpdateError!*SparseNode {
-            self.nodes = std.math.add(usize, self.nodes, 1) catch
+        fn newNode(self: *Self, kind: SparseNode.Kind) AllocUpdateError!NodeId {
+            if (self.nodes.items.len >= std.math.maxInt(NodeId)) {
                 return error.ResourceLimitExceeded;
-            const pointer = try self.allocator.create(SparseNode);
-            pointer.* = .{ .kind = kind };
-            return pointer;
+            }
+            const id: NodeId = @intCast(self.nodes.items.len);
+            try self.nodes.append(self.allocator, .{ .kind = kind });
+            return id;
         }
 
-        fn alloc(self: *Self, comptime T: type, len: usize) Allocator.Error![]T {
-            return self.allocator.alloc(T, len);
+        fn node(self: *Self, id: NodeId) *SparseNode {
+            return &self.nodes.items[@intCast(id)];
+        }
+
+        fn nodeValue(self: *const Self, id: NodeId) SparseNode {
+            return self.nodes.items[@intCast(id)];
+        }
+
+        fn path(self: *const Self, range: PathRange) []const u8 {
+            std.debug.assert(range.start <= self.path_bytes.items.len);
+            std.debug.assert(range.len <= self.path_bytes.items.len - range.start);
+            return self.path_bytes.items[range.start..][0..range.len];
+        }
+
+        fn concatPaths(self: *Self, lhs: PathRange, rhs: PathRange) AllocUpdateError!PathRange {
+            const len = std.math.add(usize, lhs.len, rhs.len) catch
+                return error.ResourceLimitExceeded;
+            try self.path_bytes.ensureUnusedCapacity(self.allocator, len);
+            const start = self.path_bytes.items.len;
+            self.path_bytes.appendSliceAssumeCapacity(self.path(lhs));
+            self.path_bytes.appendSliceAssumeCapacity(self.path(rhs));
+            return .{ .start = start, .len = len };
+        }
+
+        fn prependPath(self: *Self, value: u8, rest: PathRange) AllocUpdateError!PathRange {
+            const len = std.math.add(usize, rest.len, 1) catch
+                return error.ResourceLimitExceeded;
+            try self.path_bytes.ensureUnusedCapacity(self.allocator, len);
+            const start = self.path_bytes.items.len;
+            self.path_bytes.appendAssumeCapacity(value);
+            self.path_bytes.appendSliceAssumeCapacity(self.path(rest));
+            return .{ .start = start, .len = len };
+        }
+
+        fn oneNibblePath(self: *Self, value: u8) Allocator.Error!PathRange {
+            const start = self.path_bytes.items.len;
+            try self.path_bytes.append(self.allocator, value);
+            return .{ .start = start, .len = 1 };
         }
 
         fn buffers(self: *Self, compact_len: usize, node_len: usize) Allocator.Error!struct {
@@ -194,13 +250,13 @@ pub fn validateUpdates(updates: []const Update, sorted: bool) errors.InputError!
     }
 }
 
-fn decodeNode(context: anytype, encoded: []const u8) AllocUpdateError!*SparseNode {
+fn decodeNode(context: anytype, encoded: []const u8) AllocUpdateError!NodeId {
     const root = try context.newNode(.empty);
     try decodeInto(context, root, encoded);
     return root;
 }
 
-fn decodeInto(context: anytype, root: *SparseNode, encoded: []const u8) AllocUpdateError!void {
+fn decodeInto(context: anytype, root: NodeId, encoded: []const u8) AllocUpdateError!void {
     var frames: std.ArrayList(WorkFrame) = .empty;
     defer frames.deinit(context.allocator);
     try frames.append(context.allocator, .{ .decode = .{
@@ -233,29 +289,29 @@ fn decodeInto(context: anytype, root: *SparseNode, encoded: []const u8) AllocUpd
 
 fn decodeLeafNode(
     context: anytype,
-    target: *SparseNode,
+    target: NodeId,
     leaf: node_codec.Node.Leaf,
 ) AllocUpdateError!void {
     const owned_path = try copyCompactPath(context, leaf.path);
-    target.* = .{ .kind = .{ .leaf = .{ .path = owned_path, .value = leaf.value } } };
+    context.node(target).* = .{ .kind = .{ .leaf = .{ .path = owned_path, .value = leaf.value } } };
 }
 
 fn decodeExtensionNode(
     context: anytype,
     frames: *std.ArrayList(WorkFrame),
-    target: *SparseNode,
+    target: NodeId,
     extension: node_codec.Node.Extension,
 ) AllocUpdateError!void {
     const owned_path = try copyCompactPath(context, extension.path);
     const child = (try decodeChildReference(context, frames, extension.child, true)) orelse
         return error.InvalidNodeReference;
-    target.* = .{ .kind = .{ .extension = .{ .path = owned_path, .child = child } } };
+    context.node(target).* = .{ .kind = .{ .extension = .{ .path = owned_path, .child = child } } };
 }
 
 fn decodeBranchNode(
     context: anytype,
     frames: *std.ArrayList(WorkFrame),
-    target: *SparseNode,
+    target: NodeId,
     decoded: node_codec.Node.Branch,
 ) AllocUpdateError!void {
     var branch = emptyBranch();
@@ -263,7 +319,7 @@ fn decodeBranchNode(
         branch.children[child_index] = try decodeChildReference(context, frames, reference, false);
     }
     branch.value = decoded.value;
-    target.* = .{ .kind = .{ .branch = branch } };
+    context.node(target).* = .{ .kind = .{ .branch = branch } };
 }
 
 fn decodeChildReference(
@@ -271,7 +327,7 @@ fn decodeChildReference(
     frames: *std.ArrayList(WorkFrame),
     reference: node_codec.Reference,
     require_branch: bool,
-) AllocUpdateError!?*SparseNode {
+) AllocUpdateError!?NodeId {
     return switch (reference) {
         .empty => null,
         .embedded => |encoded| {
@@ -287,32 +343,33 @@ fn decodeChildReference(
     };
 }
 
-fn copyCompactPath(context: anytype, path: nibble.CompactPath) AllocUpdateError![]u8 {
-    const owned = try context.alloc(u8, path.len);
-    for (owned, 0..) |*path_nibble, index| path_nibble.* = path.nibbleAt(index);
-    return owned;
+fn copyCompactPath(context: anytype, path: nibble.CompactPath) AllocUpdateError!PathRange {
+    const start = context.path_bytes.items.len;
+    try context.path_bytes.ensureUnusedCapacity(context.allocator, path.len);
+    for (0..path.len) |index| context.path_bytes.appendAssumeCapacity(path.nibbleAt(index));
+    return .{ .start = start, .len = path.len };
 }
 
-fn materializeHash(context: anytype, sparse_node: *SparseNode) AllocUpdateError!void {
-    switch (sparse_node.kind) {
+fn materializeHash(context: anytype, node_id: NodeId) AllocUpdateError!void {
+    switch (context.nodeValue(node_id).kind) {
         .hash => |digest| {
             const encoded = proof.find(context.index, digest) orelse return error.MissingNode;
             if (encoded.len < 32) return error.InvalidNodeReference;
-            try decodeInto(context, sparse_node, encoded);
+            try decodeInto(context, node_id, encoded);
         },
         else => {},
     }
 }
 
-fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u8) AllocUpdateError!void {
+fn insert(context: anytype, node: NodeId, key: PathRange, value: []const u8) AllocUpdateError!void {
     var current = node;
     var remaining = key;
     while (true) {
         try context.step();
         try materializeHash(context, current);
-        switch (current.kind) {
+        switch (context.nodeValue(current).kind) {
             .empty => {
-                current.* = .{ .kind = .{ .leaf = .{ .path = remaining, .value = value } } };
+                context.node(current).* = .{ .kind = .{ .leaf = .{ .path = remaining, .value = value } } };
                 return;
             },
             .hash => unreachable,
@@ -321,116 +378,135 @@ fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u
                 return;
             },
             .extension => |extension| {
-                const common = commonPrefix(extension.path, remaining);
+                const common = commonPrefix(context.path(extension.path), context.path(remaining));
                 if (common != extension.path.len) {
                     try splitExtension(context, current, extension, remaining, value, common);
                     return;
                 }
-                if (extension.child.kind == .hash) {
+                if (context.nodeValue(extension.child).kind == .hash) {
                     try materializeHash(context, extension.child);
-                    if (extension.child.kind != .branch) return error.NonCanonicalNode;
+                    if (context.nodeValue(extension.child).kind != .branch) return error.NonCanonicalNode;
                 }
                 current = extension.child;
-                remaining = remaining[common..];
+                remaining = remaining.suffix(common);
             },
             .branch => |branch| {
                 if (remaining.len == 0) {
                     var next = branch;
                     next.value = value;
-                    current.* = .{ .kind = .{ .branch = next } };
+                    context.node(current).* = .{ .kind = .{ .branch = next } };
                     return;
                 }
-                const child_index = remaining[0];
+                const child_index = context.path(remaining)[0];
                 const child = branch.children[child_index] orelse child: {
                     const created = try context.newNode(.empty);
                     var next = branch;
                     next.children[child_index] = created;
-                    current.* = .{ .kind = .{ .branch = next } };
+                    context.node(current).* = .{ .kind = .{ .branch = next } };
                     break :child created;
                 };
                 current = child;
-                remaining = remaining[1..];
+                remaining = remaining.suffix(1);
             },
         }
     }
 }
 
-fn insertIntoLeaf(context: anytype, node: *SparseNode, leaf: SparseNode.Leaf, key: []const u8, value: []const u8) AllocUpdateError!void {
-    const common = commonPrefix(leaf.path, key);
+fn insertIntoLeaf(context: anytype, node: NodeId, leaf: SparseNode.Leaf, key: PathRange, value: []const u8) AllocUpdateError!void {
+    const common = commonPrefix(context.path(leaf.path), context.path(key));
     if (common == leaf.path.len and common == key.len) {
-        node.* = .{ .kind = .{ .leaf = .{ .path = leaf.path, .value = value } } };
+        context.node(node).* = .{ .kind = .{ .leaf = .{ .path = leaf.path, .value = value } } };
         return;
     }
-    const branch_node = try splitValues(context, leaf.path[common..], leaf.value, key[common..], value);
-    node.* = if (common == 0) branch_node.* else .{ .kind = .{ .extension = .{
-        .path = key[0..common],
-        .child = branch_node,
-    } } };
+    const branch = try splitValues(
+        context,
+        leaf.path.suffix(common),
+        leaf.value,
+        key.suffix(common),
+        value,
+    );
+    if (common == 0) {
+        context.node(node).* = .{ .kind = .{ .branch = branch } };
+    } else {
+        const branch_node = try context.newNode(.{ .branch = branch });
+        context.node(node).* = .{ .kind = .{ .extension = .{
+            .path = key.prefix(common),
+            .child = branch_node,
+        } } };
+    }
 }
 
 fn splitExtension(
     context: anytype,
-    node: *SparseNode,
+    node: NodeId,
     extension: SparseNode.Extension,
-    key: []const u8,
+    key: PathRange,
     value: []const u8,
     common: usize,
 ) AllocUpdateError!void {
     var branch = emptyBranch();
-    const old_remaining = extension.path[common..];
-    branch.children[old_remaining[0]] = if (old_remaining.len == 1)
+    const old_remaining = extension.path.suffix(common);
+    const old_child_index = context.path(old_remaining)[0];
+    branch.children[old_child_index] = if (old_remaining.len == 1)
         extension.child
     else
         try context.newNode(.{ .extension = .{
-            .path = old_remaining[1..],
+            .path = old_remaining.suffix(1),
             .child = extension.child,
         } });
 
-    const new_remaining = key[common..];
+    const new_remaining = key.suffix(common);
     if (new_remaining.len == 0) {
         branch.value = value;
     } else {
-        branch.children[new_remaining[0]] = try context.newNode(.{ .leaf = .{
-            .path = new_remaining[1..],
+        const new_child_index = context.path(new_remaining)[0];
+        branch.children[new_child_index] = try context.newNode(.{ .leaf = .{
+            .path = new_remaining.suffix(1),
             .value = value,
         } });
     }
 
-    const branch_node = try context.newNode(.{ .branch = branch });
-    node.* = if (common == 0) branch_node.* else .{ .kind = .{ .extension = .{
-        .path = key[0..common],
-        .child = branch_node,
-    } } };
+    if (common == 0) {
+        context.node(node).* = .{ .kind = .{ .branch = branch } };
+    } else {
+        const branch_node = try context.newNode(.{ .branch = branch });
+        context.node(node).* = .{ .kind = .{ .extension = .{
+            .path = key.prefix(common),
+            .child = branch_node,
+        } } };
+    }
 }
 
 fn splitValues(
     context: anytype,
-    old_path: []const u8,
+    old_path: PathRange,
     old_value: []const u8,
-    new_path: []const u8,
+    new_path: PathRange,
     new_value: []const u8,
-) AllocUpdateError!*SparseNode {
+) AllocUpdateError!SparseNode.Branch {
     var branch = emptyBranch();
     if (old_path.len == 0) {
         branch.value = old_value;
     } else {
-        branch.children[old_path[0]] = try context.newNode(.{ .leaf = .{
-            .path = old_path[1..],
+        const old_child_index = context.path(old_path)[0];
+        branch.children[old_child_index] = try context.newNode(.{ .leaf = .{
+            .path = old_path.suffix(1),
             .value = old_value,
         } });
     }
     if (new_path.len == 0) {
         branch.value = new_value;
     } else {
-        branch.children[new_path[0]] = try context.newNode(.{ .leaf = .{
-            .path = new_path[1..],
+        const new_child_index = context.path(new_path)[0];
+        branch.children[new_child_index] = try context.newNode(.{ .leaf = .{
+            .path = new_path.suffix(1),
             .value = new_value,
         } });
     }
-    return context.newNode(.{ .branch = branch });
+    return branch;
 }
 
-fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError!void {
+fn delete(context: anytype, node: NodeId, key: PathRange) AllocUpdateError!void {
     var current = node;
     var remaining = key;
     var frames: std.ArrayList(WorkFrame) = .empty;
@@ -439,23 +515,23 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
     while (true) {
         try context.step();
         try materializeHash(context, current);
-        switch (current.kind) {
+        switch (context.nodeValue(current).kind) {
             .empty => return,
             .hash => unreachable,
             .leaf => |leaf| {
-                if (!std.mem.eql(u8, leaf.path, remaining)) return;
-                current.* = .{ .kind = .empty };
+                if (!std.mem.eql(u8, context.path(leaf.path), context.path(remaining))) return;
+                context.node(current).* = .{ .kind = .empty };
                 break;
             },
             .extension => |extension| {
-                if (!startsWith(remaining, extension.path)) return;
-                if (extension.child.kind == .hash) {
+                if (!startsWith(context.path(remaining), context.path(extension.path))) return;
+                if (context.nodeValue(extension.child).kind == .hash) {
                     try materializeHash(context, extension.child);
-                    if (extension.child.kind != .branch) return error.NonCanonicalNode;
+                    if (context.nodeValue(extension.child).kind != .branch) return error.NonCanonicalNode;
                 }
                 try frames.append(context.allocator, .{ .delete = .{ .extension = current } });
                 current = extension.child;
-                remaining = remaining[extension.path.len..];
+                remaining = remaining.suffix(extension.path.len);
             },
             .branch => |branch| {
                 if (remaining.len == 0) {
@@ -465,14 +541,14 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
                     try compressBranch(context, current, next);
                     break;
                 }
-                const child_index = remaining[0];
+                const child_index = context.path(remaining)[0];
                 const child = branch.children[child_index] orelse return;
                 try frames.append(context.allocator, .{ .delete = .{ .branch = .{
                     .parent = current,
                     .child_index = child_index,
                 } } });
                 current = child;
-                remaining = remaining[1..];
+                remaining = remaining.suffix(1);
             },
         }
     }
@@ -481,44 +557,50 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
         try context.step();
         switch (work.delete) {
             .extension => |parent| {
-                const extension = switch (parent.kind) {
+                const extension = switch (context.nodeValue(parent).kind) {
                     .extension => |value| value,
                     else => unreachable,
                 };
                 try compressExtension(context, parent, extension);
             },
             .branch => |frame| {
-                var branch = switch (frame.parent.kind) {
+                var branch = switch (context.nodeValue(frame.parent).kind) {
                     .branch => |value| value,
                     else => unreachable,
                 };
                 const child = branch.children[frame.child_index].?;
-                if (child.kind == .empty) branch.children[frame.child_index] = null;
+                if (context.nodeValue(child).kind == .empty) branch.children[frame.child_index] = null;
                 try compressBranch(context, frame.parent, branch);
             },
         }
     }
 }
 
-fn compressExtension(context: anytype, node: *SparseNode, extension: SparseNode.Extension) AllocUpdateError!void {
-    switch (extension.child.kind) {
-        .empty => node.* = .{ .kind = .empty },
-        .hash, .branch => node.* = .{ .kind = .{ .extension = extension } },
-        .leaf => |leaf| node.* = .{ .kind = .{ .leaf = .{
-            .path = try concat(context, extension.path, leaf.path),
-            .value = leaf.value,
-        } } },
-        .extension => |child_extension| node.* = .{ .kind = .{ .extension = .{
-            .path = try concat(context, extension.path, child_extension.path),
-            .child = child_extension.child,
-        } } },
+fn compressExtension(context: anytype, node: NodeId, extension: SparseNode.Extension) AllocUpdateError!void {
+    switch (context.nodeValue(extension.child).kind) {
+        .empty => context.node(node).* = .{ .kind = .empty },
+        .hash, .branch => context.node(node).* = .{ .kind = .{ .extension = extension } },
+        .leaf => |leaf| {
+            const path = try context.concatPaths(extension.path, leaf.path);
+            context.node(node).* = .{ .kind = .{ .leaf = .{
+                .path = path,
+                .value = leaf.value,
+            } } };
+        },
+        .extension => |child_extension| {
+            const path = try context.concatPaths(extension.path, child_extension.path);
+            context.node(node).* = .{ .kind = .{ .extension = .{
+                .path = path,
+                .child = child_extension.child,
+            } } };
+        },
     }
 }
 
-fn compressBranch(context: anytype, node: *SparseNode, branch: SparseNode.Branch) AllocUpdateError!void {
+fn compressBranch(context: anytype, node: NodeId, branch: SparseNode.Branch) AllocUpdateError!void {
     var child_count: usize = 0;
     var only_child_index: usize = 0;
-    var only_child: ?*SparseNode = null;
+    var only_child: ?NodeId = null;
     for (branch.children, 0..) |child, index| {
         if (child == null) continue;
         child_count += 1;
@@ -527,44 +609,53 @@ fn compressBranch(context: anytype, node: *SparseNode, branch: SparseNode.Branch
     }
 
     if (branch.value) |value| {
-        node.* = if (child_count == 0)
-            .{ .kind = .{ .leaf = .{ .path = &.{}, .value = value } } }
+        context.node(node).* = if (child_count == 0)
+            .{ .kind = .{ .leaf = .{ .path = .{ .start = 0, .len = 0 }, .value = value } } }
         else
             .{ .kind = .{ .branch = branch } };
         return;
     }
     if (child_count == 0) {
-        node.* = .{ .kind = .empty };
+        context.node(node).* = .{ .kind = .empty };
         return;
     }
     if (child_count > 1) {
-        node.* = .{ .kind = .{ .branch = branch } };
+        context.node(node).* = .{ .kind = .{ .branch = branch } };
         return;
     }
 
     const child = only_child.?;
     try materializeHash(context, child);
     const child_nibble: u8 = @intCast(only_child_index);
-    switch (child.kind) {
-        .empty => node.* = .{ .kind = .empty },
+    switch (context.nodeValue(child).kind) {
+        .empty => context.node(node).* = .{ .kind = .empty },
         .hash => unreachable,
-        .branch => node.* = .{ .kind = .{ .extension = .{
-            .path = try oneNibble(context, child_nibble),
-            .child = child,
-        } } },
-        .leaf => |leaf| node.* = .{ .kind = .{ .leaf = .{
-            .path = try prepend(context, child_nibble, leaf.path),
-            .value = leaf.value,
-        } } },
-        .extension => |extension| node.* = .{ .kind = .{ .extension = .{
-            .path = try prepend(context, child_nibble, extension.path),
-            .child = extension.child,
-        } } },
+        .branch => {
+            const path = try context.oneNibblePath(child_nibble);
+            context.node(node).* = .{ .kind = .{ .extension = .{
+                .path = path,
+                .child = child,
+            } } };
+        },
+        .leaf => |leaf| {
+            const path = try context.prependPath(child_nibble, leaf.path);
+            context.node(node).* = .{ .kind = .{ .leaf = .{
+                .path = path,
+                .value = leaf.value,
+            } } };
+        },
+        .extension => |extension| {
+            const path = try context.prependPath(child_nibble, extension.path);
+            context.node(node).* = .{ .kind = .{ .extension = .{
+                .path = path,
+                .child = extension.child,
+            } } };
+        },
     }
 }
 
-fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
-    if (root.kind == .empty) return hash.empty_root;
+fn encodeRoot(context: anytype, root: NodeId) AllocUpdateError!hash.Root {
+    if (context.nodeValue(root).kind == .empty) return hash.empty_root;
 
     var frames: std.ArrayList(WorkFrame) = .empty;
     defer frames.deinit(context.allocator);
@@ -579,21 +670,26 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
         const frame = work.encode;
         try context.step();
 
-        if (!frame.expanded) switch (frame.node.kind) {
+        if (!frame.expanded) switch (context.nodeValue(frame.node).kind) {
             .empty => {
                 if (frame.is_root) return hash.empty_root;
-                frame.node.reference = .empty;
+                context.node(frame.node).reference = .empty;
                 continue;
             },
             .hash => |digest| {
                 if (frame.is_root) return error.InvalidNode;
-                frame.node.reference = .{ .hashed = digest };
+                context.node(frame.node).reference = .{ .hashed = digest };
                 continue;
             },
             .leaf => |leaf| {
-                const lengths = try leafBufferLengths(leaf.path, leaf.value);
+                const lengths = try leafBufferLengths(context.path(leaf.path), leaf.value);
                 const buffers = try context.buffers(lengths.compact, lengths.node);
-                const encoded = try encodeLeaf(buffers.node, buffers.compact, leaf.path, leaf.value);
+                const encoded = try encodeLeaf(
+                    buffers.node,
+                    buffers.compact,
+                    context.path(leaf.path),
+                    leaf.value,
+                );
                 try finishEncoding(context, frame.node, encoded, frame.is_root, &result);
                 continue;
             },
@@ -631,21 +727,22 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
             },
         };
 
-        const encoded = switch (frame.node.kind) {
+        const encoded = switch (context.nodeValue(frame.node).kind) {
             .extension => |extension| encoded: {
-                const lengths = try extensionBufferLengths(extension.path, extension.child.reference);
+                const child_reference = context.nodeValue(extension.child).reference;
+                const lengths = try extensionBufferLengths(context.path(extension.path), child_reference);
                 const buffers = try context.buffers(lengths.compact, lengths.node);
                 break :encoded try encodeExtension(
                     buffers.node,
                     buffers.compact,
-                    extension.path,
-                    extension.child.reference,
+                    context.path(extension.path),
+                    child_reference,
                 );
             },
             .branch => |branch| encoded: {
-                const node_len = try branchBufferLength(branch);
+                const node_len = try branchBufferLength(context, branch);
                 const buffers = try context.buffers(0, node_len);
-                break :encoded try encodeBranch(buffers.node, branch);
+                break :encoded try encodeBranch(context, buffers.node, branch);
             },
             else => unreachable,
         };
@@ -656,7 +753,7 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
 
 fn finishEncoding(
     context: anytype,
-    node: *SparseNode,
+    node: NodeId,
     encoded: []const u8,
     is_root: bool,
     result: *?hash.Root,
@@ -669,9 +766,9 @@ fn finishEncoding(
             .bytes = undefined,
         };
         @memcpy(embedded.bytes[0..encoded.len], encoded);
-        node.reference = .{ .embedded = embedded };
+        context.node(node).reference = .{ .embedded = embedded };
     } else {
-        node.reference = .{ .hashed = context.keccak_context.keccak256(encoded) };
+        context.node(node).reference = .{ .hashed = context.keccak_context.keccak256(encoded) };
     }
 }
 
@@ -698,11 +795,11 @@ fn extensionBufferLengths(path: []const u8, child_reference: Reference) UpdateEr
     return .{ .compact = compact, .node = try listEncodedLen(payload) };
 }
 
-fn branchBufferLength(branch: SparseNode.Branch) UpdateError!usize {
+fn branchBufferLength(context: anytype, branch: SparseNode.Branch) UpdateError!usize {
     var payload = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
         const child_len = if (child) |present|
-            try referenceEncodedLen(present.reference)
+            try referenceEncodedLen(context.nodeValue(present).reference)
         else
             1;
         payload = std.math.add(usize, payload, child_len) catch
@@ -766,12 +863,13 @@ fn encodeExtension(
     return node_buffer[0 .. listPrefixLen(payload_len) + writer.written().len];
 }
 
-fn encodeBranch(node_buffer: []u8, branch: SparseNode.Branch) UpdateError![]const u8 {
+fn encodeBranch(context: anytype, node_buffer: []u8, branch: SparseNode.Branch) UpdateError![]const u8 {
     var payload_len = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
         if (child) |present| {
-            if (present.reference == .unset or present.reference == .empty) return error.InvalidNode;
-            payload_len = std.math.add(usize, payload_len, try referenceEncodedLen(present.reference)) catch
+            const reference = context.nodeValue(present).reference;
+            if (reference == .unset or reference == .empty) return error.InvalidNode;
+            payload_len = std.math.add(usize, payload_len, try referenceEncodedLen(reference)) catch
                 return error.ResourceLimitExceeded;
         } else {
             payload_len = std.math.add(usize, payload_len, 1) catch
@@ -781,7 +879,7 @@ fn encodeBranch(node_buffer: []u8, branch: SparseNode.Branch) UpdateError![]cons
     var writer = try listWriter(node_buffer, payload_len);
     for (branch.children) |child| {
         if (child) |present| {
-            try writeReference(&writer, present.reference);
+            try writeReference(&writer, context.nodeValue(present).reference);
         } else {
             try writeBytes(&writer, "");
         }
@@ -877,15 +975,16 @@ fn addEncodedLengths(lengths: []const usize) UpdateError!usize {
     return total;
 }
 
-fn keyNibbles(context: anytype, key: []const u8) AllocUpdateError![]u8 {
+fn keyNibbles(context: anytype, key: []const u8) AllocUpdateError!PathRange {
     const len = std.math.mul(usize, key.len, 2) catch return error.ResourceLimitExceeded;
-    const out = try context.alloc(u8, len);
-    for (out, 0..) |*value, index| value.* = nibble.keyNibbleAt(key, index);
-    return out;
+    const start = context.path_bytes.items.len;
+    try context.path_bytes.ensureUnusedCapacity(context.allocator, len);
+    for (0..len) |index| context.path_bytes.appendAssumeCapacity(nibble.keyNibbleAt(key, index));
+    return .{ .start = start, .len = len };
 }
 
 fn emptyBranch() SparseNode.Branch {
-    return .{ .children = [_]?*SparseNode{null} ** 16, .value = null };
+    return .{ .children = [_]?NodeId{null} ** 16, .value = null };
 }
 
 fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {
@@ -897,26 +996,4 @@ fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {
 
 fn startsWith(key: []const u8, prefix: []const u8) bool {
     return key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix);
-}
-
-fn concat(context: anytype, lhs: []const u8, rhs: []const u8) AllocUpdateError![]u8 {
-    const len = std.math.add(usize, lhs.len, rhs.len) catch return error.ResourceLimitExceeded;
-    const out = try context.alloc(u8, len);
-    @memcpy(out[0..lhs.len], lhs);
-    @memcpy(out[lhs.len..], rhs);
-    return out;
-}
-
-fn prepend(context: anytype, value: u8, rest: []const u8) AllocUpdateError![]u8 {
-    const len = std.math.add(usize, rest.len, 1) catch return error.ResourceLimitExceeded;
-    const out = try context.alloc(u8, len);
-    out[0] = value;
-    @memcpy(out[1..], rest);
-    return out;
-}
-
-fn oneNibble(context: anytype, value: u8) AllocUpdateError![]u8 {
-    const out = try context.alloc(u8, 1);
-    out[0] = value;
-    return out;
 }

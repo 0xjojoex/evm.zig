@@ -971,17 +971,14 @@ test "MPT state root helper applies account and storage changes" {
 
     var changeset = Changeset.init();
     defer changeset.deinit(scratch);
-    const new_code = try scratch.dupe(u8, &.{ 0x61, 0x62 });
+    const new_code = [_]u8{ 0x61, 0x62 };
     try changeset.account_updates.append(scratch, .{
         .address = target,
         .nonce = 2,
         .balance = 20,
-        .code_hash = crypto.keccak256(new_code),
+        .code_hash = crypto.keccak256(&new_code),
     });
-    try changeset.code_inserts.append(scratch, .{
-        .code_hash = crypto.keccak256(new_code),
-        .code = new_code,
-    });
+    try changeset.appendCodeInsert(scratch, crypto.keccak256(&new_code), &new_code);
     try changeset.storage_writes.append(scratch, .{ .address = target, .key = 0, .value = 0 });
     try changeset.storage_writes.append(scratch, .{ .address = target, .key = 1, .value = 7 });
     changeset.sort();
@@ -996,7 +993,7 @@ test "MPT state root helper applies account and storage changes" {
         .nonce = 2,
         .balance = 20,
         .storage_root = expected_storage_root,
-        .code_hash = crypto.keccak256(new_code),
+        .code_hash = crypto.keccak256(&new_code),
     });
     const expected_state_pairs = [_]Pair{.{ .key = &account_key, .value = expected_account_value }};
     const expected = try root(scratch, &expected_state_pairs);
