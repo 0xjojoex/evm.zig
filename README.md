@@ -2,6 +2,20 @@
 
 Standalone strict RLP Recursive Length Prefix encoding and decoding library for Zig 0.16
 
+## Install
+
+The package is developed under `pkg/rlp` in
+[`0xjojoex/evm.zig`](https://github.com/0xjojoex/evm.zig) and published from
+the generated `release/rlp` branch. Add a tagged package root with:
+
+```sh
+zig fetch --save=rlp git+https://github.com/0xjojoex/evm.zig#rlp-v0.1.0
+```
+
+Then import the dependency's `rlp` module from your `build.zig`. Development
+and pull requests belong on evmz `main`; the release branch is generated and
+must not be edited directly.
+
 ```zig
 const written = try rlp.encode(Account, out, &account);
 const account = try rlp.decode(Account, written);
