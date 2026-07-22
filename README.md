@@ -9,6 +9,20 @@ guests. Encode and decode against caller-controlled memory, then compute
 const ssz = @import("ssz");
 ```
 
+## Install
+
+The package is developed under `pkg/ssz` in
+[`0xjojoex/evm.zig`](https://github.com/0xjojoex/evm.zig) and published from
+the generated `release/ssz` branch. Add a tagged package root with:
+
+```sh
+zig fetch --save=ssz git+https://github.com/0xjojoex/evm.zig#ssz-v0.1.0
+```
+
+Then import the dependency's `ssz` module from your `build.zig`. Development
+and pull requests belong on evmz `main`; the release branch is generated and
+must not be edited directly.
+
 ## Why this one
 
 - **Stateless, built for guests.** No allocation and no global state on the hash
