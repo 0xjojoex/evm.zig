@@ -169,32 +169,40 @@ pub fn build(b: *std.Build) void {
 
     // test
     {
-        const lib_unit_tests_mod = b.createModule(.{
-            .root_source_file = b.path("src/evm.zig"),
+        // EVMC imports evm.zig and therefore includes its tests. One native root
+        // avoids compiling near-identical LLVM test binaries in parallel.
+        const unit_test_root = if (is_native_profile) "src/evmc.zig" else "src/evm.zig";
+        const unit_tests_mod = b.createModule(.{
+            .root_source_file = b.path(unit_test_root),
             .target = target,
             .optimize = optimize,
+            .link_libc = is_native_profile,
             .link_libcpp = is_native_profile,
         });
-        lib_unit_tests_mod.addOptions("build_options", build_options);
-        lib_unit_tests_mod.addImport("ssz", ssz_mod);
-        lib_unit_tests_mod.addImport("rlp", rlp_mod);
-        lib_unit_tests_mod.addImport("mpt", mpt_mod);
-        lib_unit_tests_mod.addIncludePath(b.path("include"));
-        lib_unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
+        unit_tests_mod.addOptions("build_options", build_options);
+        unit_tests_mod.addImport("ssz", ssz_mod);
+        unit_tests_mod.addImport("rlp", rlp_mod);
+        unit_tests_mod.addImport("mpt", mpt_mod);
+        unit_tests_mod.addIncludePath(b.path("include"));
+        unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
         if (native_precompile_deps) |deps| {
-            addPrecompileNative(b, lib_unit_tests_mod, deps, evmone_dep);
+            unit_tests_mod.addCSourceFile(.{
+                .file = b.path("src/c_api/evmc_abi18_smoke.c"),
+                .flags = &.{ "-Wall", "-Wextra", "-pedantic", "-std=c23" },
+            });
+            addPrecompileNative(b, unit_tests_mod, deps, evmone_dep);
         }
-        addNativeKeccak(lib_unit_tests_mod, xkcp_object);
-        addNativeSecp256k1(lib_unit_tests_mod, libsecp256k1_object);
-        const lib_unit_tests = b.addTest(.{
-            .root_module = lib_unit_tests_mod,
+        addNativeKeccak(unit_tests_mod, xkcp_object);
+        addNativeSecp256k1(unit_tests_mod, libsecp256k1_object);
+        const unit_tests = b.addTest(.{
+            .root_module = unit_tests_mod,
             .filters = b.args orelse &.{},
         });
         // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
         // Keep the test build in Debug while using LLVM for tail dispatch.
-        lib_unit_tests.use_llvm = true;
+        unit_tests.use_llvm = true;
 
-        const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+        const run_unit_tests = b.addRunArtifact(unit_tests);
 
         const ssz_unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -231,39 +239,11 @@ pub fn build(b: *std.Build) void {
         });
 
         const test_step = b.step("test", "Run unit tests");
-        test_step.dependOn(&run_lib_unit_tests.step);
+        test_step.dependOn(&run_unit_tests.step);
         test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(rlp_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(mpt_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(guest_zisk_ab_tests).step);
-        if (is_native_profile) {
-            const c_api_tests_mod = b.createModule(.{
-                .root_source_file = b.path("src/evmc.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .link_libcpp = true,
-            });
-            c_api_tests_mod.addOptions("build_options", build_options);
-            c_api_tests_mod.addImport("ssz", ssz_mod);
-            c_api_tests_mod.addImport("rlp", rlp_mod);
-            c_api_tests_mod.addImport("mpt", mpt_mod);
-            c_api_tests_mod.addIncludePath(b.path("include"));
-            c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
-            c_api_tests_mod.addCSourceFile(.{
-                .file = b.path("src/c_api/evmc_abi18_smoke.c"),
-                .flags = &.{ "-Wall", "-Wextra", "-pedantic", "-std=c23" },
-            });
-            addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
-            addNativeKeccak(c_api_tests_mod, xkcp_object);
-            addNativeSecp256k1(c_api_tests_mod, libsecp256k1_object);
-            const c_api_tests = b.addTest(.{
-                .root_module = c_api_tests_mod,
-                .filters = b.args orelse &.{},
-            });
-            c_api_tests.use_llvm = true;
-            test_step.dependOn(&b.addRunArtifact(c_api_tests).step);
-        }
     }
 
     {
