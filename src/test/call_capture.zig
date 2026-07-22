@@ -44,6 +44,20 @@ fn seedCode(executor: *Default, address: evmz.Address, code: []const u8, balance
     try executor.state.seedAccount(address, account);
 }
 
+test {
+    _ = @import("geth_calltracer_projection.zig");
+}
+
+test "call capture exports neutral primitives without a client projection" {
+    try std.testing.expect(@hasDecl(evmz.trace, "CallArena"));
+    try std.testing.expect(@hasDecl(evmz.trace, "CallSpan"));
+    try std.testing.expect(@hasDecl(evmz.trace, "CallRow"));
+    try std.testing.expect(@hasDecl(evmz.trace, "CallKind"));
+    try std.testing.expect(@hasDecl(evmz.trace, "CallStatus"));
+    try std.testing.expect(!@hasDecl(evmz.trace, "call_projection"));
+    try std.testing.expect(!@hasDecl(evmz.trace, "geth_calltracer"));
+}
+
 test "call capture distinguishes STATICCALL from inherited-static CALL" {
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);

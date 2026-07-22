@@ -3,6 +3,9 @@
 //! The arena records call/create/selfdestruct externalities at their semantic
 //! boundaries. It is deliberately independent from opcode-step capture and
 //! tracked state.
+//!
+//! Rows retain client-neutral facts only. Serialization shape, error text,
+//! filtering, and transaction or block envelope metadata belong to consumers.
 
 const std = @import("std");
 const Address = @import("../address.zig").Address;

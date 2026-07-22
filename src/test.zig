@@ -3,6 +3,7 @@ test {
     _ = @import("./test/vm_runtime.zig");
     _ = @import("./test/execution_boundary.zig");
     _ = @import("./test/call_capture.zig");
+    _ = @import("./test/call_capture_oracle.zig");
     _ = @import("./test/execution_precompile_runtime.zig");
     _ = @import("./test/block_lifecycle.zig");
     _ = @import("./test/gas_bound_checkpoint.zig");

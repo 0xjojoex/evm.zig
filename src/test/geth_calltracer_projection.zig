@@ -1,10 +1,12 @@
-//! Passive Geth-style nested and Parity-style flat call projections.
+//! Test-only compatibility projection for Geth `callTracer` behavior.
 //!
-//! Both projections consume a completed semantic `CallSpan`. They never run
-//! during EVM execution and retain no formatter-specific data in `CallArena`.
+//! This is an executable conformance oracle, not part of the `evmz.trace`
+//! library surface. It proves that one neutral `CallSpan` contains enough
+//! information for Geth-style nested and Parity-style flat representations.
+//! Client-specific JSON, error text, filtering, and envelope policy stay here.
 
 const std = @import("std");
-const call_arena = @import("call_arena.zig");
+const call_arena = @import("../trace/call_arena.zig");
 
 const Address = @import("../address.zig").Address;
 

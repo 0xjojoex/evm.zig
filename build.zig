@@ -118,6 +118,36 @@ pub fn build(b: *std.Build) void {
     b.default_step.dependOn(&core_check.step);
     b.step("check", "Compile the public evmz module").dependOn(&core_check.step);
 
+    const call_fixture_oracle_mod = b.createModule(.{
+        .root_source_file = b.path("src/call_fixture_oracle_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libcpp = is_native_profile,
+    });
+    call_fixture_oracle_mod.addOptions("build_options", build_options);
+    call_fixture_oracle_mod.addImport("ssz", ssz_mod);
+    call_fixture_oracle_mod.addImport("rlp", rlp_mod);
+    call_fixture_oracle_mod.addImport("mpt", mpt_mod);
+    call_fixture_oracle_mod.addIncludePath(b.path("include"));
+    if (native_precompile_deps) |deps| {
+        addPrecompileNative(b, call_fixture_oracle_mod, deps);
+    }
+    addNativeKeccak(call_fixture_oracle_mod, xkcp_object);
+    addNativeSecp256k1(call_fixture_oracle_mod, libsecp256k1_object);
+    const call_fixture_oracle = b.addExecutable(.{
+        .name = "call-fixture-oracle",
+        .root_module = call_fixture_oracle_mod,
+    });
+    // The VM's tail-dispatch path requires LLVM on x86_64 with Zig 0.16.
+    call_fixture_oracle.use_llvm = true;
+    const run_call_fixture_oracle = b.addRunArtifact(call_fixture_oracle);
+    if (b.args) |args| run_call_fixture_oracle.addArgs(args);
+    const call_fixture_oracle_step = b.step(
+        "call-fixture-oracle",
+        "Diff curated call fixtures against a local Geth evm binary",
+    );
+    call_fixture_oracle_step.dependOn(&run_call_fixture_oracle.step);
+
     // test
     {
         const unit_tests_mod = b.createModule(.{

@@ -227,9 +227,9 @@ pub fn For(comptime ProtocolType: type) type {
                     return;
                 }
             } else {
-                // Geth derives the CREATE address before its shared depth,
-                // balance, and nonce validation, so the failed trace still has
-                // the attempted destination.
+                // The attempted CREATE address is determined before shared
+                // depth, balance, and nonce validation, so a failed semantic
+                // call can retain it without beginning child execution.
                 const creator_nonce = try frame.host.getNonce(creator);
                 target = evmz.address.create(creator, creator_nonce);
                 if (frame.msg.depth >= Host.max_call_depth) {
