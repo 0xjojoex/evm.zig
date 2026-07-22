@@ -1,0 +1,121 @@
+name: Package release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to release
+        required: true
+        type: choice
+        options:
+          - ssz
+          - rlp
+          - mpt
+      version:
+        description: Semantic version without a leading v
+        required: true
+        type: string
+      ref:
+        description: Commit on main to release
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Advance the release branch, tag, and GitHub release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: ${{ inputs.publish && 'Release' || 'Dry run' }} ${{ inputs.package }} ${{ inputs.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Require a source commit on main
+        run: |
+          set -euo pipefail
+          source_commit=$(git rev-parse HEAD)
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Restore consensus fixture archives
+        if: inputs.package == 'ssz'
+        uses: actions/cache@v6
+        with:
+          path: .eest/cache
+          key: release-consensus-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
+      - name: Fetch consensus SSZ fixtures
+        if: inputs.package == 'ssz'
+        working-directory: eest
+        run: scripts/fetch-consensus-ssz-fixtures.sh
+
+      - name: Run consensus SSZ corpus
+        if: inputs.package == 'ssz'
+        run: zig build -Doptimize=ReleaseFast ssz-conformance --summary all -- --jobs 4
+
+      - name: Validate package split
+        id: package
+        env:
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+          FETCH_URL: git+https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          SOURCE_REF=$(git rev-parse HEAD)
+          args=(
+            --package "${PACKAGE}"
+            --version "${VERSION}"
+            --ref "${SOURCE_REF}"
+            --github-output "${GITHUB_OUTPUT}"
+          )
+          if [[ "${PUBLISH}" == true ]]; then
+            args+=(--publish --fetch-url "${FETCH_URL}")
+          fi
+          scripts/release-package.sh "${args[@]}"
+
+      - name: Create GitHub release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ steps.package.outputs.package }}
+          VERSION: ${{ steps.package.outputs.version }}
+          TAG: ${{ steps.package.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.package.outputs.source_commit }}
+          SPLIT_COMMIT: ${{ steps.package.outputs.split_commit }}
+          PACKAGE_HASH: ${{ steps.package.outputs.package_hash }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+            exit 0
+          fi
+          gh release create "${TAG}" \
+            --verify-tag \
+            --title "${PACKAGE} v${VERSION}" \
+            --notes "Source commit: ${SOURCE_COMMIT}
+
+          Split commit: ${SPLIT_COMMIT}
+
+          Zig package hash: \`${PACKAGE_HASH}\`"
