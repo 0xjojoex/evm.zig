@@ -67,7 +67,6 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const native_precompile_deps = if (is_native_profile)
         nativePrecompileDeps(b, target, optimize)
     else
@@ -86,9 +85,8 @@ pub fn build(b: *std.Build) void {
     });
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
-    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
     if (native_precompile_deps) |deps| {
-        addPrecompileNative(b, evmz_mod, deps, evmone_dep);
+        addPrecompileNative(b, evmz_mod, deps);
     }
     addNativeKeccak(evmz_mod, xkcp_object);
     addNativeSecp256k1(evmz_mod, libsecp256k1_object);
@@ -133,9 +131,8 @@ pub fn build(b: *std.Build) void {
         unit_tests_mod.addImport("rlp", rlp_mod);
         unit_tests_mod.addImport("mpt", mpt_mod);
         unit_tests_mod.addIncludePath(b.path("include"));
-        unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
         if (native_precompile_deps) |deps| {
-            addPrecompileNative(b, unit_tests_mod, deps, evmone_dep);
+            addPrecompileNative(b, unit_tests_mod, deps);
         }
         addNativeKeccak(unit_tests_mod, xkcp_object);
         addNativeSecp256k1(unit_tests_mod, libsecp256k1_object);
@@ -314,7 +311,7 @@ pub fn build(b: *std.Build) void {
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
     const guest_payload = guestPayloadOption(b);
     addGuestZiskAb(b, optimize);
-    addGuestZisk(b, optimize, evmone_dep, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
+    addGuestZisk(b, optimize, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
     // examples
     {
@@ -591,7 +588,6 @@ fn addGuestPayloadTest(
 fn addGuestZisk(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    evmone_dep: *std.Build.Dependency,
     ziskos_staticlib_path: ?[]const u8,
     guest_payload: []const u8,
     guest_input_path: ?[]const u8,
@@ -625,7 +621,6 @@ fn addGuestZisk(
     });
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
-    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
     const ssz_mod = b.createModule(.{
         .root_source_file = b.path("pkg/ssz/src/lib.zig"),
         .target = target,
@@ -1193,7 +1188,6 @@ fn addPrecompileNative(
     b: *std.Build,
     module: *std.Build.Module,
     deps: NativePrecompileDeps,
-    evmone_dep: *std.Build.Dependency,
 ) void {
     const mcl_flags = &[_][]const u8{
         "-std=c++20",
@@ -1218,7 +1212,6 @@ fn addPrecompileNative(
     module.addImport("ckzg", deps.ckzg_dep.module("ckzg"));
     module.addImport("kzg_trusted_setup", deps.trusted_setup_mod);
     module.addIncludePath(b.path("src/precompile"));
-    module.addIncludePath(evmone_dep.path("evmc/include"));
     module.addIncludePath(deps.ckzg_dep.path("src"));
     module.addIncludePath(deps.blst_dep.path("bindings"));
     module.addIncludePath(deps.mcl_dep.path("include"));
