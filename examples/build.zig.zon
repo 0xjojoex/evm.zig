@@ -13,7 +13,7 @@
         "build.zig.zon",
         "basic.zig",
         "bal_parallel.zig",
-        "op-deposit.zig",
-        "custom-fork",
+        "op_deposit.zig",
+        "custom_fork",
     },
 }

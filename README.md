@@ -3,8 +3,8 @@
 evm.zig is a fast and composable EVM execution engine, as a Zig library:
 
 - a reusable library EVM with EVMC-compatible API
-- protocol as a comptime value — swap forks, gas tables, opcodes, and
-  precompiles by composition
+- Ethereum-derived with comptime fork, gas, opcode, and precompile
+  specialization
 - stateless block validation from execution witnesses
 - and the same state transition function inside a zkVM guest
 - a fast tail-call interpreter with a zero-alloc pooled executor
@@ -33,7 +33,7 @@ const evmz = b.dependency("evmz", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("evmz", evmz.module("evmz"));
 ```
 
-## First transaction
+## Example
 
 ```zig
 const evmz = @import("evmz");
@@ -86,7 +86,7 @@ zig build example
 runtime. If your embedder targets exactly one fork, bind it at compile time:
 
 ```zig
-const CancunVM = evmz.EvmWith(.{
+const CancunVM = evmz.eth.extend(.{
     .support = evmz.Evm.Support.at(.cancun),
 });
 ```
@@ -117,42 +117,33 @@ transaction. Family system operations belong to `BlockSTF`; the optional
 one-worker hook convenience is `Evm.Sequential`.
 Every block execution must reach `finish()` or `discardIfUnfinished()`.
 
-## Bring your own chain
+## Extend Ethereum
 
-Ethereum's execution, transaction, and block semantics live in the `evmz.eth`
-preset. A custom EVM-family chain can replace each layer independently and bind
-the three definitions into one engine family:
+`evmz` fixes Ethereum as the semantic substrate. A same-timeline family can
+override Ethereum behavior without assembling an arbitrary VM:
 
 ```zig
-const MyExecution = evmz.eth.defineExecution(.{ /* opcodes, gas, precompiles */ });
-const MyTransaction = evmz.eth.defineTransaction(.{ /* validation, settlement */ });
-const MyBlock = evmz.eth.defineBlock(.{ /* block hooks */ });
-
-const MyVM = evmz.Vm(
-    MyRevision,
-    MyExecution,
-    MyTransaction,
-    MyBlock,
-    .{},
-);
+const MyEvm = evmz.eth.extend(.{
+    .execution = .{ /* opcodes, gas, precompiles */ },
+    .transaction = .{ /* admission and intrinsic gas */ },
+    .settlement = .{ /* fee and refund rules */ },
+    .authorization = .{ /* authorization-list rules */ },
+    .block = .{ /* block hooks */ },
+});
 ```
 
-`MyVM` exposes its `Executor`, `Interpreter`, `Transaction`, `Outcome`, and
-`Executed` types plus the matching protocol bindings; the lowercase modules
-(`evmz.execution`, `evmz.executor`, ...) stay available for low-level work.
-`MyVM.BlockExecution.init(&executor, env)` opens a block with its default
-transaction runtime, or pass a preconfigured runtime to `initWithRuntime`.
-Alternate transaction programs come from
-`MyVM.Program(Transaction, Input, Output, Rejection, Implementation)`, which
-shares the VM's `Executor` and exposes
-`Program.Block(Environment, Included, Result, Implementation)` for a matching
-block fold. See [`examples/op-deposit.zig`](examples/op-deposit.zig).
+Families with their own revision enum use:
 
-Authored definitions set the defaults; `initWithPolicy` (transaction runtimes)
-and `initWithPolicies` (block and sequential runtimes) pick other policy values
-without changing the generated types. `evmz.protocol.assertExecutionContract`
-and `assertTransactionContract` report what authored definitions must provide,
-and `examples/custom-fork/` is a compiled downstream template.
+```zig
+const MyRevisions = evmz.eth.revision.Model(MyRevision);
+
+const MyEvm = evmz.eth.derive(MyRevisions, .{
+    .base_revision = mapToEthereum,
+});
+```
+
+See `examples/custom_fork/` for a same-timeline extension and
+`examples/op_deposit.zig` for revision mapping, custom transactions, and a custom block fold.
 
 ## C / EVMC
 
@@ -164,10 +155,6 @@ builds library artifacts exporting `evmc_create_evmz`, an EVMC-compatible
 entrypoint. Public headers are in `include/`.
 
 ## Benchmarks
-
-State execution is validated against the locked Ethereum Execution Spec Tests
-corpus: `67,066` state vectors, `0` failed, `0` skipped. The EEST runner and
-fixture tooling live in `eest/`.
 
 Fixed-Osaka benchmark snapshots use native ReleaseFast builds and explicitly
 omit frame pointers for every engine. Lower is better.
@@ -197,11 +184,6 @@ medians per deployed-runtime call:
 | ERC20 transfer          |  3.859 ms |    6.183 ms |   7.423 ms |  6.088 ms |     1.60× |     1.58× |
 | ERC20 approval+transfer |  3.485 ms |    4.936 ms |   5.950 ms |  4.665 ms |     1.42× |     1.34× |
 | Snailtracer             | 20.495 ms |   59.606 ms |  78.840 ms | 37.704 ms |     2.91× |     1.84× |
-
-The ten-thousand-hashes dip is consistent with code-layout sensitivity rather
-than tracing work: trace-replay growth leaves the untraced Keccak handler
-byte-identical but shifts it by 16 bytes modulo a 64-byte cache line in the
-final binary.
 
 ### AMD EPYC Genoa / Linux x86-64
 

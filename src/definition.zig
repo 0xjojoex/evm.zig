@@ -1,31 +1,22 @@
-//! Fork-configuration schemas for the execution, transaction, and block layers.
+//! Internal rule schemas for Ethereum execution, transaction, and block layers.
+//! Public families start from `eth.extend` or `eth.derive`; `eth/config.zig`
+//! resolves these layers as one complete compiler input.
 //!
-//! `ExecutionDefinition(R)`, `TransactionDefinition(R)`, and
-//! `BlockDefinition(R)` are the authoring boundaries. Each layer consumes only
-//! the policy it owns: the execution definition binds Executor, the transaction
-//! definition binds the transaction program above it, and the block definition
-//! binds the block program above that runtime. There is no composed all-domain
-//! view; `protocol/binding.zig` binds each layer directly
-//! (`ExecutionProtocol` → `TransactionProtocol` → `BlockProtocol`).
-//!
-//! ## Implementer contract
-//!
-//! This file is the canonical contract for definition implementers—the Zig
-//! equivalent of Rust trait declarations and their default methods. Each Config
-//! field documents one semantic hook and supplies an intentional neutral
-//! default. `protocol/types.zig` owns shared input/output value types;
-//! `protocol/validate.zig` owns compile-time shape diagnostics. Neither owns
-//! hook semantics. Ethereum implementations and EIP rationale live beside
-//! their domain in `eth/`.
+//! Each layer still consumes only the policy it owns so transaction or block
+//! customization does not change Executor identity. `protocol/binding.zig`
+//! binds the complete values into runtime surfaces.
 //!
 //! On the bound layer protocols, lowercase members (`.call`, `.create`,
 //! `.storage`, `.self_destruct` on the execution layer; `.transaction`,
 //! `.settlement`, `.authorization` on the transaction layer; `.block` on the
 //! block layer) are semantic values. Uppercase `Tx`, `Settlement`,
 //! `Instruction`, and `Precompile` are generated APIs that carry engine-owned
-//! types; definitions do not replace those representations.
+//! types; rule values do not replace those representations.
 //!
-//! This file defines schema and neutral defaults only, never Ethereum rules.
+//! Ethereum implementations and EIP rationale remain beside their domains in
+//! `eth/`. The top-level rule aggregates below have no neutral defaults: every
+//! compiled family field comes from canonical Ethereum, mapped Ethereum
+//! inheritance, or an explicit override.
 const std = @import("std");
 
 const address = @import("address.zig");
@@ -40,72 +31,40 @@ const tx_gas = @import("transaction/gas.zig");
 
 const Address = address.Address;
 
-const NeutralTransactionValidationError = enum { unsupported };
-
-pub fn neutralValueTransferLog(comptime R: type) *const fn (R, types.ValueTransferInput) ?types.ValueTransferLog {
-    return struct {
-        fn run(_: R, _: types.ValueTransferInput) ?types.ValueTransferLog {
-            return null;
-        }
-    }.run;
-}
-
-const NeutralTransactionPreparation = struct {
-    pub fn Runtime(comptime Protocol: type, comptime Policy: type) type {
-        return struct {
-            policy: *const Policy,
-
-            pub fn prepare(self: @This(), _: tx.PrepareInput(Protocol)) !tx.PrepareResult(Protocol) {
-                _ = self.policy;
-                return error.UnsupportedTransactionPreparation;
-            }
-        };
-    }
-};
-
-/// Execution-owned definition consumed by Interpreter and Executor.
+/// Execution-owned rules consumed by Interpreter and Executor.
 ///
 /// This is the complete dependency of Interpreter and Executor. Transaction
 /// preparation, authorization, settlement, and block sequencing deliberately
 /// do not appear here, so changing those domains does not change Executor
 /// identity. Value-transfer logs remain because they are observable during
 /// message execution.
-pub fn ExecutionDefinition(comptime R: type) type {
+pub fn ExecutionRules(comptime R: type) type {
     return struct {
         pub const Revision = R;
 
-        name: []const u8 = "custom",
-        revision: RevisionConfig(R) = .{},
+        name: []const u8,
+        revision: RevisionConfig(R),
         instruction: type,
-        value_transfer_log: *const fn (R, types.ValueTransferInput) ?types.ValueTransferLog = neutralValueTransferLog(R),
-        call: CallConfig(R) = .default,
-        create: CreateConfig(R) = .default,
-        storage: StorageConfig(R) = .default,
-        self_destruct: SelfDestructConfig(R) = .default,
+        value_transfer_log: *const fn (R, types.ValueTransferInput) ?types.ValueTransferLog,
+        call: CallConfig(R),
+        create: CreateConfig(R),
+        storage: StorageConfig(R),
+        self_destruct: SelfDestructConfig(R),
         precompile: type,
     };
 }
 
-/// Transaction-shell definition consumed above one execution runtime.
+/// Transaction-shell rules consumed above one execution runtime.
 ///
-/// This is the complete authored policy consumed above one execution runtime.
+/// This is the complete resolved policy consumed above one execution runtime.
 /// It deliberately excludes block sequencing and system-operation hooks.
-pub fn TransactionDefinition(comptime R: type) type {
+pub fn TransactionLayerRules(comptime R: type) type {
     return struct {
         pub const Revision = R;
 
-        transaction: TransactionConfig(R) = .default,
-        settlement: SettlementConfig(R) = .default,
-        authorization: AuthorizationConfig(R) = .default,
-    };
-}
-
-/// Block-program definition consumed above one transaction runtime.
-pub fn BlockDefinition(comptime R: type) type {
-    return struct {
-        pub const Revision = R;
-
-        block: BlockConfig(R) = .default,
+        transaction: TransactionConfig(R),
+        settlement: SettlementConfig(R),
+        authorization: AuthorizationConfig(R),
     };
 }
 
@@ -115,10 +74,6 @@ pub fn TransactionConfig(comptime R: type) type {
 
         pub const default: Self = .{};
 
-        /// Pre-execution validation and normalization into an executable request.
-        Preparation: type = NeutralTransactionPreparation,
-        /// Protocol-owned rejection reason returned by `Preparation`.
-        ValidationError: type = NeutralTransactionValidationError,
         /// Whether an engine transaction kind is valid at `revision`.
         kindActive: *const fn (R, tx.TxKind) bool = neverTransactionKind,
         /// Whether `kind` may target contract creation rather than a call.
@@ -298,7 +253,7 @@ pub fn BlockConfig(comptime R: type) type {
     };
 }
 
-/// Runtime-only transaction policy projected from an authored
+/// Runtime-only transaction policy projected from a resolved
 /// `TransactionConfig`. Type-shaped preparation and rejection vocabulary stay
 /// on the transaction program. Calldata pricing is batched before crossing the
 /// runtime boundary so the byte loop does not dispatch indirectly per byte.
@@ -345,24 +300,24 @@ pub fn BlockPolicy(comptime R: type) type {
     return BlockConfig(R);
 }
 
-/// Project one complete authored transaction definition into an owned,
+/// Project one complete resolved transaction layer into an owned,
 /// runtime-only policy value. Every source field must be classified here so a
 /// future schema addition cannot silently disappear at the binding boundary.
 pub fn projectTransactionPolicy(
     comptime R: type,
-    comptime authored: TransactionDefinition(R),
+    comptime rules: TransactionLayerRules(R),
 ) TransactionPolicy(R) {
     const RuntimeConfig = TransactionPolicyConfig(R);
     comptime {
         assertBindingComplete(
             TransactionConfig(R),
             RuntimeConfig,
-            .{ "Preparation", "ValidationError" },
+            .{},
             .{},
             .{},
         );
         assertBindingComplete(
-            TransactionDefinition(R),
+            TransactionLayerRules(R),
             TransactionPolicy(R),
             .{},
             .{"transaction"},
@@ -375,13 +330,13 @@ pub fn projectTransactionPolicy(
     }
 
     return .{
-        .transaction = projectTransactionConfig(R, authored.transaction),
-        .settlement = authored.settlement,
-        .authorization = authored.authorization,
+        .transaction = projectTransactionConfig(R, rules.transaction),
+        .settlement = rules.settlement,
+        .authorization = rules.authorization,
     };
 }
 
-/// Project authored or namespace-style transaction facts into the runtime-only
+/// Project resolved or namespace-style transaction facts into the runtime-only
 /// policy carrier. Missing hooks deliberately inherit neutral defaults; this is
 /// used by static protocol helpers and focused tests, not runtime selection.
 pub fn projectTransactionConfig(
@@ -395,7 +350,7 @@ pub fn projectTransactionConfig(
     );
 }
 
-/// Project authored or namespace-style settlement facts into its runtime-only
+/// Project resolved or namespace-style settlement facts into its runtime-only
 /// policy carrier.
 pub fn projectSettlementConfig(
     comptime R: type,
@@ -439,17 +394,13 @@ else
     return @field(@TypeOf(source), name);
 }
 
-/// Project one complete authored block definition into its owned policy.
+/// Project one complete resolved block config into its owned policy.
 pub fn projectBlockPolicy(
     comptime R: type,
-    comptime authored: BlockDefinition(R),
+    comptime rules: BlockConfig(R),
 ) BlockPolicy(R) {
-    const Projection = struct { block: BlockPolicy(R) };
-    comptime {
-        assertBindingComplete(BlockDefinition(R), Projection, .{}, .{}, .{});
-        assertRuntimeOnly(BlockPolicy(R));
-    }
-    return authored.block;
+    comptime assertRuntimeOnly(BlockPolicy(R));
+    return rules;
 }
 
 fn nameIn(comptime name: []const u8, comptime names: anytype) bool {
@@ -459,7 +410,7 @@ fn nameIn(comptime name: []const u8, comptime names: anytype) bool {
     return false;
 }
 
-/// Prove that each authored field is classified exactly once as static,
+/// Prove that each rule field is classified exactly once as static,
 /// copied directly, or deliberately replaced by a named projected field.
 fn assertBindingComplete(
     comptime Source: type,
@@ -479,9 +430,9 @@ fn assertBindingComplete(
             @intFromBool(is_replaced) +
             @intFromBool(is_direct);
         if (classification_count != 1)
-            @compileError("definition field must have exactly one policy binding classification: " ++ field.name);
+            @compileError("rule field must have exactly one policy binding classification: " ++ field.name);
         if (is_direct and @FieldType(Projection, field.name) != field.type)
-            @compileError("policy projection changed definition field type: " ++ field.name);
+            @compileError("policy projection changed rule field type: " ++ field.name);
     }
 
     inline for (std.meta.fields(Projection)) |field| {
@@ -497,11 +448,11 @@ fn assertBindingComplete(
 
     inline for (static_fields) |field_name| {
         if (!@hasField(Source, field_name))
-            @compileError("static classification names no definition field: " ++ field_name);
+            @compileError("static classification names no rule field: " ++ field_name);
     }
     inline for (replaced_source_fields) |field_name| {
         if (!@hasField(Source, field_name))
-            @compileError("replacement names no definition field: " ++ field_name);
+            @compileError("replacement names no rule field: " ++ field_name);
     }
     inline for (replacement_projection_fields) |field_name| {
         if (!@hasField(Projection, field_name))
@@ -723,33 +674,33 @@ pub fn SelfDestructConfig(comptime R: type) type {
 }
 
 /// Config block describing a revision enum `R`: its ordering, latest/stable
-/// pins, and implication relation. Held as `Definition.revision`.
+/// pins, and implication relation. Held on `ExecutionRules.revision`.
 pub fn RevisionConfig(comptime R: type) type {
     return support.ModelConfig(R);
 }
 
 /// Builds the bound revision model (ordering + availability queries) from a
-/// `RevisionConfig`. Consumed by `Bound` to resolve per-revision opcode support.
+/// `RevisionConfig`. Consumed by `ExecutionModel` for opcode support.
 pub fn RevisionModel(comptime R: type, comptime cfg: RevisionConfig(R)) type {
     return support.ModelWithConfig(R, cfg);
 }
 
-/// Bind only the message-execution projection of a Definition.
-pub fn BoundExecution(comptime execution_definition: anytype) type {
-    const DefinitionValue = @TypeOf(execution_definition);
-    if (DefinitionValue == type) {
-        @compileError("BoundExecution expects an ExecutionDefinition(R) value");
+/// Resolve the message-execution model used by dispatch and the Executor.
+pub fn ExecutionModel(comptime execution_rules: anytype) type {
+    const RulesType = @TypeOf(execution_rules);
+    if (RulesType == type) {
+        @compileError("ExecutionModel expects an ExecutionRules(R) value");
     }
 
-    const R = DefinitionValue.Revision;
-    const revision_model = RevisionModel(R, execution_definition.revision);
-    const InstructionSource = execution_definition.instruction;
+    const R = RulesType.Revision;
+    const revision_model = RevisionModel(R, execution_rules.revision);
+    const InstructionSource = execution_rules.instruction;
     const InstructionBase = instructionDomain(InstructionSource);
-    const InstructionDomain = BoundInstruction(InstructionSource, InstructionBase, revision_model.Availability);
-    const call_config: CallConfig(R) = execution_definition.call;
-    const create_config: CreateConfig(R) = execution_definition.create;
-    const storage_config: StorageConfig(R) = execution_definition.storage;
-    const self_destruct_config: SelfDestructConfig(R) = execution_definition.self_destruct;
+    const InstructionDomain = ResolvedInstruction(InstructionSource, InstructionBase, revision_model.Availability);
+    const call_config: CallConfig(R) = execution_rules.call;
+    const create_config: CreateConfig(R) = execution_rules.create;
+    const storage_config: StorageConfig(R) = execution_rules.storage;
+    const self_destruct_config: SelfDestructConfig(R) = execution_rules.self_destruct;
 
     return struct {
         pub const Revision = R;
@@ -767,12 +718,12 @@ pub fn BoundExecution(comptime execution_definition: anytype) type {
         pub const StaticGasSource = InstructionSource;
 
         pub const Instruction = InstructionDomain;
-        pub const valueTransferLog = execution_definition.value_transfer_log;
+        pub const valueTransferLog = execution_rules.value_transfer_log;
         pub const call = call_config;
         pub const create = create_config;
         pub const storage = storage_config;
         pub const self_destruct = self_destruct_config;
-        pub const Precompile = execution_definition.precompile;
+        pub const Precompile = execution_rules.precompile;
     };
 }
 
@@ -783,10 +734,10 @@ fn instructionDomain(comptime InstructionSource: type) type {
     if (@hasDecl(InstructionSource, "Instruction")) {
         return InstructionSource.Instruction;
     }
-    @compileError("Definition.instruction must expose Value or nested Instruction");
+    @compileError("ExecutionRules.instruction must expose Value or nested Instruction");
 }
 
-fn BoundInstruction(comptime InstructionSource: type, comptime Base: type, comptime Availability: type) type {
+fn ResolvedInstruction(comptime InstructionSource: type, comptime Base: type, comptime Availability: type) type {
     return struct {
         pub const Value = Base.Value;
 
@@ -820,7 +771,7 @@ fn BoundInstruction(comptime InstructionSource: type, comptime Base: type, compt
             }
             return switch (comptime context(value)) {
                 .byte => |opcode_byte| InstructionSource.staticGasForRevisionByte(revision, opcode_byte),
-                .custom => @compileError("ExecutionDefinition.instruction with custom values must provide staticGasForRevisionInstruction"),
+                .custom => @compileError("ExecutionRules.instruction with custom values must provide staticGasForRevisionInstruction"),
             };
         }
 
@@ -878,21 +829,11 @@ test "revision model accepts custom ordering function" {
     try std.testing.expectEqual(support.Resolution.runtime, model.resolveAvailability(.{ .since = .beta }, full));
 }
 
-test "execution, transaction, and block configs carry neutral policy" {
+test "low-level configs retain explicit neutral test values" {
     const R = enum { one };
-    const execution = ExecutionDefinition(R){
-        .instruction = void,
-        .precompile = void,
-    };
     const transaction = TransactionConfig(R).default;
     const block = BlockConfig(R).default;
-    const zero_address = std.mem.zeroes(Address);
 
-    try std.testing.expectEqual(@as(?types.ValueTransferLog, null), execution.value_transfer_log(.one, .{
-        .from = zero_address,
-        .to = zero_address,
-        .amount = 0,
-    }));
     try std.testing.expectEqual(@as(usize, 0), block.beforeBlock(.one, .{
         .number = 0,
         .timestamp = 0,
@@ -905,22 +846,25 @@ test "execution, transaction, and block configs carry neutral policy" {
     try std.testing.expect(!transaction.transactionWarmsCoinbase(.one));
 }
 
-test "definition value domains default to complete neutral configs" {
+test "top-level compiler rule aggregates require every field" {
     const R = enum { one };
-    const execution: ExecutionDefinition(R) = .{
-        .instruction = void,
-        .precompile = void,
+    const Assert = struct {
+        fn hasNoDefaults(comptime T: type) void {
+            inline for (std.meta.fields(T)) |field| {
+                if (field.default_value_ptr != null) {
+                    @compileError("top-level compiler rule field must not have a default: " ++ field.name);
+                }
+            }
+        }
     };
-    const transaction: TransactionDefinition(R) = .{};
 
-    try std.testing.expect(!transaction.transaction.kindActive(.one, .legacy));
-    try std.testing.expect(!transaction.authorization.active(.one));
-    try std.testing.expectEqual(@as(i64, 0), execution.call.callBaseGas(.one));
-    try std.testing.expectEqual(@as(?usize, null), execution.create.createCodeSizeLimit(.one));
-    try std.testing.expectEqual(@as(?i64, null), execution.storage.sstoreMinimumGas(.one));
+    comptime {
+        Assert.hasNoDefaults(ExecutionRules(R));
+        Assert.hasNoDefaults(TransactionLayerRules(R));
+    }
 }
 
-test "transaction definition projects to one runtime-only policy type" {
+test "transaction layer rules project to one runtime-only policy type" {
     const R = enum { first, second };
     const hooks = struct {
         fn calldataGas(_: R, input: []const u8) ?u64 {
@@ -941,16 +885,24 @@ test "transaction definition projects to one runtime-only policy type" {
         }
     };
 
-    const generous_definition: TransactionDefinition(R) = .{ .transaction = .{
-        .calldataGas = hooks.calldataGas,
-        .totalGasLimit = hooks.generousLimit,
-    } };
-    const strict_definition: TransactionDefinition(R) = .{ .transaction = .{
-        .calldataGas = hooks.calldataGas,
-        .totalGasLimit = hooks.strictLimit,
-    } };
-    const generous = projectTransactionPolicy(R, generous_definition);
-    const strict = projectTransactionPolicy(R, strict_definition);
+    const generous_rules: TransactionLayerRules(R) = .{
+        .transaction = .{
+            .calldataGas = hooks.calldataGas,
+            .totalGasLimit = hooks.generousLimit,
+        },
+        .settlement = .default,
+        .authorization = .default,
+    };
+    const strict_rules: TransactionLayerRules(R) = .{
+        .transaction = .{
+            .calldataGas = hooks.calldataGas,
+            .totalGasLimit = hooks.strictLimit,
+        },
+        .settlement = .default,
+        .authorization = .default,
+    };
+    const generous = projectTransactionPolicy(R, generous_rules);
+    const strict = projectTransactionPolicy(R, strict_rules);
 
     comptime {
         std.debug.assert(@TypeOf(generous) == TransactionPolicy(R));
@@ -969,7 +921,7 @@ test "transaction definition projects to one runtime-only policy type" {
     try std.testing.expectEqual(@as(?u64, 10_000_000), strict.transaction.totalGasLimit(.second));
 }
 
-test "block definition projects to a runtime policy value" {
+test "block config projects to a runtime policy value" {
     const R = enum { one };
     const hooks = struct {
         fn beforeBlock(_: R, context: types.BeforeBlockContext) types.BlockSystemCalls {
@@ -984,10 +936,10 @@ test "block definition projects to a runtime policy value" {
             return calls;
         }
     };
-    const authored: BlockDefinition(R) = .{ .block = .{
+    const rules: BlockConfig(R) = .{
         .beforeBlock = hooks.beforeBlock,
-    } };
-    const policy = projectBlockPolicy(R, authored);
+    };
+    const policy = projectBlockPolicy(R, rules);
 
     comptime {
         if (@TypeOf(policy) != BlockPolicy(R))

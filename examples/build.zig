@@ -8,8 +8,8 @@ const Example = struct {
 const examples = [_]Example{
     .{ .name = "basic", .path = "basic.zig" },
     .{ .name = "bal_parallel", .path = "bal_parallel.zig" },
-    .{ .name = "op-deposit", .path = "op-deposit.zig" },
-    .{ .name = "custom-fork", .path = "custom-fork/main.zig" },
+    .{ .name = "op_deposit", .path = "op_deposit.zig" },
+    .{ .name = "custom_fork", .path = "custom_fork/main.zig" },
 };
 
 pub fn build(b: *std.Build) void {

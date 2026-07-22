@@ -8,7 +8,7 @@ const JsonValue = fixture_common.JsonValue;
 const transaction = evmz.transaction;
 const EthTransactionProtocol = evmz.Evm.TransactionProtocol;
 const Evm = evmz.Evm;
-const TxResult = transaction.TransactOutcome(evmz.vm.TxExecutionResult, Evm.Rejection);
+const TxResult = transaction.TransactOutcome(evmz.TxExecutionResult, Evm.Rejection);
 
 const supported_exact_gas_bound_limits = [_]u64{
     1_000_000,
@@ -783,7 +783,7 @@ const FixtureHost = struct {
         self.allocator.destroy(self.store);
     }
 
-    fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
+    fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
         return accountView(&self.executor, address);
     }
 
@@ -883,7 +883,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.revision = spec;
         }
 
-        fn getAccount(self: *Self, address: Address) !?evmz.vm.AccountView {
+        fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
             return accountView(&self.executor, address);
         }
 
@@ -917,7 +917,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
     };
 }
 
-fn accountView(executor: *Evm.Executor, address: Address) !?evmz.vm.AccountView {
+fn accountView(executor: *Evm.Executor, address: Address) !?evmz.AccountView {
     const account = try executor.getAccountOrLoad(address) orelse return null;
     return .{
         .nonce = account.nonce,

@@ -268,7 +268,7 @@ pub fn Prepared(comptime Protocol: type) type {
 
 pub fn PrepareResult(comptime Protocol: type) type {
     return union(enum) {
-        rejected: Protocol.transaction.ValidationError,
+        rejected: Protocol.Tx.ValidationError,
         executable: Prepared(Protocol),
     };
 }

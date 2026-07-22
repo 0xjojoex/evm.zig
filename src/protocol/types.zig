@@ -188,7 +188,9 @@ pub const BeforeTransactionContext = struct {
     transaction_index: u64,
 };
 
-pub const BlockTransactionStatus = enum {
+/// Terminal execution status. One vocabulary serves the engine halt states
+/// and the transaction/receipt layer; `Interpreter.Status` aliases this type.
+pub const BlockTransactionStatus = enum(u8) {
     success,
     revert,
     invalid,

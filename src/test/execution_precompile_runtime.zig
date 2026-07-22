@@ -60,17 +60,10 @@ const StatefulPrecompile = struct {
     }
 };
 
-const StatefulDefinition = evmz.eth.defineExecution(.{
+const StatefulVm = evmz.eth.extend(.{ .execution = .{
     .name = "stateful-precompile-service-test",
     .precompile = StatefulPrecompile,
-});
-const StatefulVm = evmz.Vm(
-    evmz.eth.Revision,
-    StatefulDefinition,
-    evmz.eth.transaction_definition,
-    evmz.eth.block_definition,
-    .{},
-);
+} });
 
 test "family precompile runtime can use host state and keeps EVM rollback semantics" {
     const sender = evmz.addr(0xaaaa);

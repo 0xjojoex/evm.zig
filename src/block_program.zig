@@ -19,7 +19,6 @@ pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
 pub fn bind(
     comptime TransactionRuntimeType: type,
     comptime ExecutorType: type,
-    comptime BlockProtocolType: type,
     comptime BlockPolicyType: type,
     comptime default_block_policy: BlockPolicyType,
     comptime TransactionType: type,
@@ -40,7 +39,6 @@ pub fn bind(
         TransactionRuntimeType,
         RuntimeWithPrelude,
         ExecutorType,
-        BlockProtocolType,
         TransactionType,
         TransactInputType,
         OutputType,
@@ -60,7 +58,6 @@ fn BoundBlockProgram(
     comptime BaseTransactionRuntimeType: type,
     comptime TransactionRuntimeType: type,
     comptime ExecutorType: type,
-    comptime BlockProtocolType: type,
     comptime TransactionType: type,
     comptime TransactInputType: type,
     comptime OutputType: type,
@@ -96,7 +93,6 @@ fn BoundBlockProgram(
 
         pub const TransactionRuntime = TransactionRuntimeType;
         pub const Executor = ExecutorType;
-        pub const BlockProtocol = BlockProtocolType;
         pub const Transaction = TransactionType;
         pub const Output = OutputType;
         pub const Rejection = RejectionType;

@@ -1,8 +1,8 @@
 //! The Ethereum protocol definition.
 //!
-//! This module owns the independently authored Ethereum execution,
-//! transaction, and block definitions. Resolved facts live on `Protocol`,
-//! produced by `fork(revision)` or `protocol(window)`.
+//! This module owns canonical Ethereum rules and Ethereum-derived families.
+//! Resolved facts live on `Protocol`, produced by `fork(revision)` or
+//! `protocol(window)`.
 //!
 //! Layer note: most declarations here are protocol *data and derivations*.
 //! `eth.block_stf` is the concrete Ethereum block-transition layer above
@@ -12,7 +12,7 @@
 const std = @import("std");
 
 pub const revision = @import("eth/revision.zig");
-pub const config = @import("eth/config.zig");
+const config = @import("eth/config.zig");
 const derived = @import("eth/derive.zig");
 pub const bal = @import("eth/bal.zig");
 pub const bal_diff = @import("eth/bal/diff.zig");
@@ -37,41 +37,23 @@ pub const eip7685 = @import("eth/eip/7685.zig");
 pub const eip8282 = @import("eth/eip/8282.zig");
 pub const eip8037 = @import("eth/eip/8037.zig");
 const definition_mod = @import("definition.zig");
-const protocol_mod = @import("protocol.zig");
+const protocol_binding = @import("protocol/binding.zig");
 
 pub const Revision = revision.Revision;
 pub const ExecutionOptions = config.ExecutionOptions;
 pub const TransactionOptions = config.TransactionOptions;
+pub const SettlementOptions = config.SettlementOptions;
+pub const AuthorizationOptions = config.AuthorizationOptions;
 pub const BlockOptions = config.BlockOptions;
 pub const DeriveOptions = derived.Options;
 pub const derive = derived.derive;
+pub const ExtendOptions = derived.ExtendOptions;
+pub const extend = derived.extend;
 
-pub fn defineExecution(comptime options: ExecutionOptions(Revision)) definition_mod.ExecutionDefinition(Revision) {
-    return config.execution(options);
-}
-
-pub fn defineTransaction(comptime options: TransactionOptions(Revision)) definition_mod.TransactionDefinition(Revision) {
-    return config.transaction(options);
-}
-
-pub fn defineBlock(comptime options: BlockOptions(Revision)) definition_mod.BlockDefinition(Revision) {
-    return config.block(options);
-}
-
-pub fn transactionPolicy(comptime options: TransactionOptions(Revision)) definition_mod.TransactionPolicy(Revision) {
-    return definition_mod.projectTransactionPolicy(Revision, defineTransaction(options));
-}
-
-pub fn blockPolicy(comptime options: BlockOptions(Revision)) definition_mod.BlockPolicy(Revision) {
-    return definition_mod.projectBlockPolicy(Revision, defineBlock(options));
-}
-
-pub const execution_definition = defineExecution(.{});
-pub const transaction_definition = defineTransaction(.{});
-pub const block_definition = defineBlock(.{});
-pub const transaction_policy = transactionPolicy(.{});
-pub const block_policy = blockPolicy(.{});
-const Definition = definition_mod.BoundExecution(execution_definition);
+const canonical = config.canonical;
+const transaction_policy = definition_mod.projectTransactionPolicy(Revision, canonical.transaction);
+const block_policy = definition_mod.projectBlockPolicy(Revision, canonical.block);
+const Execution = definition_mod.ExecutionModel(canonical.execution);
 
 pub const ExecutionHeader = header.ExecutionHeader;
 pub const Withdrawal = @import("eth/Withdrawal.zig");
@@ -80,31 +62,31 @@ pub const BlockSTF = block_stf;
 pub const Protocol = protocol(.all);
 
 /// Bind the Ethereum execution layer over `support_window` revisions.
-pub fn executionProtocol(comptime support_window: Definition.Support) type {
-    return protocol_mod.ExecutionProtocol(execution_definition, support_window);
+fn executionProtocol(comptime support_window: Execution.Support) type {
+    return protocol_binding.compileExecution(canonical.execution, support_window);
 }
 
 /// Bind the Ethereum transaction layer above the execution binding.
-pub fn transactionProtocol(comptime support_window: Definition.Support) type {
-    return protocol_mod.TransactionProtocol(
+fn transactionProtocol(comptime support_window: Execution.Support) type {
+    return protocol_binding.compileTransaction(
         executionProtocol(support_window),
-        transaction_definition,
+        canonical.transaction,
     );
 }
 
 /// Bind the full Ethereum layer chain over `support_window` revisions. The
 /// returned namespace is the block layer; `TransactionProtocol` and
 /// `ExecutionProtocol` reference the layers below it.
-pub fn protocol(comptime support_window: Definition.Support) type {
-    return protocol_mod.BlockProtocol(
+pub fn protocol(comptime support_window: Execution.Support) type {
+    return protocol_binding.compileBlock(
         transactionProtocol(support_window),
-        block_definition,
+        canonical.block,
     );
 }
 
 /// Bind the Ethereum layer chain pinned to a single `revision_value`.
 pub fn fork(comptime revision_value: Revision) type {
-    return protocol(Definition.Support.at(revision_value));
+    return protocol(Execution.Support.at(revision_value));
 }
 
 pub const system_address = system.system_address;

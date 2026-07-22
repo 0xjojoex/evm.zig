@@ -27,7 +27,7 @@ const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
 const eip7685 = @import("eip/7685.zig");
 const eip8282 = @import("eip/8282.zig");
-const eth_config = @import("config.zig");
+const family_builder = @import("derive.zig");
 const eth_system = @import("system.zig");
 const eth_transaction = @import("transaction.zig");
 const trie = @import("trie.zig");
@@ -41,16 +41,7 @@ const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
 
-const execution_definition = eth_config.execution(.{});
-const transaction_definition = eth_config.transaction(.{});
-const block_definition = eth_config.block(.{});
-const Engine = vm.Vm(
-    Revision,
-    execution_definition,
-    transaction_definition,
-    block_definition,
-    .{},
-);
+const Engine = family_builder.extend(.{});
 const BlockExecution = Engine.BlockExecution;
 const BalDifferentialOperations = struct {
     pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;

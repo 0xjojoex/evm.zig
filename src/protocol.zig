@@ -1,21 +1,12 @@
-//! Binds authored definition values into per-layer runtime surfaces.
+//! Shared semantic carrier types and resolved revision/dispatch facts.
 //!
-//! Each layer binds directly above the one below it: `ExecutionProtocol`
-//! turns an execution definition into the dispatch namespace the interpreter
-//! and executor consume (instruction tables, support window, revision model);
-//! `TransactionProtocol` binds transaction policy above it; `BlockProtocol`
-//! binds block sequencing hooks above that. There is no composed all-domain
-//! protocol namespace.
-
-const definition = @import("./definition.zig");
+//! Ethereum-family construction lives under `eth`; definition binding remains
+//! private engine machinery. Execution consumers use these domain-owned values
+//! without depending on the assembly path that selected them.
 
 const types = @import("./protocol/types.zig");
-const validate = @import("./protocol/validate.zig");
-pub const dispatcher = @import("./protocol/dispatcher.zig");
-pub const instruction = @import("./protocol/instruction.zig");
-pub const transaction = @import("./protocol/transaction.zig");
-pub const binding = @import("./protocol/binding.zig");
-pub const support = @import("./protocol/support.zig");
+const dispatcher = @import("./protocol/dispatcher.zig");
+const support = @import("./protocol/support.zig");
 
 pub const SelfDestructPolicy = types.SelfDestructPolicy;
 pub const SelfDestructFinalization = types.SelfDestructFinalization;
@@ -48,29 +39,10 @@ pub const DelegatedAccountAccess = types.DelegatedAccountAccess;
 pub const AuthorizationGasAdjustment = types.AuthorizationGasAdjustment;
 pub const ChildGas = types.ChildGas;
 
-/// Assert the full execution-layer contract for one execution definition:
-/// dispatch surface, precompile domain, and interpreter dynamic-gas hooks.
-pub fn assertExecutionContract(comptime execution_definition: anytype) void {
-    validate.assertExecutionContract(definition.BoundExecution(execution_definition));
-}
-
-/// Assert the dispatch and precompile contract for one execution definition.
-pub fn assertDispatchContract(comptime execution_definition: anytype) void {
-    validate.assertDispatchContract(definition.BoundExecution(execution_definition));
-}
-
-/// Assert one transaction definition's preparation contract over revision `R`.
-pub fn assertTransactionContract(comptime R: type, comptime transaction_definition: anytype) void {
-    validate.assertTransactionContract(R, transaction_definition);
-}
-
 pub const DispatchEntry = dispatcher.DispatchEntry;
 pub const ExecutionTarget = dispatcher.ExecutionTarget;
 pub const OpcodeTier = support.OpcodeTier;
 pub const Resolution = support.Resolution;
-pub const ExecutionProtocol = binding.ExecutionProtocol;
-pub const TransactionProtocol = binding.TransactionProtocol;
-pub const BlockProtocol = binding.BlockProtocol;
 pub const StaticGas = dispatcher.StaticGas;
 pub const RevisionId = support.RevisionId;
 pub const revisionId = support.revisionId;

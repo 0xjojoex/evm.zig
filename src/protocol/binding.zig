@@ -14,29 +14,28 @@ const tx_settlement = @import("../transaction/settlement.zig");
 const support_mod = @import("support.zig");
 const Resolution = support_mod.Resolution;
 
-pub fn ExecutionProtocol(
-    comptime definition_value: anytype,
-    comptime support_window: definition_mod.BoundExecution(definition_value).Support,
+pub fn compileExecution(
+    comptime execution_rules: anytype,
+    comptime support_window: definition_mod.ExecutionModel(execution_rules).Support,
 ) type {
-    return ExecutionProtocolWithDispatch(definition_value, support_window, .{});
+    return compileExecutionWithDispatch(execution_rules, support_window, .{});
 }
 
-/// Bind one transaction definition above one bound execution protocol.
+/// Compile transaction rules above one resolved execution model.
 ///
 /// The transaction layer owns preparation, settlement, and authorization
 /// policy. It inherits revision context from the execution layer below and
 /// never re-binds it: the support window is applied once, at the execution
 /// binding, because only instruction dispatch has comptime revision shape.
 /// Cross-layer reads stay explicit through `ExecutionProtocol`.
-pub fn TransactionProtocol(
+pub fn compileTransaction(
     comptime ExecutionProtocolType: type,
-    comptime transaction_definition: definition_mod.TransactionDefinition(ExecutionProtocolType.Revision),
+    comptime transaction_layer_rules: definition_mod.TransactionLayerRules(ExecutionProtocolType.Revision),
 ) type {
-    validate.assertTransactionContract(ExecutionProtocolType.Revision, transaction_definition);
     const R = ExecutionProtocolType.Revision;
-    const transaction_config: definition_mod.TransactionConfig(R) = transaction_definition.transaction;
-    const settlement_config: definition_mod.SettlementConfig(R) = transaction_definition.settlement;
-    const authorization_config: definition_mod.AuthorizationConfig(R) = transaction_definition.authorization;
+    const transaction_config: definition_mod.TransactionConfig(R) = transaction_layer_rules.transaction;
+    const settlement_config: definition_mod.SettlementConfig(R) = transaction_layer_rules.settlement;
+    const authorization_config: definition_mod.AuthorizationConfig(R) = transaction_layer_rules.authorization;
 
     return struct {
         pub const ExecutionProtocol = ExecutionProtocolType;
@@ -49,23 +48,20 @@ pub fn TransactionProtocol(
         pub const settlement = settlement_config;
         pub const authorization = authorization_config;
 
-        pub const Tx = transaction_mod.For(transaction_config);
+        pub const Tx = transaction_mod.Ethereum;
         pub const Settlement = tx_settlement.Default;
     };
 }
 
-/// Bind one block definition above one bound transaction protocol.
+/// Compile block rules above one resolved transaction model.
 ///
 /// The block layer owns block-sequencing system-call hooks. Everything else is
 /// reached through the `TransactionProtocol` and `ExecutionProtocol` layer
 /// references.
-pub fn BlockProtocol(
+pub fn compileBlock(
     comptime TransactionProtocolType: type,
-    comptime block_definition: definition_mod.BlockDefinition(TransactionProtocolType.Revision),
+    comptime block_config: definition_mod.BlockConfig(TransactionProtocolType.Revision),
 ) type {
-    const R = TransactionProtocolType.Revision;
-    const block_config: definition_mod.BlockConfig(R) = block_definition.block;
-
     return struct {
         pub const TransactionProtocol = TransactionProtocolType;
         pub const ExecutionProtocol = TransactionProtocolType.ExecutionProtocol;
@@ -78,61 +74,60 @@ pub fn BlockProtocol(
     };
 }
 
-/// Bind the execution-only Definition projection used by Interpreter and
-/// Executor. Its type identity is independent from transaction and block
-/// program customization in the authoring aggregate.
-pub fn ExecutionProtocolWithDispatch(
-    comptime definition_value: anytype,
-    comptime support_window: definition_mod.BoundExecution(definition_value).Support,
+/// Compile the execution model used by Interpreter and Executor. Its type
+/// identity is independent from transaction and block program customization.
+pub fn compileExecutionWithDispatch(
+    comptime execution_rules: anytype,
+    comptime support_window: definition_mod.ExecutionModel(execution_rules).Support,
     comptime dispatch_config: dispatcher.DispatchConfig,
 ) type {
-    const DefinitionType = definition_mod.BoundExecution(definition_value);
-    validate.assertDispatchContract(DefinitionType);
+    const ExecutionModel = definition_mod.ExecutionModel(execution_rules);
+    validate.assertDispatchContract(ExecutionModel);
     support_window.assertValid();
     const hot_cold_dispatch = dispatcher.useHotColdDispatch(dispatch_config);
-    const InstructionFacts = instruction_mod.For(DefinitionType, support_window);
+    const InstructionFacts = instruction_mod.For(ExecutionModel, support_window);
 
     return struct {
-        pub const Revision = DefinitionType.Revision;
-        pub const BaseRevision = DefinitionType.BaseRevision;
-        pub const revisions = DefinitionType.revisions;
-        pub const Support = DefinitionType.Support;
-        pub const Availability = DefinitionType.Availability;
-        pub const order = DefinitionType.order;
-        pub const isImpl = DefinitionType.isImpl;
-        pub const baseRevision = DefinitionType.baseRevision;
+        pub const Revision = ExecutionModel.Revision;
+        pub const BaseRevision = ExecutionModel.BaseRevision;
+        pub const revisions = ExecutionModel.revisions;
+        pub const Support = ExecutionModel.Support;
+        pub const Availability = ExecutionModel.Availability;
+        pub const order = ExecutionModel.order;
+        pub const isImpl = ExecutionModel.isImpl;
+        pub const baseRevision = ExecutionModel.baseRevision;
 
         pub const support = support_window;
         pub const dispatch = dispatch_config;
         pub const hot_cold_dispatch_enabled = hot_cold_dispatch;
 
-        pub const valueTransferLog = DefinitionType.valueTransferLog;
-        pub const call = DefinitionType.call;
-        pub const create = DefinitionType.create;
-        pub const storage = DefinitionType.storage;
-        pub const self_destruct = DefinitionType.self_destruct;
+        pub const valueTransferLog = ExecutionModel.valueTransferLog;
+        pub const call = ExecutionModel.call;
+        pub const create = ExecutionModel.create;
+        pub const storage = ExecutionModel.storage;
+        pub const self_destruct = ExecutionModel.self_destruct;
 
         pub const Precompile = struct {
-            pub fn active(revision: DefinitionType.Revision, target: address.Address) bool {
-                if (comptime std.meta.hasFn(DefinitionType.Precompile, "active")) {
-                    return DefinitionType.Precompile.active(revision, target);
+            pub fn active(revision: ExecutionModel.Revision, target: address.Address) bool {
+                if (comptime std.meta.hasFn(ExecutionModel.Precompile, "active")) {
+                    return ExecutionModel.Precompile.active(revision, target);
                 }
-                return DefinitionType.Precompile.resolve(revision, target) != null;
+                return ExecutionModel.Precompile.resolve(revision, target) != null;
             }
 
             pub fn execute(
-                revision: DefinitionType.Revision,
+                revision: ExecutionModel.Revision,
                 target: address.Address,
                 precompile_call: precompile_runtime.PrecompileCall,
             ) precompile_mod.Error!?precompile_runtime.PrecompileOutcome {
-                const entry = DefinitionType.Precompile.resolve(revision, target) orelse return null;
-                return try DefinitionType.Precompile.execute(revision, entry, precompile_call);
+                const entry = ExecutionModel.Precompile.resolve(revision, target) orelse return null;
+                return try ExecutionModel.Precompile.execute(revision, entry, precompile_call);
             }
         };
 
         const byte = struct {
             pub fn entry(comptime opcode_byte: u8) dispatcher.DispatchEntry {
-                return dispatcher.resolveDispatchEntryByte(DefinitionType, support_window, opcode_byte);
+                return dispatcher.resolveDispatchEntryByte(ExecutionModel, support_window, opcode_byte);
             }
 
             pub fn info(comptime opcode_byte: u8) opcode_info.OpInfo {
@@ -152,7 +147,7 @@ pub fn ExecutionProtocolWithDispatch(
             }
 
             pub fn staticGas(comptime opcode_byte: u8) dispatcher.StaticGas {
-                return dispatcher.resolveStaticGasByte(DefinitionType, support_window, opcode_byte);
+                return dispatcher.resolveStaticGasByte(ExecutionModel, support_window, opcode_byte);
             }
 
             pub fn staticGasConstant(comptime opcode_byte: u8) ?i64 {
@@ -179,7 +174,7 @@ pub fn ExecutionProtocolWithDispatch(
                 @setEvalBranchQuota(10_000);
                 return switch (comptime @This().context(value)) {
                     .byte => |opcode_byte| byte.entry(opcode_byte),
-                    .custom => dispatcher.resolveDispatchEntryInstruction(DefinitionType, support_window, value),
+                    .custom => dispatcher.resolveDispatchEntryInstruction(ExecutionModel, support_window, value),
                 };
             }
 
@@ -187,7 +182,7 @@ pub fn ExecutionProtocolWithDispatch(
                 return InstructionFacts.info(value);
             }
 
-            pub fn rawAvailability(comptime value: Value) DefinitionType.Availability {
+            pub fn rawAvailability(comptime value: Value) ExecutionModel.Availability {
                 return InstructionFacts.rawAvailability(value);
             }
 
@@ -195,7 +190,7 @@ pub fn ExecutionProtocolWithDispatch(
                 return InstructionFacts.availability(value);
             }
 
-            pub fn staticGasForRevision(revision: DefinitionType.Revision, comptime value: Value) i64 {
+            pub fn staticGasForRevision(revision: ExecutionModel.Revision, comptime value: Value) i64 {
                 return InstructionFacts.staticGasForRevision(revision, value);
             }
 
@@ -210,7 +205,7 @@ pub fn ExecutionProtocolWithDispatch(
             pub fn staticGas(comptime value: Value) dispatcher.StaticGas {
                 return switch (comptime context(value)) {
                     .byte => |opcode_byte| byte.staticGas(opcode_byte),
-                    .custom => dispatcher.resolveStaticGasInstruction(DefinitionType, support_window, value),
+                    .custom => dispatcher.resolveStaticGasInstruction(ExecutionModel, support_window, value),
                 };
             }
 
@@ -221,21 +216,21 @@ pub fn ExecutionProtocolWithDispatch(
                 };
             }
 
-            pub fn expByteGas(revision: DefinitionType.Revision) i64 {
+            pub fn expByteGas(revision: ExecutionModel.Revision) i64 {
                 return InstructionFacts.expByteGas(revision);
             }
 
-            pub fn accountReadColdAccessGas(revision: DefinitionType.Revision) ?i64 {
+            pub fn accountReadColdAccessGas(revision: ExecutionModel.Revision) ?i64 {
                 return InstructionFacts.accountReadColdAccessGas(revision);
             }
 
-            pub fn codeAccountAccessGas(revision: DefinitionType.Revision, status: types.AccountAccessStatus) ?i64 {
+            pub fn codeAccountAccessGas(revision: ExecutionModel.Revision, status: types.AccountAccessStatus) ?i64 {
                 return InstructionFacts.codeAccountAccessGas(revision, status);
             }
         };
 
         pub fn dispatchTable() dispatcher.DispatchTable {
-            return dispatcher.resolveDispatchTable(DefinitionType, support_window);
+            return dispatcher.resolveDispatchTable(ExecutionModel, support_window);
         }
     };
 }
@@ -246,9 +241,11 @@ fn instructionFor(comptime ProtocolType: type, comptime opcode: opcode_info.Opco
 
 test "layered protocol chain exposes resolved Ethereum facts" {
     const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
-    const CancunPlus = ExecutionProtocol(
-        ethereum.execution_definition,
+    const eth_config = @import("../eth/config.zig");
+    const resolved = eth_config.canonical;
+    const Ethereum = definition_mod.ExecutionModel(resolved.execution);
+    const CancunPlus = compileExecution(
+        resolved.execution,
         Ethereum.Support.since(.cancun),
     );
     const blobbasefee = comptime instructionFor(CancunPlus, .BLOBBASEFEE);
@@ -261,7 +258,7 @@ test "layered protocol chain exposes resolved Ethereum facts" {
 
     comptime {
         if (@hasDecl(Ethereum, "opcodeAvailability") or @hasDecl(Ethereum, "staticGasForRevision"))
-            @compileError("bound execution leaked flat byte-level instruction facts");
+            @compileError("resolved execution leaked flat byte-level instruction facts");
         if (@hasDecl(CancunPlus, "opcodeAvailability") or @hasDecl(CancunPlus, "staticGasForRevision"))
             @compileError("execution protocol leaked flat byte-level instruction facts");
     }
@@ -280,27 +277,27 @@ test "layered protocol chain exposes resolved Ethereum facts" {
     try std.testing.expectEqual(@as(?precompile_mod.Contract, .ecrecover), ethereum.precompile.resolve(.cancun, address.addr(0x01)));
     try std.testing.expect(CancunPlus.Precompile.active(.cancun, address.addr(0x01)));
 
-    const CancunPlusTx = TransactionProtocol(CancunPlus, ethereum.transaction_definition);
-    const CancunPlusBlock = BlockProtocol(CancunPlusTx, ethereum.block_definition);
+    const CancunPlusTx = compileTransaction(CancunPlus, resolved.transaction);
+    const CancunPlusBlock = compileBlock(CancunPlusTx, resolved.block);
     try std.testing.expect(CancunPlusTx.authorization.active(.prague));
     try std.testing.expectEqual(CancunPlus.support, CancunPlusBlock.support);
 
-    const Amsterdam = ExecutionProtocol(
-        ethereum.execution_definition,
+    const Amsterdam = compileExecution(
+        resolved.execution,
         Ethereum.Support.at(.amsterdam),
     );
     try std.testing.expect(Amsterdam.hot_cold_dispatch_enabled);
     try std.testing.expectEqual(@as(?usize, ethereum.system.Create.amsterdam_max_code_size), Amsterdam.create.createCodeSizeLimit(.amsterdam));
 
-    const AmsterdamWithoutHotCold = ExecutionProtocolWithDispatch(
-        ethereum.execution_definition,
+    const AmsterdamWithoutHotCold = compileExecutionWithDispatch(
+        resolved.execution,
         Ethereum.Support.at(.amsterdam),
         .{ .hot_cold = .disabled },
     );
     try std.testing.expect(!AmsterdamWithoutHotCold.hot_cold_dispatch_enabled);
 
-    const Frontier = ExecutionProtocol(
-        ethereum.execution_definition,
+    const Frontier = compileExecution(
+        resolved.execution,
         Ethereum.Support.at(.frontier),
     );
     try std.testing.expectEqual(@as(?usize, null), Frontier.create.createCodeSizeLimit(.frontier));
@@ -308,6 +305,7 @@ test "layered protocol chain exposes resolved Ethereum facts" {
 
 test "execution protocol identity ignores transaction and block program hooks" {
     const ethereum = @import("../eth.zig");
+    const eth_config = @import("../eth/config.zig");
     const overrides = struct {
         fn maxInitcodeSize(_: ethereum.Revision) usize {
             return 1234;
@@ -317,25 +315,24 @@ test "execution protocol identity ignores transaction and block program hooks" {
             return .{};
         }
     };
-    const alternate_transaction = comptime ethereum.defineTransaction(.{
+    const base = eth_config.canonical;
+    const alternate = comptime eth_config.resolveExtension(.{
         .transaction = .{ .maxInitcodeSize = overrides.maxInitcodeSize },
-    });
-    const alternate_block = comptime ethereum.defineBlock(.{
         .block = .{ .beforeBlock = overrides.beforeBlock },
     });
-    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
+    const Ethereum = definition_mod.ExecutionModel(base.execution);
     const support_window = comptime Ethereum.Support.at(.cancun);
-    const Execution = ExecutionProtocol(ethereum.execution_definition, support_window);
-    const BaseTx = TransactionProtocol(Execution, ethereum.transaction_definition);
-    const BaseBlock = BlockProtocol(BaseTx, ethereum.block_definition);
-    const AlternateTx = TransactionProtocol(Execution, alternate_transaction);
-    const AlternateBlock = BlockProtocol(AlternateTx, alternate_block);
+    const Execution = compileExecution(base.execution, support_window);
+    const BaseTx = compileTransaction(Execution, base.transaction);
+    const BaseBlock = compileBlock(BaseTx, base.block);
+    const AlternateTx = compileTransaction(Execution, alternate.transaction);
+    const AlternateBlock = compileBlock(AlternateTx, alternate.block);
 
     comptime {
         if (BaseTx == AlternateTx)
-            @compileError("transaction protocol must retain transaction definition identity");
+            @compileError("transaction protocol must retain transaction-layer rule identity");
         if (BaseBlock == AlternateBlock)
-            @compileError("block protocol must retain block definition identity");
+            @compileError("block protocol must retain block-config identity");
         if (BaseTx.ExecutionProtocol != AlternateTx.ExecutionProtocol)
             @compileError("execution protocol changed with transaction or block program hooks");
         if (BaseBlock.ExecutionProtocol != Execution)

@@ -15,7 +15,7 @@ const RevisionId = evmz.protocol.RevisionId;
 
 const Error = anyerror;
 
-pub const Status = enum(u8) { success, invalid, revert, out_of_gas };
+pub const Status = evmz.protocol.BlockTransactionStatus;
 
 pub const FrameStatus = enum(u8) {
     running,

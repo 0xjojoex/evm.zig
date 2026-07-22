@@ -4,18 +4,12 @@ const evmz = @import("../evm.zig");
 const Address = evmz.Address;
 const protocol = evmz.protocol;
 const BeforeBlockContext = protocol.BeforeBlockContext;
-const AfterTransactionContext = evmz.vm.AfterTransactionContext;
-const FinalizeBlockContext = evmz.vm.FinalizeBlockContext;
+const AfterTransactionContext = evmz.AfterTransactionContext;
+const FinalizeBlockContext = evmz.FinalizeBlockContext;
 const MemoryStore = evmz.state.MemoryStore;
 
-fn VmFor(comptime block_definition: evmz.BlockDefinition(evmz.eth.Revision)) type {
-    return evmz.Vm(
-        evmz.eth.Revision,
-        evmz.eth.execution_definition,
-        evmz.eth.transaction_definition,
-        block_definition,
-        .{},
-    );
+fn VmFor(comptime block_options: evmz.eth.BlockOptions(evmz.eth.Revision)) type {
+    return evmz.eth.extend(.{ .block = block_options });
 }
 
 const lifecycle_code = [_]u8{
@@ -105,15 +99,12 @@ const LifecycleBlock = struct {
     }
 };
 
-const LifecycleDefinition = evmz.eth.defineBlock(.{
-    .block = .{
-        .beforeBlock = LifecycleBlock.beforeBlock,
-        .beforeTransaction = LifecycleBlock.beforeTransaction,
-        .afterTransaction = LifecycleBlock.afterTransaction,
-        .finalizeBlock = LifecycleBlock.finalizeBlock,
-    },
+const LifecycleVm = VmFor(.{
+    .beforeBlock = LifecycleBlock.beforeBlock,
+    .beforeTransaction = LifecycleBlock.beforeTransaction,
+    .afterTransaction = LifecycleBlock.afterTransaction,
+    .finalizeBlock = LifecycleBlock.finalizeBlock,
 });
-const LifecycleVm = VmFor(LifecycleDefinition);
 
 const RejectingBeforeTransactionBlock = struct {
     fn beforeTransaction(_: evmz.eth.Revision, _: protocol.BeforeTransactionContext) protocol.BlockSystemCalls {
@@ -121,10 +112,9 @@ const RejectingBeforeTransactionBlock = struct {
     }
 };
 
-const RejectingBeforeTransactionDefinition = evmz.eth.defineBlock(.{
-    .block = .{ .beforeTransaction = RejectingBeforeTransactionBlock.beforeTransaction },
+const RejectingBeforeTransactionVm = VmFor(.{
+    .beforeTransaction = RejectingBeforeTransactionBlock.beforeTransaction,
 });
-const RejectingBeforeTransactionVm = VmFor(RejectingBeforeTransactionDefinition);
 
 const EmptyBeforeTransactionBlock = struct {
     var invocations = std.atomic.Value(usize).init(0);
@@ -135,10 +125,9 @@ const EmptyBeforeTransactionBlock = struct {
     }
 };
 
-const EmptyBeforeTransactionDefinition = evmz.eth.defineBlock(.{
-    .block = .{ .beforeTransaction = EmptyBeforeTransactionBlock.beforeTransaction },
+const EmptyBeforeTransactionVm = VmFor(.{
+    .beforeTransaction = EmptyBeforeTransactionBlock.beforeTransaction,
 });
-const EmptyBeforeTransactionVm = VmFor(EmptyBeforeTransactionDefinition);
 
 const CheckpointRecorder = struct {
     events: [8]evmz.trace.CheckpointKind = undefined,
@@ -196,11 +185,10 @@ const AtomicLifecycleBlock = struct {
     }
 };
 
-const AtomicLifecycleDefinition = evmz.eth.defineBlock(.{ .block = .{
+const AtomicLifecycleVm = VmFor(.{
     .beforeBlock = AtomicLifecycleBlock.beforeBlock,
     .finalizeBlock = AtomicLifecycleBlock.finalizeBlock,
-} });
-const AtomicLifecycleVm = VmFor(AtomicLifecycleDefinition);
+});
 
 const FinishLifecycleBlock = struct {
     const recipient = evmz.addr(0x3001);
@@ -210,10 +198,9 @@ const FinishLifecycleBlock = struct {
     }
 };
 
-const FinishLifecycleDefinition = evmz.eth.defineBlock(.{
-    .block = .{ .afterTransaction = FinishLifecycleBlock.afterTransaction },
+const FinishLifecycleVm = VmFor(.{
+    .afterTransaction = FinishLifecycleBlock.afterTransaction,
 });
-const FinishLifecycleVm = VmFor(FinishLifecycleDefinition);
 
 const RejectingAfterTransactionBlock = struct {
     fn afterTransaction(_: evmz.eth.Revision, _: AfterTransactionContext) protocol.BlockSystemCalls {
@@ -221,10 +208,9 @@ const RejectingAfterTransactionBlock = struct {
     }
 };
 
-const RejectingAfterTransactionDefinition = evmz.eth.defineBlock(.{
-    .block = .{ .afterTransaction = RejectingAfterTransactionBlock.afterTransaction },
+const RejectingAfterTransactionVm = VmFor(.{
+    .afterTransaction = RejectingAfterTransactionBlock.afterTransaction,
 });
-const RejectingAfterTransactionVm = VmFor(RejectingAfterTransactionDefinition);
 
 test "Sequential exposes definition-owned lifecycle phases with derived facts" {
     const sender = evmz.addr(0xaaaa);

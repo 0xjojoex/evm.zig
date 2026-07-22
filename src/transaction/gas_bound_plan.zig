@@ -387,7 +387,7 @@ fn mul(comptime T: type, a: T, b: T) Error!T {
 
 fn ethereumTestProtocol() type {
     const eth = @import("../eth.zig");
-    return eth.transactionProtocol(.all);
+    return eth.Protocol.TransactionProtocol;
 }
 
 fn ethereumTestPlanner() type {
@@ -396,7 +396,7 @@ fn ethereumTestPlanner() type {
 
 test "bound gas plan input defaults to protocol support max" {
     const eth = @import("../eth.zig");
-    const Cancun = eth.transactionProtocol(eth.Protocol.Support.at(.cancun));
+    const Cancun = eth.fork(.cancun).TransactionProtocol;
     const Planner = For(Cancun);
     const input = Planner.Input{ .gas_limit = 1_000_000 };
 

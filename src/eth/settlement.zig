@@ -14,8 +14,7 @@ pub const Settlement = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.SettlementConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.SettlementConfig(Revision) {
         return .{
             .baseFeeActive = @This().baseFeeActive,
             .gasRefundCapDivisor = @This().gasRefundCapDivisor,

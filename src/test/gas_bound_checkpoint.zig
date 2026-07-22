@@ -5,7 +5,7 @@ const Address = evmz.Address;
 const DefaultVm = evmz.Evm;
 const MemoryStore = evmz.state.MemoryStore;
 const Transaction = evmz.Transaction;
-const TxResult = evmz.transaction.TransactOutcome(evmz.vm.TxExecutionResult, DefaultVm.Rejection);
+const TxResult = evmz.transaction.TransactOutcome(evmz.TxExecutionResult, DefaultVm.Rejection);
 const TxStatus = evmz.TxStatus;
 const transaction = evmz.transaction;
 
@@ -383,7 +383,7 @@ fn runStorageOverlayBlock(block: anytype) !BlockRun {
     };
 }
 
-fn expectExecuted(result: TxResult) !evmz.vm.TxExecutionResult {
+fn expectExecuted(result: TxResult) !evmz.TxExecutionResult {
     return switch (result) {
         .executed => |executed| executed,
         .rejected => error.UnexpectedRejection,

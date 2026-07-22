@@ -294,10 +294,9 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
             return calls;
         }
     };
-    const block_definition = comptime evmz.eth.defineBlock(.{
+    const Family = evmz.eth.extend(.{
         .block = .{ .beforeBlock = ReservoirBlock.beforeBlock },
     });
-    const block_policy = evmz.definition.projectBlockPolicy(ethereum.Revision, block_definition);
 
     var executor = evmz.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
     defer executor.deinit();
@@ -308,7 +307,7 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
         0x00, // STOP
     });
 
-    try applyBeforeBlock(&block_policy, &executor, testTxContext(), .{
+    try applyBeforeBlock(&Family.block_policy, &executor, testTxContext(), .{
         .number = 1,
         .timestamp = 12,
     });
@@ -337,18 +336,10 @@ test "finalize block copies successful system contract output into typed request
         }
     };
 
-    const RequestBlockDefinition = comptime evmz.eth.defineBlock(.{
+    const Family = evmz.eth.extend(.{
         .block = .{ .finalizeBlock = RequestBlock.finalizeBlock },
     });
-    const RequestProtocol = evmz.protocol.BlockProtocol(
-        evmz.eth.transactionProtocol(.all),
-        RequestBlockDefinition,
-    );
-    const request_policy = evmz.definition.projectBlockPolicy(
-        ethereum.Revision,
-        RequestBlockDefinition,
-    );
-    const Executor = evmz.executor.Executor(RequestProtocol.ExecutionProtocol);
+    const Executor = evmz.Executor;
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .prague,
     });
@@ -364,7 +355,7 @@ test "finalize block copies successful system contract output into typed request
     };
     try executor.state.setCode(RequestBlock.recipient, &request_code);
 
-    const requests = try applyFinalizeBlock(&request_policy, &executor, testTxContext(), std.testing.allocator, .{
+    const requests = try applyFinalizeBlock(&Family.block_policy, &executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,
@@ -402,24 +393,16 @@ test "finalize block rejects missing required system contract code" {
         }
     };
 
-    const RequiredBlockDefinition = comptime evmz.eth.defineBlock(.{
+    const Family = evmz.eth.extend(.{
         .block = .{ .finalizeBlock = RequiredBlock.finalizeBlock },
     });
-    const RequiredProtocol = evmz.protocol.BlockProtocol(
-        evmz.eth.transactionProtocol(.all),
-        RequiredBlockDefinition,
-    );
-    const required_policy = evmz.definition.projectBlockPolicy(
-        ethereum.Revision,
-        RequiredBlockDefinition,
-    );
-    const Executor = evmz.executor.Executor(RequiredProtocol.ExecutionProtocol);
+    const Executor = evmz.Executor;
     var executor = Executor.init(std.testing.allocator, .{
         .revision = .prague,
     });
     defer executor.deinit();
 
-    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&required_policy, &executor, testTxContext(), std.testing.allocator, .{
+    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&Family.block_policy, &executor, testTxContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,

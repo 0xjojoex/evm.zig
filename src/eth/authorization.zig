@@ -22,8 +22,7 @@ pub const Authorization = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.AuthorizationConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.AuthorizationConfig(Revision) {
         return .{
             .active = @This().active,
             .warmsDelegatedTarget = @This().warmsDelegatedTarget,

@@ -1,9 +1,9 @@
-//! Assembles Ethereum execution, transaction, and block definitions from their
-//! per-domain spec tables.
+//! Resolves one complete Ethereum-family rule set from per-domain spec tables.
 //!
-//! `ExecutionOptions`, `TransactionOptions`, and `BlockOptions` are the public
-//! override surfaces. Their builders resolve patches into complete independent
-//! definitions before per-layer runtime binding.
+//! Public callers supply flat domain overrides through `eth.extend` or
+//! `eth.derive`. The VM compiler receives only `Resolved(R)`, so execution,
+//! transaction, and block rules cannot drift into independently assembled
+//! families.
 
 const std = @import("std");
 
@@ -26,7 +26,6 @@ const Opcode = opcode_info.Opcode;
 pub fn ExecutionOptions(comptime R: type) type {
     return struct {
         name: ?[]const u8 = null,
-        revision: revision.Patch(R) = .{},
         instruction: ?type = null,
         value_transfer_log: ?*const fn (R, protocol_types.ValueTransferInput) ?protocol_types.ValueTransferLog = null,
         call: system.Call.Patch(R) = .{},
@@ -38,105 +37,99 @@ pub fn ExecutionOptions(comptime R: type) type {
 }
 
 pub fn TransactionOptions(comptime R: type) type {
-    return struct {
-        transaction: transaction_config.Patch(R) = .{},
-        settlement: settlement.Settlement.Patch(R) = .{},
-        authorization: authorization.Authorization.Patch(R) = .{},
-    };
+    return transaction_config.Patch(R);
+}
+
+pub fn SettlementOptions(comptime R: type) type {
+    return settlement.Settlement.Patch(R);
+}
+
+pub fn AuthorizationOptions(comptime R: type) type {
+    return authorization.Authorization.Patch(R);
 }
 
 pub fn BlockOptions(comptime R: type) type {
+    return system.Block.Patch(R);
+}
+
+pub fn SemanticOptions(comptime R: type) type {
     return struct {
-        block: system.Block.Patch(R) = .{},
+        execution: ExecutionOptions(R) = .{},
+        transaction: TransactionOptions(R) = .{},
+        settlement: SettlementOptions(R) = .{},
+        authorization: AuthorizationOptions(R) = .{},
+        block: BlockOptions(R) = .{},
     };
 }
 
-pub fn execution(comptime cfg: ExecutionOptions(Revision)) definition.ExecutionDefinition(Revision) {
-    return executionFor(Revision, cfg);
+/// Complete rules consumed by the private Ethereum-family compiler.
+pub fn Resolved(comptime R: type) type {
+    return struct {
+        execution: definition.ExecutionRules(R),
+        transaction: definition.TransactionLayerRules(R),
+        block: definition.BlockConfig(R),
+    };
 }
 
-pub fn executionFor(comptime R: type, comptime cfg: ExecutionOptions(R)) definition.ExecutionDefinition(R) {
-    const base: definition.ExecutionDefinition(R) = .{
+/// The single canonical Ethereum rule source before family overrides.
+pub const canonical: Resolved(Revision) = canonicalRules();
+
+/// Resolve an Ethereum same-timeline extension over canonical rules.
+pub fn resolveExtension(comptime options: SemanticOptions(Revision)) Resolved(Revision) {
+    return applyOverrides(Revision, canonical, options);
+}
+
+/// Apply the ordinary Ethereum override vocabulary to one complete family.
+/// Both same-timeline extensions and lifted revision families pass through
+/// this path, so field coverage and precedence cannot drift between them.
+pub fn applyOverrides(
+    comptime R: type,
+    comptime base: Resolved(R),
+    comptime options: SemanticOptions(R),
+) Resolved(R) {
+    return .{
+        .execution = .{
+            .name = options.execution.name orelse base.execution.name,
+            .revision = base.execution.revision,
+            .instruction = options.execution.instruction orelse base.execution.instruction,
+            .value_transfer_log = options.execution.value_transfer_log orelse base.execution.value_transfer_log,
+            .call = mergePatch(base.execution.call, options.execution.call),
+            .create = mergePatch(base.execution.create, options.execution.create),
+            .storage = mergePatch(base.execution.storage, options.execution.storage),
+            .self_destruct = mergePatch(base.execution.self_destruct, options.execution.self_destruct),
+            .precompile = options.execution.precompile orelse base.execution.precompile,
+        },
+        .transaction = .{
+            .transaction = mergePatch(base.transaction.transaction, options.transaction),
+            .settlement = mergePatch(base.transaction.settlement, options.settlement),
+            .authorization = mergePatch(base.transaction.authorization, options.authorization),
+        },
+        .block = mergePatch(base.block, options.block),
+    };
+}
+
+fn canonicalRules() Resolved(Revision) {
+    const execution_rules: definition.ExecutionRules(Revision) = .{
         .name = "ethereum",
-        .revision = defaultRevisionConfig(R),
-        .instruction = domainOrDefault(R, cfg.instruction, instruction, "instruction"),
-        .value_transfer_log = if (R == Revision) system.Execution.valueTransferLog else definition.neutralValueTransferLog(R),
-        .call = system.Call.config(R),
-        .create = system.Create.config(R),
-        .storage = system.Storage.config(R),
-        .self_destruct = system.SelfDestruct.config(R),
-        .precompile = domainOrDefault(R, cfg.precompile, precompile, "precompile"),
+        .revision = defaultRevisionConfig(),
+        .instruction = instruction,
+        .value_transfer_log = system.Execution.valueTransferLog,
+        .call = system.Call.config(),
+        .create = system.Create.config(),
+        .storage = system.Storage.config(),
+        .self_destruct = system.SelfDestruct.config(),
+        .precompile = precompile,
     };
-    return applyExecution(R, base, cfg);
-}
-
-/// Apply the ordinary Ethereum execution-option vocabulary over an already
-/// complete definition. `eth.derive` uses this after lifting and amendment
-/// resolution so direct Ethereum config and derived families cannot drift into
-/// separate semantic-override APIs.
-pub fn applyExecution(
-    comptime R: type,
-    comptime base: definition.ExecutionDefinition(R),
-    comptime cfg: ExecutionOptions(R),
-) definition.ExecutionDefinition(R) {
-    validateRevisionPatch(R, cfg.revision);
+    const transaction_rules: definition.TransactionLayerRules(Revision) = .{
+        .transaction = transaction_config.config(),
+        .settlement = settlement.Settlement.config(),
+        .authorization = authorization.Authorization.config(),
+    };
     return .{
-        .name = cfg.name orelse base.name,
-        .revision = mergePatch(base.revision, cfg.revision),
-        .instruction = cfg.instruction orelse base.instruction,
-        .value_transfer_log = cfg.value_transfer_log orelse base.value_transfer_log,
-        .call = mergePatch(base.call, cfg.call),
-        .create = mergePatch(base.create, cfg.create),
-        .storage = mergePatch(base.storage, cfg.storage),
-        .self_destruct = mergePatch(base.self_destruct, cfg.self_destruct),
-        .precompile = cfg.precompile orelse base.precompile,
+        .execution = execution_rules,
+        .transaction = transaction_rules,
+        .block = system.Block.config(),
     };
-}
-
-pub fn transaction(comptime cfg: TransactionOptions(Revision)) definition.TransactionDefinition(Revision) {
-    return transactionFor(Revision, cfg);
-}
-
-pub fn transactionFor(comptime R: type, comptime cfg: TransactionOptions(R)) definition.TransactionDefinition(R) {
-    const base: definition.TransactionDefinition(R) = .{
-        .transaction = transaction_config.config(R),
-        .settlement = settlement.Settlement.config(R),
-        .authorization = authorization.Authorization.config(R),
-    };
-    return applyTransaction(R, base, cfg);
-}
-
-/// Apply transaction-domain patches over a complete transaction definition.
-pub fn applyTransaction(
-    comptime R: type,
-    comptime base: definition.TransactionDefinition(R),
-    comptime cfg: TransactionOptions(R),
-) definition.TransactionDefinition(R) {
-    return .{
-        .transaction = mergePatch(base.transaction, cfg.transaction),
-        .settlement = mergePatch(base.settlement, cfg.settlement),
-        .authorization = mergePatch(base.authorization, cfg.authorization),
-    };
-}
-
-pub fn block(comptime cfg: BlockOptions(Revision)) definition.BlockDefinition(Revision) {
-    return blockFor(Revision, cfg);
-}
-
-pub fn blockFor(comptime R: type, comptime cfg: BlockOptions(R)) definition.BlockDefinition(R) {
-    const base: definition.BlockDefinition(R) = .{
-        .block = system.Block.config(R),
-    };
-    return applyBlock(R, base, cfg);
-}
-
-/// Apply block-domain patches over a complete block definition.
-pub fn applyBlock(
-    comptime R: type,
-    comptime base: definition.BlockDefinition(R),
-    comptime cfg: BlockOptions(R),
-) definition.BlockDefinition(R) {
-    return .{ .block = mergePatch(base.block, cfg.block) };
 }
 
 fn mergePatch(comptime base: anytype, comptime overrides: anytype) @TypeOf(base) {
@@ -149,38 +142,25 @@ fn mergePatch(comptime base: anytype, comptime overrides: anytype) @TypeOf(base)
     return result;
 }
 
-fn validateRevisionPatch(comptime R: type, comptime patch: revision.Patch(R)) void {
-    if (patch.order != null and R == Revision) {
-        @compileError("Ethereum execution defaults do not support overriding revision.order; construct a complete ExecutionDefinition for custom revision semantics");
-    }
+fn defaultRevisionConfig() definition.RevisionConfig(Revision) {
+    return .{
+        .latest = Revision.latest,
+        .stable = Revision.stable,
+        .order = Revision.order,
+    };
 }
 
-fn defaultRevisionConfig(comptime R: type) definition.RevisionConfig(R) {
-    if (R == Revision) {
-        return .{
-            .latest = Revision.latest,
-            .stable = Revision.stable,
-            .order = Revision.order,
-        };
-    }
-    return .{};
-}
+test "canonical Ethereum config resolves one complete family input" {
+    const resolved = canonical;
+    const Execution = definition.ExecutionModel(resolved.execution);
+    const Cancun = protocol_binding.compileExecution(resolved.execution, Execution.Support.at(.cancun));
+    const CancunTx = protocol_binding.compileTransaction(Cancun, resolved.transaction);
 
-fn domainOrDefault(comptime R: type, comptime override: ?type, comptime default: type, comptime name: []const u8) type {
-    if (override) |Domain| return Domain;
-    if (R == Revision) return default;
-    @compileError("eth.defineFor with a custom Revision requires ." ++ name);
-}
+    comptime std.debug.assert(@TypeOf(resolved) == Resolved(Revision));
 
-test "default ethereum config assembles through layered definition builders" {
-    const execution_definition = execution(.{});
-    const Definition = definition.BoundExecution(execution_definition);
-    const Cancun = protocol_binding.ExecutionProtocol(execution_definition, Definition.Support.at(.cancun));
-    const CancunTx = protocol_binding.TransactionProtocol(Cancun, transaction(.{}));
-
-    try std.testing.expectEqualStrings("ethereum", execution_definition.name);
-    try std.testing.expectEqual(Revision.latest, Definition.latest);
-    try std.testing.expectEqual(Revision.stable, Definition.stable);
+    try std.testing.expectEqualStrings("ethereum", resolved.execution.name);
+    try std.testing.expectEqual(Revision.latest, Execution.latest);
+    try std.testing.expectEqual(Revision.stable, Execution.stable);
     try std.testing.expectEqual(support.Resolution.always, Cancun.Instruction.availability(Cancun.Instruction.fromByte(@intFromEnum(Opcode.BLOBBASEFEE))));
     try std.testing.expectEqual(support.Resolution.never, Cancun.Instruction.availability(Cancun.Instruction.fromByte(@intFromEnum(Opcode.SLOTNUM))));
     try std.testing.expectEqual(@as(?i64, 100), Cancun.Instruction.staticGasConstant(Cancun.Instruction.fromByte(@intFromEnum(Opcode.BALANCE))));
@@ -189,39 +169,25 @@ test "default ethereum config assembles through layered definition builders" {
 }
 
 test "preset config uses generated support with ethereum revision semantics" {
-    const execution_definition = execution(.{ .revision = .{
-        .latest = .cancun,
-        .stable = .cancun,
-    } });
-    const Definition = definition.BoundExecution(execution_definition);
-    const full = Definition.Support.all;
+    const resolved = resolveExtension(.{});
+    const Execution = definition.ExecutionModel(resolved.execution);
+    const full = Execution.Support.all;
 
     full.assertValid();
     try std.testing.expect(full.contains(.london));
-    try std.testing.expect(!Definition.Support.at(.cancun).contains(.prague));
-    try std.testing.expectEqual(support.Resolution.runtime, Definition.resolveAvailability(.{ .since = .cancun }, full));
-}
-
-test "revision patch can restore semantic optional fields to neutral" {
-    const execution_definition = execution(.{ .revision = .{
-        .latest = @as(?Revision, null),
-        .stable = @as(?Revision, null),
-    } });
-    const Definition = definition.BoundExecution(execution_definition);
-
-    try std.testing.expectEqual(@as(?Revision, null), execution_definition.revision.latest);
-    try std.testing.expectEqual(@as(?Revision, null), execution_definition.revision.stable);
-    try std.testing.expectEqual(Revision.latest, Definition.latest);
-    try std.testing.expectEqual(Revision.latest, Definition.stable);
+    try std.testing.expect(!Execution.Support.at(.cancun).contains(.prague));
+    try std.testing.expectEqual(support.Resolution.runtime, Execution.resolveAvailability(.{ .since = .cancun }, full));
 }
 
 test "domain patch can override an Ethereum hook back to its neutral default" {
     const neutral_active = definition.AuthorizationConfig(Revision).default.active;
-    const execution_definition = execution(.{});
-    const Definition = definition.BoundExecution(execution_definition);
-    const Prague = protocol_binding.TransactionProtocol(
-        protocol_binding.ExecutionProtocol(execution_definition, Definition.Support.at(.prague)),
-        transaction(.{ .authorization = .{ .active = neutral_active } }),
+    const resolved = resolveExtension(.{
+        .authorization = .{ .active = neutral_active },
+    });
+    const Execution = definition.ExecutionModel(resolved.execution);
+    const Prague = protocol_binding.compileTransaction(
+        protocol_binding.compileExecution(resolved.execution, Execution.Support.at(.prague)),
+        resolved.transaction,
     );
 
     try std.testing.expect(!Prague.authorization.active(.prague));
@@ -269,13 +235,13 @@ test "preset config accepts partial simple-domain overrides" {
             return 123;
         }
     };
-    const execution_definition = execution(.{
-        .call = .{ .callBaseGas = overrides.callBaseGas },
-        .create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
-        .self_destruct = .{ .selfDestructRefundGas = overrides.selfDestructRefundGas },
-        .storage = .{ .sstoreMinimumGas = overrides.sstoreMinimumGas },
-    });
-    const transaction_definition = transaction(.{
+    const resolved = resolveExtension(.{
+        .execution = .{
+            .call = .{ .callBaseGas = overrides.callBaseGas },
+            .create = .{ .createCodeSizeLimit = overrides.createCodeSizeLimit },
+            .self_destruct = .{ .selfDestructRefundGas = overrides.selfDestructRefundGas },
+            .storage = .{ .sstoreMinimumGas = overrides.sstoreMinimumGas },
+        },
         .authorization = .{ .active = overrides.authorizationActive },
         .transaction = .{
             .maxInitcodeSize = overrides.maxInitcodeSize,
@@ -283,9 +249,9 @@ test "preset config accepts partial simple-domain overrides" {
         },
         .settlement = .{ .gasRefundCapDivisor = overrides.gasRefundCapDivisor },
     });
-    const Definition = definition.BoundExecution(execution_definition);
-    const London = protocol_binding.ExecutionProtocol(execution_definition, Definition.Support.at(.london));
-    const LondonTx = protocol_binding.TransactionProtocol(London, transaction_definition);
+    const Execution = definition.ExecutionModel(resolved.execution);
+    const London = protocol_binding.compileExecution(resolved.execution, Execution.Support.at(.london));
+    const LondonTx = protocol_binding.compileTransaction(London, resolved.transaction);
 
     try std.testing.expect(!LondonTx.authorization.active(.london));
     try std.testing.expectEqual(@as(usize, 1000), LondonTx.transaction.maxInitcodeSize(.london));

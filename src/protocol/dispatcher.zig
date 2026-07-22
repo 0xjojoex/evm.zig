@@ -1,5 +1,6 @@
 const std = @import("std");
 const definition_mod = @import("../definition.zig");
+const eth_config = @import("../eth/config.zig");
 const execution = @import("execution.zig");
 const instruction_mod = @import("instruction.zig");
 const opcode_info = @import("../opcode.zig");
@@ -401,8 +402,7 @@ pub fn hotPathFromResolved(tier: OpcodeTier, availability: Resolution, static_ga
 }
 
 test "ethereum support windows resolve opcode availability" {
-    const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
+    const Ethereum = definition_mod.ExecutionModel(eth_config.canonical.execution);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);
@@ -420,8 +420,7 @@ test "ethereum support windows resolve opcode availability" {
 }
 
 test "ethereum support windows collapse stable static gas" {
-    const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
+    const Ethereum = definition_mod.ExecutionModel(eth_config.canonical.execution);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);
@@ -504,8 +503,7 @@ test "static gas folding uses support containment instead of revision tag order"
 }
 
 test "resolved hot path requires tier, always availability, and constant gas" {
-    const ethereum = @import("../eth.zig");
-    const Ethereum = definition_mod.BoundExecution(ethereum.execution_definition);
+    const Ethereum = definition_mod.ExecutionModel(eth_config.canonical.execution);
     const Support = Ethereum.Support;
 
     const full = resolveDispatchTable(Ethereum, Support.all);

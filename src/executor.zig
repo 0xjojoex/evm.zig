@@ -1287,6 +1287,11 @@ pub fn Executor(comptime ProtocolType: type) type {
             try self.state.addBalance(address, value);
         }
 
+        /// Set account code as a neutral family/STF state transition.
+        pub fn setCode(self: *Self, address: Address, code: []const u8) !void {
+            try self.state.setCode(address, code);
+        }
+
         pub fn logs(self: *const Self) []const Host.Log {
             return self.state.getLogs();
         }
@@ -2339,9 +2344,7 @@ test "executor carries comptime protocol through nested host calls" {
 fn ethereumProtocolWith(comptime definition_name: []const u8, comptime overrides: evmz.eth.ExecutionOptions(evmz.eth.Revision)) type {
     comptime var options = overrides;
     options.name = definition_name;
-    const custom_definition = comptime evmz.eth.defineExecution(options);
-    const CustomDefinition = evmz.definition.BoundExecution(custom_definition);
-    return evmz.protocol.ExecutionProtocol(custom_definition, CustomDefinition.Support.all);
+    return evmz.eth.extend(.{ .execution = options }).ExecutionProtocol;
 }
 
 test "protocol definition drives call base gas" {

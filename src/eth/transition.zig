@@ -23,7 +23,7 @@ pub fn Implementation(
     comptime Output: type,
 ) type {
     const PreparedTransaction = transaction.Prepared(TransactionProtocol);
-    const Rejection = TransactionProtocol.transaction.ValidationError;
+    const Rejection = TransactionProtocol.Tx.ValidationError;
     const Revision = TransactionProtocol.Revision;
 
     const Transition = struct {
@@ -165,7 +165,7 @@ pub fn Implementation(
                     const request = transaction.executionRequest(
                         executable.scope.context,
                         executable.message,
-                        executable.execution_gas orelse execution.ExecutionGas.legacy(0),
+                        executable.execution_gas orelse execution.ExecutionGas.none,
                     );
                     var initial_accounts: [1]Address = undefined;
                     const initial_account_count: usize = if (context.policy().transaction.transactionWarmsCoinbase(context.revision())) blk: {
@@ -181,19 +181,12 @@ pub fn Implementation(
                     try context.runPrelude();
                     try attempt.beginExecution(request, scope_init);
                     const result = try executePrepared(context, attempt, executable);
-                    const Status = @FieldType(Output, "status");
-                    const status: Status = switch (result.status) {
-                        .success => .success,
-                        .revert => .revert,
-                        .invalid => .invalid,
-                        .out_of_gas => .out_of_gas,
-                    };
                     const created_address = if (result.status == .success) switch (executable.message) {
                         .call => null,
                         .create => |create| create.recipient,
                     } else null;
                     return .{ .completed = .{
-                        .status = status,
+                        .status = result.status,
                         .gas = result.gas,
                         .output = result.output_data,
                         .created_address = created_address,

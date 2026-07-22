@@ -517,6 +517,15 @@ fn BoundTransaction(
             self.lease.retain() catch |err| return executor_errors.normalize(err);
         }
 
+        /// Retain the attempt's state writes and return the output in one
+        /// step. Read `view`/`logs` first: retention closes the lease.
+        /// Borrowed output slices stay valid until the next Executor
+        /// operation.
+        pub fn retainResult(self: @This()) executor_errors.Error!OutputType {
+            try self.retain();
+            return self.output_value;
+        }
+
         pub fn discard(self: @This()) executor_errors.Error!void {
             return self.lease.discard() catch |err| return executor_errors.normalize(err);
         }

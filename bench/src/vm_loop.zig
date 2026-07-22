@@ -5,7 +5,7 @@ const common = @import("common.zig");
 
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
-const BenchVM = evmz.EvmWith(.{
+const BenchVM = evmz.eth.extend(.{
     .support = .{
         .min = parseBuildSpec(build_options.support_min),
         .max = parseBuildSpec(build_options.support_max),

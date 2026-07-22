@@ -8,6 +8,7 @@ const precompile_mod = @import("../precompile.zig");
 const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const instruction_mod = @import("../protocol/instruction.zig");
 const opcode_info = @import("../opcode.zig");
+const protocol_dispatcher = @import("../protocol/dispatcher.zig");
 const protocol_types = @import("../protocol/types.zig");
 const support = @import("../protocol/support.zig");
 const transaction = @import("../transaction.zig");
@@ -17,39 +18,113 @@ const instruction = @import("instruction.zig");
 const precompile = @import("precompile.zig");
 const revision = @import("revision.zig");
 
+const canonical = config.canonical;
+const CanonicalExecution = definition.ExecutionModel(canonical.execution);
+
+/// Same-timeline Ethereum extension options. Use `derive` when the family owns
+/// a different revision enum and maps it onto Ethereum history.
+pub const ExtendOptions = struct {
+    support: CanonicalExecution.Support = .all,
+    dispatch: protocol_dispatcher.DispatchConfig = .{},
+    execution: config.ExecutionOptions(revision.Revision) = .{},
+    transaction: config.TransactionOptions(revision.Revision) = .{},
+    settlement: config.SettlementOptions(revision.Revision) = .{},
+    authorization: config.AuthorizationOptions(revision.Revision) = .{},
+    block: config.BlockOptions(revision.Revision) = .{},
+};
+
+/// Extend the canonical Ethereum revision timeline without exposing the raw
+/// generic VM constructor or reauthoring inherited Ethereum semantics.
+pub fn extend(comptime options: ExtendOptions) type {
+    const resolved = config.resolveExtension(.{
+        .execution = options.execution,
+        .transaction = options.transaction,
+        .settlement = options.settlement,
+        .authorization = options.authorization,
+        .block = options.block,
+    });
+    return vm.compile(
+        revision.Revision,
+        resolved,
+        options.support,
+        options.dispatch,
+    );
+}
+
 /// Ethereum-derived family options. Structural transaction and block programs
-/// compose on the returned VM through `Transition`, `Program`, and `Block`.
-pub fn Options(comptime R: type) type {
+/// compose through `Transition`, `Program`, and `Program.Block`.
+pub fn Options(comptime Revisions: type) type {
+    const R = Revisions.Revision;
     return struct {
         base_revision: *const fn (R) revision.Revision,
         /// Semantic overrides use the same typed vocabulary as direct
-        /// `eth.config` assembly and are applied after Ethereum lifting.
+        /// `eth.extend` and are applied after Ethereum lifting.
         execution: config.ExecutionOptions(R) = .{},
         transaction: config.TransactionOptions(R) = .{},
+        settlement: config.SettlementOptions(R) = .{},
+        authorization: config.AuthorizationOptions(R) = .{},
         block: config.BlockOptions(R) = .{},
     };
 }
 
-/// Return the ordinary concrete generated VM surface for a local revision type
-/// whose unchanged semantics are inherited from Ethereum.
-pub fn derive(comptime R: type, comptime options: Options(R)) type {
-    const execution_definition = derivedExecution(R, options);
-    const transaction_definition = derivedTransaction(R, options);
-    const block_definition = derivedBlock(R, options);
-    return vm.Vm(
+/// Return the ordinary concrete generated VM surface for a local revision
+/// model whose unchanged semantics are inherited from Ethereum.
+pub fn derive(comptime Revisions: type, comptime options: Options(Revisions)) type {
+    const R = Revisions.Revision;
+    const resolved = config.applyOverrides(
         R,
-        execution_definition,
-        transaction_definition,
-        block_definition,
+        liftedRules(Revisions, options),
+        semanticOptions(Revisions, options),
+    );
+    validateResolution(Revisions, options, resolved.execution.revision);
+    return vm.compile(
+        R,
+        resolved,
+        .all,
         .{},
     );
 }
 
-fn derivedExecution(comptime R: type, comptime options: Options(R)) definition.ExecutionDefinition(R) {
-    const base = config.execution(.{});
-    const lifted: definition.ExecutionDefinition(R) = .{
+fn semanticOptions(
+    comptime Revisions: type,
+    comptime options: Options(Revisions),
+) config.SemanticOptions(Revisions.Revision) {
+    return .{
+        .execution = options.execution,
+        .transaction = options.transaction,
+        .settlement = options.settlement,
+        .authorization = options.authorization,
+        .block = options.block,
+    };
+}
+
+fn liftedRules(
+    comptime Revisions: type,
+    comptime options: Options(Revisions),
+) config.Resolved(Revisions.Revision) {
+    const R = Revisions.Revision;
+    return .{
+        .execution = liftedExecution(Revisions, options),
+        .transaction = liftedTransaction(Revisions, options),
+        .block = liftConfig(R, options.base_revision, canonical.block, definition.BlockConfig(R)),
+    };
+}
+
+fn liftedExecution(
+    comptime Revisions: type,
+    comptime options: Options(Revisions),
+) definition.ExecutionRules(Revisions.Revision) {
+    const R = Revisions.Revision;
+    const base = canonical.execution;
+    return .{
         .name = "ethereum-derived",
-        .revision = .{ .semantics = RevisionSemantics(R, options.base_revision) },
+        .revision = .{
+            .revisions = Revisions.revisions,
+            .latest = Revisions.latest,
+            .stable = Revisions.stable,
+            .order = Revisions.order,
+            .semantics = RevisionSemantics(R, options.base_revision),
+        },
         .instruction = LiftedInstruction(R, options.base_revision),
         .value_transfer_log = liftRevisionFunction(
             R,
@@ -63,38 +138,27 @@ fn derivedExecution(comptime R: type, comptime options: Options(R)) definition.E
         .self_destruct = liftConfig(R, options.base_revision, base.self_destruct, definition.SelfDestructConfig(R)),
         .precompile = LiftedPrecompile(R, options.base_revision),
     };
-    const resolved = config.applyExecution(R, lifted, options.execution);
-    validateResolution(R, options, resolved.revision);
-    return resolved;
 }
 
-fn derivedTransaction(comptime R: type, comptime options: Options(R)) definition.TransactionDefinition(R) {
-    const base = config.transaction(.{});
-    const lifted: definition.TransactionDefinition(R) = .{
+fn liftedTransaction(
+    comptime Revisions: type,
+    comptime options: Options(Revisions),
+) definition.TransactionLayerRules(Revisions.Revision) {
+    const R = Revisions.Revision;
+    const base = canonical.transaction;
+    return comptime .{
         .transaction = liftConfig(R, options.base_revision, base.transaction, definition.TransactionConfig(R)),
         .settlement = liftConfig(R, options.base_revision, base.settlement, definition.SettlementConfig(R)),
         .authorization = liftConfig(R, options.base_revision, base.authorization, definition.AuthorizationConfig(R)),
     };
-    return config.applyTransaction(R, lifted, options.transaction);
-}
-
-fn derivedBlock(comptime R: type, comptime options: Options(R)) definition.BlockDefinition(R) {
-    const base = config.block(.{});
-    const lifted: definition.BlockDefinition(R) = .{
-        .block = liftConfig(R, options.base_revision, base.block, definition.BlockConfig(R)),
-    };
-    return config.applyBlock(R, lifted, options.block);
 }
 
 fn validateResolution(
-    comptime R: type,
-    comptime options: Options(R),
-    comptime revision_config: definition.RevisionConfig(R),
+    comptime Revisions: type,
+    comptime options: Options(Revisions),
+    comptime revision_config: definition.RevisionConfig(Revisions.Revision),
 ) void {
-    if (options.execution.revision.semantics != null) {
-        @compileError("eth.derive owns revision.semantics through base_revision");
-    }
-
+    const R = Revisions.Revision;
     const Model = definition.RevisionModel(R, revision_config);
     if (firstBaseRevisionRegression(R, Model.revisions, options.base_revision)) |index| {
         const current = Model.revisions[index];
@@ -349,13 +413,22 @@ test "derived family lifts Ethereum semantics onto a local revision timeline" {
     const LocalRevision = enum {
         prague,
         prague_patch,
+
+        const Self = @This();
+
+        pub fn order(self: Self, other: Self) std.math.Order {
+            return std.math.order(@intFromEnum(self), @intFromEnum(other));
+        }
+
+        pub const isImpl = revision.Model(Self).isImpl;
     };
+    const LocalRevisions = revision.Model(LocalRevision);
     const Base = struct {
         fn map(_: LocalRevision) revision.Revision {
             return .prague;
         }
     };
-    const Derived = derive(LocalRevision, .{
+    const Derived = derive(LocalRevisions, .{
         .base_revision = Base.map,
     });
     const Input = struct {
@@ -368,6 +441,9 @@ test "derived family lifts Ethereum semantics onto a local revision timeline" {
     try std.testing.expectEqual(revision.Revision, Derived.BaseRevision);
     try std.testing.expectEqual(revision.Revision.prague, Derived.baseRevision(.prague));
     try std.testing.expectEqual(revision.Revision.prague, Derived.baseRevision(.prague_patch));
+    try std.testing.expect(LocalRevision.prague_patch.isImpl(.prague));
+    try std.testing.expect(Derived.ExecutionProtocol.isImpl(.prague_patch, .prague));
+    try std.testing.expect(!Derived.ExecutionProtocol.isImpl(.prague, .prague_patch));
     try std.testing.expectEqual(
         instruction.staticGasForRevision(.prague, .BALANCE),
         Derived.Instruction.staticGasForRevision(.prague, Derived.Instruction.fromByte(@intFromEnum(opcode_info.Opcode.BALANCE))),
@@ -380,8 +456,17 @@ test "derived family lifts Ethereum semantics onto a local revision timeline" {
     try std.testing.expect(@hasDecl(Transition, "transact"));
 }
 
-test "eth.config semantic overrides apply after Ethereum lifting" {
-    const LocalRevision = enum { candidate };
+test "Ethereum semantic overrides apply after revision lifting" {
+    const LocalRevision = enum {
+        candidate,
+
+        const Self = @This();
+
+        pub fn order(self: Self, other: Self) std.math.Order {
+            return std.math.order(@intFromEnum(self), @intFromEnum(other));
+        }
+    };
+    const LocalRevisions = revision.Model(LocalRevision);
     const Base = struct {
         fn map(_: LocalRevision) revision.Revision {
             return .prague;
@@ -395,33 +480,77 @@ test "eth.config semantic overrides apply after Ethereum lifting" {
         fn totalGasLimit(_: LocalRevision) ?u64 {
             return 123;
         }
+
+        fn gasRefundCapDivisor(_: LocalRevision) u64 {
+            return 7;
+        }
+
+        fn authorizationActive(_: LocalRevision) bool {
+            return false;
+        }
+
+        fn beforeBlock(_: LocalRevision, _: protocol_types.BeforeBlockContext) protocol_types.BlockSystemCalls {
+            var calls = protocol_types.BlockSystemCalls{};
+            calls.append(.{
+                .sender = address.addr(0x100),
+                .recipient = address.addr(0x200),
+                .gas = 1,
+            });
+            return calls;
+        }
     };
-    const options: Options(LocalRevision) = .{
+    const options: Options(LocalRevisions) = .{
         .base_revision = Base.map,
         .execution = .{
             .name = "derived-override",
             .create = .{ .createCodeSizeLimit = Override.createCodeSizeLimit },
         },
-        .transaction = .{
-            .transaction = .{ .totalGasLimit = Override.totalGasLimit },
-        },
+        .transaction = .{ .totalGasLimit = Override.totalGasLimit },
+        .settlement = .{ .gasRefundCapDivisor = Override.gasRefundCapDivisor },
+        .authorization = .{ .active = Override.authorizationActive },
+        .block = .{ .beforeBlock = Override.beforeBlock },
     };
-    const execution_definition = derivedExecution(LocalRevision, options);
-    const transaction_definition = derivedTransaction(LocalRevision, options);
+    const execution_rules = config.applyOverrides(
+        LocalRevision,
+        liftedRules(LocalRevisions, options),
+        semanticOptions(LocalRevisions, options),
+    ).execution;
+    const Derived = derive(LocalRevisions, options);
 
-    try std.testing.expectEqualStrings("derived-override", execution_definition.name);
+    try std.testing.expectEqualStrings("derived-override", execution_rules.name);
     try std.testing.expectEqual(
         @as(?usize, 1234),
-        execution_definition.create.createCodeSizeLimit(.candidate),
+        Derived.ExecutionProtocol.create.createCodeSizeLimit(.candidate),
     );
     try std.testing.expectEqual(
         @as(?u64, 123),
-        transaction_definition.transaction.totalGasLimit(.candidate),
+        Derived.TransactionProtocol.transaction.totalGasLimit(.candidate),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 7),
+        Derived.TransactionProtocol.settlement.gasRefundCapDivisor(.candidate),
+    );
+    try std.testing.expect(!Derived.TransactionProtocol.authorization.active(.candidate));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        Derived.block_policy.beforeBlock(.candidate, .{
+            .number = 0,
+            .timestamp = 0,
+        }).slice().len,
     );
 }
 
 test "base revision mapping detects a decreasing local timeline" {
-    const LocalRevision = enum { first, second };
+    const LocalRevision = enum {
+        first,
+        second,
+
+        const Self = @This();
+
+        pub fn order(self: Self, other: Self) std.math.Order {
+            return std.math.order(@intFromEnum(self), @intFromEnum(other));
+        }
+    };
     const Decreasing = struct {
         fn map(local_revision: LocalRevision) revision.Revision {
             return switch (local_revision) {

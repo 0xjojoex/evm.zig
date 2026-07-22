@@ -3,14 +3,15 @@ const evmz = @import("evmz");
 
 const Revision = evmz.eth.Revision;
 
-const CustomExecution = evmz.eth.defineExecution(.{
-    .name = "custom-fork",
-    .create = .{
-        .createCodeSizeLimit = createCodeSizeLimit,
-        .createInitCodeSizeLimit = createInitCodeSizeLimit,
+const CustomEvm = evmz.eth.extend(.{
+    .support = .at(.cancun),
+    .execution = .{
+        .name = "custom-fork",
+        .create = .{
+            .createCodeSizeLimit = createCodeSizeLimit,
+            .createInitCodeSizeLimit = createInitCodeSizeLimit,
+        },
     },
-});
-const CustomTransaction = evmz.eth.defineTransaction(.{
     .transaction = .{
         .maxInitcodeSize = maxInitcodeSize,
         .transactionWarmsCoinbase = transactionWarmsCoinbase,
@@ -22,16 +23,8 @@ const CustomTransaction = evmz.eth.defineTransaction(.{
         .warmsDelegatedTarget = warmsDelegatedTarget,
     },
 });
-const CustomBlock = evmz.eth.defineBlock(.{});
-const CustomVM = evmz.Vm(
-    Revision,
-    CustomExecution,
-    CustomTransaction,
-    CustomBlock,
-    .{ .support = .{ .min = .cancun, .max = .cancun } },
-);
-const CustomExecutionProtocol = CustomVM.ExecutionProtocol;
-const CustomTransactionProtocol = CustomVM.TransactionProtocol;
+const CustomExecutionProtocol = CustomEvm.ExecutionProtocol;
+const CustomTransactionProtocol = CustomEvm.TransactionProtocol;
 
 fn warmsDelegatedTarget(revision: Revision) bool {
     return revision.isImpl(.prague);
@@ -75,5 +68,5 @@ pub fn main(_: std.process.Init) !void {
     if (CustomTransactionProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
     if (!CustomTransactionProtocol.authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
     if (!CustomTransactionProtocol.transaction.transactionWarmsCoinbase(.london)) return error.CustomTransactionWarmingMismatch;
-    std.debug.print("{s}: code size limit {d}\n", .{ CustomExecution.name, CustomExecutionProtocol.create.createCodeSizeLimit(.cancun).? });
+    std.debug.print("custom-fork: code size limit {d}\n", .{CustomExecutionProtocol.create.createCodeSizeLimit(.cancun).?});
 }

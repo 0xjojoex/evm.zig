@@ -199,7 +199,7 @@ fn prepare(
         base_fee: u256 = 0,
     },
 ) !transaction.PrepareResult(Protocol) {
-    return Protocol.Tx.prepare(Protocol, &evmz.eth.transaction_policy, .{
+    return Protocol.Tx.prepare(Protocol, &evmz.Evm.transaction_policy, .{
         .revision = env_overrides.revision,
         .tx = value,
         .env = .{

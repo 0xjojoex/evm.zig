@@ -50,8 +50,7 @@ pub const Storage = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.StorageConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.StorageConfig(Revision) {
         return .{
             .sloadColdStorageAccessGas = @This().sloadColdStorageAccessGas,
             .sstoreMinimumGas = @This().sstoreMinimumGas,
@@ -161,10 +160,8 @@ pub const Block = struct {
         return PatchType;
     }
 
-    /// Complete Ethereum block policy, or the neutral policy for a custom
-    /// revision enum whose Ethereum semantics cannot be inherited.
-    pub fn config(comptime R: type) definition.BlockConfig(R) {
-        if (R != Revision) return .default;
+    /// Complete canonical Ethereum block policy.
+    pub fn config() definition.BlockConfig(Revision) {
         return .{
             .beforeBlock = Self.beforeBlock,
             .beforeTransaction = Self.beforeTransaction,
@@ -284,8 +281,7 @@ pub const Create = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.CreateConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.CreateConfig(Revision) {
         return .{
             .createCodeSizeLimit = @This().createCodeSizeLimit,
             .rejectsCreateCode = @This().rejectsCreateCode,
@@ -374,8 +370,7 @@ pub const Call = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.CallConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.CallConfig(Revision) {
         return .{
             .callBaseGas = @This().callBaseGas,
             .callColdAccountAccessGas = @This().callColdAccountAccessGas,
@@ -476,8 +471,7 @@ pub const SelfDestruct = struct {
         return PatchType;
     }
 
-    pub fn config(comptime R: type) definition.SelfDestructConfig(R) {
-        if (R != Revision) return .default;
+    pub fn config() definition.SelfDestructConfig(Revision) {
         return .{
             .selfDestructPolicy = @This().selfDestructPolicy,
             .selfDestructFinalization = @This().selfDestructFinalization,

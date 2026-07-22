@@ -5,7 +5,6 @@ pub const BlockHashSource = @import("./BlockHashSource.zig");
 pub const c_api = @import("./c_api.zig");
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
-pub const definition = @import("./definition.zig");
 pub const easm = @import("./easm.zig");
 pub const eth = @import("./eth.zig");
 pub const execution = @import("./execution.zig");
@@ -28,29 +27,10 @@ pub const t = @import("./t.zig");
 pub const trace = @import("./trace.zig");
 pub const transaction = @import("./transaction.zig");
 pub const uint256 = @import("./uint256.zig");
-pub const vm = @import("./vm.zig");
+const vm = @import("./vm.zig");
 
-/// Compose a concrete engine family from independently authored layers.
-pub const Vm = vm.Vm;
 /// The Ethereum-mainnet engine family — the usual ready-to-use entry point.
-pub const Evm = Vm(
-    eth.Revision,
-    eth.execution_definition,
-    eth.transaction_definition,
-    eth.block_definition,
-    .{},
-);
-
-/// Derive an Ethereum engine family with typed support and dispatch options.
-pub fn EvmWith(comptime options: vm.OptionsFor(eth.execution_definition)) type {
-    return Vm(
-        eth.Revision,
-        eth.execution_definition,
-        eth.transaction_definition,
-        eth.block_definition,
-        options,
-    );
-}
+pub const Evm = eth.extend(.{});
 
 // Commonly-used types are flat-aliased here for ergonomics.
 pub const addr = address.addr;
@@ -67,15 +47,8 @@ pub const Opcode = opcode.Opcode;
 pub const OpcodeInfo = opcode.OpInfo;
 pub const PreparedCodeBackend = prepared_code.Backend;
 pub const InMemoryPreparedPool = prepared_code.InMemoryPreparedPool;
-pub const ExecutionDefinition = definition.ExecutionDefinition;
 pub const ExecutionResourcePlan = execution_resources.Plan;
 pub const ExecutionResourcePreparer = execution_resources.Preparer;
-pub const TransactionDefinition = definition.TransactionDefinition;
-pub const BlockDefinition = definition.BlockDefinition;
-pub const TransactionPolicy = definition.TransactionPolicy;
-pub const BlockPolicy = definition.BlockPolicy;
-pub const RevisionConfig = definition.RevisionConfig;
-pub const RevisionModel = definition.RevisionModel;
 pub const StateReader = vm.StateReader;
 pub const ConcurrentStateReader = state.ConcurrentReader;
 pub const ConcurrentBlockHashSource = BlockHashSource.Concurrent;
@@ -83,6 +56,11 @@ pub const Transaction = Evm.Transaction;
 pub const Executed = Evm.Executed;
 pub const Outcome = Evm.Outcome;
 pub const TxStatus = Evm.TxStatus;
+pub const TxExecutionResult = vm.TxExecutionResult;
+pub const AccountView = vm.AccountView;
+pub const BlockResult = vm.BlockResult;
+pub const AfterTransactionContext = vm.AfterTransactionContext;
+pub const FinalizeBlockContext = vm.FinalizeBlockContext;
 
 /// Number of 32-byte EVM words spanning `size` bytes (rounded up).
 pub fn calcWordSize(comptime T: type, size: T) T {

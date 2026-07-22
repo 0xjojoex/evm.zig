@@ -7,59 +7,51 @@ const precompile_mod = @import("../precompile.zig");
 const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const tx = @import("../transaction.zig");
 const tx_gas = @import("../transaction/gas.zig");
+const eth_config = @import("../eth/config.zig");
 
 const protocol = @import("../protocol.zig");
+const binding = @import("binding.zig");
+const validate = @import("validate.zig");
 const support = @import("support.zig");
 const types = @import("types.zig");
-const ExecutionProtocol = protocol.ExecutionProtocol;
-const TransactionProtocol = protocol.TransactionProtocol;
+const compileExecution = binding.compileExecution;
+const compileTransaction = binding.compileTransaction;
 const Resolution = protocol.Resolution;
 const ExecutionTarget = protocol.ExecutionTarget;
 const RevisionModel = support.Model;
-const InstructionContext = protocol.instruction.Context;
+const InstructionContext = @import("instruction.zig").Context;
 const OpcodeTier = protocol.OpcodeTier;
 const StaticGas = protocol.StaticGas;
-const assertExecutionContract = protocol.assertExecutionContract;
-const assertTransactionContract = protocol.assertTransactionContract;
-const assertDispatchContract = protocol.assertDispatchContract;
-
-const TestTransactionPreparation = struct {
-    pub fn Runtime(comptime ProtocolType: type, comptime Policy: type) type {
-        return struct {
-            policy: *const Policy,
-
-            pub fn prepare(self: @This(), input: tx.PrepareInput(ProtocolType)) !tx.PrepareResult(ProtocolType) {
-                _ = self.policy;
-                _ = input;
-                return error.UnsupportedTransactionPreparation;
-            }
-        };
+const assertExecutionContract = struct {
+    fn call(comptime execution_rules: anytype) void {
+        validate.assertExecutionContract(definition.ExecutionModel(execution_rules));
     }
-
-    pub fn For(comptime ProtocolType: type) type {
-        return struct {
-            pub fn prepare(input: tx.PrepareInput(ProtocolType)) !tx.PrepareResult(ProtocolType) {
-                _ = input;
-                return error.UnsupportedTransactionPreparation;
-            }
-        };
+}.call;
+const assertDispatchContract = struct {
+    fn call(comptime execution_rules: anytype) void {
+        validate.assertDispatchContract(definition.ExecutionModel(execution_rules));
     }
-};
-
-const TestTransactionValidationError = enum { rejected };
+}.call;
 
 fn instructionFor(comptime ProtocolType: type, comptime opcode: opcode_info.Opcode) ProtocolType.Instruction.Value {
     return ProtocolType.Instruction.fromByte(@intFromEnum(opcode));
 }
 
-fn testExecutionDefinition(
+fn testExecutionRules(
     comptime R: type,
     comptime Instruction: type,
     comptime create_code_size_limit: ?*const fn (R) ?usize,
-) definition.ExecutionDefinition(R) {
+) definition.ExecutionRules(R) {
+    const Neutral = struct {
+        fn valueTransferLog(_: R, _: types.ValueTransferInput) ?types.ValueTransferLog {
+            return null;
+        }
+    };
     return .{
         .name = "test",
+        .revision = .{},
         .instruction = Instruction,
+        .value_transfer_log = Neutral.valueTransferLog,
         .call = testCallConfig(R),
         .create = testCreateConfig(R, create_code_size_limit),
         .storage = testStorageConfig(R),
@@ -68,7 +60,7 @@ fn testExecutionDefinition(
     };
 }
 
-fn testTransactionDefinition(comptime R: type) definition.TransactionDefinition(R) {
+fn testTransactionLayerRules(comptime R: type) definition.TransactionLayerRules(R) {
     return .{
         .transaction = testTransactionConfig(R),
         .settlement = testSettlementConfig(R),
@@ -77,10 +69,10 @@ fn testTransactionDefinition(comptime R: type) definition.TransactionDefinition(
 }
 
 fn protocolFor(
-    comptime execution_definition: anytype,
-    comptime support_window: definition.BoundExecution(execution_definition).Support,
+    comptime execution_rules: anytype,
+    comptime support_window: definition.ExecutionModel(execution_rules).Support,
 ) type {
-    return ExecutionProtocol(execution_definition, support_window);
+    return compileExecution(execution_rules, support_window);
 }
 
 fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
@@ -154,8 +146,6 @@ fn testTransactionConfig(comptime R: type) definition.TransactionConfig(R) {
         }
     };
     return .{
-        .Preparation = TestTransactionPreparation,
-        .ValidationError = TestTransactionValidationError,
         .kindActive = F.kindActive,
         .allowsContractCreation = F.allowsContractCreation,
         .requiresAuthorizationList = F.requiresAuthorizationList,
@@ -307,9 +297,10 @@ fn TestPrecompile(comptime R: type) type {
 
 test "protocol type exposes dispatch facts" {
     const eth = @import("../eth.zig");
-    const Ethereum = definition.BoundExecution(eth.execution_definition);
-    const CancunPlus = ExecutionProtocol(
-        eth.execution_definition,
+    const resolved = eth_config.canonical;
+    const Ethereum = definition.ExecutionModel(resolved.execution);
+    const CancunPlus = compileExecution(
+        resolved.execution,
         Ethereum.Support.since(.cancun),
     );
     const blobbasefee = comptime instructionFor(CancunPlus, .BLOBBASEFEE);
@@ -331,13 +322,13 @@ test "protocol type exposes dispatch facts" {
 
 test "transaction resolver defaults engine protocol shape" {
     const eth = @import("../eth.zig");
-    const Ethereum = definition.BoundExecution(eth.execution_definition);
-    assertExecutionContract(eth.execution_definition);
-    assertTransactionContract(eth.Revision, eth.transaction_definition);
+    const resolved = eth_config.canonical;
+    const Ethereum = definition.ExecutionModel(resolved.execution);
+    assertExecutionContract(resolved.execution);
 
-    const Cancun = TransactionProtocol(
-        ExecutionProtocol(eth.execution_definition, Ethereum.Support.at(.cancun)),
-        eth.transaction_definition,
+    const Cancun = compileTransaction(
+        compileExecution(resolved.execution, Ethereum.Support.at(.cancun)),
+        resolved.transaction,
     );
     try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.min);
     try std.testing.expectEqual(eth.Revision.cancun, Cancun.support.max);
@@ -440,16 +431,16 @@ test "protocol contract accepts non-Ethereum revision model" {
             return if (revision_value == .beta) 42 else null;
         }
     };
-    const FakeDefinition = comptime blk: {
-        var value = testExecutionDefinition(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
+    const FakeRules = comptime blk: {
+        var value = testExecutionRules(FakeRevision, FakeInstruction, FakeCreate.createCodeSizeLimit);
         value.revision = fake_revision_config;
         break :blk value;
     };
-    const FakeBound = definition.BoundExecution(FakeDefinition);
+    const FakeExecution = definition.ExecutionModel(FakeRules);
 
-    assertDispatchContract(FakeDefinition);
+    assertDispatchContract(FakeRules);
 
-    const FakeProtocol = protocolFor(FakeDefinition, FakeBound.Support.all);
+    const FakeProtocol = protocolFor(FakeRules, FakeExecution.Support.all);
     const fake_add = comptime instructionFor(FakeProtocol, .ADD);
     const fake_log1 = comptime instructionFor(FakeProtocol, .LOG1);
     try std.testing.expectEqual(Resolution.always, FakeProtocol.Instruction.availability(fake_add));
@@ -458,17 +449,20 @@ test "protocol contract accepts non-Ethereum revision model" {
     try std.testing.expectEqual(OpcodeTier.hot, FakeProtocol.Instruction.tier(fake_add));
     try std.testing.expect(!FakeProtocol.Instruction.entry(fake_add).hot_path);
     try std.testing.expectEqual(@as(?usize, 42), FakeProtocol.create.createCodeSizeLimit(.beta));
-    try std.testing.expectEqual(FakeRevision.beta, FakeBound.latest);
-    try std.testing.expectEqual(FakeRevision.alpha, FakeBound.stable);
-    try std.testing.expect(FakeBound.Support.all.contains(.beta));
+    try std.testing.expectEqual(FakeRevision.beta, FakeExecution.latest);
+    try std.testing.expectEqual(FakeRevision.alpha, FakeExecution.stable);
+    try std.testing.expect(FakeExecution.Support.all.contains(.beta));
     try std.testing.expectEqual(std.math.Order.lt, FakeProtocol.order(.alpha, .beta));
     try std.testing.expectEqual(FakeSemantics.BaseRevision.cancun, FakeProtocol.baseRevision(.beta));
 
-    const FakeTx = TransactionProtocol(FakeProtocol, testTransactionDefinition(FakeRevision));
-    try std.testing.expectEqual(TestTransactionValidationError, FakeTx.Tx.ValidationError);
+    const FakeTx = compileTransaction(FakeProtocol, testTransactionLayerRules(FakeRevision));
+    try std.testing.expectEqual(
+        @import("../eth/transaction_validation.zig").ValidationError,
+        FakeTx.Tx.ValidationError,
+    );
     try std.testing.expectEqual(FakeProtocol.support, FakeTx.support);
 
-    const AlphaProtocol = protocolFor(FakeDefinition, FakeBound.Support.at(.alpha));
+    const AlphaProtocol = protocolFor(FakeRules, FakeExecution.Support.at(.alpha));
     const alpha_add = comptime instructionFor(AlphaProtocol, .ADD);
     const alpha_log1 = comptime instructionFor(AlphaProtocol, .LOG1);
     try std.testing.expectEqual(@as(?i64, 3), AlphaProtocol.Instruction.staticGasConstant(alpha_add));
@@ -476,12 +470,12 @@ test "protocol contract accepts non-Ethereum revision model" {
     try std.testing.expectEqual(Resolution.never, AlphaProtocol.Instruction.availability(alpha_log1));
     try std.testing.expectEqual(@as(?usize, null), AlphaProtocol.create.createCodeSizeLimit(.alpha));
 
-    const BetaProtocol = protocolFor(FakeDefinition, FakeBound.Support.at(.beta));
+    const BetaProtocol = protocolFor(FakeRules, FakeExecution.Support.at(.beta));
     const beta_log1 = comptime instructionFor(BetaProtocol, .LOG1);
     try std.testing.expectEqual(Resolution.always, BetaProtocol.Instruction.availability(beta_log1));
 }
 
-test "definition-owned instruction type can compose custom opcode identity" {
+test "rule-owned instruction type can compose custom opcode identity" {
     const CustomRevision = enum(u8) {
         alpha,
     };
@@ -571,12 +565,12 @@ test "definition-owned instruction type can compose custom opcode identity" {
             return @intCast(info(value).static_gas);
         }
     };
-    const CustomDefinition = testExecutionDefinition(CustomRevision, CustomInstruction, null);
-    const CustomBound = definition.BoundExecution(CustomDefinition);
+    const CustomRules = testExecutionRules(CustomRevision, CustomInstruction, null);
+    const CustomExecution = definition.ExecutionModel(CustomRules);
 
-    assertDispatchContract(CustomDefinition);
+    assertDispatchContract(CustomRules);
 
-    const CustomProtocol = protocolFor(CustomDefinition, CustomBound.Support.all);
+    const CustomProtocol = protocolFor(CustomRules, CustomExecution.Support.all);
     const entry = CustomProtocol.Instruction.entry(CustomProtocol.Instruction.fromByte(custom_opcode_byte));
     try std.testing.expectEqual(@as(u8, custom_opcode_byte), entry.opcode_byte);
     try std.testing.expect(entry.defined());
@@ -593,7 +587,7 @@ test "definition-owned instruction type can compose custom opcode identity" {
     try std.testing.expectEqual(ExecutionTarget{ .builtin = .ADD }, inherited_entry.execution_target);
     try std.testing.expectEqual(@as(?i64, 7), CustomProtocol.Instruction.staticGasConstant(inherited_instruction));
 
-    const subinstruction = CustomBound.Instruction.Value{ .evm64 = custom_subopcode_byte };
+    const subinstruction = CustomExecution.Instruction.Value{ .evm64 = custom_subopcode_byte };
     const subentry = CustomProtocol.Instruction.entry(subinstruction);
     try std.testing.expectEqual(@as(u8, custom_opcode_byte), subentry.opcode_byte);
     try std.testing.expectEqualStrings("C001_ADD64", subentry.info.name.?);
@@ -602,8 +596,6 @@ test "definition-owned instruction type can compose custom opcode identity" {
     try std.testing.expectEqual(ExecutionTarget.invalid, subentry.execution_target);
 }
 
-test "ethereum definition satisfies full runtime contract" {
-    const eth = @import("../eth.zig");
-    assertExecutionContract(eth.execution_definition);
-    assertTransactionContract(eth.Revision, eth.transaction_definition);
+test "canonical Ethereum execution satisfies full runtime contract" {
+    assertExecutionContract(eth_config.canonical.execution);
 }

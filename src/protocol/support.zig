@@ -99,16 +99,16 @@ pub fn Model(comptime Revision: type) type {
     return ModelWithConfig(Revision, .{});
 }
 
-pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revision)) type {
-    const default_revisions: []const Revision = std.enums.values(Revision);
+pub fn ModelWithConfig(comptime R: type, comptime cfg: ModelConfig(R)) type {
+    const default_revisions: []const R = std.enums.values(R);
     const configured_revisions = cfg.revisions orelse default_revisions;
-    const configured_set = std.enums.EnumSet(Revision).initMany(configured_revisions);
+    const configured_set = std.enums.EnumSet(R).initMany(configured_revisions);
     const Semantics = cfg.semantics;
     if (configured_revisions.len == 0) {
         @compileError("Revision.revisions must not be empty");
     }
-    assertRevisionOrder(Revision, configured_revisions, cfg.order);
-    assertSemantics(Revision, Semantics);
+    assertRevisionOrder(R, configured_revisions, cfg.order);
+    assertSemantics(R, Semantics);
     const latest_revision = cfg.latest orelse configured_revisions[configured_revisions.len - 1];
     const stable_revision = cfg.stable orelse latest_revision;
     if (!configured_set.contains(latest_revision)) {
@@ -119,54 +119,55 @@ pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revisi
     }
 
     return struct {
+        pub const Revision = R;
         pub const revisions = configured_revisions;
         pub const latest = latest_revision;
         pub const stable = stable_revision;
         pub const RevisionSemantics = Semantics;
         pub const BaseRevision = Semantics.BaseRevision;
 
-        pub fn order(a: Revision, b: Revision) std.math.Order {
+        pub fn order(a: R, b: R) std.math.Order {
             return cfg.order(a, b);
         }
 
-        pub fn isImpl(current: Revision, required: Revision) bool {
+        pub fn isImpl(current: R, required: R) bool {
             return includes(cfg.order, current, required);
         }
 
-        pub fn baseRevision(revision: Revision) BaseRevision {
+        pub fn baseRevision(revision: R) BaseRevision {
             return Semantics.baseRevision(revision);
         }
 
-        pub fn isConfigured(revision: Revision) bool {
+        pub fn isConfigured(revision: R) bool {
             return configured_set.contains(revision);
         }
 
         pub const Availability = union(enum) {
             never,
             always,
-            since: Revision,
-            gate: *const fn (Revision) bool,
+            since: R,
+            gate: *const fn (R) bool,
         };
 
         pub const Support = struct {
-            min: Revision = revisions[0],
-            max: Revision = revisions[revisions.len - 1],
+            min: R = revisions[0],
+            max: R = revisions[revisions.len - 1],
 
             pub const all: Support = .{};
 
-            pub fn since(comptime min: Revision) Support {
+            pub fn since(comptime min: R) Support {
                 return .{ .min = min };
             }
 
-            pub fn through(comptime max: Revision) Support {
+            pub fn through(comptime max: R) Support {
                 return .{ .max = max };
             }
 
-            pub fn range(comptime min: Revision, comptime max: Revision) Support {
+            pub fn range(comptime min: R, comptime max: R) Support {
                 return .{ .min = min, .max = max };
             }
 
-            pub fn at(comptime revision: Revision) Support {
+            pub fn at(comptime revision: R) Support {
                 return .{ .min = revision, .max = revision };
             }
 
@@ -188,7 +189,7 @@ pub fn ModelWithConfig(comptime Revision: type, comptime cfg: ModelConfig(Revisi
                     includes(cfg.order, self.max, self.min);
             }
 
-            pub fn contains(self: Support, revision: Revision) bool {
+            pub fn contains(self: Support, revision: R) bool {
                 return isConfigured(revision) and
                     includes(cfg.order, revision, self.min) and
                     includes(cfg.order, self.max, revision);

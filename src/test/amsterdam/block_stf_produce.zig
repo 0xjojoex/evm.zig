@@ -323,7 +323,7 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
 
     const parent_hash = [_]u8{0x11} ** 32;
     const parent_beacon_block_root = [_]u8{0x22} ** 32;
-    const env: evmz.vm.Env = .{ .number = 1, .timestamp = 1, .gas_limit = 2_000_000 };
+    const env: evmz.Env = .{ .number = 1, .timestamp = 1, .gas_limit = 2_000_000 };
     const header: block_stf.BlockHeader = .{
         .number = env.number,
         .timestamp = env.timestamp,
@@ -701,7 +701,7 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
     parent_hash[31] = 0x22;
     var beacon_root = [_]u8{0x33} ** 32;
     beacon_root[31] = 0x44;
-    const env: evmz.vm.Env = .{
+    const env: evmz.Env = .{
         .number = 1,
         .timestamp = 12,
         .gas_limit = 30_000_000,
@@ -802,7 +802,7 @@ test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
     }
 }
 
-fn blockEnv(gas_limit: u64) evmz.vm.Env {
+fn blockEnv(gas_limit: u64) evmz.Env {
     return .{
         .number = 0,
         .slot_number = 0,

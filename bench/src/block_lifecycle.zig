@@ -344,7 +344,7 @@ fn syntheticAccessListAddress(index: usize) evmz.Address {
     return address;
 }
 
-fn runTransactions(block: anytype, options: Options, access_list: []const evmz.transaction.AccessListEntry) !evmz.vm.BlockResult {
+fn runTransactions(block: anytype, options: Options, access_list: []const evmz.transaction.AccessListEntry) !evmz.BlockResult {
     var tx_input: [32]u8 = undefined;
     var index: usize = 0;
     while (index < options.txs) : (index += 1) {

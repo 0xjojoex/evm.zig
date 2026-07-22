@@ -13,14 +13,11 @@ const opcode_info = @import("../opcode.zig");
 const precompile = @import("../precompile.zig");
 const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const support = @import("support.zig");
-const transaction_protocol = @import("transaction.zig");
-const tx = @import("../transaction/types.zig");
-const tx_settlement = @import("../transaction/settlement.zig");
 
 const RevisionId = support.RevisionId;
 
 // Authored definition values are nominally typed before this point. These
-// checks receive a `BoundExecution` and validate the user-provided type
+// checks receive an `ExecutionModel` and validate the resolved type
 // surfaces that enter dispatch, precompiles, and interpreter execution.
 pub fn assertInstructionContract(comptime ExecutionBinding: type) void {
     const support_window = comptime assertDefinitionModel(ExecutionBinding);
@@ -33,7 +30,7 @@ pub fn assertDispatchContract(comptime ExecutionBinding: type) void {
 }
 
 /// Full execution-layer contract: dispatch surface, precompile domain, and the
-/// dynamic-gas hooks the real Interpreter consumes. Takes a `BoundExecution`.
+/// dynamic-gas hooks the real Interpreter consumes. Takes an `ExecutionModel`.
 pub fn assertExecutionContract(comptime ExecutionBinding: type) void {
     assertDispatchContract(ExecutionBinding);
     assertInstructionDynamicGasTypes(ExecutionBinding);
@@ -277,33 +274,6 @@ fn assertInstructionDynamicGasTypes(comptime Definition: type) void {
     _ = account_read_cold_access_gas;
     const code_account_access_gas: ?i64 = Instruction.codeAccountAccessGas(revision, .cold);
     _ = code_account_access_gas;
-}
-
-/// Assert that one transaction definition's user-provided `Preparation` type
-/// satisfies the engine prepare contract. Runs at `TransactionProtocol` bind.
-pub fn assertTransactionContract(comptime R: type, comptime transaction_definition: anytype) void {
-    const TransactionApi = transaction_protocol.For(transaction_definition.transaction);
-    const ProtocolLike = struct {
-        pub const Revision = R;
-        pub const transaction = transaction_definition.transaction;
-        pub const Tx = TransactionApi;
-        pub const settlement = transaction_definition.settlement;
-        pub const Settlement = tx_settlement.Default;
-    };
-
-    const prepare_result_type = @TypeOf(TransactionApi.prepare(
-        ProtocolLike,
-        @as(*const definition.TransactionPolicy(R), undefined),
-        @as(tx.PrepareInput(ProtocolLike), undefined),
-    ));
-    switch (@typeInfo(prepare_result_type)) {
-        .error_union => |info| {
-            if (info.payload != tx.PrepareResult(ProtocolLike)) {
-                @compileError("Protocol.Tx.prepare must return !transaction.PrepareResult(Protocol)");
-            }
-        },
-        else => @compileError("Protocol.Tx.prepare must return an error union"),
-    }
 }
 
 test "support value protocol exposes methods" {

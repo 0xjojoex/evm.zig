@@ -1,4 +1,6 @@
 test {
+    _ = @import("./test/vm_family.zig");
+    _ = @import("./test/vm_runtime.zig");
     _ = @import("./test/execution_boundary.zig");
     _ = @import("./test/execution_precompile_runtime.zig");
     _ = @import("./test/block_lifecycle.zig");
@@ -21,7 +23,7 @@ const evmz = @import("evm.zig");
 const Opcode = evmz.Opcode;
 
 test "protocol definition plugs into existing runtime code" {
-    const CancunVM = evmz.EvmWith(.{
+    const CancunVM = evmz.eth.extend(.{
         .support = evmz.Evm.Support.at(.cancun),
     });
     const Cancun = CancunVM.ExecutionProtocol;
@@ -47,15 +49,14 @@ test "protocol definition plugs into existing runtime code" {
         CancunVM.Instruction.entry(CancunVM.Instruction.fromByte(@intFromEnum(Opcode.ADD))),
     );
     try std.testing.expectEqual(CancunVM.TransactionProtocol.Tx.Value, CancunVM.Transaction);
-    try std.testing.expectEqual(CancunVM.TransactionProtocol.Tx.View, CancunVM.TransactionView);
+    try std.testing.expectEqual(evmz.transaction.TransactionView, CancunVM.TransactionProtocol.Tx.View);
     try std.testing.expectEqual(CancunVM.TransactionProtocol.Tx.ValidationError, CancunVM.Rejection);
     try std.testing.expectEqual(evmz.Evm.Executor, evmz.Executor);
     try std.testing.expectEqual(evmz.Evm.Interpreter, evmz.Interpreter);
-    try std.testing.expectEqual(evmz.vm.OptionsFor(evmz.eth.execution_definition), evmz.Evm.Options);
     try std.testing.expectEqual(evmz.Evm.ExecutionProtocol.Support, evmz.Evm.Support);
     try std.testing.expectEqual(evmz.eth.Revision, evmz.Evm.BaseRevision);
     try std.testing.expectEqual(evmz.eth.Revision.cancun, evmz.Evm.baseRevision(.cancun));
-    try std.testing.expectEqual(evmz.Evm, evmz.EvmWith(.{}));
+    try std.testing.expectEqual(evmz.Evm, evmz.eth.extend(.{}));
     try std.testing.expectEqual(evmz.execution.Message, evmz.Message);
     try std.testing.expect(@hasDecl(evmz.Evm.TransactionProtocol.Settlement, "Plan"));
     try std.testing.expect(@hasDecl(evmz.Evm.TransactionProtocol.Settlement, "Costs"));
@@ -74,7 +75,7 @@ test "protocol definition plugs into existing runtime code" {
 
     var executor = CancunVM.Executor.init(std.testing.allocator, .{ .revision = .cancun });
     defer executor.deinit();
-    const env: evmz.vm.Env = .{};
+    const env: evmz.Env = .{};
     const result = try executor.runStandalone(env.txContext(evmz.addr(0xaaaa), 0, 100_000, &.{}), .{
         .call = .{
             .sender = evmz.addr(0xaaaa),
@@ -85,19 +86,14 @@ test "protocol definition plugs into existing runtime code" {
 }
 
 test "decomposed definitions keep the concrete engine transaction value" {
-    const CustomExecution = comptime evmz.eth.defineExecution(.{ .name = "custom-semantics" });
-    const CustomVm = evmz.Vm(
-        evmz.eth.Revision,
-        CustomExecution,
-        evmz.eth.transaction_definition,
-        evmz.eth.block_definition,
-        .{ .support = .{ .min = .cancun, .max = .cancun } },
-    );
+    const CustomVm = evmz.eth.extend(.{
+        .support = .at(.cancun),
+        .execution = .{ .name = "custom-semantics" },
+    });
 
     try std.testing.expect(CustomVm.Transaction == evmz.Transaction);
-    try std.testing.expect(CustomVm.TransactionView == evmz.transaction.TransactionView);
+    try std.testing.expect(CustomVm.TransactionProtocol.Tx.View == evmz.transaction.TransactionView);
     try std.testing.expect(CustomVm.TransactionProtocol.Tx.Value == evmz.Transaction);
-    try std.testing.expect(!@hasDecl(evmz.vm, "ResolvedVm"));
 }
 
 test "protocol surface flattens semantic types and hides validation" {
@@ -110,20 +106,14 @@ test "protocol surface flattens semantic types and hides validation" {
 }
 
 test "typed Evm support options resolve the protocol window" {
-    const SinceCancun = evmz.EvmWith(.{ .support = evmz.Evm.Support.since(.cancun) });
-    const ThroughCancun = evmz.EvmWith(.{ .support = evmz.Evm.Support.through(.cancun) });
-    const LondonToCancun = evmz.EvmWith(.{ .support = .{
+    const SinceCancun = evmz.eth.extend(.{ .support = evmz.Evm.Support.since(.cancun) });
+    const ThroughCancun = evmz.eth.extend(.{ .support = evmz.Evm.Support.through(.cancun) });
+    const LondonToCancun = evmz.eth.extend(.{ .support = .{
         .min = .london,
         .max = .cancun,
     } });
 
-    try std.testing.expectEqual(evmz.Evm, evmz.Vm(
-        evmz.eth.Revision,
-        evmz.eth.execution_definition,
-        evmz.eth.transaction_definition,
-        evmz.eth.block_definition,
-        .{},
-    ));
+    try std.testing.expectEqual(evmz.Evm, evmz.eth.extend(.{}));
     try std.testing.expectEqual(evmz.eth.Revision.cancun, SinceCancun.ExecutionProtocol.support.min);
     try std.testing.expectEqual(evmz.Evm.Support.all.max, SinceCancun.ExecutionProtocol.support.max);
     try std.testing.expectEqual(evmz.Evm.Support.all.min, ThroughCancun.ExecutionProtocol.support.min);

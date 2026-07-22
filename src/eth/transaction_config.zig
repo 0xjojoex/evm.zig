@@ -6,13 +6,9 @@ const tx_blob = @import("../transaction/blob.zig");
 const tx_gas = @import("../transaction/gas.zig");
 const Revision = @import("revision.zig").Revision;
 const transaction = @import("transaction.zig");
-const transaction_prepare = @import("transaction_prepare.zig");
-const transaction_validation = @import("transaction_validation.zig");
 
 pub fn Patch(comptime R: type) type {
     const PatchType = struct {
-        Preparation: ?type = null,
-        ValidationError: ?type = null,
         kindActive: ?*const fn (R, tx.TxKind) bool = null,
         allowsContractCreation: ?*const fn (R, tx.TxKind) bool = null,
         requiresAuthorizationList: ?*const fn (R, tx.TxKind) bool = null,
@@ -39,11 +35,8 @@ pub fn Patch(comptime R: type) type {
     return PatchType;
 }
 
-pub fn config(comptime R: type) definition.TransactionConfig(R) {
-    if (R != Revision) return .default;
+pub fn config() definition.TransactionConfig(Revision) {
     return .{
-        .Preparation = transaction_prepare,
-        .ValidationError = transaction_validation.ValidationError,
         .kindActive = transaction.Transaction.kindActive,
         .allowsContractCreation = transaction.Transaction.allowsContractCreation,
         .requiresAuthorizationList = transaction.Transaction.requiresAuthorizationList,

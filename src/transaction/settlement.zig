@@ -47,6 +47,8 @@ pub const ExecutionGasResult = struct {
     gas_refund: i64,
     gas_reservoir: i64,
     state_gas_spent: i64,
+
+    pub const empty: ExecutionGasResult = std.mem.zeroes(@This());
 };
 
 /// Gas contribution used for block/session accounting.
