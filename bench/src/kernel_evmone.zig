@@ -1,8 +1,9 @@
 const std = @import("std");
 const evmz = @import("evmz");
+const evmz_evmc = @import("evmz_evmc");
 const common = @import("common.zig");
 
-const evmc = evmz.c_api.evmc;
+const evmc = evmz_evmc.evmc;
 
 extern fn evmc_create_evmone() ?*evmc.evmc_vm;
 

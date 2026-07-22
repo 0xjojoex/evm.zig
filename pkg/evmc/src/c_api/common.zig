@@ -2,7 +2,7 @@ pub const evmc = @cImport({
     @cInclude("evmz/evmc_zig.h");
 });
 const std = @import("std");
-const evmz = @import("../evm.zig");
+const evmz = @import("evmz");
 
 comptime {
     if (evmc.EVMC_ABI_VERSION != 18) {

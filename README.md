@@ -145,14 +145,18 @@ const MyEvm = evmz.eth.derive(MyRevisions, .{
 See `examples/custom_fork/` for a same-timeline extension and
 `examples/op_deposit.zig` for revision mapping, custom transactions, and a custom block fold.
 
-## C / EVMC
+## EVMC compatibility package
 
 ```sh
-zig build -Doptimize=ReleaseFast
+zig build evmc -Doptimize=ReleaseFast
+zig build evmc-test
+zig build evmc-example -Doptimize=ReleaseFast
 ```
 
-builds library artifacts exporting `evmc_create_evmz`, an EVMC-compatible
-entrypoint. Public headers are in `include/`.
+The standalone `pkg/evmc` package builds static and shared `libevmz-evmc`
+artifacts exporting `evmc_create_evmz`. It owns the EVMC headers and C example
+while depending on the public `evmz` engine module. The root `include/evmz/evmz.h`
+path remains reserved for a future native evmz C API.
 
 ## Benchmarks
 

@@ -1,6 +1,7 @@
 const std = @import("std");
-const Host = @import("../Host.zig");
-const Interpreter = @import("../Interpreter.zig");
+const evmz = @import("evmz");
+const Host = evmz.Host;
+const Interpreter = evmz.Interpreter;
 
 const common = @import("common.zig");
 const evmc = common.evmc;
