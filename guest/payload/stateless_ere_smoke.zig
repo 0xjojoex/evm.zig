@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const evmz = @import("evmz");
 const guest_options = @import("guest_options");
 const guest_allocator = @import("guest_allocator");
@@ -7,8 +8,8 @@ const magic: u32 = 0x4552_4531; // ERE1
 const zisk_output_addr: usize = 0xa0010000;
 
 pub const output_word_count = 12;
-pub export var evmz_guest_output: [output_word_count]u32 = [_]u32{0} ** output_word_count;
-pub export var evmz_guest_public_values: evmz.stateless.ere.PublicValues = [_]u8{0} ** evmz.stateless.ere.public_values_size;
+pub var evmz_guest_output: [output_word_count]u32 = [_]u32{0} ** output_word_count;
+pub var evmz_guest_public_values: evmz.stateless.ere.PublicValues = [_]u8{0} ** evmz.stateless.ere.public_values_size;
 
 pub const EreSmokeProof = struct {
     successful_validation: bool,
@@ -16,7 +17,7 @@ pub const EreSmokeProof = struct {
     public_values: evmz.stateless.ere.PublicValues,
 };
 
-export fn evmz_guest_entry() callconv(.c) void {
+pub fn evmz_guest_entry() callconv(.c) void {
     var fixed = guest_allocator.fixedBufferAllocator();
     const proof = runStatelessEreSmoke(fixed.allocator()) catch |err| {
         evmz_guest_output = errorWords(@truncate(@intFromError(err)));
@@ -28,6 +29,11 @@ export fn evmz_guest_entry() callconv(.c) void {
 }
 
 comptime {
+    if (!builtin.is_test) {
+        @export(&evmz_guest_output, .{ .name = "evmz_guest_output" });
+        @export(&evmz_guest_public_values, .{ .name = "evmz_guest_public_values" });
+        @export(&evmz_guest_entry, .{ .name = "evmz_guest_entry" });
+    }
     if (guest_options.use_ziskos_staticlib) {
         @export(&ziskMain, .{ .name = "main" });
     }

@@ -36,78 +36,21 @@ pub fn build(b: *std.Build) void {
     const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
     {
-        const state_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/state.zig", target, optimize, evmz_mod),
-        });
-        const state_cli_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/state_cli.zig", target, optimize, evmz_mod),
-        });
-        const tx_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/tx.zig", target, optimize, evmz_mod),
-        });
-
-        const stateless_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless.zig", target, optimize, evmz_mod),
-        });
-        const stateless_cli_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless_cli.zig", target, optimize, evmz_mod),
-        });
-        const stateless_input_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless_input_cli.zig", target, optimize, evmz_mod),
-        });
-        const stateless_ere_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless_ere_cli.zig", target, optimize, evmz_mod),
-        });
-        const stateless_ere_bench_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless_ere_bench.zig", target, optimize, evmz_mod),
-        });
-        const block_stf_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/block_stf.zig", target, optimize, evmz_mod),
-        });
-        const block_stf_cli_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/block_stf_cli.zig", target, optimize, evmz_mod),
-        });
-        const stateless_block_stf_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/stateless_block_stf.zig", target, optimize, evmz_mod),
+        const eest_tests = b.addTest(.{
+            .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod),
+            .filters = b.args orelse &.{},
         });
         // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
-        // Match the root test lane and compile evmz-backed tests with LLVM.
-        for ([_]*std.Build.Step.Compile{
-            state_tests,
-            state_cli_tests,
-            tx_tests,
-            stateless_tests,
-            stateless_cli_tests,
-            stateless_input_tests,
-            stateless_ere_tests,
-            stateless_ere_bench_tests,
-            block_stf_tests,
-            block_stf_cli_tests,
-            stateless_block_stf_tests,
-        }) |test_artifact| {
-            test_artifact.use_llvm = true;
-        }
-        const ssz_conformance_tests = b.addTest(.{
-            .root_module = sszConformanceModule(b, "src/ssz_conformance.zig", target, optimize, ssz_mod, snappy_mod),
-        });
-        const ssz_conformance_cli_tests = b.addTest(.{
-            .root_module = sszConformanceModule(b, "src/ssz_conformance_cli.zig", target, optimize, ssz_mod, snappy_mod),
+        // Match the root test lane and compile the evmz-backed test root with LLVM.
+        eest_tests.use_llvm = true;
+        const ssz_tests = b.addTest(.{
+            .root_module = sszConformanceModule(b, "src/ssz_test.zig", target, optimize, ssz_mod, snappy_mod),
+            .filters = b.args orelse &.{},
         });
 
         const test_step = b.step("test", "Run EEST runner tests");
-        test_step.dependOn(&b.addRunArtifact(state_tests).step);
-        test_step.dependOn(&b.addRunArtifact(state_cli_tests).step);
-        test_step.dependOn(&b.addRunArtifact(tx_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_cli_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_input_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_ere_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_ere_bench_tests).step);
-        test_step.dependOn(&b.addRunArtifact(block_stf_tests).step);
-        test_step.dependOn(&b.addRunArtifact(block_stf_cli_tests).step);
-        test_step.dependOn(&b.addRunArtifact(stateless_block_stf_tests).step);
-        test_step.dependOn(&b.addRunArtifact(ssz_conformance_tests).step);
-        test_step.dependOn(&b.addRunArtifact(ssz_conformance_cli_tests).step);
+        test_step.dependOn(&b.addRunArtifact(eest_tests).step);
+        test_step.dependOn(&b.addRunArtifact(ssz_tests).step);
     }
 
     {

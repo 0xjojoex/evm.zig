@@ -7,14 +7,6 @@
         .evmz = .{
             .path = "..",
         },
-        .evmone = .{
-            .url = "https://github.com/ipsilon/evmone/archive/786c96f1c9dfde702e303260a504af93916d9574.tar.gz",
-            .hash = "N-V-__8AAPbMGwBbPwVga0NrOYojtKqDH0mpHAS9Abv4oYKn",
-        },
-        .intx = .{
-            .url = "https://github.com/chfast/intx/archive/v0.15.0.tar.gz",
-            .hash = "N-V-__8AAGrRAwDs_VApdcu4nRtzxUL6Yqr_lyqvRxgkkAm9",
-        },
         .snappy = .{
             .url = "https://github.com/blockblaz/zig-snappy/archive/050f529bc5fa11242140312ecf550c186f05af1e.tar.gz",
             .hash = "zig_snappy-0.0.5-bDFzXlh4AADPRkDi2swDMAf8shH39Fc1g5oYRAhFQfTt",

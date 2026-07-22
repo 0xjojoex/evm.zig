@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const evmz = @import("evmz");
 const guest_options = @import("guest_options");
 const guest_allocator = @import("guest_allocator");
@@ -11,7 +12,7 @@ const magic: u32 = 0x5354_4c53; // STLS
 const zisk_output_addr: usize = 0xa0010000;
 
 pub const output_word_count = 8;
-pub export var evmz_guest_output: [output_word_count]u32 = .{
+pub var evmz_guest_output: [output_word_count]u32 = .{
     magic,
     0,
     0,
@@ -31,7 +32,7 @@ pub const StatelessProof = struct {
     receipts_root_low: u32,
 };
 
-export fn evmz_guest_entry() callconv(.c) void {
+pub fn evmz_guest_entry() callconv(.c) void {
     var fixed = guest_allocator.fixedBufferAllocator();
     const proof = runStatelessSmoke(fixed.allocator()) catch |err| {
         evmz_guest_output = .{
@@ -60,6 +61,10 @@ export fn evmz_guest_entry() callconv(.c) void {
 }
 
 comptime {
+    if (!builtin.is_test) {
+        @export(&evmz_guest_output, .{ .name = "evmz_guest_output" });
+        @export(&evmz_guest_entry, .{ .name = "evmz_guest_entry" });
+    }
     if (guest_options.use_ziskos_staticlib) {
         @export(&ziskMain, .{ .name = "main" });
     }

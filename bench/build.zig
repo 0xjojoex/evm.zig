@@ -281,44 +281,35 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const common_tests = b.addTest(.{
-            .root_module = benchModule(b, "src/common.zig", target, optimize, evmz_mod),
+        const bench_tests_mod = benchModule(b, "src/test.zig", target, optimize, evmz_mod);
+        bench_tests_mod.addImport("build_options", vm_loop_options_mod);
+        bench_tests_mod.addImport("evmz_evmc", evmz_evmc_mod);
+        const bench_tests = b.addTest(.{
+            .name = "evmz-bench-tests",
+            .root_module = bench_tests_mod,
+            .filters = b.args orelse &.{},
         });
-        const vm_loop_test_mod = benchModule(b, "src/vm_loop.zig", target, optimize, evmz_mod);
-        vm_loop_test_mod.addImport("build_options", vm_loop_options_mod);
-        const vm_loop_tests = b.addTest(.{
-            .root_module = vm_loop_test_mod,
-        });
-        const block_lifecycle_tests = b.addTest(.{
-            .root_module = benchModule(b, "src/block_lifecycle.zig", target, optimize, evmz_mod),
-        });
-        const host_boundary_test_mod = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod);
-        host_boundary_test_mod.addImport("evmz_evmc", evmz_evmc_mod);
-        const host_boundary_tests = b.addTest(.{ .root_module = host_boundary_test_mod });
-        const host_matrix_test_mod = benchModule(b, "src/host_matrix.zig", target, optimize, evmz_mod);
-        host_matrix_test_mod.addImport("evmz_evmc", evmz_evmc_mod);
-        const host_matrix_tests = b.addTest(.{ .root_module = host_matrix_test_mod });
         const kernel_tests = b.addTest(.{
+            .name = "evmone-kernel-tests",
             .root_module = blk: {
                 const kernel_test_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
                 kernel_test_mod.addImport("evmz_evmc", evmz_evmc_mod);
                 addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep, evmone_libgcc);
                 break :blk kernel_test_mod;
             },
+            .filters = b.args orelse &.{},
         });
         const compare_tests = b.addTest(.{
+            .name = "compare-tests",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/compare.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
+            .filters = b.args orelse &.{},
         });
         const test_step = b.step("test", "Run benchmark sidecar tests");
-        test_step.dependOn(&b.addRunArtifact(common_tests).step);
-        test_step.dependOn(&b.addRunArtifact(vm_loop_tests).step);
-        test_step.dependOn(&b.addRunArtifact(block_lifecycle_tests).step);
-        test_step.dependOn(&b.addRunArtifact(host_boundary_tests).step);
-        test_step.dependOn(&b.addRunArtifact(host_matrix_tests).step);
+        test_step.dependOn(&b.addRunArtifact(bench_tests).step);
         test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
         test_step.dependOn(&b.addRunArtifact(compare_tests).step);
     }
