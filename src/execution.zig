@@ -16,6 +16,30 @@ pub const PrecompileCall = precompile_runtime.PrecompileCall;
 pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
 pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
 
+/// Neutral reason an EVM execution stopped.
+///
+/// `invalid` is the compatibility fallback while opcode-local invalid reasons
+/// are migrated one by one. Projection-specific strings do not belong here.
+pub const TerminalCause = enum(u8) {
+    none,
+    revert,
+    out_of_gas,
+    invalid,
+    call_depth_exceeded,
+    insufficient_balance,
+    nonce_overflow,
+    invalid_opcode,
+    stack_underflow,
+    stack_overflow,
+    invalid_jump,
+    write_protection,
+    return_data_out_of_bounds,
+    contract_address_collision,
+    max_code_size_exceeded,
+    invalid_code,
+    code_store_out_of_gas,
+};
+
 /// A top-level call message.
 pub const Call = struct {
     sender: Address,

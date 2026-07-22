@@ -358,11 +358,11 @@ pub fn returndatacopy(frame: *CallFrame) !void {
     if (!trackCopyGas(frame, size)) return;
 
     const offset = std.math.cast(usize, offset_word) orelse {
-        frame.failWithStatus(.invalid);
+        frame.failWithFrameStatus(.return_data_out_of_bounds);
         return;
     };
     if (offset > frame.return_data.len or size > frame.return_data.len - offset) {
-        frame.failWithStatus(.invalid);
+        frame.failWithFrameStatus(.return_data_out_of_bounds);
         return;
     }
     frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);

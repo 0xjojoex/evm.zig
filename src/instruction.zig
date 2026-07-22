@@ -134,7 +134,7 @@ test "execute charges dynamic and fixed static gas" {
 
 test "execute uses definition availability from support window" {
     const FrontierProtocol = evmz.eth.fork(.frontier).ExecutionProtocol;
-    try expectOpcodeStatus(FrontierProtocol, .frontier, .BASEFEE, .invalid);
+    try expectOpcodeStatus(FrontierProtocol, .frontier, .BASEFEE, .invalid_opcode);
 }
 
 test "execute uses resolved dispatch target for hot opcodes" {
@@ -157,7 +157,7 @@ test "execute uses resolved dispatch target for hot opcodes" {
     try frame.frame.stack.push(2);
     try frame.frame.stack.push(3);
     try For(OverrideProtocol).execute(@intFromEnum(Opcode.ADD), frame.frame);
-    try std.testing.expectEqual(Interpreter.FrameStatus.invalid, frame.frame.status);
+    try std.testing.expectEqual(Interpreter.FrameStatus.invalid_opcode, frame.frame.status);
 }
 
 test "untraced interpreter raw fallback respects resolved dispatch target" {
@@ -1361,6 +1361,6 @@ pub fn For(comptime ProtocolType: type) type {
 }
 
 inline fn failInvalid(frame: *CallFrame) bool {
-    frame.failWithStatus(.invalid);
+    frame.failWithFrameStatus(.invalid_opcode);
     return false;
 }

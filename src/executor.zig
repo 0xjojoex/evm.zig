@@ -1730,6 +1730,7 @@ pub fn Executor(comptime ProtocolType: type) type {
 
             return .{
                 .status = result.status,
+                .cause = result.cause,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
                 .gas_reservoir = result.gas_reservoir,
@@ -3944,6 +3945,8 @@ test "Amsterdam raises create runtime code size limit" {
         .init_code = &oversized_osaka,
     } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, osaka_result.status);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.max_code_size_exceeded, osaka_result.cause.?);
+    try std.testing.expect(osaka_result.checkpoint_reverted);
 
     var amsterdam = Default.init(std.testing.allocator, .{
         .revision = .amsterdam,
@@ -3975,6 +3978,8 @@ test "Amsterdam raises create runtime code size limit" {
         .init_code = &oversized_amsterdam,
     } }, .legacy(20_000_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, amsterdam_over_result.status);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.max_code_size_exceeded, amsterdam_over_result.cause.?);
+    try std.testing.expect(amsterdam_over_result.checkpoint_reverted);
 }
 
 test "protocol definition drives create runtime code size limit" {
@@ -4004,6 +4009,8 @@ test "protocol definition drives create runtime code size limit" {
         .init_code = &two_byte_runtime,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.max_code_size_exceeded, result.cause.?);
+    try std.testing.expect(result.checkpoint_reverted);
 }
 
 test "protocol definition drives create runtime prefix rejection" {
@@ -4036,6 +4043,8 @@ test "protocol definition drives create runtime prefix rejection" {
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.invalid, default_result.status);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.invalid_code, default_result.cause.?);
+    try std.testing.expect(default_result.checkpoint_reverted);
 
     const AllowEfExecutor = Executor(AllowEfProtocol);
     var custom_executor = AllowEfExecutor.init(std.testing.allocator, .{
@@ -4095,6 +4104,8 @@ test "protocol definition drives create deposit gas" {
         .init_code = &init_code,
     } }, .legacy(100_000))).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, custom_result.cause.?);
+    try std.testing.expect(custom_result.checkpoint_reverted);
 }
 
 test "protocol definition drives created account initial nonce" {

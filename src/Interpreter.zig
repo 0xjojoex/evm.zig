@@ -12,6 +12,7 @@ const trace = @import("./trace.zig");
 const tail_dispatch = @import("./interpreter/tail_dispatch.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 const RevisionId = evmz.protocol.RevisionId;
+const TerminalCause = @import("./execution.zig").TerminalCause;
 
 const Error = anyerror;
 
@@ -24,6 +25,12 @@ pub const FrameStatus = enum(u8) {
     invalid,
     revert,
     out_of_gas,
+    invalid_opcode,
+    stack_underflow,
+    stack_overflow,
+    invalid_jump,
+    write_protection,
+    return_data_out_of_bounds,
 
     pub fn fromResult(status: Status) FrameStatus {
         return switch (status) {
@@ -40,13 +47,33 @@ pub const FrameStatus = enum(u8) {
             .invalid => .invalid,
             .revert => .revert,
             .out_of_gas => .out_of_gas,
+            .invalid_opcode,
+            .stack_underflow,
+            .stack_overflow,
+            .invalid_jump,
+            .write_protection,
+            .return_data_out_of_bounds,
+            => .invalid,
             .running, .suspended => unreachable,
+        };
+    }
+
+    pub fn specificCause(self: FrameStatus) ?TerminalCause {
+        return switch (self) {
+            .invalid_opcode => .invalid_opcode,
+            .stack_underflow => .stack_underflow,
+            .stack_overflow => .stack_overflow,
+            .invalid_jump => .invalid_jump,
+            .write_protection => .write_protection,
+            .return_data_out_of_bounds => .return_data_out_of_bounds,
+            .running, .suspended, .success, .invalid, .revert, .out_of_gas => null,
         };
     }
 };
 
 pub const Result = struct {
     status: Status,
+    cause: ?TerminalCause = null,
     gas_left: i64,
     gas_refund: i64,
     gas_reservoir: i64 = 0,
@@ -55,6 +82,10 @@ pub const Result = struct {
     /// Borrowed from the frame's EVM memory. Executor entry points copy root
     /// output into their retained result storage before releasing the frame.
     output_data: []u8,
+
+    pub fn terminalCause(self: Result) TerminalCause {
+        return self.cause orelse terminalCauseForStatus(self.status);
+    }
 
     pub fn refillIntrinsicStateGas(self: *Result, amount: i64) void {
         self.gas_reservoir = std.math.add(i64, self.gas_reservoir, amount) catch std.math.maxInt(i64);
@@ -97,6 +128,15 @@ pub const Result = struct {
         self.state_gas_from_gas_left = 0;
     }
 };
+
+pub fn terminalCauseForStatus(status: Status) TerminalCause {
+    return switch (status) {
+        .success => .none,
+        .revert => .revert,
+        .out_of_gas => .out_of_gas,
+        .invalid => .invalid,
+    };
+}
 
 pub const CallResume = struct {
     gas_limit: i64,
@@ -501,8 +541,12 @@ pub const CallFrame = struct {
     }
 
     pub fn failWithStatus(self: *CallFrame, status: Status) void {
-        self.status = FrameStatus.fromResult(status);
-        switch (status) {
+        self.failWithFrameStatus(FrameStatus.fromResult(status));
+    }
+
+    pub fn failWithFrameStatus(self: *CallFrame, status: FrameStatus) void {
+        self.status = status;
+        switch (status.toResult()) {
             .invalid, .out_of_gas => self.gas_left = 0,
             .success, .revert => {},
         }
@@ -560,6 +604,7 @@ pub const CallFrame = struct {
             .state_gas_from_gas_left = self.state_gas_from_gas_left,
             .output_data = self.outputData(),
             .status = self.status.toResult(),
+            .cause = self.status.specificCause(),
         };
         result.finalizeFrameStateGas();
         return result;
@@ -938,16 +983,17 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         code: []const u8,
         gas: i64,
         status: Status,
+        cause: TerminalCause,
         outcome: trace.TraceFrameOutcome,
         step_outcome: ?trace.TraceStepOutcome,
     };
     const cases = [_]Case{
-        .{ .code = &.{}, .gas = 100, .status = .success, .outcome = .success, .step_outcome = null },
-        .{ .code = &explicit_success, .gas = 100, .status = .success, .outcome = .success, .step_outcome = .success },
-        .{ .code = &revert, .gas = 100, .status = .revert, .outcome = .revert, .step_outcome = .revert },
-        .{ .code = &invalid, .gas = 100, .status = .invalid, .outcome = .invalid, .step_outcome = .invalid },
-        .{ .code = &stack_fault, .gas = 100, .status = .invalid, .outcome = .invalid, .step_outcome = .invalid },
-        .{ .code = &out_of_gas, .gas = 2, .status = .out_of_gas, .outcome = .out_of_gas, .step_outcome = .out_of_gas },
+        .{ .code = &.{}, .gas = 100, .status = .success, .cause = .none, .outcome = .success, .step_outcome = null },
+        .{ .code = &explicit_success, .gas = 100, .status = .success, .cause = .none, .outcome = .success, .step_outcome = .success },
+        .{ .code = &revert, .gas = 100, .status = .revert, .cause = .revert, .outcome = .revert, .step_outcome = .revert },
+        .{ .code = &invalid, .gas = 100, .status = .invalid, .cause = .invalid_opcode, .outcome = .invalid, .step_outcome = .invalid },
+        .{ .code = &stack_fault, .gas = 100, .status = .invalid, .cause = .stack_underflow, .outcome = .invalid, .step_outcome = .invalid },
+        .{ .code = &out_of_gas, .gas = 2, .status = .out_of_gas, .cause = .out_of_gas, .outcome = .out_of_gas, .step_outcome = .out_of_gas },
     };
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -974,6 +1020,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
 
         const captured = try interpreter.capture(&tape, .{});
         try std.testing.expectEqual(case.status, captured.result.status);
+        try std.testing.expectEqual(case.cause, captured.result.terminalCause());
         try std.testing.expectEqual(@as(usize, 1), captured.span.frames.len);
         try std.testing.expectEqual(case.outcome, captured.span.frames[0].outcome);
         if (case.step_outcome) |expected| {
@@ -1059,6 +1106,19 @@ test "interpreter state gas charge is atomic on out of gas" {
     try std.testing.expectEqual(@as(i64, 5), frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), frame.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), frame.state_gas_from_gas_left);
+}
+
+test "terminal cause fallback follows the final result status" {
+    var result = Result{
+        .status = .success,
+        .gas_left = 1,
+        .gas_refund = 0,
+        .output_data = &.{},
+    };
+    try std.testing.expectEqual(TerminalCause.none, result.terminalCause());
+
+    result.status = .out_of_gas;
+    try std.testing.expectEqual(TerminalCause.out_of_gas, result.terminalCause());
 }
 
 test "interpreter reverts frame-local state gas" {
@@ -1186,6 +1246,7 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
 
 comptime {
     if (@sizeOf(usize) == 8) {
+        assertLayout(@sizeOf(Result) == 64, "Result size changed; rerun call-capture canary benches");
         assertLayout(@sizeOf(CallFrame) == 400, "CallFrame size changed; rerun VM-loop canary benches");
         assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
         assertLayout(@offsetOf(CallFrame, "stack") == 240, "CallFrame stack view moved; rerun arithmetic VM-loop bench");

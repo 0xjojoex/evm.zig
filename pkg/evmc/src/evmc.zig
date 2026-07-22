@@ -394,6 +394,7 @@ const ToHost = struct {
     }
 
     fn call(ptr: *anyopaque, msg: evmz.Host.Message) !evmz.Host.Result {
+        if (evmz.Host.precheckResult(msg)) |result| return result;
         const self: *Self = @ptrCast(@alignCast(ptr));
         const recipient = toEvmcAddress(msg.recipient);
         const sender = toEvmcAddress(msg.sender);

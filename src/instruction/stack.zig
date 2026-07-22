@@ -46,7 +46,7 @@ pub fn dup(frame: *CallFrame, comptime n: u8) !void {
 pub fn dupn(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
     const n = decodeSingle(immediate) orelse {
-        frame.failWithStatus(.invalid);
+        frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
     consumeImmediate(frame);
@@ -109,7 +109,7 @@ pub fn swap(frame: *CallFrame, comptime n: u8) !void {
 pub fn swapn(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
     const n = decodeSingle(immediate) orelse {
-        frame.failWithStatus(.invalid);
+        frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
     consumeImmediate(frame);
@@ -119,7 +119,7 @@ pub fn swapn(frame: *CallFrame) !void {
 pub fn exchange(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
     const n, const m = decodePair(immediate) orelse {
-        frame.failWithStatus(.invalid);
+        frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
     consumeImmediate(frame);

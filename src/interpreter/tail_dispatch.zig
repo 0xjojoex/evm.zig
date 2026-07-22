@@ -14,7 +14,6 @@ const CallFrame = Interpreter.CallFrame;
 
 const TailStatus = enum {
     done,
-    invalid,
     out_of_gas,
     thrown,
 };
@@ -368,10 +367,6 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const status = table[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx);
             switch (status) {
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
-                .invalid => {
-                    ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
-                    frame.failWithStatus(.invalid);
-                },
                 .out_of_gas => {
                     ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
                     frame.failWithStatus(.out_of_gas);
@@ -418,10 +413,6 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const status = traced_table[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx);
             switch (status) {
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
-                .invalid => {
-                    ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
-                    frame.failWithStatus(.invalid);
-                },
                 .out_of_gas => {
                     ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
                     frame.failWithStatus(.out_of_gas);
@@ -469,17 +460,17 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         inline fn requireOpcode(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?TailStatus {
             const maybe_availability = comptime Instructions.tailFastPathBuiltin(opcode);
-            const availability = maybe_availability orelse return fail(ctx, ip, sp, gas, .invalid);
+            const availability = maybe_availability orelse return fail(ctx, ip, sp, gas, .invalid_opcode);
             return switch (comptime availability) {
                 .always => null,
-                .never => fail(ctx, ip, sp, gas, .invalid),
+                .never => fail(ctx, ip, sp, gas, .invalid_opcode),
                 .runtime => switch (comptime Protocol.Instruction.rawAvailability(
                     Protocol.Instruction.fromByte(@intFromEnum(opcode)),
                 )) {
                     .always => null,
-                    .never => fail(ctx, ip, sp, gas, .invalid),
-                    .since => |activation| if (Instructions.revisionIncludes(Instructions.frameRevision(ctx.frame), activation)) null else fail(ctx, ip, sp, gas, .invalid),
-                    .gate => |active| if (active(Instructions.frameRevision(ctx.frame))) null else fail(ctx, ip, sp, gas, .invalid),
+                    .never => fail(ctx, ip, sp, gas, .invalid_opcode),
+                    .since => |activation| if (Instructions.revisionIncludes(Instructions.frameRevision(ctx.frame), activation)) null else fail(ctx, ip, sp, gas, .invalid_opcode),
+                    .gate => |active| if (active(Instructions.frameRevision(ctx.frame))) null else fail(ctx, ip, sp, gas, .invalid_opcode),
                 },
             };
         }
@@ -488,9 +479,11 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         // noinline + cold marks every call site unlikely, so LLVM sinks the
         // exit blocks below each handler's fall-through fast path; an inline
         // @branchHint does not propagate to the caller's branch.
-        noinline fn fail(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: TailStatus) TailStatus {
+        noinline fn fail(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: Interpreter.FrameStatus) TailStatus {
             @branchHint(.cold);
-            return ctx.finish(ip, sp, gas, status);
+            _ = gas;
+            ctx.frame.failWithFrameStatus(status);
+            return ctx.finish(ip, sp, 0, .done);
         }
 
         fn tailStop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -502,9 +495,9 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             ctx.spill(ip, sp, gas);
             const opcode_byte = (ip - 1)[0];
             executeColdOpcode(opcode_byte, ctx.frame) catch |err| {
-                if (invalidStatusError(err)) {
+                if (frameStatusForError(err)) |status| {
                     if (ctx.frame.status == .running) {
-                        ctx.frame.failWithStatus(.invalid);
+                        ctx.frame.failWithFrameStatus(status);
                     }
                     return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
                 }
@@ -536,7 +529,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.SLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
             const key_slot = sp - 1;
             ctx.frame.gas_left = next_gas;
@@ -553,8 +546,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         fn tailSstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             // Canonical SSTORE has no static-gas charge; all accounting is
             // performed by sstoreAfterPop after the static/stack checks.
-            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, gas, .invalid);
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .invalid);
+            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, gas, .write_protection);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .stack_underflow);
 
             const next_sp = sp - 2;
             const key = (sp - 1)[0];
@@ -574,7 +567,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         fn tailTload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.TLOAD, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.TLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
             const slot = sp - 1;
             const value = ctx.frame.host.getTransientStorage(ctx.frame.msg.recipient, slot[0]) catch |err| {
@@ -589,8 +582,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         fn tailTstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.TSTORE, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.TSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .invalid);
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .write_protection);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
             const nsp = sp - 2;
             const key = (sp - 1)[0];
@@ -605,7 +598,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         fn tailMcopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.MCOPY, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.MCOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
             const nsp = sp - 3;
             const dest_word = (sp - 1)[0];
@@ -630,7 +623,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         fn tailExp(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.EXP, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.EXP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
             const base = (sp - 1)[0];
             const exponent = (sp - 2)[0];
@@ -646,7 +639,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
                     const a = (sp - 1)[0];
                     const b = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -678,7 +671,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
                     sp[0] = switch (value) {
                         .address => evmz.address.toU256(ctx.frame.msg.recipient),
                         .caller => evmz.address.toU256(ctx.frame.msg.sender),
@@ -697,7 +690,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
                     const nsp = sp - 3;
                     const dest_offset_word = (sp - 1)[0];
@@ -722,9 +715,9 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                         ),
                         .return_data => {
                             const source_offset = std.math.cast(usize, source_offset_word) orelse
-                                return fail(ctx, ip, nsp, final_gas, .invalid);
+                                return fail(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
                             if (source_offset > ctx.frame.return_data.len or size > ctx.frame.return_data.len - source_offset) {
-                                return fail(ctx, ip, nsp, final_gas, .invalid);
+                                return fail(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
                             }
                             ctx.frame.memory.writeBytes(
                                 dest_offset,
@@ -741,7 +734,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .invalid);
+                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .stack_underflow);
 
                     const nsp = sp - 2;
                     const offset_word = (sp - 1)[0];
@@ -765,8 +758,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .invalid);
-                    if (!ctx.hasStack(sp, 2 + topic_count)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .write_protection);
+                    if (!ctx.hasStack(sp, 2 + topic_count)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
 
                     // Canonical logging pops offset/size before dynamic gas, then
                     // topics only after memory and data gas have succeeded.
@@ -803,7 +796,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
                     const slot = sp - 1;
                     slot[0] = switch (op) {
                         .iszero => @intFromBool(slot[0] == 0),
@@ -816,14 +809,14 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailPop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.POP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             return tailNext(ip, sp - 1, next_gas, ctx);
         }
 
         fn tailPush0(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.PUSH0, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.PUSH0, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = 0;
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
@@ -832,7 +825,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
                     const immediate_len: usize = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
                     // read_bytes carries Bytecode.zero_padding_len (33) trailing zero
                     // bytes, so a full-width big-endian load is always in bounds and
@@ -850,7 +843,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.DUP1) + 1;
-                    if (!ctx.hasStack(sp, depth) or sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, depth)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
                     sp[0] = (sp - depth)[0];
                     return tailNext(ip, sp + 1, next_gas, ctx);
                 }
@@ -862,7 +856,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.SWAP1) + 1;
-                    if (!ctx.hasStack(sp, depth + 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, depth + 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
                     const top = sp - 1;
                     const target = top - depth;
                     const tmp = target[0];
@@ -878,7 +872,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
                     const shift = (sp - 1)[0];
                     const value = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -902,40 +896,40 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailJump(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.JUMP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 1;
-            const target = std.math.cast(usize, nsp[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid);
-            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid);
+            const target = std.math.cast(usize, nsp[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid_jump);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
         }
 
         fn tailJumpi(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.JUMPI, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 2;
             if (nsp[0] == 0) return tailNext(ip, nsp, next_gas, ctx);
-            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid);
-            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid);
+            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid_jump);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
         }
 
         fn tailPc(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.PC, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = ctx.pcOf(ip) - 1;
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
 
         fn tailMsize(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSIZE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = ctx.frame.memory.len();
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
 
         fn tailGas(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.GAS, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = @intCast(next_gas);
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
@@ -947,7 +941,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailCalldataLoad(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.CALLDATALOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             var buffer: [32]u8 = [_]u8{0} ** 32;
             if (std.math.cast(usize, offset_word)) |offset| {
@@ -964,7 +958,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailMload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             (sp - 1)[0] = ctx.frame.memory.read(offset);
@@ -973,7 +967,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailMstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
@@ -983,7 +977,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailMstore8(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSTORE8, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
             const mem_gas = expandMemory(offset, 1, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
@@ -993,7 +987,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn tailKeccak256(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.KECCAK256, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .invalid);
+            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             const size_word = (sp - 2)[0];
             const size = wordToUsizeOrOog(size_word, ip, sp, next_gas, ctx) orelse return .out_of_gas;
@@ -1162,7 +1156,14 @@ noinline fn expOutlined(base: u256, exponent: u256) u256 {
 fn tapeStepOutcome(status: Interpreter.FrameStatus) trace.TraceStepOutcome {
     return switch (status) {
         .running, .suspended, .success => .success,
-        .invalid => .invalid,
+        .invalid,
+        .invalid_opcode,
+        .stack_underflow,
+        .stack_overflow,
+        .invalid_jump,
+        .write_protection,
+        .return_data_out_of_bounds,
+        => .invalid,
         .revert => .revert,
         .out_of_gas => .out_of_gas,
     };
@@ -1216,15 +1217,15 @@ test "captured memory plans use each opcode's destination operands" {
     try std.testing.expect(builtinMemoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
 }
 
-fn invalidStatusError(err: anyerror) bool {
+fn frameStatusForError(err: anyerror) ?Interpreter.FrameStatus {
     return switch (err) {
-        error.StackOverflow,
-        error.StackUnderflow,
-        error.StaticCallViolation,
+        error.StackOverflow => .stack_overflow,
+        error.StackUnderflow => .stack_underflow,
+        error.StaticCallViolation => .write_protection,
         error.UnknownOpcode,
         error.UnsupportedInstruction,
-        => true,
-        else => false,
+        => .invalid_opcode,
+        else => null,
     };
 }
 

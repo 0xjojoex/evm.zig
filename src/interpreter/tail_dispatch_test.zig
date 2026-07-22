@@ -148,6 +148,7 @@ fn expectOwnedBorrowedEquivalent(case: Case) !void {
 
     try std.testing.expectEqual(case.expected_status, owned_result.status);
     try std.testing.expectEqual(owned_result.status, borrowed_result.status);
+    try std.testing.expectEqual(owned_result.terminalCause(), borrowed_result.terminalCause());
     try std.testing.expectEqual(owned_result.gas_left, borrowed_result.gas_left);
     try std.testing.expectEqual(owned_result.gas_refund, borrowed_result.gas_refund);
     try std.testing.expectEqual(owned_result.gas_reservoir, borrowed_result.gas_reservoir);

@@ -23,6 +23,20 @@ pub const Status = enum(u8) {
     revert,
     out_of_gas,
     invalid,
+    call_depth_exceeded,
+    insufficient_balance,
+    nonce_overflow,
+    invalid_opcode,
+    stack_underflow,
+    stack_overflow,
+    invalid_jump,
+    write_protection,
+    return_data_out_of_bounds,
+    contract_address_collision,
+    max_code_size_exceeded,
+    invalid_code,
+    code_store_out_of_gas,
+    code_store_out_of_gas_committed,
 };
 
 pub const ByteRange = struct {
@@ -51,9 +65,33 @@ pub const Row = struct {
     output: ByteRange = .{},
     status: Status = .running,
 
-    // Used only while constructing the flat tree.
-    next_child_ordinal: u32 = 0,
+    // Low 31 bits count children while constructing the flat tree. The high
+    // bit retains whether this frame restored its own execution checkpoint.
+    construction_state: u32 = 0,
+
+    const checkpoint_reverted_mask: u32 = 1 << 31;
+    const child_count_mask: u32 = checkpoint_reverted_mask - 1;
+
+    pub fn checkpointReverted(self: Row) bool {
+        return self.construction_state & checkpoint_reverted_mask != 0;
+    }
+
+    pub fn createdAddress(self: Row) ?Address {
+        return switch (self.kind) {
+            .create, .create2 => switch (self.status) {
+                .success, .code_store_out_of_gas_committed => self.to,
+                else => null,
+            },
+            else => null,
+        };
+    }
 };
+
+comptime {
+    if (@sizeOf(usize) == 8 and @sizeOf(Row) != 144) {
+        @compileError("call capture Row size changed; rerun retained-tree memory and timing benches");
+    }
+}
 
 pub const Start = struct {
     depth: u16,
@@ -70,6 +108,7 @@ pub const Finish = struct {
     status: Status,
     gas_left: i64,
     output: []const u8 = &.{},
+    checkpoint_reverted: bool = false,
 };
 
 pub const Token = struct {
@@ -171,9 +210,10 @@ pub const CallArena = struct {
         const parent_index = self.active_rows.getLastOrNull();
         const child_ordinal = if (parent_index) |parent| blk: {
             const parent_row = &self.rows.items[parent];
-            const ordinal = parent_row.next_child_ordinal;
-            parent_row.next_child_ordinal = std.math.add(u32, ordinal, 1) catch
-                return error.CallCaptureIndexOverflow;
+            const ordinal = parent_row.construction_state & Row.child_count_mask;
+            if (ordinal == Row.child_count_mask) return error.CallCaptureIndexOverflow;
+            parent_row.construction_state =
+                (parent_row.construction_state & Row.checkpoint_reverted_mask) | (ordinal + 1);
             break :blk ordinal;
         } else blk: {
             const ordinal = self.root_count;
@@ -218,6 +258,9 @@ pub const CallArena = struct {
         const row = &self.rows.items[token.row_index];
         row.output = .{ .start = output_start, .len = output_len };
         row.status = event.status;
+        if (event.checkpoint_reverted) {
+            row.construction_state |= Row.checkpoint_reverted_mask;
+        }
         row.gas_used = if (event.gas_left >= row.gas)
             0
         else
@@ -292,7 +335,12 @@ test "call arena preserves preorder, parentage, and copied bytes" {
         .gas = 40,
         .input = &.{0xcc},
     });
-    try arena.finishCall(child, .{ .status = .success, .gas_left = 7, .output = &.{0xdd} });
+    try arena.finishCall(child, .{
+        .status = .revert,
+        .gas_left = 7,
+        .output = &.{0xdd},
+        .checkpoint_reverted = true,
+    });
     try arena.finishCall(root, .{ .status = .revert, .gas_left = 3, .output = &.{0xee} });
 
     const span = try arena.finish();
@@ -301,8 +349,56 @@ test "call arena preserves preorder, parentage, and copied bytes" {
     try std.testing.expectEqual(@as(?u32, 0), span.rows[1].parent_index);
     try std.testing.expectEqual(@as(u32, 0), span.rows[1].child_ordinal);
     try std.testing.expectEqual(@as(i64, 33), span.rows[1].gas_used);
+    try std.testing.expect(!span.rows[0].checkpointReverted());
+    try std.testing.expect(span.rows[1].checkpointReverted());
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, span.input(span.rows[0]));
     try std.testing.expectEqualSlices(u8, &.{0xdd}, span.output(span.rows[1]));
+}
+
+test "created address is derived from create kind and committed outcome" {
+    const created = @as(Address, @splat(0x44));
+    var arena = CallArena.init(std.testing.allocator);
+    defer arena.deinit();
+    try arena.begin();
+
+    const success = try arena.start(.{
+        .depth = 0,
+        .kind = .create,
+        .from = @splat(0x11),
+        .to = created,
+        .code_address = created,
+    });
+    try arena.finishCall(success, .{ .status = .success, .gas_left = 0 });
+
+    const frontier_exception = try arena.start(.{
+        .depth = 0,
+        .kind = .create2,
+        .from = @splat(0x22),
+        .to = created,
+        .code_address = created,
+    });
+    try arena.finishCall(frontier_exception, .{
+        .status = .code_store_out_of_gas_committed,
+        .gas_left = 0,
+    });
+
+    const rejected = try arena.start(.{
+        .depth = 0,
+        .kind = .create,
+        .from = @splat(0x33),
+        .to = created,
+        .code_address = created,
+    });
+    try arena.finishCall(rejected, .{
+        .status = .contract_address_collision,
+        .gas_left = 0,
+        .checkpoint_reverted = true,
+    });
+
+    const span = try arena.finish();
+    try std.testing.expectEqual(@as(?Address, created), span.rows[0].createdAddress());
+    try std.testing.expectEqual(@as(?Address, created), span.rows[1].createdAddress());
+    try std.testing.expectEqual(@as(?Address, null), span.rows[2].createdAddress());
 }
 
 test "bounded call arena reports capacity before partial append" {

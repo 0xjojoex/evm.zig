@@ -835,6 +835,7 @@ fn EthereumFamily(
             );
             return Host.Result.fromCall(.{
                 .status = result.status,
+                .cause = result.cause,
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,

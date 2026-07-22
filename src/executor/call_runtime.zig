@@ -357,6 +357,10 @@ pub fn For(comptime Executor: type) type {
                 defer self.executor.state.trace_depth = previous_depth;
 
                 const call_capture = try beginCallCapture(self.capture_context, msg);
+                if (Host.precheckResult(msg)) |result| {
+                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    return result;
+                }
                 switch (try beginCall(self.executor, msg)) {
                     .immediate => |result| {
                         if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
@@ -379,8 +383,12 @@ pub fn For(comptime Executor: type) type {
                 defer self.executor.state.trace_depth = previous_depth;
 
                 const call_capture = try beginCallCapture(self.capture_context, msg);
+                if (Host.precheckResult(msg)) |result| {
+                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    return result;
+                }
                 if (msg.depth > Host.max_call_depth) {
-                    const result = createFailure(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+                    const result = createFailureWithCause(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
                     if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
                     return result;
                 }
@@ -420,12 +428,13 @@ pub fn For(comptime Executor: type) type {
                 }
 
                 if (call_capture != null) {
-                    try self.callCaptureContext().?.reserveCallOutput(stable_result.output_data.len);
+                    try self.callCaptureContext().?.reserveCallOutput(result.output_data.len);
                 }
 
                 const host_result = switch (frame_kind) {
                     .root_call => Host.Result.fromCall(.{
                         .status = result.status,
+                        .cause = result.cause,
                         .output_data = result.output_data,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
@@ -439,6 +448,8 @@ pub fn For(comptime Executor: type) type {
                         } else unreachable;
                         break :blk Host.Result.fromCall(.{
                             .status = result.status,
+                            .cause = result.cause,
+                            .checkpoint_reverted = result.status != .success,
                             .output_data = result.output_data,
                             .gas_left = result.gas_left,
                             .gas_refund = result.gas_refund,
@@ -513,20 +524,42 @@ pub fn For(comptime Executor: type) type {
             };
         }
 
-        fn callCaptureStatus(status: Interpreter.Status) evmz.trace.CallStatus {
-            return switch (status) {
-                .success => .success,
+        fn callCaptureStatus(status: Interpreter.Status, cause: evmz.execution.TerminalCause) evmz.trace.CallStatus {
+            return switch (cause) {
+                .call_depth_exceeded => .call_depth_exceeded,
+                .insufficient_balance => .insufficient_balance,
+                .nonce_overflow => .nonce_overflow,
+                .invalid_opcode => .invalid_opcode,
+                .stack_underflow => .stack_underflow,
+                .stack_overflow => .stack_overflow,
+                .invalid_jump => .invalid_jump,
+                .write_protection => .write_protection,
+                .return_data_out_of_bounds => .return_data_out_of_bounds,
+                .contract_address_collision => .contract_address_collision,
+                .max_code_size_exceeded => .max_code_size_exceeded,
+                .invalid_code => .invalid_code,
+                .code_store_out_of_gas => if (status == .success)
+                    .code_store_out_of_gas_committed
+                else
+                    .code_store_out_of_gas,
+                .none => .success,
                 .revert => .revert,
                 .out_of_gas => .out_of_gas,
-                .invalid => .invalid,
+                .invalid => switch (status) {
+                    .success => .success,
+                    .revert => .revert,
+                    .out_of_gas => .out_of_gas,
+                    .invalid => .invalid,
+                },
             };
         }
 
         fn callCaptureFinish(result: Host.Result) evmz.trace.CallFinish {
             return .{
-                .status = callCaptureStatus(result.status()),
+                .status = callCaptureStatus(result.status(), result.terminalCause()),
                 .gas_left = result.gasLeft(),
                 .output = result.outputData(),
+                .checkpoint_reverted = result.checkpointReverted(),
             };
         }
 
@@ -568,9 +601,11 @@ pub fn For(comptime Executor: type) type {
             result: Interpreter.Result,
         ) !void {
             try self.capture_context.?.finishCall(token, .{
-                .status = callCaptureStatus(result.status),
+                .status = callCaptureStatus(result.status, result.terminalCause()),
                 .gas_left = result.gas_left,
                 .output = result.output_data,
+                // Root execution has no frame-local checkpoint in CallRuntime.
+                .checkpoint_reverted = false,
             });
         }
 
@@ -651,6 +686,7 @@ pub fn For(comptime Executor: type) type {
             );
             return Host.Result.fromCall(.{
                 .status = result.status,
+                .cause = result.cause,
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
@@ -856,8 +892,10 @@ pub fn For(comptime Executor: type) type {
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
                     .status = .invalid,
-                    .gas_left = 0,
+                    .cause = .insufficient_balance,
+                    .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
                     .gas_refund = 0,
+                    .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
                     .output_data = &.{},
                 };
             }
@@ -877,6 +915,7 @@ pub fn For(comptime Executor: type) type {
             const result = host_result.expectCall();
             return .{
                 .status = result.status,
+                .cause = result.cause,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
                 .gas_reservoir = result.gas_reservoir,
@@ -898,8 +937,10 @@ pub fn For(comptime Executor: type) type {
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .status = .invalid,
-                    .gas_left = 0,
+                    .cause = .insufficient_balance,
+                    .gas_left = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
                     .gas_refund = 0,
+                    .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
                     .output_data = &.{},
                 };
             }
@@ -923,6 +964,7 @@ pub fn For(comptime Executor: type) type {
             const call_result = (try runtime.run()).expectCall();
             return .{
                 .status = call_result.status,
+                .cause = call_result.cause,
                 .gas_left = call_result.gas_left,
                 .gas_refund = call_result.gas_refund,
                 .gas_reservoir = call_result.gas_reservoir,
@@ -988,6 +1030,7 @@ pub fn For(comptime Executor: type) type {
             const create_result = host_result.expectCreate();
             var result = Interpreter.Result{
                 .status = create_result.status,
+                .cause = create_result.cause,
                 .gas_left = create_result.gas_left,
                 .gas_refund = create_result.gas_refund,
                 .gas_reservoir = create_result.gas_reservoir,
@@ -1160,15 +1203,18 @@ pub fn For(comptime Executor: type) type {
             return switch (result) {
                 .call => |call_result| Host.Result.fromCall(.{
                     .status = call_result.status,
+                    .cause = call_result.cause,
                     .output_data = try self.setLastOutput(call_result.output_data),
                     .gas_left = call_result.gas_left,
                     .gas_refund = call_result.gas_refund,
                     .gas_reservoir = call_result.gas_reservoir,
                     .state_gas_spent = call_result.state_gas_spent,
                     .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
+                    .checkpoint_reverted = call_result.checkpoint_reverted,
                 }),
                 .create => |create_result| Host.Result.fromCreate(create_result.address, .{
                     .status = create_result.status,
+                    .cause = create_result.cause,
                     .output_data = if (aliasesLastOutput(self, create_result.output_data))
                         self.lastOutputData()
                     else
@@ -1178,6 +1224,7 @@ pub fn For(comptime Executor: type) type {
                     .gas_reservoir = create_result.gas_reservoir,
                     .state_gas_spent = create_result.state_gas_spent,
                     .state_gas_from_gas_left = create_result.state_gas_from_gas_left,
+                    .checkpoint_reverted = create_result.checkpoint_reverted,
                 }),
             };
         }
@@ -1193,6 +1240,7 @@ pub fn For(comptime Executor: type) type {
             if (msg.depth > Host.max_call_depth) {
                 return .{ .immediate = Host.Result.fromCall(.{
                     .status = .invalid,
+                    .cause = .call_depth_exceeded,
                     .output_data = &.{},
                     .gas_left = msg.gas,
                     .gas_refund = 0,
@@ -1212,6 +1260,7 @@ pub fn For(comptime Executor: type) type {
                     try checkpoint.restore();
                     return .{ .immediate = Host.Result.fromCall(.{
                         .status = .invalid,
+                        .cause = .insufficient_balance,
                         .output_data = &.{},
                         .gas_left = msg.gas,
                         .gas_refund = 0,
@@ -1227,7 +1276,10 @@ pub fn For(comptime Executor: type) type {
                         try touchEmptyCallRecipient(self, msg);
                     }
                     try checkpoint.finish(result.status());
-                    return .{ .immediate = result };
+                    return .{ .immediate = hostResultWithCheckpointReverted(
+                        result,
+                        result.status() != .success,
+                    ) };
                 }
             }
 
@@ -1357,11 +1409,11 @@ pub fn For(comptime Executor: type) type {
             defer self.state.trace_depth = previous_depth;
 
             const call_capture = try beginCallCapture(self.capture_context, msg);
-            const result = if (msg.kind == .create or msg.kind == .create2) result: {
-                // Opcode handlers check the caller frame depth before constructing the
-                // child message. The executor receives that already-incremented child.
+            const result = Host.precheckResult(msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
+                // Direct Host callers may still submit an over-depth message.
+                // Opcode-generated terminal attempts were resolved above.
                 if (msg.depth > Host.max_call_depth) {
-                    break :result createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+                    break :result createFailureWithCause(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
                 }
                 break :result try executeCreateMessage(self, msg);
             } else switch (try beginCall(self, msg)) {
@@ -1380,6 +1432,8 @@ pub fn For(comptime Executor: type) type {
                     try checkpoint.finish(result.status);
                     break :blk Host.Result.fromCall(.{
                         .status = result.status,
+                        .cause = result.cause,
+                        .checkpoint_reverted = result.status != .success,
                         .output_data = result.output_data,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
@@ -1410,7 +1464,7 @@ pub fn For(comptime Executor: type) type {
             self.state.trace_depth = msg.depth;
             defer self.state.trace_depth = previous_depth;
 
-            if (msg.depth > Host.max_call_depth) return createFailure(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid);
+            if (msg.depth > Host.max_call_depth) return createFailureWithCause(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
 
             return switch (try begin(self, msg)) {
                 .immediate => |result| result,
@@ -1434,7 +1488,8 @@ pub fn For(comptime Executor: type) type {
                 .nonce => |nonce| nonce,
             };
             const next_nonce = std.math.add(u64, caller_nonce, 1) catch
-                return .{ .immediate = createFailure(self, msg.recipient, msg.gas, msg.gas_reservoir, .invalid) };
+                return .{ .immediate = createFailureWithCause(self, msg.recipient, msg.gas, msg.gas_reservoir, .invalid, .nonce_overflow) };
+            try warmCreatedAddressIfNeeded(self, msg.recipient);
             try self.state.setNonce(msg.sender, next_nonce);
             return beginPreparedCreate(self, msg);
         }
@@ -1444,6 +1499,7 @@ pub fn For(comptime Executor: type) type {
                 .rejected => |result| return .{ .immediate = result },
                 .nonce => {},
             }
+            try warmCreatedAddressIfNeeded(self, msg.recipient);
             return beginPreparedCreate(self, msg);
         }
 
@@ -1451,13 +1507,15 @@ pub fn For(comptime Executor: type) type {
             const caller = try self.getOrCreateAccount(msg.sender);
             const create_address = msg.recipient;
             if (caller.balance < msg.value) {
-                return .{ .rejected = createFailure(self, create_address, msg.gas, msg.gas_reservoir, .invalid) };
+                return .{ .rejected = createFailureWithCause(self, create_address, msg.gas, msg.gas_reservoir, .invalid, .insufficient_balance) };
             }
+            return .{ .nonce = caller.nonce };
+        }
 
+        fn warmCreatedAddressIfNeeded(self: *Executor, create_address: Address) !void {
             if (Protocol.create.createWarmsCreatedAddress(self.revision())) {
                 try self.warmAccount(create_address);
             }
-            return .{ .nonce = caller.nonce };
         }
 
         fn beginPreparedCreate(self: *Executor, msg: Host.Message) !StartedCreate {
@@ -1467,7 +1525,14 @@ pub fn For(comptime Executor: type) type {
 
             if (try createCollision(self, create_address)) {
                 try checkpoint.commit();
-                return .{ .immediate = createFailure(self, create_address, 0, msg.gas_reservoir, .invalid) };
+                return .{ .immediate = createFailureWithCause(
+                    self,
+                    create_address,
+                    0,
+                    msg.gas_reservoir,
+                    .invalid,
+                    .contract_address_collision,
+                ) };
             }
 
             _ = try self.state.subtractBalance(msg.sender, msg.value);
@@ -1514,6 +1579,8 @@ pub fn For(comptime Executor: type) type {
                 try checkpoint.restore();
                 return Host.Result.fromCreate(child.address, .{
                     .status = result.status,
+                    .cause = result.cause,
+                    .checkpoint_reverted = true,
                     .output_data = output,
                     .gas_left = result.gas_left,
                     .gas_refund = result.gas_refund,
@@ -1526,27 +1593,28 @@ pub fn For(comptime Executor: type) type {
             if (Protocol.create.createCodeSizeLimit(self.revision())) |limit| {
                 if (output.len > limit) {
                     try checkpoint.restore();
-                    return createFailureFromResult(self, child.address, result, .out_of_gas);
+                    return createFailureFromResult(self, child.address, result, .out_of_gas, .max_code_size_exceeded);
                 }
             }
             if (Protocol.create.rejectsCreateCode(self.revision(), output)) {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .invalid);
+                return createFailureFromResult(self, child.address, result, .invalid, .invalid_code);
             }
 
             const runtime_size = std.math.cast(i64, output.len) orelse {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas);
+                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
             };
             const deposit_regular_cost = Protocol.create.createDepositRegularGas(self.revision(), runtime_size) orelse {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas);
+                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
             };
             if (result.gas_left < deposit_regular_cost) {
                 if (Protocol.create.createDepositRegularGasOogCommits(self.revision())) {
                     try checkpoint.commit();
                     return Host.Result.fromCreate(child.address, .{
                         .status = .success,
+                        .cause = .code_store_out_of_gas,
                         .output_data = output,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
@@ -1556,19 +1624,19 @@ pub fn For(comptime Executor: type) type {
                     });
                 }
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas);
+                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
             }
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
             const deposit_state_gas = Protocol.create.createDepositStateGas(self.revision(), runtime_size) orelse {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, deposit_result, .out_of_gas);
+                return createFailureFromResult(self, child.address, deposit_result, .out_of_gas, .code_store_out_of_gas);
             };
             deposit_result.trackStateGas(deposit_state_gas);
             if (deposit_result.status != .success) {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, deposit_result, deposit_result.status);
+                return createFailureFromResult(self, child.address, deposit_result, deposit_result.status, .code_store_out_of_gas);
             }
 
             try self.state.setCode(child.address, output);
@@ -1586,9 +1654,21 @@ pub fn For(comptime Executor: type) type {
         }
 
         fn createFailure(self: *Executor, create_address: Address, gas_left: i64, gas_reservoir: i64, status: Interpreter.Status) Host.Result {
+            return createFailureWithCause(self, create_address, gas_left, gas_reservoir, status, null);
+        }
+
+        fn createFailureWithCause(
+            self: *Executor,
+            create_address: Address,
+            gas_left: i64,
+            gas_reservoir: i64,
+            status: Interpreter.Status,
+            cause: ?evmz.execution.TerminalCause,
+        ) Host.Result {
             self.clearLastOutput();
             return Host.Result.fromCreate(create_address, .{
                 .status = status,
+                .cause = cause,
                 .output_data = &.{},
                 .gas_left = gas_left,
                 .gas_refund = 0,
@@ -1596,13 +1676,42 @@ pub fn For(comptime Executor: type) type {
             });
         }
 
-        fn createFailureFromResult(self: *Executor, create_address: Address, result: Interpreter.Result, status: Interpreter.Status) Host.Result {
+        fn createFailureFromResult(
+            self: *Executor,
+            create_address: Address,
+            result: Interpreter.Result,
+            status: Interpreter.Status,
+            cause: evmz.execution.TerminalCause,
+        ) Host.Result {
             var failed = result;
             failed.status = status;
             failed.gas_left = 0;
             failed.gas_refund = 0;
             failed.finalizeFrameStateGas();
-            return createFailure(self, create_address, failed.gas_left, failed.gas_reservoir, status);
+            const host_result = createFailureWithCause(
+                self,
+                create_address,
+                failed.gas_left,
+                failed.gas_reservoir,
+                status,
+                cause,
+            );
+            return hostResultWithCheckpointReverted(host_result, true);
+        }
+
+        fn hostResultWithCheckpointReverted(result: Host.Result, reverted: bool) Host.Result {
+            return switch (result) {
+                .call => |call_result| blk: {
+                    var updated = call_result;
+                    updated.checkpoint_reverted = reverted;
+                    break :blk Host.Result.fromCall(updated);
+                },
+                .create => |create_result| blk: {
+                    var updated = create_result;
+                    updated.checkpoint_reverted = reverted;
+                    break :blk .{ .create = updated };
+                },
+            };
         }
 
         fn createCollision(self: *Executor, address: Address) !bool {

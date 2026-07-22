@@ -10,6 +10,7 @@ const Opcode = @import("./opcode.zig").Opcode;
 const Interpreter = @import("./Interpreter.zig");
 const addr = evmz.addr;
 const Address = evmz.Address;
+const TerminalCause = @import("./execution.zig").TerminalCause;
 
 pub const max_call_depth: u16 = 1024;
 
@@ -57,10 +58,17 @@ pub const Message = struct {
     is_static: bool = false,
     real_sender: Address = addr(0),
     code_address: Address = addr(0),
+
+    /// Terminal validation already resolved by the opcode handler. The
+    /// interpreter still emits the semantic action so call capture observes
+    /// the attempt, but no host implementation may execute it.
+    precheck_failure: ?TerminalCause = null,
 };
 
 pub const CallResult = struct {
     status: Interpreter.Status,
+    cause: ?TerminalCause = null,
+    checkpoint_reverted: bool = false,
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
@@ -71,6 +79,8 @@ pub const CallResult = struct {
 
 pub const CreateResult = struct {
     status: Interpreter.Status,
+    cause: ?TerminalCause = null,
+    checkpoint_reverted: bool = false,
     output_data: []const u8,
     gas_left: i64,
     gas_refund: i64,
@@ -91,6 +101,8 @@ pub const Result = union(enum) {
     pub fn fromCreate(address: Address, result: CallResult) Result {
         return .{ .create = .{
             .status = result.status,
+            .cause = result.cause,
+            .checkpoint_reverted = result.checkpoint_reverted,
             .output_data = result.output_data,
             .gas_left = result.gas_left,
             .gas_refund = result.gas_refund,
@@ -108,10 +120,26 @@ pub const Result = union(enum) {
         };
     }
 
+    pub fn terminalCause(self: Result) TerminalCause {
+        return switch (self) {
+            .call => |result| result.cause orelse Interpreter.terminalCauseForStatus(result.status),
+            .create => |result| result.cause orelse Interpreter.terminalCauseForStatus(result.status),
+        };
+    }
+
     pub fn outputData(self: Result) []const u8 {
         return switch (self) {
             .call => |result| result.output_data,
             .create => |result| result.output_data,
+        };
+    }
+
+    /// Whether this frame restored its own execution checkpoint. Precheck
+    /// rejection and the pre-Homestead code-deposit exception do not.
+    pub fn checkpointReverted(self: Result) bool {
+        return switch (self) {
+            .call => |result| result.checkpoint_reverted,
+            .create => |result| result.checkpoint_reverted,
         };
     }
 
@@ -164,6 +192,32 @@ pub const Result = union(enum) {
         };
     }
 };
+
+/// Resolve an opcode-local terminal call/create attempt without invoking the
+/// host. The supplied child gas is returned in full, matching EVM prechecks.
+pub fn precheckResult(msg: Message) ?Result {
+    const cause = msg.precheck_failure orelse return null;
+    const result = CallResult{
+        .status = .invalid,
+        .cause = cause,
+        .output_data = &.{},
+        .gas_left = msg.gas,
+        .gas_refund = 0,
+        .gas_reservoir = msg.gas_reservoir,
+    };
+    return switch (msg.kind) {
+        .call, .staticcall, .delegatecall, .callcode => Result.fromCall(result),
+        .create, .create2 => Result.fromCreate(msg.recipient, result),
+    };
+}
+
+comptime {
+    if (@sizeOf(usize) == 8) {
+        if (@sizeOf(Message) != 160) @compileError("Host.Message size changed; check opcode-action and pooled-frame layout");
+        if (@sizeOf(CallResult) != 64) @compileError("Host.CallResult size changed; rerun call-capture canary benches");
+        if (@sizeOf(CreateResult) != 80) @compileError("Host.CreateResult size changed; rerun call-capture canary benches");
+    }
+}
 
 pub const CallKind = enum(u8) {
     call = 0,

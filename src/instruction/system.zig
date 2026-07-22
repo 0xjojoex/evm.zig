@@ -21,7 +21,7 @@ pub inline fn stop(frame: *CallFrame) !void {
 }
 
 pub inline fn invalid(frame: *CallFrame) !void {
-    frame.failWithStatus(.invalid);
+    frame.failWithFrameStatus(.invalid_opcode);
 }
 
 /// `RETURN` Halt the execution returning the output data
@@ -151,9 +151,7 @@ pub fn For(comptime ProtocolType: type) type {
             msg.gas_reservoir = frame.gas_reservoir;
 
             if (frame.msg.depth >= Host.max_call_depth) {
-                frame.refillStateGas(account_state_gas);
-                frame.stack.pushUnchecked(0);
-                return;
+                msg.precheck_failure = .call_depth_exceeded;
             }
 
             const continuation = Interpreter.CallResume{
@@ -210,25 +208,44 @@ pub fn For(comptime ProtocolType: type) type {
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
             try frame.replaceReturnData(&.{});
-            if (frame.msg.depth >= Host.max_call_depth) {
-                frame.stack.pushUnchecked(0);
-                return;
-            }
 
             const creator = frame.msg.recipient;
-            if (value != 0 and try frame.host.getBalance(creator) < value) {
-                frame.stack.pushUnchecked(0);
-                return;
+            var target: evmz.Address = undefined;
+            if (comptime is_create2) {
+                target = evmz.address.create2(creator, salt, init_code);
+                if (frame.msg.depth >= Host.max_call_depth) {
+                    queueCreate(frame, target, value, init_code, 0, true, .call_depth_exceeded);
+                    return;
+                }
+                if (value != 0 and try frame.host.getBalance(creator) < value) {
+                    queueCreate(frame, target, value, init_code, 0, true, .insufficient_balance);
+                    return;
+                }
+                const creator_nonce = try frame.host.getNonce(creator);
+                if (creator_nonce == std.math.maxInt(u64)) {
+                    queueCreate(frame, target, value, init_code, 0, true, .nonce_overflow);
+                    return;
+                }
+            } else {
+                // Geth derives the CREATE address before its shared depth,
+                // balance, and nonce validation, so the failed trace still has
+                // the attempted destination.
+                const creator_nonce = try frame.host.getNonce(creator);
+                target = evmz.address.create(creator, creator_nonce);
+                if (frame.msg.depth >= Host.max_call_depth) {
+                    queueCreate(frame, target, value, init_code, 0, false, .call_depth_exceeded);
+                    return;
+                }
+                if (value != 0 and try frame.host.getBalance(creator) < value) {
+                    queueCreate(frame, target, value, init_code, 0, false, .insufficient_balance);
+                    return;
+                }
+                if (creator_nonce == std.math.maxInt(u64)) {
+                    queueCreate(frame, target, value, init_code, 0, false, .nonce_overflow);
+                    return;
+                }
             }
-            const creator_nonce = try frame.host.getNonce(creator);
-            if (creator_nonce == std.math.maxInt(u64)) {
-                frame.stack.pushUnchecked(0);
-                return;
-            }
-            const target = if (is_create2)
-                evmz.address.create2(creator, salt, init_code)
-            else
-                evmz.address.create(creator, creator_nonce);
+
             try frame.host.observeAccountAccess(target, nextDepth(frame.msg.depth));
             const target_alive = if (try frame.host.getNonce(target) != 0)
                 true
@@ -244,6 +261,19 @@ pub fn For(comptime ProtocolType: type) type {
             frame.trackStateGas(account_state_gas);
             if (frame.status != .running) return;
 
+            queueCreate(frame, target, value, init_code, account_state_gas, is_create2, null);
+        }
+
+        fn queueCreate(
+            frame: *CallFrame,
+            target: evmz.Address,
+            value: u256,
+            init_code: []const u8,
+            account_state_gas: i64,
+            comptime is_create2: bool,
+            precheck_failure: ?evmz.execution.TerminalCause,
+        ) void {
+            const revision = Self.frameRevision(frame);
             var msg = Host.Message{
                 .depth = nextDepth(frame.msg.depth),
                 .kind = if (is_create2) .create2 else .create,
@@ -253,6 +283,7 @@ pub fn For(comptime ProtocolType: type) type {
                 .recipient = target,
                 .sender = frame.msg.recipient,
                 .value = value,
+                .precheck_failure = precheck_failure,
             };
 
             const child_gas = Protocol.call.childGas(revision, .{
