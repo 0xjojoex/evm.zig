@@ -1,0 +1,24 @@
+.{
+    .name = .evmz_evmc,
+    .version = "0.0.0",
+    .fingerprint = 0x38352511d498872a,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .evmz = .{
+            .path = "../..",
+        },
+        .evmone = .{
+            .url = "https://github.com/ipsilon/evmone/archive/786c96f1c9dfde702e303260a504af93916d9574.tar.gz",
+            .hash = "N-V-__8AAPbMGwBbPwVga0NrOYojtKqDH0mpHAS9Abv4oYKn",
+        },
+    },
+    .paths = .{
+        "LICENSE",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "examples",
+        "include",
+        "src",
+    },
+}

@@ -1,12 +1,13 @@
 const std = @import("std");
 const evmz = @import("evmz");
+const evmz_evmc = @import("evmz_evmc");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
-const evmc = evmz.c_api.evmc;
-const evmc_common = evmz.c_api.common;
-const host2c = evmz.c_api.host2c;
+const evmc = evmz_evmc.evmc;
+const evmc_common = evmz_evmc.common;
+const host2c = evmz_evmc.testing.host2c;
 
 pub const default_iterations = 100_000;
 

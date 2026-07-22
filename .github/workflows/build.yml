@@ -37,6 +37,37 @@ jobs:
       - name: Run unit tests
         run: zig build test --summary all
 
+  evmc-test:
+    name: EVMC compatibility package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run EVMC tests
+        working-directory: pkg/evmc
+        run: zig build test --summary all
+
+      - name: Build EVMC release artifacts
+        working-directory: pkg/evmc
+        run: zig build -Doptimize=ReleaseFast --summary all
+
+      - name: Run EVMC C example
+        working-directory: pkg/evmc
+        run: zig build example -Doptimize=ReleaseFast --summary all
+
   fuzz:
     name: Fuzz pure-Zig units
     runs-on: ubuntu-24.04
@@ -104,6 +135,12 @@ jobs:
           } | tee portability-${{ matrix.target }}.txt
 
       - name: Cross compile
+        env:
+          TARGET: ${{ matrix.target }}
+        run: zig build -Dtarget="${TARGET}" -Doptimize=ReleaseFast --summary all
+
+      - name: Cross compile EVMC adapter
+        working-directory: pkg/evmc
         env:
           TARGET: ${{ matrix.target }}
         run: zig build -Dtarget="${TARGET}" -Doptimize=ReleaseFast --summary all

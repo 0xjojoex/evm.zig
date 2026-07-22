@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     const native_keccak = resolveNativeKeccak(profile, target, requested_native_keccak);
     const requested_native_secp256k1 = nativeSecp256k1Option(b);
     const native_secp256k1 = resolveNativeSecp256k1(profile, target, requested_native_secp256k1);
+    const pic = b.option(bool, "pic", "Build the public evmz module as position-independent code") orelse false;
     const evmz_build = EvmzBuildConfig{
         .profile = profile,
         .native_keccak = native_keccak,
@@ -24,11 +25,7 @@ pub fn build(b: *std.Build) void {
     const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
     if (use_xkcp and xkcp_dep == null) return;
     const xkcp_object = if (xkcp_dep) |dep|
-        buildXkcpObject(b, target, optimize, dep, "xkcp", null)
-    else
-        null;
-    const xkcp_pic_object = if (xkcp_dep) |dep|
-        buildXkcpObject(b, target, optimize, dep, "xkcp-pic", true)
+        buildXkcpObject(b, target, optimize, dep, if (pic) "xkcp-pic" else "xkcp", if (pic) true else null)
     else
         null;
     if (xkcp_dep) |dep| {
@@ -42,11 +39,7 @@ pub fn build(b: *std.Build) void {
         null;
     if (use_libsecp256k1 and libsecp256k1_dep == null) return;
     const libsecp256k1_object = if (libsecp256k1_dep) |dep|
-        buildLibsecp256k1Object(b, target, optimize, dep, "libsecp256k1", null)
-    else
-        null;
-    const libsecp256k1_pic_object = if (libsecp256k1_dep) |dep|
-        buildLibsecp256k1Object(b, target, optimize, dep, "libsecp256k1-pic", true)
+        buildLibsecp256k1Object(b, target, optimize, dep, if (pic) "libsecp256k1-pic" else "libsecp256k1", if (pic) true else null)
     else
         null;
     if (libsecp256k1_dep) |dep| {
@@ -74,7 +67,6 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const native_precompile_deps = if (is_native_profile)
         nativePrecompileDeps(b, target, optimize)
     else
@@ -89,12 +81,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .omit_frame_pointer = omit_frame_pointer,
+        .pic = if (pic) true else null,
     });
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
-    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
     if (native_precompile_deps) |deps| {
-        addPrecompileNative(b, evmz_mod, deps, evmone_dep);
+        addPrecompileNative(b, evmz_mod, deps);
     }
     addNativeKeccak(evmz_mod, xkcp_object);
     addNativeSecp256k1(evmz_mod, libsecp256k1_object);
@@ -119,82 +111,40 @@ pub fn build(b: *std.Build) void {
     mpt_mod.addImport("rlp", rlp_mod);
     evmz_mod.addImport("mpt", mpt_mod);
 
-    const static_c_lib = if (is_native_profile) static_c_lib: {
-        const c_lib_mod = b.createModule(.{
-            .root_source_file = b.path("src/evmc.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .link_libcpp = true,
-            .omit_frame_pointer = omit_frame_pointer,
-        });
-        c_lib_mod.addOptions("build_options", build_options);
-        c_lib_mod.addImport("ssz", ssz_mod);
-        c_lib_mod.addImport("rlp", rlp_mod);
-        c_lib_mod.addImport("mpt", mpt_mod);
-        c_lib_mod.addIncludePath(b.path("include"));
-        c_lib_mod.addIncludePath(evmone_dep.path("evmc/include"));
-        addPrecompileNative(b, c_lib_mod, native_precompile_deps.?, evmone_dep);
-        addNativeKeccak(c_lib_mod, xkcp_pic_object);
-        addNativeSecp256k1(c_lib_mod, libsecp256k1_pic_object);
-
-        const static_c_lib = b.addLibrary(.{
-            .name = "evmz",
-            .root_module = c_lib_mod,
-            .linkage = .static,
-        });
-        b.installArtifact(static_c_lib);
-        b.default_step.dependOn(&static_c_lib.step);
-
-        const shared_c_lib = b.addLibrary(.{
-            .name = "evmz",
-            .root_module = c_lib_mod,
-            .linkage = .dynamic,
-        });
-        b.installArtifact(shared_c_lib);
-        b.default_step.dependOn(&shared_c_lib.step);
-
-        // C headers.
-        const evmz_compat_header = b.addInstallHeaderFile(b.path("include/evmz.h"), "evmz.h");
-        const evmz_evmc_header = b.addInstallHeaderFile(b.path("include/evmz/evmc.h"), "evmz/evmc.h");
-        const evmz_native_header = b.addInstallHeaderFile(b.path("include/evmz/evmz.h"), "evmz/evmz.h");
-        const evmc_header = b.addInstallHeaderFile(evmone_dep.path("evmc/include/evmc/evmc.h"), "evmc/evmc.h");
-        b.getInstallStep().dependOn(&evmz_compat_header.step);
-        b.getInstallStep().dependOn(&evmz_evmc_header.step);
-        b.getInstallStep().dependOn(&evmz_native_header.step);
-        b.getInstallStep().dependOn(&evmc_header.step);
-
-        break :static_c_lib static_c_lib;
-    } else null;
+    const core_check = b.addObject(.{
+        .name = "evmz",
+        .root_module = evmz_mod,
+    });
+    b.default_step.dependOn(&core_check.step);
+    b.step("check", "Compile the public evmz module").dependOn(&core_check.step);
 
     // test
     {
-        const lib_unit_tests_mod = b.createModule(.{
+        const unit_tests_mod = b.createModule(.{
             .root_source_file = b.path("src/evm.zig"),
             .target = target,
             .optimize = optimize,
             .link_libcpp = is_native_profile,
         });
-        lib_unit_tests_mod.addOptions("build_options", build_options);
-        lib_unit_tests_mod.addImport("ssz", ssz_mod);
-        lib_unit_tests_mod.addImport("rlp", rlp_mod);
-        lib_unit_tests_mod.addImport("mpt", mpt_mod);
-        lib_unit_tests_mod.addIncludePath(b.path("include"));
-        lib_unit_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
+        unit_tests_mod.addOptions("build_options", build_options);
+        unit_tests_mod.addImport("ssz", ssz_mod);
+        unit_tests_mod.addImport("rlp", rlp_mod);
+        unit_tests_mod.addImport("mpt", mpt_mod);
+        unit_tests_mod.addIncludePath(b.path("include"));
         if (native_precompile_deps) |deps| {
-            addPrecompileNative(b, lib_unit_tests_mod, deps, evmone_dep);
+            addPrecompileNative(b, unit_tests_mod, deps);
         }
-        addNativeKeccak(lib_unit_tests_mod, xkcp_object);
-        addNativeSecp256k1(lib_unit_tests_mod, libsecp256k1_object);
-        const lib_unit_tests = b.addTest(.{
-            .root_module = lib_unit_tests_mod,
+        addNativeKeccak(unit_tests_mod, xkcp_object);
+        addNativeSecp256k1(unit_tests_mod, libsecp256k1_object);
+        const unit_tests = b.addTest(.{
+            .root_module = unit_tests_mod,
             .filters = b.args orelse &.{},
         });
         // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
         // Keep the test build in Debug while using LLVM for tail dispatch.
-        lib_unit_tests.use_llvm = true;
+        unit_tests.use_llvm = true;
 
-        const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+        const run_unit_tests = b.addRunArtifact(unit_tests);
 
         const ssz_unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
@@ -231,39 +181,11 @@ pub fn build(b: *std.Build) void {
         });
 
         const test_step = b.step("test", "Run unit tests");
-        test_step.dependOn(&run_lib_unit_tests.step);
+        test_step.dependOn(&run_unit_tests.step);
         test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(rlp_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(mpt_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(guest_zisk_ab_tests).step);
-        if (is_native_profile) {
-            const c_api_tests_mod = b.createModule(.{
-                .root_source_file = b.path("src/evmc.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .link_libcpp = true,
-            });
-            c_api_tests_mod.addOptions("build_options", build_options);
-            c_api_tests_mod.addImport("ssz", ssz_mod);
-            c_api_tests_mod.addImport("rlp", rlp_mod);
-            c_api_tests_mod.addImport("mpt", mpt_mod);
-            c_api_tests_mod.addIncludePath(b.path("include"));
-            c_api_tests_mod.addIncludePath(evmone_dep.path("evmc/include"));
-            c_api_tests_mod.addCSourceFile(.{
-                .file = b.path("src/c_api/evmc_abi18_smoke.c"),
-                .flags = &.{ "-Wall", "-Wextra", "-pedantic", "-std=c23" },
-            });
-            addPrecompileNative(b, c_api_tests_mod, native_precompile_deps.?, evmone_dep);
-            addNativeKeccak(c_api_tests_mod, xkcp_object);
-            addNativeSecp256k1(c_api_tests_mod, libsecp256k1_object);
-            const c_api_tests = b.addTest(.{
-                .root_module = c_api_tests_mod,
-                .filters = b.args orelse &.{},
-            });
-            c_api_tests.use_llvm = true;
-            test_step.dependOn(&b.addRunArtifact(c_api_tests).step);
-        }
     }
 
     {
@@ -367,6 +289,11 @@ pub fn build(b: *std.Build) void {
     if (pathExists(b, "pkg/ssz/build.zig")) {
         addSszBenchDelegate(b, bench_optimize_name);
     }
+    if (is_native_profile and pathExists(b, "pkg/evmc/build.zig")) {
+        addEvmcDelegate(b, "evmc", "Build the EVMC compatibility package", null, target, optimize_name, evmz_build);
+        addEvmcDelegate(b, "evmc-test", "Run EVMC compatibility package tests", "test", target, optimize_name, evmz_build);
+        addEvmcDelegate(b, "evmc-example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
+    }
 
     if (is_native_profile) {
         addGuestPayloadTest(b, target, optimize, evmz_mod);
@@ -384,7 +311,7 @@ pub fn build(b: *std.Build) void {
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
     const guest_payload = guestPayloadOption(b);
     addGuestZiskAb(b, optimize);
-    addGuestZisk(b, optimize, evmone_dep, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
+    addGuestZisk(b, optimize, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
     // examples
     {
@@ -402,33 +329,10 @@ pub fn build(b: *std.Build) void {
             if (!is_native_profile) {
                 std.debug.panic("C examples require -Dprofile=native", .{});
             }
-            const path = b.fmt("examples/{s}", .{example_name});
-            const example_exe_name = std.fs.path.stem(std.fs.path.basename(example_name));
-            const example_c = b.addExecutable(.{
-                .name = example_exe_name,
-                .root_module = b.createModule(.{
-                    .target = target,
-                    .optimize = optimize,
-                    .link_libc = true,
-                }),
-            });
-
-            example_c.root_module.addIncludePath(b.path("include"));
-            example_c.root_module.addIncludePath(evmone_dep.path("evmc/include"));
-            example_c.root_module.addCSourceFile(.{
-                .file = b.path(path),
-                .flags = &[_][]const u8{
-                    "-Wall",
-                    "-Wextra",
-                    "-pedantic",
-                    "-std=c23",
-                },
-            });
-            example_c.root_module.linkLibrary(static_c_lib.?);
-            var run_example = b.addRunArtifact(example_c);
-            run_example.has_side_effects = true;
-            const run_step = b.step("example", "Run the example");
-            run_step.dependOn(&run_example.step);
+            if (!std.mem.eql(u8, example_name, "basic.c")) {
+                std.debug.panic("unknown C example '{s}'", .{example_name});
+            }
+            addEvmcDelegate(b, "example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
         }
     }
 }
@@ -684,7 +588,6 @@ fn addGuestPayloadTest(
 fn addGuestZisk(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    evmone_dep: *std.Build.Dependency,
     ziskos_staticlib_path: ?[]const u8,
     guest_payload: []const u8,
     guest_input_path: ?[]const u8,
@@ -718,7 +621,6 @@ fn addGuestZisk(
     });
     evmz_mod.addOptions("build_options", build_options);
     evmz_mod.addIncludePath(b.path("include"));
-    evmz_mod.addIncludePath(evmone_dep.path("evmc/include"));
     const ssz_mod = b.createModule(.{
         .root_source_file = b.path("pkg/ssz/src/lib.zig"),
         .target = target,
@@ -980,6 +882,34 @@ fn addSszBenchDelegate(b: *std.Build, optimize_name: []const u8) void {
 
     const step = b.step("ssz-bench", "Run standalone SSZ codec benchmarks");
     step.dependOn(&run.step);
+}
+
+fn addEvmcDelegate(
+    b: *std.Build,
+    step_name: []const u8,
+    description: []const u8,
+    child_step: ?[]const u8,
+    target: std.Build.ResolvedTarget,
+    optimize_name: []const u8,
+    config: EvmzBuildConfig,
+) void {
+    const run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}),
+        b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}),
+        b.fmt("-Doptimize={s}", .{optimize_name}),
+        b.fmt("-Dnative-keccak={s}", .{config.native_keccak}),
+        b.fmt("-Dnative-secp256k1={s}", .{config.native_secp256k1}),
+    });
+    if (child_step) |name| run.addArg(name);
+    if (b.args) |args| {
+        run.addArg("--");
+        run.addArgs(args);
+    }
+    run.setCwd(b.path("pkg/evmc"));
+
+    b.step(step_name, description).dependOn(&run.step);
 }
 
 fn addBenchCompareDelegate(
@@ -1258,7 +1188,6 @@ fn addPrecompileNative(
     b: *std.Build,
     module: *std.Build.Module,
     deps: NativePrecompileDeps,
-    evmone_dep: *std.Build.Dependency,
 ) void {
     const mcl_flags = &[_][]const u8{
         "-std=c++20",
@@ -1283,7 +1212,6 @@ fn addPrecompileNative(
     module.addImport("ckzg", deps.ckzg_dep.module("ckzg"));
     module.addImport("kzg_trusted_setup", deps.trusted_setup_mod);
     module.addIncludePath(b.path("src/precompile"));
-    module.addIncludePath(evmone_dep.path("evmc/include"));
     module.addIncludePath(deps.ckzg_dep.path("src"));
     module.addIncludePath(deps.blst_dep.path("bindings"));
     module.addIncludePath(deps.mcl_dep.path("include"));

@@ -1,14 +1,8 @@
-//! Implementation of the EVMC interface for evm.zig.
-//! This is a proof of concept and not intended for production use.
+//! EVMC ABI compatibility adapter for evmz.
 const std = @import("std");
-const evmz = @import("evm.zig");
-const t = @import("t.zig");
-const host2c = @import("./c_api/host2c.zig");
-const mock = @import("./c_api/mock.zig");
+const evmz = @import("evmz");
 const common = @import("./c_api/common.zig");
 const evmc = common.evmc;
-
-const MockHostContext = mock.MockHostContext;
 
 const Address = evmz.Address;
 
@@ -18,22 +12,6 @@ export fn evmc_create_evmz() ?*evmc.evmc_vm {
     const instance = std.heap.c_allocator.create(Evmz) catch return null;
     instance.* = Evmz.init();
     return &instance.vm;
-}
-
-export fn evmz_destroy_mock_host_context(context: ?*evmc.evmc_host_context) void {
-    if (MockHostContext.fromContext(context)) |ctx| {
-        ctx.host_context.deinit();
-    }
-}
-
-export fn evmz_create_mock_host_context(tx_context: ?*evmc.evmc_tx_context) ?*evmc.evmc_host_context {
-    const mock_context = MockHostContext.create(if (tx_context) |c| c.* else null) catch return null;
-    return mock_context.toContext();
-}
-
-// const interface = host2c.getInterface();
-export fn evmz_mock_host_interface() evmc.evmc_host_interface {
-    return host2c.getInterface();
 }
 
 const Evmz = struct {
@@ -552,6 +530,8 @@ extern fn evmz_evmc_abi18_smoke(
 ) callconv(.c) c_int;
 
 test "EVMC ABI 18 callbacks cross the real C23 boundary" {
+    const t = evmz.t;
+    const host2c = @import("./c_api/host2c.zig");
     const account_address = evmz.addr(0x18);
     const beneficiary_address = evmz.addr(0x19);
     var mock_host = t.MockHost.init(std.testing.allocator, null);
@@ -573,6 +553,8 @@ test "EVMC ABI 18 callbacks cross the real C23 boundary" {
 }
 
 test "EVMC ABI 18 nonce callback round-trips through both host adapters" {
+    const t = evmz.t;
+    const host2c = @import("./c_api/host2c.zig");
     const account_address = evmz.addr(0x18);
     var mock_host = t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -591,15 +573,18 @@ test "EVMC ABI 18 nonce callback round-trips through both host adapters" {
 }
 
 test "EVMC execute returns owned output through mock host" {
+    const host2c = @import("./c_api/host2c.zig");
+    const mock = @import("./c_api/mock.zig");
     const vm = evmc_create_evmz() orelse return error.OutOfMemory;
     defer vm.*.destroy.?(vm);
 
     var tx_context = std.mem.zeroes(evmc.evmc_tx_context);
     tx_context.block_gas_limit = 200_000;
-    const context = evmz_create_mock_host_context(&tx_context) orelse return error.OutOfMemory;
-    defer evmz_destroy_mock_host_context(context);
+    const mock_context = try mock.MockHostContext.create(tx_context);
+    defer mock_context.host_context.deinit();
+    const context = mock_context.toContext();
 
-    const host = evmz_mock_host_interface();
+    const host = host2c.getInterface();
     var msg = std.mem.zeroes(evmc.evmc_message);
     msg.kind = evmc.EVMC_CALL;
     msg.gas = 100_000;
@@ -625,6 +610,8 @@ test "EVMC Paris revision maps to Merge revision" {
 }
 
 test "EVMC execute carries blob hashes through tx context" {
+    const host2c = @import("./c_api/host2c.zig");
+    const mock = @import("./c_api/mock.zig");
     const vm = evmc_create_evmz() orelse return error.OutOfMemory;
     defer vm.*.destroy.?(vm);
 
@@ -635,10 +622,11 @@ test "EVMC execute carries blob hashes through tx context" {
     tx_context.blob_hashes = &blob_hashes;
     tx_context.blob_hashes_count = blob_hashes.len;
 
-    const context = evmz_create_mock_host_context(&tx_context) orelse return error.OutOfMemory;
-    defer evmz_destroy_mock_host_context(context);
+    const mock_context = try mock.MockHostContext.create(tx_context);
+    defer mock_context.host_context.deinit();
+    const context = mock_context.toContext();
 
-    const host = evmz_mock_host_interface();
+    const host = host2c.getInterface();
     var msg = std.mem.zeroes(evmc.evmc_message);
     msg.kind = evmc.EVMC_CALL;
     msg.gas = 100_000;

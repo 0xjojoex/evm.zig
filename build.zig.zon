@@ -12,10 +12,6 @@
             .url = "https://github.com/supranational/blst/archive/e7f90de551e8df682f3cc99067d204d8b90d27ad.tar.gz",
             .hash = "N-V-__8AAN0aOwD_n2xFB-Q0eBNtvIKtGPfGZSVt0DdbmfH2",
         },
-        .evmone = .{
-            .url = "https://github.com/ipsilon/evmone/archive/786c96f1c9dfde702e303260a504af93916d9574.tar.gz",
-            .hash = "N-V-__8AAPbMGwBbPwVga0NrOYojtKqDH0mpHAS9Abv4oYKn",
-        },
         .mcl = .{
             .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.06.tar.gz",
             .hash = "N-V-__8AAIbQPgBN3AkA58o43UT3Y6jkn55OesBXTWc63zEF",
@@ -38,7 +34,9 @@
         "examples",
         "include",
         "LICENSE",
-        "pkg",
+        "pkg/mpt",
+        "pkg/rlp",
+        "pkg/ssz",
         "README.md",
         "src",
     },
