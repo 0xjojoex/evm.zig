@@ -4,11 +4,13 @@
     .fingerprint = 0xc7194db22dc5b5b4,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .rlp = .{ .path = "../rlp" },
+        .rlp = .{
+            .url = "git+https://github.com/0xjojoex/evm.zig.git#rlp-v0.1.0",
+            .hash = "rlp-0.1.0-SlXDVcYLAgA2p-rqTGgOFCKbdBmAFIaSx5WOD9mOXAet",
+        },
     },
     .paths = .{
         "README.md",
-        "SPEC.md",
         "build.zig",
         "build.zig.zon",
         "fixtures",
