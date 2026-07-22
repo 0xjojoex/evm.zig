@@ -16,6 +16,8 @@ pub const capture = @import("./trace/capture.zig");
 pub const call_arena = @import("./trace/call_arena.zig");
 pub const eip3155 = @import("./trace/eip3155.zig");
 
+const call_projection = @import("./trace/call_projection.zig");
+
 pub const TraceTapeError = tape.Error;
 pub const TraceTape = tape.TraceTape;
 pub const CaptureProfile = tape.CaptureProfile;
@@ -37,6 +39,10 @@ pub const CallStart = call_arena.Start;
 pub const CallFinish = call_arena.Finish;
 pub const CallToken = call_arena.Token;
 pub const CallSpan = call_arena.Span;
+
+test {
+    _ = call_projection;
+}
 
 /// Runtime-erased consumer for one completed passive trace span.
 ///
