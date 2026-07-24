@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const definition_support = @import("../protocol/support.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const uint256 = @import("../uint256.zig");
 
 pub const BlobSchedule = struct {
@@ -12,6 +12,8 @@ pub const BlobSchedule = struct {
     execution_base_cost: u64,
     base_fee_update_fraction: u256,
     reserve_price_active: bool,
+    /// Accepted versioned-hash version byte (EIP-4844 KZG uses 0x01).
+    hash_version: u8,
 };
 
 pub const ExcessBlobGasInput = struct {
@@ -20,42 +22,41 @@ pub const ExcessBlobGasInput = struct {
     parent_base_fee_per_gas: u256,
 };
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
         const Self = @This();
-        const transaction = ProtocolType.transaction;
+        const transaction = spec.transaction;
 
-        pub const Protocol = ProtocolType;
+        pub const specification = spec;
 
-        pub fn blobSchedule(revision: Protocol.Revision) ?BlobSchedule {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return transaction.blobSchedule(revision);
+        pub fn blobSchedule() ?BlobSchedule {
+            return transaction.blob_schedule;
         }
 
-        pub fn blobBaseFeeForRevision(revision: Protocol.Revision, excess_blob_gas: u256) ?u256 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const schedule = Self.blobSchedule(revision) orelse return 0;
+        pub fn blobBaseFee(excess_blob_gas: u256) ?u256 {
+            const schedule = Self.blobSchedule() orelse return 0;
             return blobBaseFeeForSchedule(schedule, excess_blob_gas);
         }
 
-        pub fn calcExcessBlobGas(revision: Protocol.Revision, input: ExcessBlobGasInput) ?u256 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const schedule = Self.blobSchedule(revision) orelse return 0;
+        pub fn calcExcessBlobGas(input: ExcessBlobGasInput) ?u256 {
+            const schedule = Self.blobSchedule() orelse return 0;
             return calcExcessBlobGasForSchedule(schedule, input);
         }
 
-        pub fn maxBlobCount(revision: Protocol.Revision) usize {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const schedule = Self.blobSchedule(revision) orelse return 0;
+        pub fn maxBlobCount() usize {
+            const schedule = Self.blobSchedule() orelse return 0;
             return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
         }
 
-        pub fn maxBlobCountPerTransaction(revision: Protocol.Revision) usize {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const schedule = Self.blobSchedule(revision) orelse return 0;
+        pub fn maxBlobCountPerTransaction() usize {
+            const schedule = Self.blobSchedule() orelse return 0;
             return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
         }
     };
+}
+
+fn runtime(comptime spec: ExactSpec) type {
+    return Runtime(spec);
 }
 
 pub fn blobBaseFeeForSchedule(schedule: BlobSchedule, excess_blob_gas: u256) ?u256 {
@@ -109,65 +110,73 @@ pub fn blobVersion(hash: u256) u8 {
 
 test "transaction blob fee helpers" {
     const eth = @import("../eth.zig");
-    const Ethereum = eth.Protocol.TransactionProtocol;
-    const EthBlob = For(Ethereum);
+    const Shanghai = runtime(eth.shanghai);
+    const Cancun = runtime(eth.cancun);
+    const Prague = runtime(eth.prague);
+    const Osaka = runtime(eth.osaka);
+    const Amsterdam = runtime(eth.amsterdam);
 
-    try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(Ethereum.transaction.blobSchedule(.cancun).?, 0x0e0000));
-    try std.testing.expectEqual(@as(?BlobSchedule, null), EthBlob.blobSchedule(.shanghai));
-    try std.testing.expectEqual(@as(u64, 6), EthBlob.blobSchedule(.cancun).?.max);
-    try std.testing.expectEqual(eth.transaction.cancun_blob_base_fee_update_fraction, EthBlob.blobSchedule(.cancun).?.base_fee_update_fraction);
-    try std.testing.expectEqual(@as(u64, 9), EthBlob.blobSchedule(.osaka).?.max);
-    try std.testing.expectEqual(@as(usize, 6), EthBlob.maxBlobCountPerTransaction(.osaka));
-    try std.testing.expectEqual(eth.transaction.prague_blob_base_fee_update_fraction, EthBlob.blobSchedule(.osaka).?.base_fee_update_fraction);
-    try std.testing.expectEqual(@as(u64, 14), EthBlob.blobSchedule(.amsterdam).?.target);
-    try std.testing.expectEqual(@as(u64, 21), EthBlob.blobSchedule(.amsterdam).?.max);
-    try std.testing.expectEqual(eth.transaction.amsterdam_blob_base_fee_update_fraction, EthBlob.blobSchedule(.amsterdam).?.base_fee_update_fraction);
-    try std.testing.expectEqual(@as(u256, 19), EthBlob.blobBaseFeeForRevision(.cancun, 10_000_000));
-    try std.testing.expectEqual(@as(u256, 7), EthBlob.blobBaseFeeForRevision(.osaka, 10_000_000));
-    try std.testing.expectEqual(@as(u256, 786_432), EthBlob.calcExcessBlobGas(.prague, .{
+    try std.testing.expectEqual(@as(u256, 1), blobBaseFeeForSchedule(eth.cancun.transaction.blob_schedule.?, 0x0e0000));
+    try std.testing.expectEqual(@as(?BlobSchedule, null), Shanghai.blobSchedule());
+    try std.testing.expectEqual(@as(u64, 6), Cancun.blobSchedule().?.max);
+    try std.testing.expectEqual(eth.transaction.cancun_blob_base_fee_update_fraction, Cancun.blobSchedule().?.base_fee_update_fraction);
+    try std.testing.expectEqual(@as(u64, 9), Osaka.blobSchedule().?.max);
+    try std.testing.expectEqual(@as(usize, 6), Osaka.maxBlobCountPerTransaction());
+    try std.testing.expectEqual(eth.transaction.prague_blob_base_fee_update_fraction, Osaka.blobSchedule().?.base_fee_update_fraction);
+    try std.testing.expectEqual(@as(u64, 14), Amsterdam.blobSchedule().?.target);
+    try std.testing.expectEqual(@as(u64, 21), Amsterdam.blobSchedule().?.max);
+    try std.testing.expectEqual(eth.transaction.amsterdam_blob_base_fee_update_fraction, Amsterdam.blobSchedule().?.base_fee_update_fraction);
+    try std.testing.expectEqual(@as(u256, 19), Cancun.blobBaseFee(10_000_000));
+    try std.testing.expectEqual(@as(u256, 7), Osaka.blobBaseFee(10_000_000));
+    try std.testing.expectEqual(@as(u256, 786_432), Prague.calcExcessBlobGas(.{
         .parent_excess_blob_gas = 786_432,
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     }));
-    try std.testing.expectEqual(@as(u256, 1_048_576), EthBlob.calcExcessBlobGas(.osaka, .{
+    try std.testing.expectEqual(@as(u256, 1_048_576), Osaka.calcExcessBlobGas(.{
         .parent_excess_blob_gas = 786_432,
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     }));
 }
 
-test "transaction blob helpers accept comptime protocol" {
-    const CustomRevision = enum { cancun, osaka };
-    const TestProtocol = struct {
-        pub const Revision = CustomRevision;
-
-        pub const transaction = struct {
-            pub fn blobSchedule(revision: Revision) ?BlobSchedule {
-                return .{
-                    .target = 2,
-                    .max = 4,
-                    .max_per_transaction = if (revision == .osaka) 2 else 4,
-                    .gas_per_blob = 131_072 * 2,
-                    .min_base_fee = 1,
-                    .execution_base_cost = 8_192,
-                    .base_fee_update_fraction = 5_007_716,
-                    .reserve_price_active = revision == .osaka,
-                };
-            }
-        };
-    };
+test "transaction blob helpers accept extended exact specs" {
+    const eth = @import("../eth.zig");
+    const Cancun = eth.cancun.extend(.{ .transaction = .{ .blob_schedule = .{ .replace = .{
+        .target = 2,
+        .max = 4,
+        .max_per_transaction = 4,
+        .gas_per_blob = 131_072 * 2,
+        .min_base_fee = 1,
+        .execution_base_cost = 8_192,
+        .base_fee_update_fraction = 5_007_716,
+        .reserve_price_active = false,
+        .hash_version = 0x01,
+    } } } });
+    const Osaka = eth.osaka.extend(.{ .transaction = .{ .blob_schedule = .{ .replace = .{
+        .target = 2,
+        .max = 4,
+        .max_per_transaction = 2,
+        .gas_per_blob = 131_072 * 2,
+        .min_base_fee = 1,
+        .execution_base_cost = 8_192,
+        .base_fee_update_fraction = 5_007_716,
+        .reserve_price_active = true,
+        .hash_version = 0x01,
+    } } } });
     const input = ExcessBlobGasInput{
         .parent_excess_blob_gas = 262_144,
         .parent_blob_gas_used = 524_288,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const Bound = For(TestProtocol);
-    const schedule = TestProtocol.transaction.blobSchedule(.osaka).?;
+    const CancunBlob = runtime(Cancun);
+    const OsakaBlob = runtime(Osaka);
+    const schedule = Osaka.transaction.blob_schedule.?;
 
-    try std.testing.expectEqual(@as(u64, 4), Bound.blobSchedule(.cancun).?.max);
-    try std.testing.expectEqual(@as(usize, 4), Bound.maxBlobCount(.cancun));
-    try std.testing.expectEqual(@as(usize, 2), Bound.maxBlobCountPerTransaction(.osaka));
-    try std.testing.expectEqual(blobBaseFeeForSchedule(schedule, 10_000_000), Bound.blobBaseFeeForRevision(.osaka, 10_000_000));
-    try std.testing.expectEqual(@as(u256, 262_144), Bound.calcExcessBlobGas(.cancun, input));
-    try std.testing.expectEqual(calcExcessBlobGasForSchedule(schedule, input), Bound.calcExcessBlobGas(.osaka, input));
+    try std.testing.expectEqual(@as(u64, 4), CancunBlob.blobSchedule().?.max);
+    try std.testing.expectEqual(@as(usize, 4), CancunBlob.maxBlobCount());
+    try std.testing.expectEqual(@as(usize, 2), OsakaBlob.maxBlobCountPerTransaction());
+    try std.testing.expectEqual(blobBaseFeeForSchedule(schedule, 10_000_000), OsakaBlob.blobBaseFee(10_000_000));
+    try std.testing.expectEqual(@as(u256, 262_144), CancunBlob.calcExcessBlobGas(input));
+    try std.testing.expectEqual(calcExcessBlobGasForSchedule(schedule, input), OsakaBlob.calcExcessBlobGas(input));
 }

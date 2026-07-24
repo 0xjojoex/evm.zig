@@ -2,14 +2,14 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const Address = evmz.Address;
-const protocol = evmz.protocol;
-const BeforeBlockContext = protocol.BeforeBlockContext;
+const system = evmz.eth.system;
+const BeforeBlockContext = system.BeforeBlockContext;
 const AfterTransactionContext = evmz.AfterTransactionContext;
 const FinalizeBlockContext = evmz.FinalizeBlockContext;
 const MemoryStore = evmz.state.MemoryStore;
 
-fn VmFor(comptime block_options: evmz.eth.BlockOptions(evmz.eth.Revision)) type {
-    return evmz.eth.extend(.{ .block = block_options });
+fn VmFor(comptime base: evmz.eth.Spec, comptime block_patch: evmz.eth.spec.BlockSpec.Patch) type {
+    return evmz.Vm(base.extend(.{ .block = block_patch }));
 }
 
 const lifecycle_code = [_]u8{
@@ -24,17 +24,17 @@ const LifecycleBlock = struct {
     const after_transaction_address = evmz.addr(0x1003);
     const finalize_block_address = evmz.addr(0x1004);
 
-    fn beforeBlock(_: evmz.eth.Revision, context: BeforeBlockContext) protocol.BlockSystemCalls {
+    fn beforeBlock(context: BeforeBlockContext) system.BlockSystemCalls {
         if (context.number != 7 or context.timestamp != 9) return failingCalls();
         return calls(before_block_address, 1);
     }
 
-    fn beforeTransaction(_: evmz.eth.Revision, context: protocol.BeforeTransactionContext) protocol.BlockSystemCalls {
+    fn beforeTransaction(context: system.BeforeTransactionContext) system.BlockSystemCalls {
         if (context.number != 7 or context.timestamp != 9) return failingCalls();
         return calls(before_transaction_address, std.math.cast(u8, context.transaction_index + 2) orelse 0xff);
     }
 
-    fn afterTransaction(_: evmz.eth.Revision, context: AfterTransactionContext) protocol.BlockSystemCalls {
+    fn afterTransaction(context: AfterTransactionContext) system.BlockSystemCalls {
         if (context.number != 7 or
             context.timestamp != 9 or
             context.status != .success or
@@ -47,8 +47,8 @@ const LifecycleBlock = struct {
         return calls(after_transaction_address, std.math.cast(u8, context.transaction_index + 3) orelse 0xff);
     }
 
-    fn finalizeBlock(_: evmz.eth.Revision, context: FinalizeBlockContext) protocol.FinalizeSystemCalls {
-        var result = protocol.FinalizeSystemCalls{};
+    fn finalizeBlock(context: FinalizeBlockContext) system.FinalizeSystemCalls {
+        var result = system.FinalizeSystemCalls{};
         if (context.number != 7 or
             context.timestamp != 9 or
             context.transaction_count != 1 or
@@ -65,19 +65,19 @@ const LifecycleBlock = struct {
         return result;
     }
 
-    fn calls(recipient: Address, marker: u8) protocol.BlockSystemCalls {
-        var result = protocol.BlockSystemCalls{};
+    fn calls(recipient: Address, marker: u8) system.BlockSystemCalls {
+        var result = system.BlockSystemCalls{};
         result.append(systemCall(recipient, marker));
         return result;
     }
 
-    fn failingCalls() protocol.BlockSystemCalls {
-        var result = protocol.BlockSystemCalls{};
+    fn failingCalls() system.BlockSystemCalls {
+        var result = system.BlockSystemCalls{};
         result.append(failingCall());
         return result;
     }
 
-    fn systemCall(recipient: Address, marker: u8) protocol.BlockSystemCall {
+    fn systemCall(recipient: Address, marker: u8) system.BlockSystemCall {
         var input = [_]u8{0} ** 32;
         input[31] = marker;
         return .{
@@ -89,7 +89,7 @@ const LifecycleBlock = struct {
         };
     }
 
-    fn failingCall() protocol.BlockSystemCall {
+    fn failingCall() system.BlockSystemCall {
         return .{
             .sender = evmz.eth.system_address,
             .recipient = evmz.addr(0xffff),
@@ -99,7 +99,7 @@ const LifecycleBlock = struct {
     }
 };
 
-const LifecycleVm = VmFor(.{
+const LifecycleVm = VmFor(evmz.eth.prague, .{
     .beforeBlock = LifecycleBlock.beforeBlock,
     .beforeTransaction = LifecycleBlock.beforeTransaction,
     .afterTransaction = LifecycleBlock.afterTransaction,
@@ -107,72 +107,57 @@ const LifecycleVm = VmFor(.{
 });
 
 const RejectingBeforeTransactionBlock = struct {
-    fn beforeTransaction(_: evmz.eth.Revision, _: protocol.BeforeTransactionContext) protocol.BlockSystemCalls {
+    fn beforeTransaction(_: system.BeforeTransactionContext) system.BlockSystemCalls {
         return LifecycleBlock.failingCalls();
     }
 };
 
-const RejectingBeforeTransactionVm = VmFor(.{
+const RejectingBeforeTransactionVm = VmFor(evmz.eth.prague, .{
     .beforeTransaction = RejectingBeforeTransactionBlock.beforeTransaction,
 });
 
 const EmptyBeforeTransactionBlock = struct {
     var invocations = std.atomic.Value(usize).init(0);
 
-    fn beforeTransaction(_: evmz.eth.Revision, _: protocol.BeforeTransactionContext) protocol.BlockSystemCalls {
+    fn beforeTransaction(_: system.BeforeTransactionContext) system.BlockSystemCalls {
         _ = invocations.fetchAdd(1, .monotonic);
         return .{};
     }
 };
 
-const EmptyBeforeTransactionVm = VmFor(.{
+const EmptyBeforeTransactionVm = VmFor(evmz.eth.amsterdam, .{
     .beforeTransaction = EmptyBeforeTransactionBlock.beforeTransaction,
 });
 
-const CheckpointRecorder = struct {
-    events: [8]evmz.trace.CheckpointKind = undefined,
-    len: usize = 0,
+const ObservationCounter = struct {
+    calls: usize = 0,
 
-    fn target(self: *CheckpointRecorder) evmz.executor.CaptureStateTarget {
-        return evmz.executor.CaptureStateTarget.init(self, &.{ .checkpoint = checkpoint });
-    }
-
-    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) !void {
-        const self: *CheckpointRecorder = @ptrCast(@alignCast(ptr));
-        std.debug.assert(self.len < self.events.len);
-        self.events[self.len] = event.kind;
-        self.len += 1;
+    pub fn observe(self: *@This(), _: evmz.state.TrackedState.PendingView) !void {
+        self.calls += 1;
     }
 };
 
-const FailingCheckpointTarget = struct {
-    fail_commit_at: usize,
-    commit_count: usize = 0,
+const FailingObservation = struct {
+    calls: usize = 0,
 
-    fn target(self: *FailingCheckpointTarget) evmz.executor.CaptureStateTarget {
-        return evmz.executor.CaptureStateTarget.init(self, &.{ .checkpoint = checkpoint });
-    }
-
-    fn checkpoint(ptr: *anyopaque, event: evmz.trace.Checkpoint) !void {
-        const self: *FailingCheckpointTarget = @ptrCast(@alignCast(ptr));
-        if (event.kind != .commit) return;
-        self.commit_count += 1;
-        if (self.commit_count == self.fail_commit_at) return error.TestCaptureFailure;
+    pub fn observe(self: *@This(), _: evmz.state.TrackedState.PendingView) !void {
+        self.calls += 1;
+        return error.TestObservationFailure;
     }
 };
 
 const AtomicLifecycleBlock = struct {
     const recipient = evmz.addr(0x2001);
 
-    fn beforeBlock(_: evmz.eth.Revision, _: BeforeBlockContext) protocol.BlockSystemCalls {
-        var result = protocol.BlockSystemCalls{};
+    fn beforeBlock(_: BeforeBlockContext) system.BlockSystemCalls {
+        var result = system.BlockSystemCalls{};
         result.append(LifecycleBlock.systemCall(recipient, 7));
         result.append(LifecycleBlock.failingCall());
         return result;
     }
 
-    fn finalizeBlock(_: evmz.eth.Revision, _: FinalizeBlockContext) protocol.FinalizeSystemCalls {
-        var result = protocol.FinalizeSystemCalls{};
+    fn finalizeBlock(_: FinalizeBlockContext) system.FinalizeSystemCalls {
+        var result = system.FinalizeSystemCalls{};
         result.append(.{
             .call = LifecycleBlock.systemCall(recipient, 8),
             .output_prefix = 0x99,
@@ -185,7 +170,7 @@ const AtomicLifecycleBlock = struct {
     }
 };
 
-const AtomicLifecycleVm = VmFor(.{
+const AtomicLifecycleVm = VmFor(evmz.eth.prague, .{
     .beforeBlock = AtomicLifecycleBlock.beforeBlock,
     .finalizeBlock = AtomicLifecycleBlock.finalizeBlock,
 });
@@ -193,26 +178,26 @@ const AtomicLifecycleVm = VmFor(.{
 const FinishLifecycleBlock = struct {
     const recipient = evmz.addr(0x3001);
 
-    fn afterTransaction(_: evmz.eth.Revision, _: AfterTransactionContext) protocol.BlockSystemCalls {
+    fn afterTransaction(_: AfterTransactionContext) system.BlockSystemCalls {
         return LifecycleBlock.calls(recipient, 9);
     }
 };
 
-const FinishLifecycleVm = VmFor(.{
+const FinishLifecycleVm = VmFor(evmz.eth.prague, .{
     .afterTransaction = FinishLifecycleBlock.afterTransaction,
 });
 
 const RejectingAfterTransactionBlock = struct {
-    fn afterTransaction(_: evmz.eth.Revision, _: AfterTransactionContext) protocol.BlockSystemCalls {
+    fn afterTransaction(_: AfterTransactionContext) system.BlockSystemCalls {
         return LifecycleBlock.failingCalls();
     }
 };
 
-const RejectingAfterTransactionVm = VmFor(.{
+const RejectingAfterTransactionVm = VmFor(evmz.eth.prague, .{
     .afterTransaction = RejectingAfterTransactionBlock.afterTransaction,
 });
 
-test "Sequential exposes definition-owned lifecycle phases with derived facts" {
+test "Sequential exposes spec-owned lifecycle phases with derived facts" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -233,7 +218,6 @@ test "Sequential exposes definition-owned lifecycle phases with derived facts" {
     }
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -287,7 +271,6 @@ test "Sequential does not run before-transaction hooks for rejected transactions
     sender_account.balance = 10_000_000;
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -320,7 +303,6 @@ test "Sequential failing before-transaction prelude discards the opened attempt"
     sender_account.balance = 10_000_000;
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -337,7 +319,7 @@ test "Sequential failing before-transaction prelude discards the opened attempt"
     try std.testing.expectEqual(@as(u64, 0), (try block.progress()).tx_count);
 }
 
-test "Sequential empty before-transaction prelude adds no execution checkpoint" {
+test "Sequential empty before-transaction prelude stays in one observed transition" {
     const sender = evmz.addr(0xaaaa);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
@@ -346,44 +328,26 @@ test "Sequential empty before-transaction prelude adds no execution checkpoint" 
     sender_account.balance = 10_000_000;
 
     EmptyBeforeTransactionBlock.invocations.store(0, .monotonic);
-    var recorder = CheckpointRecorder{};
+    var observations = ObservationCounter{};
     var executor = EmptyBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
-    var capture = evmz.executor.CaptureContext.init(
-        std.testing.allocator,
-        null,
-        recorder.target(),
-    );
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    try capture.begin();
-    defer {
-        if (capture.isActive()) capture.abort() catch {};
-        executor.setCaptureContext(null);
-    }
 
     var block = try beginBlock(EmptyBeforeTransactionVm, &executor, .{ .gas_limit = 1_000_000 });
     defer block.discardIfUnfinished();
-    _ = switch (try block.transact(.{
+    _ = switch (try block.transactObserved(.{
         .sender = sender,
         .to = evmz.addr(0xbbbb),
         .gas_limit = 300_000,
-    })) {
+    }, &observations)) {
         .included => |included| included,
         .rejected => return error.UnexpectedRejection,
     };
     try block.endTransactions();
-    _ = try capture.finish();
 
     try std.testing.expectEqual(@as(usize, 1), EmptyBeforeTransactionBlock.invocations.load(.monotonic));
-    try std.testing.expectEqualSlices(
-        evmz.trace.CheckpointKind,
-        &.{ .checkpoint, .checkpoint, .commit, .commit },
-        recorder.events[0..recorder.len],
-    );
+    try std.testing.expectEqual(@as(usize, 1), observations.calls);
     _ = try block.finish();
 }
 
@@ -398,24 +362,30 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
     var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
     try hook_account.setCode(&lifecycle_code);
 
-    var recorder = CheckpointRecorder{};
+    const Observer = struct {
+        address: Address,
+        found: bool = false,
+        calls: usize = 0,
+
+        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
+            self.calls += 1;
+            const storage = pending.observations().storage;
+            var index: u32 = 0;
+            while (index < storage.len()) : (index += 1) {
+                const fact = storage.at(index);
+                if (!std.mem.eql(u8, &fact.address, &self.address) or fact.key != 0) continue;
+                try std.testing.expectEqual(@as(u256, 2), fact.current);
+                try std.testing.expect(fact.effect.written);
+                self.found = true;
+                return;
+            }
+        }
+    };
+    var observations = Observer{ .address = LifecycleBlock.before_transaction_address };
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
-    var capture = evmz.executor.CaptureContext.init(
-        std.testing.allocator,
-        null,
-        recorder.target(),
-    );
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    try capture.begin();
-    defer {
-        if (capture.isActive()) capture.abort() catch {};
-        executor.setCaptureContext(null);
-    }
 
     var block = try beginBlock(LifecycleVm, &executor, .{
         .number = 7,
@@ -423,21 +393,17 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
         .gas_limit = 1_000_000,
     });
     defer block.discardIfUnfinished();
-    _ = switch (try block.transact(.{
+    _ = switch (try block.transactObserved(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
-    })) {
+    }, &observations)) {
         .included => |included| included,
         .rejected => return error.UnexpectedRejection,
     };
-    _ = try capture.finish();
 
-    try std.testing.expectEqualSlices(
-        evmz.trace.CheckpointKind,
-        &.{ .checkpoint, .checkpoint, .commit, .checkpoint, .commit, .commit },
-        recorder.events[0..recorder.len],
-    );
+    try std.testing.expectEqual(@as(usize, 1), observations.calls);
+    try std.testing.expect(observations.found);
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(LifecycleBlock.before_transaction_address, 0));
     block.discardIfUnfinished();
 }
@@ -456,7 +422,6 @@ test "Sequential block rejection restores before-transaction hook and payload wr
     try payload_account.setCode(&lifecycle_code);
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -500,7 +465,6 @@ test "Sequential discard restores included hook and payload without allocating" 
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = LifecycleVm.Executor.init(failing_allocator.allocator(), .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -544,39 +508,31 @@ test "Sequential restores a system call when outer commit observation fails" {
     try recipient_account.setCode(&lifecycle_code);
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
 
-    var failing = FailingCheckpointTarget{ .fail_commit_at = 2 };
-    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null, failing.target());
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    defer executor.setCaptureContext(null);
-    try capture.begin();
-    defer if (capture.isActive()) capture.abort() catch {};
+    var failing = FailingObservation{};
 
     var block = try beginBlock(LifecycleVm, &executor, .{ .gas_limit = 1_000_000 });
     defer block.discardIfUnfinished();
     var input = [_]u8{0} ** 32;
     input[31] = 5;
     try std.testing.expectError(
-        error.TestCaptureFailure,
-        block.systemCall(.{
+        error.TestObservationFailure,
+        block.systemCallObserved(.{
             .sender = evmz.eth.system_address,
             .recipient = recipient,
             .input = &input,
             .gas = 100_000,
-        }),
+        }, &failing),
     );
-    try std.testing.expectEqual(@as(usize, 2), failing.commit_count);
+    try std.testing.expectEqual(@as(usize, 1), failing.calls);
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(recipient, 0));
     const summary = try block.finish();
     try std.testing.expectEqual(@as(u64, 0), summary.gas_used);
     try std.testing.expectEqual(@as(u64, 0), summary.block_gas.total);
     try std.testing.expectEqual(@as(u64, 0), summary.tx_count);
-    _ = try capture.finish();
 }
 
 test "Sequential restores included transaction progress when outer observation fails" {
@@ -590,18 +546,11 @@ test "Sequential restores included transaction progress when outer observation f
     try hook_account.setCode(&lifecycle_code);
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
 
-    var failing = FailingCheckpointTarget{ .fail_commit_at = 3 };
-    var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null, failing.target());
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    defer executor.setCaptureContext(null);
-    try capture.begin();
-    defer if (capture.isActive()) capture.abort() catch {};
+    var failing = FailingObservation{};
 
     var block = try beginBlock(LifecycleVm, &executor, .{
         .number = 7,
@@ -609,21 +558,18 @@ test "Sequential restores included transaction progress when outer observation f
         .gas_limit = 1_000_000,
     });
     defer block.discardIfUnfinished();
-    // Type-erased capture/provider failures are normalized at the public
-    // transaction boundary while the rollback behavior remains unchanged.
-    try std.testing.expectError(error.InfrastructureFailure, block.transact(.{
+    try std.testing.expectError(error.TestObservationFailure, block.transactObserved(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
-    }));
-    try std.testing.expectEqual(@as(usize, 3), failing.commit_count);
+    }, &failing));
+    try std.testing.expectEqual(@as(usize, 1), failing.calls);
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(LifecycleBlock.before_transaction_address, 0));
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
     const summary = try block.finish();
     try std.testing.expectEqual(@as(u64, 0), summary.gas_used);
     try std.testing.expectEqual(@as(u64, 0), summary.block_gas.total);
     try std.testing.expectEqual(@as(u64, 0), summary.tx_count);
-    _ = try capture.finish();
 }
 
 test "block lifecycle hook batches restore earlier calls when a later call fails" {
@@ -633,7 +579,6 @@ test "block lifecycle hook batches restore earlier calls when a later call fails
     try recipient.setCode(&lifecycle_code);
 
     var executor = AtomicLifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -657,7 +602,6 @@ test "Sequential finish flushes the final included transaction after hook" {
     try hook_account.setCode(&lifecycle_code);
 
     var executor = FinishLifecycleVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -687,7 +631,6 @@ test "Sequential next transaction stops when the previous after hook fails" {
     sender_account.balance = 10_000_000;
 
     var executor = RejectingAfterTransactionVm.Executor.init(std.testing.allocator, .{
-        .revision = .prague,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -717,7 +660,7 @@ test "Sequential next transaction stops when the previous after hook fails" {
 }
 
 test "one Executor admits only one active Sequential" {
-    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
+    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var block = try beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 });
@@ -741,14 +684,14 @@ test "one Executor admits only one active Sequential" {
     );
     try std.testing.expectError(
         error.BlockExecutionActive,
-        executor.reset(.{ .revision = .amsterdam }),
+        executor.reset(.{}),
     );
 }
 
 test "independent Executors admit independent Sequential lifetimes" {
-    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
+    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer first_executor.deinit();
-    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
+    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer second_executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &first_executor, .{ .gas_limit = 1_000_000 });
@@ -761,7 +704,7 @@ test "independent Executors admit independent Sequential lifetimes" {
 }
 
 test "stale Sequential copy cannot resolve a later generation" {
-    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .revision = .amsterdam });
+    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 });

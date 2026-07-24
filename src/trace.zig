@@ -1,7 +1,7 @@
 //! Captured execution facts and passive span consumers.
 //!
-//! Live step execution has exactly two protocol tables: normal and `TraceFor`.
-//! The latter writes concrete rows to `TraceTape`; consumer callbacks run only
+//! Live step execution has exactly two exact dispatch tables: normal and traced.
+//! The traced table writes concrete rows to `TraceTape`; consumer callbacks run only
 //! when the completed `TraceSpan` is replayed. Live state and checkpoint facts
 //! use the operation-scoped fallible target in `executor/capture_context.zig`.
 //!

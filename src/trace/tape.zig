@@ -88,7 +88,7 @@ pub const StepInput = struct {
     gas_before: i64,
     refund_before: i64,
     stack_len: usize,
-    /// Length of the unchanged stack prefix, resolved by the active protocol.
+    /// Length of the unchanged stack prefix, resolved by the exact specification.
     /// Zero is always a correct full-snapshot fallback.
     stack_prefix_len: usize = 0,
     memory_size: usize,

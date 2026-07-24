@@ -3,8 +3,8 @@
 const std = @import("std");
 
 const Config = @import("../ExecutionConfig.zig");
-const EthTransaction = @import("../eth/transaction.zig").Transaction;
 const Revision = @import("../eth/revision.zig").Revision;
+const eth_spec = @import("../eth/spec.zig");
 const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
@@ -73,8 +73,32 @@ fn validateWithScratch(
     const parent_header = header_chain.parent();
     const codes = try witnessCodes(allocator, input.witness.codes);
 
-    return block_stf.apply(allocator, .{
-        .revision = input.revision,
+    return switch (input.revision) {
+        inline else => |revision| validateExact(
+            revision,
+            allocator,
+            input,
+            capture,
+            options,
+            &header_chain,
+            parent_header,
+            codes,
+        ),
+    };
+}
+
+fn validateExact(
+    comptime revision: Revision,
+    allocator: std.mem.Allocator,
+    input: input_mod.Input,
+    capture: ?block_stf.ExecutionCapture,
+    options: Options,
+    header_chain: *HeaderChain,
+    parent_header: ParsedHeader,
+    codes: []const state.WitnessStateReader.Code,
+) Error!block_stf.Result {
+    const block = input.block;
+    return block_stf.Exact(revision).apply(allocator, .{
         .config = Config.base,
         .env = .{
             .chain_id = input.chain_id,
@@ -85,7 +109,7 @@ fn validateWithScratch(
             .gas_limit = block.gas_limit,
             .prev_randao = block.prev_randao,
             .base_fee = block.base_fee_per_gas,
-            .blob_base_fee = try currentBlobBaseFee(input.revision, input.blob_schedule, block),
+            .blob_base_fee = try currentBlobBaseFeeExact(revision, input.blob_schedule, block),
             .blob_schedule = input.blob_schedule,
         },
         .block_hash_source = header_chain.source(),
@@ -108,7 +132,7 @@ fn validateWithScratch(
             .blob_gas_used = parent_header.blob_gas_used orelse 0,
             .excess_blob_gas = parent_header.excess_blob_gas orelse 0,
         },
-        .block_access_list = if (input.revision.isImpl(.amsterdam)) block.block_access_list else null,
+        .block_access_list = if (revision.isImpl(.amsterdam)) block.block_access_list else null,
         .root_checks = .{
             .payload_header = .{
                 .state = .fromHash(block.state_root),
@@ -116,12 +140,12 @@ fn validateWithScratch(
             },
         },
         .header_claims = .{
-            .gas_used = if (input.revision.isImpl(.amsterdam)) null else block.gas_used,
-            .block_gas_used = if (input.revision.isImpl(.amsterdam)) block.gas_used else null,
+            .gas_used = if (revision.isImpl(.amsterdam)) null else block.gas_used,
+            .block_gas_used = if (revision.isImpl(.amsterdam)) block.gas_used else null,
             .logs_bloom = block.logs_bloom,
             .blob_gas_used = block.blob_gas_used,
-            .excess_blob_gas = try expectedExcessBlobGas(input.revision, block),
-            .requests_hash = if (input.revision.isImpl(.prague))
+            .excess_blob_gas = try expectedExcessBlobGas(revision, block),
+            .requests_hash = if (revision.isImpl(.prague))
                 try block_stf.requestsHash(allocator, block.execution_requests)
             else
                 null,
@@ -137,7 +161,7 @@ fn validateWithScratch(
         // or reader cache, after which this can become the default without
         // repeating proof traversal. It never changes EVM warmth semantics.
         .precheck_block_access_list_state = shouldPrecheckBlockAccessListState(
-            input.revision,
+            revision,
             options,
         ),
     }) catch |err| return mapBlockError(err);
@@ -180,8 +204,8 @@ fn blockShapeValid(revision: Revision, block: input_mod.Block) bool {
     return true;
 }
 
-fn currentBlobBaseFee(
-    revision: Revision,
+fn currentBlobBaseFeeExact(
+    comptime revision: Revision,
     blob_schedule: ?transaction.BlobSchedule,
     block: input_mod.Block,
 ) Error!u256 {
@@ -190,7 +214,7 @@ fn currentBlobBaseFee(
     if (blob_schedule) |schedule| {
         return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.InvalidHeaderWitness;
     }
-    const schedule = EthTransaction.blobSchedule(revision) orelse return 0;
+    const schedule = eth_spec.specAt(revision).transaction.blob_schedule orelse return 0;
     return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.InvalidHeaderWitness;
 }
 

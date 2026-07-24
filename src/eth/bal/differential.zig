@@ -15,11 +15,12 @@ const Config = @import("../../ExecutionConfig.zig");
 const Executor = @import("../../executor.zig");
 const Host = @import("../../Host.zig");
 const bal = @import("model.zig");
-const bal_recorder = @import("recorder.zig");
+const ShardFold = @import("shard_fold.zig").ShardFold;
 const ClaimView = @import("ClaimView.zig");
 const batch_scheduler = @import("../../io/batch_scheduler.zig");
 const lane_batch = @import("lane_batch.zig");
-const candidate_state = @import("candidate_state.zig");
+const candidate_transition = @import("candidate_transition.zig");
+const tracked_state_projector = @import("tracked_state_projector.zig");
 const prepared_code = @import("../../prepared_code.zig");
 const BalClaimReader = @import("../../state/BalClaimReader.zig");
 const Reader = @import("../../state/Reader.zig");
@@ -34,7 +35,6 @@ pub const Status = enum {
     matched,
     fallback_positioned_account,
     fallback_positioned_storage,
-    fallback_changeset_lifecycle,
     fallback_folded_state_storage,
     fallback_parallel_runtime,
     diagnostic_failure,
@@ -42,7 +42,7 @@ pub const Status = enum {
     claim_storage_not_covered,
     claim_import_failed,
     outcome_mismatch,
-    changeset_fold_mismatch,
+    transition_fold_mismatch,
     candidate_artifact_mismatch,
     candidate_rejection_mismatch,
     unsupported_before_transaction_hooks,
@@ -52,7 +52,6 @@ pub const Status = enum {
         return switch (self) {
             .fallback_positioned_account,
             .fallback_positioned_storage,
-            .fallback_changeset_lifecycle,
             .fallback_folded_state_storage,
             .fallback_parallel_runtime,
             .unsupported_before_transaction_hooks,
@@ -68,7 +67,7 @@ pub const Status = enum {
             .claim_storage_not_covered,
             .claim_import_failed,
             .outcome_mismatch,
-            .changeset_fold_mismatch,
+            .transition_fold_mismatch,
             .candidate_artifact_mismatch,
             .candidate_rejection_mismatch,
             .diagnostic_failure,
@@ -127,7 +126,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        revision: Engine.Revision,
         config: Config,
         env: vm.Env,
         lifecycle_tx_context: Host.TxContext,
@@ -136,14 +134,14 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         block_hash_source: ?vm.BlockHashSource,
         claim: *const ClaimView,
         report: *Report,
-        changeset_fold: candidate_state.OrderedChangesetFold,
-        bal_shard_fold: bal_recorder.ShardFold,
+        transition_fold: candidate_transition.OrderedTransitionFold,
+        bal_shard_fold: ShardFold,
         progress: vm.BlockResult = .{},
         encoded_receipts: std.ArrayList([]const u8) = .empty,
         deposit_request_data: std.ArrayList(u8) = .empty,
         block_logs_bloom: [256]u8 = [_]u8{0} ** 256,
         blob_gas_used: u64 = 0,
-        pre_changeset: ?state.Changeset = null,
+        pre_state: ?candidate_transition.CandidateState = null,
         claim_executor: ?Engine.Executor = null,
         parallel_batch: ?LaneBatch = null,
         active: bool = true,
@@ -154,8 +152,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             progress_before: vm.BlockResult,
             progress_after: vm.BlockResult,
             result: *const vm.TxExecutionResult,
-            logs: []const Host.Log,
-            block_policy: *const Engine.BlockPolicy,
+            logs: state.TrackedState.LogView,
             blob_gas_used_after: u64,
         };
 
@@ -171,7 +168,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             tx_index: usize,
             progress_before: vm.BlockResult,
             blob_gas_used_before: u64,
-            block_policy: *const Engine.BlockPolicy,
         };
 
         const OwnedIncluded = struct {
@@ -181,13 +177,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             progress_after: vm.BlockResult,
             result: vm.TxExecutionResult,
             logs: []Host.Log,
-            block_policy: Engine.BlockPolicy,
             blob_gas_used_after: u64,
 
             fn init(allocator: std.mem.Allocator, included: Included) !OwnedIncluded {
                 const output = try allocator.dupe(u8, included.result.output);
                 errdefer allocator.free(output);
-                const logs = try candidate_state.cloneLogs(allocator, included.logs);
+                const logs = try candidate_transition.cloneLogs(allocator, included.logs);
                 var result = included.result.*;
                 result.output = output;
                 return .{
@@ -197,7 +192,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                     .progress_after = included.progress_after,
                     .result = result,
                     .logs = logs,
-                    .block_policy = included.block_policy.*,
                     .blob_gas_used_after = included.blob_gas_used_after,
                 };
             }
@@ -209,15 +203,14 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                     .progress_before = self.progress_before,
                     .progress_after = self.progress_after,
                     .result = &self.result,
-                    .logs = self.logs,
-                    .block_policy = &self.block_policy,
+                    .logs = .fromSlice(self.logs),
                     .blob_gas_used_after = self.blob_gas_used_after,
                 };
             }
         };
 
         pub const Artifacts = struct {
-            changeset: state.Changeset,
+            state: candidate_transition.CandidateState,
             gas_used: u64,
             block_gas_used: u64,
             block_state_gas_used: u64,
@@ -231,7 +224,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             encoded_block_access_list: []u8,
 
             pub fn deinit(self: *Artifacts, allocator: std.mem.Allocator) void {
-                self.changeset.deinit(allocator);
+                self.state.deinit(allocator);
                 Operations.freeCandidateRequests(allocator, self.requests);
                 allocator.free(self.encoded_block_access_list);
                 self.* = undefined;
@@ -240,7 +233,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
         pub fn init(
             allocator: std.mem.Allocator,
-            revision: Engine.Revision,
             config: Config,
             env: vm.Env,
             lifecycle_tx_context: Host.TxContext,
@@ -253,7 +245,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         ) Self {
             var self: Self = .{
                 .allocator = allocator,
-                .revision = revision,
                 .config = config,
                 .env = env,
                 .lifecycle_tx_context = lifecycle_tx_context,
@@ -262,8 +253,8 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .block_hash_source = block_hash_source,
                 .claim = claim,
                 .report = report,
-                .changeset_fold = candidate_state.OrderedChangesetFold.init(allocator),
-                .bal_shard_fold = bal_recorder.ShardFold.init(allocator),
+                .transition_fold = candidate_transition.OrderedTransitionFold.init(allocator),
+                .bal_shard_fold = ShardFold.init(allocator),
             };
             if (parallel_execution) |execution| {
                 self.parallel_batch = LaneBatch.init(
@@ -287,12 +278,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self.discardPending();
             if (self.parallel_batch) |*batch| batch.deinit();
             if (self.claim_executor) |*executor| executor.deinit();
-            if (self.pre_changeset) |*changeset| changeset.deinit(self.allocator);
+            if (self.pre_state) |*candidate| candidate.deinit(self.allocator);
             for (self.encoded_receipts.items) |encoded| self.allocator.free(encoded);
             self.encoded_receipts.deinit(self.allocator);
             self.deposit_request_data.deinit(self.allocator);
             self.bal_shard_fold.deinit();
-            self.changeset_fold.deinit();
+            self.transition_fold.deinit();
             self.claim_executor = null;
         }
 
@@ -301,10 +292,9 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         pub fn verifyBeforeBlock(
             self: *Self,
             header: ?Operations.BlockHeader,
-            block_policy: *const Engine.BlockPolicy,
         ) void {
             if (!self.active) return;
-            self.verifyBeforeBlockFallible(header, block_policy) catch |err| {
+            self.verifyBeforeBlockFallible(header) catch |err| {
                 self.stopForCandidateError(err, 0);
             };
         }
@@ -312,40 +302,42 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn verifyBeforeBlockFallible(
             self: *Self,
             header: ?Operations.BlockHeader,
-            block_policy: *const Engine.BlockPolicy,
         ) !void {
             var execution: CapturedExecution = undefined;
             try execution.init(self.allocator, .{
-                .revision = self.revision,
                 .state_reader = self.base_reader,
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
                 .config = self.config,
-            }, 0);
+            });
             defer execution.deinit();
 
+            var observation_builder =
+                tracked_state_projector.BlockBuilder.init(self.allocator);
+            defer observation_builder.deinit();
+            var state_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
+            defer state_fold.deinit();
+            var observation_collector = ObservationCollector{
+                .allocator = self.allocator,
+                .builder = &observation_builder,
+                .state_fold = &state_fold,
+                .block_access_index = 0,
+            };
             if (header) |context| {
-                try Executor.system_contracts.applyBeforeBlock(
-                    block_policy,
+                try Executor.system_contracts.applyBeforeBlockObserved(
                     &execution.executor,
                     self.lifecycle_tx_context,
                     context,
+                    &observation_collector,
                 );
             }
-            try execution.finish();
-
-            var shard = try execution.recorder.toOwnedBlockAccessList(self.allocator);
+            var shard = try observation_builder.finish();
             defer shard.deinit(self.allocator);
             try self.bal_shard_fold.append(shard.accounts);
 
-            var changeset = try execution.executor.changeset();
-            errdefer changeset.deinit(self.allocator);
-            if (changesetFallbackStatus(&changeset)) |status| {
-                self.stop(status, 0, null);
-                return;
-            }
-            std.debug.assert(self.pre_changeset == null);
-            self.pre_changeset = changeset;
+            try state_fold.finish();
+            std.debug.assert(self.pre_state == null);
+            self.pre_state = state_fold.takeOwned();
         }
 
         const LaneFailure = struct {
@@ -354,52 +346,43 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         };
 
         const LaneOutcome = union(enum) {
-            effects: candidate_state.TransactionEffects,
+            effects: candidate_transition.TransactionEffects,
             rejected,
             failed: LaneFailure,
         };
 
+        const ObservationCollector = struct {
+            allocator: std.mem.Allocator,
+            builder: *tracked_state_projector.BlockBuilder,
+            state_fold: ?*candidate_transition.OrderedTransitionFold = null,
+            block_access_index: bal.BlockAccessIndex,
+
+            pub fn observe(
+                self: *ObservationCollector,
+                pending: Engine.Executor.State.PendingView,
+            ) !void {
+                var transition = try tracked_state_projector.materialize(
+                    pending.observations(),
+                    self.allocator,
+                );
+                defer transition.deinit(self.allocator);
+                try self.builder.appendTransition(transition, self.block_access_index);
+                if (self.state_fold) |fold| try fold.appendNext(&transition);
+            }
+        };
+
         const CapturedExecution = struct {
             executor: Engine.Executor = undefined,
-            recorder: bal_recorder.Recorder = undefined,
-            capture: Executor.CaptureContext = undefined,
-            capture_open: bool = false,
-            capture_bound: bool = false,
 
             fn init(
                 self: *CapturedExecution,
                 allocator: std.mem.Allocator,
                 options: Engine.Executor.Init,
-                block_access_index: ?bal.BlockAccessIndex,
             ) !void {
-                self.* = .{};
                 self.executor = Engine.Executor.init(allocator, options);
-                self.recorder = bal_recorder.Recorder.init(allocator);
-                if (block_access_index) |index| self.recorder.setBlockAccessIndex(index);
-                self.capture = Executor.CaptureContext.init(
-                    allocator,
-                    null,
-                    self.recorder.stateTarget(),
-                );
-                self.executor.setCaptureContext(&self.capture);
-                self.capture_bound = true;
-                errdefer self.deinit();
-                try self.capture.begin();
-                self.capture_open = true;
-            }
-
-            fn finish(self: *CapturedExecution) !void {
-                _ = try self.capture.finish();
-                self.capture_open = false;
-                self.executor.setCaptureContext(null);
-                self.capture_bound = false;
             }
 
             fn deinit(self: *CapturedExecution) void {
-                if (self.capture_open) self.capture.abort() catch {};
-                if (self.capture_bound) self.executor.setCaptureContext(null);
-                self.capture.deinit();
-                self.recorder.deinit();
                 self.executor.deinit();
                 self.* = undefined;
             }
@@ -514,7 +497,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 self.stop(.candidate_artifact_mismatch, included.tx_index, null);
                 return false;
             }
-            const before_calls = included.block_policy.beforeTransaction(self.revision, .{
+            const before_calls = Engine.specification.block.beforeTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = expected_progress.tx_count,
@@ -632,19 +615,18 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             candidate_prepared_code_backend: ?prepared_code.Backend,
             candidate_block_hash_source: ?vm.BlockHashSource,
             included: Included,
-        ) !?candidate_state.TransactionEffects {
+        ) !?candidate_transition.TransactionEffects {
             var execution: CapturedExecution = undefined;
             try execution.init(allocator, .{
-                .revision = self.revision,
                 .state_reader = claim_reader.reader(),
                 .prepared_code_backend = candidate_prepared_code_backend,
                 .block_hash_source = candidate_block_hash_source,
                 .config = self.config,
-            }, null);
+            });
             defer execution.deinit();
 
             var runtime = Engine.init(&execution.executor);
-            const outcome = try runtime.transact(.{
+            const outcome = try runtime.transactObserved(.{
                 .env = self.env,
                 .tx = included.transaction,
                 .progress = .{
@@ -657,13 +639,16 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .executed => |executed_value| {
                     var executed = executed_value;
                     defer executed.discardIfCurrent();
-                    var effects_builder = try candidate_state.TransactionEffects.Builder.init(executed);
+                    var effects_builder = try candidate_transition.TransactionEffects.Builder.init(
+                        executed,
+                        try tracked_state_projector.materialize(
+                            executed.observations(),
+                            allocator,
+                        ),
+                    );
                     defer effects_builder.discardIfUnfinished();
                     try executed.retain();
-                    try execution.finish();
-                    var observations = try execution.recorder.toOwnedStateObservationDelta(allocator);
-                    errdefer observations.deinit(allocator);
-                    return effects_builder.finish(observations);
+                    return effects_builder.finish();
                 },
             }
         }
@@ -671,7 +656,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn acceptLane(
             self: *Self,
             included: Included,
-            effects: *const candidate_state.TransactionEffects,
+            effects: *const candidate_transition.TransactionEffects,
         ) void {
             if (!self.active) return;
             self.acceptLaneFallible(included, effects) catch |err|
@@ -681,7 +666,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn acceptLaneFallible(
             self: *Self,
             included: Included,
-            effects: *const candidate_state.TransactionEffects,
+            effects: *const candidate_transition.TransactionEffects,
         ) !void {
             if (!executionResultEqual(effects.result, included.result.*) or
                 !logsEqual(effects.logs, included.logs))
@@ -701,7 +686,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             {
                 return error.CandidateArtifactMismatch;
             }
-            const after_calls = included.block_policy.afterTransaction(self.revision, .{
+            const after_calls = Engine.specification.block.afterTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = next_progress.tx_count - 1,
@@ -714,12 +699,8 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             if (after_calls.slice().len != 0) {
                 return error.UnsupportedAfterTransactionHooks;
             }
-            // BAL has no account lifecycle bit. Until the scheduled destroy
-            // shape is fixture-pinned, a lane deletion is insufficient
-            // evidence for a fatal claim mismatch.
-            try ensureChangesetLifecycle(&effects.changeset);
-            try self.changeset_fold.append(included.tx_index, &effects.changeset);
-            self.report.folded_transactions = self.changeset_fold.transactionCount();
+            try self.transition_fold.append(included.tx_index, &effects.transition);
+            self.report.folded_transactions = self.transition_fold.transactionCount();
 
             const write_index = std.math.add(usize, included.tx_index, 1) catch
                 return error.BlockAccessIndexOverflow;
@@ -734,11 +715,10 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .gas_used = effects.result.gas.used,
                 .cumulative_gas_used = next_progress.gas_used,
                 .created_address = effects.result.created_address,
-                .logs = effects.logs,
+                .logs = .fromSlice(effects.logs),
             };
             try Operations.appendCandidateDepositRequestData(
                 self.allocator,
-                self.revision,
                 &self.deposit_request_data,
                 effects.logs,
             );
@@ -788,7 +768,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 return;
             }
 
-            const before_calls = rejected.block_policy.beforeTransaction(self.revision, .{
+            const before_calls = Engine.specification.block.beforeTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = self.progress.tx_count,
@@ -801,7 +781,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 return error.BlockAccessIndexOverflow;
             var claim_reader = BalClaimReader.init(self.base_reader, self.claim, block_access_index);
             const executor_options: Engine.Executor.Init = .{
-                .revision = self.revision,
                 .state_reader = claim_reader.reader(),
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
@@ -843,7 +822,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                     if (rejected.kind != .block_gas) {
                         return error.CandidateRejectionMismatch;
                     }
-                    const view = try executed.view();
+                    const view = executed.view();
                     self.finishRejected(
                         try executionExceedsBlockGas(self.env, self.progress, view.output.*),
                         rejected.tx_index,
@@ -861,23 +840,23 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         pub fn finish(self: *Self) std.Io.Cancelable!void {
             try self.flushPending();
             if (self.active) {
-                self.changeset_fold.finish() catch |err| {
-                    self.stop(.diagnostic_failure, self.changeset_fold.transactionCount(), err);
+                self.transition_fold.finish() catch |err| {
+                    self.stop(.diagnostic_failure, self.transition_fold.transactionCount(), err);
                     return;
                 };
                 const transaction_count = std.math.cast(
                     bal.BlockAccessIndex,
-                    self.changeset_fold.transactionCount(),
+                    self.transition_fold.transactionCount(),
                 ) orelse {
-                    self.stop(.diagnostic_failure, self.changeset_fold.transactionCount(), error.BlockAccessIndexOverflow);
+                    self.stop(.diagnostic_failure, self.transition_fold.transactionCount(), error.BlockAccessIndexOverflow);
                     return;
                 };
-                if (!changesetMatchesTransactionDelta(
-                    self.changeset_fold.view(),
+                if (!candidateStateMatchesTransactionDelta(
+                    self.transition_fold.view(),
                     self.claim,
                     transaction_count,
                 )) {
-                    self.stop(.changeset_fold_mismatch, self.changeset_fold.transactionCount(), null);
+                    self.stop(.transition_fold_mismatch, self.transition_fold.transactionCount(), null);
                     return;
                 }
                 self.report.status = .outcomes_matched;
@@ -888,15 +867,14 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         /// Reconstitute the complete candidate state, run block-final work
         /// serially over it, and return independently assembled artifacts.
         /// The caller remains responsible for exact comparison with canonical
-        /// serial output; this method never commits the candidate changeset.
+        /// serial output; this method never commits candidate state.
         pub fn finishCandidate(
             self: *Self,
             withdrawals: []const Operations.Withdrawal,
-            block_policy: *const Engine.BlockPolicy,
         ) ?Artifacts {
             if (self.report.status != .outcomes_matched) return null;
-            return self.finishCandidateFallible(withdrawals, block_policy) catch |err| {
-                self.stopForCandidateError(err, self.changeset_fold.transactionCount());
+            return self.finishCandidateFallible(withdrawals) catch |err| {
+                self.stopForCandidateError(err, self.transition_fold.transactionCount());
                 return null;
             };
         }
@@ -904,70 +882,76 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn finishCandidateFallible(
             self: *Self,
             withdrawals: []const Operations.Withdrawal,
-            block_policy: *const Engine.BlockPolicy,
         ) !Artifacts {
-            const pre_changeset = if (self.pre_changeset) |*changeset|
-                changeset
+            const pre_state = if (self.pre_state) |*candidate|
+                candidate
             else
                 return error.CandidateBeforeBlockNotRun;
 
-            var pre_transaction_fold = candidate_state.OrderedChangesetFold.init(self.allocator);
-            defer pre_transaction_fold.deinit();
-            try pre_transaction_fold.append(0, pre_changeset);
-            try pre_transaction_fold.append(1, self.changeset_fold.view());
-            try pre_transaction_fold.finish();
-
-            var folded_reader = pre_transaction_fold.readerOver(self.base_reader);
+            var pre_reader = pre_state.readerOver(self.base_reader);
+            var transaction_reader = self.transition_fold.view().readerOver(pre_reader.reader());
             const transaction_count = std.math.cast(
                 bal.BlockAccessIndex,
-                self.changeset_fold.transactionCount(),
+                self.transition_fold.transactionCount(),
             ) orelse return error.BlockAccessIndexOverflow;
             const post_execution_index = try bal.postExecutionSystemIndex(transaction_count);
             var execution: CapturedExecution = undefined;
             try execution.init(self.allocator, .{
-                .revision = self.revision,
-                .state_reader = folded_reader.reader(),
+                .state_reader = transaction_reader.reader(),
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
                 .config = self.config,
-            }, post_execution_index);
+            });
             defer execution.deinit();
 
-            for (withdrawals) |withdrawal| {
-                try execution.recorder.accountAccess(.{ .address = withdrawal.address });
-            }
-            Operations.applyCandidateWithdrawals(&execution.executor, withdrawals) catch |err|
-                return preserveFoldedStateError(err, folded_reader.strategy_failure);
+            var observation_builder =
+                tracked_state_projector.BlockBuilder.init(self.allocator);
+            defer observation_builder.deinit();
+            var post_state_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
+            defer post_state_fold.deinit();
+            var observation_collector = ObservationCollector{
+                .allocator = self.allocator,
+                .builder = &observation_builder,
+                .state_fold = &post_state_fold,
+                .block_access_index = post_execution_index,
+            };
+            Operations.applyCandidateWithdrawals(
+                &execution.executor,
+                self.lifecycle_tx_context,
+                withdrawals,
+                &observation_collector,
+            ) catch |err|
+                return preserveFoldedStateError(
+                    err,
+                    transaction_reader.strategy_failure orelse pre_reader.strategy_failure,
+                );
             const requests = Operations.deriveCandidateRequests(
                 self.allocator,
                 &execution.executor,
-                block_policy,
                 self.env,
                 self.progress,
                 self.deposit_request_data.items,
-            ) catch |err| return preserveFoldedStateError(err, folded_reader.strategy_failure);
+                &observation_collector,
+            ) catch |err| return preserveFoldedStateError(
+                err,
+                transaction_reader.strategy_failure orelse pre_reader.strategy_failure,
+            );
             errdefer Operations.freeCandidateRequests(self.allocator, requests);
             const requests_hash = try Operations.candidateRequestsHash(self.allocator, requests);
 
-            try execution.finish();
-            var post_shard = try execution.recorder.toOwnedBlockAccessList(self.allocator);
+            var post_shard = try observation_builder.finish();
             defer post_shard.deinit(self.allocator);
             try self.bal_shard_fold.append(post_shard.accounts);
 
-            var post_changeset = try execution.executor.changeset();
-            defer post_changeset.deinit(self.allocator);
-            if (changesetFallbackStatus(&post_changeset)) |status| {
-                self.stop(status, self.changeset_fold.transactionCount(), null);
-                return error.CandidateChangesetLifecycleFallback;
-            }
-
-            var full_fold = candidate_state.OrderedChangesetFold.init(self.allocator);
+            try post_state_fold.finish();
+            var full_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
             defer full_fold.deinit();
-            try full_fold.append(0, pre_transaction_fold.view());
-            try full_fold.append(1, &post_changeset);
+            try full_fold.appendState(pre_state);
+            try full_fold.appendState(self.transition_fold.view());
+            try full_fold.appendState(post_state_fold.view());
             try full_fold.finish();
-            var full_changeset = full_fold.takeOwned();
-            errdefer full_changeset.deinit(self.allocator);
+            var full_state = full_fold.takeOwned();
+            errdefer full_state.deinit(self.allocator);
 
             var decoded_bal = try self.bal_shard_fold.finish();
             defer decoded_bal.deinit(self.allocator);
@@ -975,7 +959,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             errdefer self.allocator.free(encoded_bal);
 
             return .{
-                .changeset = full_changeset,
+                .state = full_state,
                 .gas_used = self.progress.gas_used,
                 .block_gas_used = self.progress.block_gas.total,
                 .block_state_gas_used = self.progress.block_gas.state,
@@ -1025,14 +1009,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
         fn blobGasAdmission(self: *const Self, tx: Engine.Transaction) anyerror!BlobGasAdmission {
             const transaction_blob_gas = try Operations.candidateTransactionBlobGasUsed(
-                self.revision,
                 self.env.blob_schedule,
                 tx,
             );
             const next = std.math.add(u64, self.blob_gas_used, transaction_blob_gas) catch
                 return error.BlobGasOverflow;
             const limit = try Operations.candidateBlockBlobGasLimit(
-                self.revision,
                 self.env.blob_schedule,
             );
             return .{ .next = next, .exceeds_limit = next > limit };
@@ -1054,9 +1036,10 @@ fn executionResultEqual(expected: vm.TxExecutionResult, actual: vm.TxExecutionRe
         std.meta.eql(expected.created_address, actual.created_address);
 }
 
-fn logsEqual(expected: []const Host.Log, actual: []const Host.Log) bool {
-    if (expected.len != actual.len) return false;
-    for (expected, actual) |expected_log, actual_log| {
+fn logsEqual(expected: []const Host.Log, actual: state.TrackedState.LogView) bool {
+    if (expected.len != actual.len()) return false;
+    for (expected, 0..) |expected_log, index| {
+        const actual_log = actual.get(index);
         if (!std.mem.eql(u8, &expected_log.address, &actual_log.address) or
             !std.mem.eql(u256, expected_log.topics, actual_log.topics) or
             !std.mem.eql(u8, expected_log.data, actual_log.data))
@@ -1067,43 +1050,45 @@ fn logsEqual(expected: []const Host.Log, actual: []const Host.Log) bool {
     return true;
 }
 
-/// One-sided diagnostic: every transaction-indexed field declared by the
-/// claim must equal the folded execution result. Extra execution writes are
-/// intentionally ignored because Changeset account leaves are field-complete
-/// while BAL is field-partial. Under-declaration is rejected later by exact
-/// observed-vs-claimed BAL bytes. This subset check is not the Phase-C
-/// soundness gate, which requires exact rebuilt-BAL equality in both directions.
-fn changesetMatchesTransactionDelta(
-    changeset: *const state.Changeset,
+/// One-sided diagnostic over the same field-level shape used by BAL. Exact
+/// observed-vs-claimed BAL bytes remain the soundness gate in both directions.
+fn candidateStateMatchesTransactionDelta(
+    candidate: *const candidate_transition.CandidateState,
     claim: *const ClaimView,
     transaction_count: bal.BlockAccessIndex,
 ) bool {
     var account_index: usize = 0;
     var account_fields = claim.transactionDelta(transaction_count).accountFields();
     while (account_fields.next()) |expected| {
-        while (account_index < changeset.account_updates.items.len and
-            std.mem.order(u8, &changeset.account_updates.items[account_index].address, &expected.address) == .lt)
+        while (account_index < candidate.accounts.items.len and
+            std.mem.order(u8, &candidate.accounts.items[account_index].address, &expected.address) == .lt)
         {
             account_index += 1;
         }
-        if (account_index == changeset.account_updates.items.len) return false;
-        const actual = changeset.account_updates.items[account_index];
+        if (account_index == candidate.accounts.items.len) return false;
+        const actual = candidate.accounts.items[account_index];
         if (!std.mem.eql(u8, &actual.address, &expected.address)) return false;
-        if (expected.balance) |balance| if (actual.balance != balance) return false;
-        if (expected.nonce) |nonce| if (actual.nonce != nonce) return false;
-        if (expected.code) |code| if (!std.mem.eql(u8, &actual.code_hash, &code.hash)) return false;
+        if (expected.balance) |balance| if (actual.balance == null or actual.balance.? != balance) return false;
+        if (expected.nonce) |nonce| if (actual.nonce == null or actual.nonce.? != nonce) return false;
+        if (expected.code) |code| {
+            if (actual.code_hash == null or
+                !std.mem.eql(u8, &actual.code_hash.?, &code.hash))
+            {
+                return false;
+            }
+        }
     }
 
     var storage_index: usize = 0;
     var storage_writes = claim.transactionDelta(transaction_count).storageWrites();
     while (storage_writes.next()) |expected| {
-        while (storage_index < changeset.storage_writes.items.len and
-            storageWriteBefore(changeset.storage_writes.items[storage_index], expected))
+        while (storage_index < candidate.storage.items.len and
+            storageWriteBefore(candidate.storage.items[storage_index], expected))
         {
             storage_index += 1;
         }
-        if (storage_index == changeset.storage_writes.items.len) return false;
-        const actual = changeset.storage_writes.items[storage_index];
+        if (storage_index == candidate.storage.items.len) return false;
+        const actual = candidate.storage.items[storage_index];
         if (!std.mem.eql(u8, &actual.address, &expected.address) or
             actual.key != expected.slot or actual.value != expected.value)
         {
@@ -1113,20 +1098,13 @@ fn changesetMatchesTransactionDelta(
     return true;
 }
 
-fn storageWriteBefore(actual: state.Changeset.StorageWrite, expected: ClaimView.FinalStorageWrite) bool {
+fn storageWriteBefore(
+    actual: candidate_transition.StorageDelta,
+    expected: ClaimView.FinalStorageWrite,
+) bool {
     const address_order = std.mem.order(u8, &actual.address, &expected.address);
     if (address_order != .eq) return address_order == .lt;
     return actual.key < expected.slot;
-}
-
-fn changesetFallbackStatus(changeset: *const state.Changeset) ?Status {
-    if (changeset.account_deletes.items.len != 0) return .fallback_changeset_lifecycle;
-    return null;
-}
-
-fn ensureChangesetLifecycle(changeset: *const state.Changeset) !void {
-    if (changesetFallbackStatus(changeset) != null)
-        return error.CandidateChangesetLifecycleFallback;
 }
 
 fn advanceProgress(
@@ -1157,7 +1135,6 @@ fn executionExceedsBlockGas(
 }
 
 fn statusForError(err: anyerror, strategy_failure: ?BalClaimReader.StrategyFailure) Status {
-    if (err == error.AccountRecreationUnsupported) return .fallback_changeset_lifecycle;
     if (err == error.StateReaderStrategyFailure) {
         const failure = strategy_failure orelse return .diagnostic_failure;
         return switch (failure) {
@@ -1177,9 +1154,6 @@ fn statusForCandidateError(err: anyerror) Status {
         error.CandidateRejectionMismatch => .candidate_rejection_mismatch,
         error.UnsupportedBeforeTransactionHooks => .unsupported_before_transaction_hooks,
         error.UnsupportedAfterTransactionHooks => .unsupported_after_transaction_hooks,
-        error.AccountRecreationUnsupported,
-        error.CandidateChangesetLifecycleFallback,
-        => .fallback_changeset_lifecycle,
         error.FoldedStateStorageUnknown => .fallback_folded_state_storage,
         else => .diagnostic_failure,
     };
@@ -1192,7 +1166,6 @@ fn candidateErrorIsSemantic(err: anyerror) bool {
         error.CandidateRejectionMismatch,
         error.UnsupportedBeforeTransactionHooks,
         error.UnsupportedAfterTransactionHooks,
-        error.CandidateChangesetLifecycleFallback,
         => true,
         else => false,
     };
@@ -1203,7 +1176,7 @@ fn candidateErrorIsSemantic(err: anyerror) bool {
 /// rather than becoming a fatal diagnostic mismatch.
 fn preserveFoldedStateError(
     err: anyerror,
-    strategy_failure: ?candidate_state.FoldedStateReader.StrategyFailure,
+    strategy_failure: ?candidate_transition.FoldedStateReader.StrategyFailure,
 ) anyerror {
     if (err == error.StateReaderStrategyFailure and
         strategy_failure == .storage_presence_unknown)
@@ -1216,14 +1189,13 @@ fn preserveFoldedStateError(
 test "BAL differential status classifies whole-lane fallback and mismatch" {
     try std.testing.expect(Status.fallback_positioned_account.isFallback());
     try std.testing.expect(Status.fallback_positioned_storage.isFallback());
-    try std.testing.expect(Status.fallback_changeset_lifecycle.isFallback());
     try std.testing.expect(Status.fallback_folded_state_storage.isFallback());
     try std.testing.expect(Status.fallback_parallel_runtime.isFallback());
     try std.testing.expect(Status.diagnostic_failure.isMismatch());
     try std.testing.expect(Status.claim_account_not_covered.isMismatch());
     try std.testing.expect(Status.claim_storage_not_covered.isMismatch());
     try std.testing.expect(Status.outcome_mismatch.isMismatch());
-    try std.testing.expect(Status.changeset_fold_mismatch.isMismatch());
+    try std.testing.expect(Status.transition_fold_mismatch.isMismatch());
     try std.testing.expect(Status.candidate_artifact_mismatch.isMismatch());
     try std.testing.expect(Status.candidate_rejection_mismatch.isMismatch());
     try std.testing.expect(!Status.matched.isFallback());
@@ -1291,69 +1263,6 @@ test "BAL strategy errors preserve differential policy" {
     try std.testing.expectEqual(Status.claim_storage_not_covered, statusForError(error.StateReaderStrategyFailure, .storage_not_covered));
     try std.testing.expectEqual(Status.diagnostic_failure, statusForError(error.StateReaderStrategyFailure, null));
     try std.testing.expectEqual(Status.diagnostic_failure, statusForError(error.ProviderSpecificFailure, null));
-    try std.testing.expectEqual(Status.fallback_changeset_lifecycle, statusForError(error.AccountRecreationUnsupported, null));
-}
-
-test "BAL differential changeset policy falls back on account deletion" {
-    var changeset = state.Changeset.init();
-    defer changeset.deinit(std.testing.allocator);
-    try changeset.account_deletes.append(std.testing.allocator, [_]u8{0xaa} ** 20);
-
-    try std.testing.expectEqual(
-        Status.fallback_changeset_lifecycle,
-        changesetFallbackStatus(&changeset).?,
-    );
-}
-
-test "BAL differential runner stops the whole lane on account deletion" {
-    const DummyEngine = struct {
-        pub const Revision = u8;
-        pub const Transaction = void;
-        pub const BlockPolicy = void;
-        pub const Executor = struct {
-            pub fn deinit(_: *@This()) void {}
-        };
-    };
-    const DummyOperations = struct {
-        pub const BlockHeader = void;
-        pub const Withdrawal = void;
-
-        pub fn freeCandidateRequests(_: std.mem.Allocator, _: []const []const u8) void {}
-    };
-    const TestRunner = Runner(DummyEngine, DummyOperations);
-
-    var store = state.MemoryStore.init(std.testing.allocator);
-    defer store.deinit();
-    const empty_claim = [_]bal.AccountChanges{};
-    var claim = try ClaimView.initAssumeValidated(std.testing.allocator, &empty_claim);
-    defer claim.deinit(std.testing.allocator);
-    var report = Report{};
-    const env = vm.Env{};
-    var runner = TestRunner.init(
-        std.testing.allocator,
-        0,
-        Config.base,
-        env,
-        env.txContext([_]u8{0} ** 20, 0, 0, &.{}),
-        store.reader(),
-        null,
-        null,
-        &claim,
-        &report,
-        null,
-    );
-    defer runner.deinit();
-
-    var changeset = state.Changeset.init();
-    defer changeset.deinit(std.testing.allocator);
-    try changeset.account_deletes.append(std.testing.allocator, [_]u8{0xaa} ** 20);
-
-    ensureChangesetLifecycle(&changeset) catch |err| runner.stopForCandidateError(err, 3);
-    try std.testing.expect(!runner.active);
-    try std.testing.expectEqual(Status.fallback_changeset_lifecycle, report.status);
-    try std.testing.expectEqual(@as(?usize, 3), report.tx_index);
-    try std.testing.expectEqual(@as(?anyerror, null), report.diagnostic_error);
-    try std.testing.expectEqual(@as(usize, 0), report.folded_transactions);
 }
 
 test "folded state reader normalization preserves fallback policy" {

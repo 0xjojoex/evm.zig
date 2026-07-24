@@ -28,7 +28,6 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var executor = evmz.Evm.Executor.init(allocator, .{
-        .revision = .latest,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -47,10 +46,9 @@ pub fn main(init: std.process.Init) !void {
         .rejected => return error.ExampleTransactionRejected,
     };
     defer executed.discardIfCurrent();
-    const execution = try executed.result();
-    var diff = try executed.changeset();
-    defer diff.deinit(allocator);
-    const stored = storageValue(&diff, contract, 0);
+    const execution = executed.result();
+    const changes = executed.changes();
+    const stored = storageValue(changes.storage_writes, contract, 0);
     if (execution.status != .success) return error.ExampleTransactionFailed;
     if (stored != 42) return error.ExampleStorageMismatch;
 
@@ -68,8 +66,10 @@ fn printHex(bytes: []const u8) void {
     }
 }
 
-fn storageValue(diff: *const evmz.state.Changeset, address: evmz.Address, key: u256) u256 {
-    for (diff.storage_writes.items) |write| {
+fn storageValue(writes: evmz.state.TrackedState.StorageChanges, address: evmz.Address, key: u256) u256 {
+    var index: u32 = 0;
+    while (index < writes.len()) : (index += 1) {
+        const write = writes.at(index);
         if (std.mem.eql(u8, &write.address, &address) and write.key == key) return write.value;
     }
     return 0;

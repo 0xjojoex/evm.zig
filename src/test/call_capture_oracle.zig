@@ -3,14 +3,14 @@ const evmz = @import("../evm.zig");
 const cases = @import("call_fixture_cases.zig");
 const geth_projection = @import("geth_calltracer_projection.zig");
 
-const Default = evmz.Evm.Executor;
+const Default = evmz.Vm(evmz.eth.cancun).Executor;
 const MemoryAccount = evmz.state.MemoryAccount;
 
 const CaptureHarness = struct {
     arena: evmz.trace.CallArena,
     context: evmz.executor.CaptureContext,
 
-    fn init(self: *CaptureHarness, executor: *Default) void {
+    fn init(self: *CaptureHarness) void {
         self.* = .{
             .arena = evmz.trace.CallArena.init(std.testing.allocator),
             .context = undefined,
@@ -19,67 +19,64 @@ const CaptureHarness = struct {
             std.testing.allocator,
             null,
             .{ .arena = &self.arena },
-            null,
         );
-        executor.setCaptureContext(&self.context);
     }
 
-    fn finish(self: *CaptureHarness, executor: *Default) !evmz.trace.CallSpan {
+    fn finish(self: *CaptureHarness) !evmz.trace.CallSpan {
         _ = try self.context.finish();
-        executor.setCaptureContext(null);
         return self.arena.latest().?;
     }
 
-    fn deinit(self: *CaptureHarness, executor: *Default) void {
-        if (executor.capture_context != null) executor.setCaptureContext(null);
+    fn deinit(self: *CaptureHarness) void {
         self.context.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
 };
 
-test "curated call fixtures satisfy compact neutral expectations" {
-    for (cases.all) |case| {
+test "curated call fixtures satisfy compact client-independent expectations" {
+    inline for (cases.all) |case| {
         errdefer std.log.err("call fixture failed: {s}", .{case.id});
         try runCase(case);
     }
 }
 
 test "transaction validation rejection produces no call frame" {
+    const Cancun = evmz.Vm(evmz.eth.cancun);
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedAccount(&executor, sender, 10_000_000, 0, &.{});
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    var vm = evmz.Evm.init(&executor);
-    const outcome = try vm.transact(.{
+    var vm = Cancun.init(&executor);
+    const outcome = try vm.transactCaptured(.{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = .{
             .sender = sender,
             .to = recipient,
             .gas_limit = 20_999,
         },
-    });
+    }, &capture.context);
     switch (outcome) {
         .executed => |executed| {
             executed.discardIfCurrent();
             return error.UnexpectedExecution;
         },
         .rejected => |reason| try std.testing.expectEqual(
-            evmz.Evm.Rejection.intrinsic_gas_too_low,
+            Cancun.Rejection.intrinsic_gas_too_low,
             reason,
         ),
     }
 
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
     try std.testing.expectEqual(@as(usize, 0), span.rows.len);
     try std.testing.expectEqual(@as(usize, 0), span.bytes.len);
     try std.testing.expect(!executor.hasCurrentTransaction());
@@ -109,23 +106,24 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedAccount(&executor, sender, 10_000_000, 0, &.{});
     try seedAccount(&executor, recursive, 0, 0, &recursive_code);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, gas),
         .{ .call = .{ .sender = sender, .recipient = recursive } },
         .legacy(gas),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, evmz.Host.max_call_depth) + 2, span.rows.len);
@@ -170,13 +168,14 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
     );
 }
 
-fn runCase(case: cases.Case) !void {
-    const revision = std.meta.stringToEnum(evmz.eth.Revision, case.fork) orelse
+fn runCase(comptime case: cases.Case) !void {
+    const revision = comptime std.meta.stringToEnum(evmz.eth.Revision, case.fork) orelse
         return error.UnknownOracleRevision;
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
     const sender = try evmz.address.fromHex(cases.sender);
     const recipient = try evmz.address.fromHex(case.recipient);
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = revision });
+    var executor = ExactVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedAccount(
         &executor,
@@ -198,12 +197,12 @@ fn runCase(case: cases.Case) !void {
     }
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    _ = try executor.runStandalone(
+    _ = try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
@@ -211,8 +210,9 @@ fn runCase(case: cases.Case) !void {
             .value = try parseHexInt(u256, case.value),
         } },
         .legacy(case.gas),
+        &capture.context,
     );
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(case.expected_rows.len, span.rows.len);
     for (span.rows, case.expected_rows) |row, expected| {
@@ -234,7 +234,7 @@ fn runCase(case: cases.Case) !void {
 }
 
 fn seedAccount(
-    executor: *Default,
+    executor: anytype,
     address: evmz.Address,
     balance: u256,
     nonce: u64,

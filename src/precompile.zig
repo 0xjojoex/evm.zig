@@ -3,75 +3,11 @@
 const std = @import("std");
 const address = @import("address.zig");
 const crypto = @import("crypto.zig");
+const precompile_runtime = @import("execution/precompile_runtime.zig");
 const precompile_backend = @import("precompile/backend.zig");
-const Revision = @import("eth/revision.zig").Revision;
 const uint256 = @import("uint256.zig");
 
 const Address = address.Address;
-const modexp_osaka_max_input_len: u256 = 1024;
-
-/// Scalar gas inputs consumed by the precompile formulas below. The catalog
-/// owns these semantic names; Ethereum and derived families own their values.
-pub const GasParameter = enum {
-    ecrecover,
-    sha256_base,
-    sha256_word,
-    ripemd160_base,
-    ripemd160_word,
-    identity_base,
-    identity_word,
-    modexp_osaka_minimum,
-    modexp_berlin_minimum,
-    modexp_berlin_divisor,
-    modexp_byzantium_divisor,
-    bn254_add_before_istanbul,
-    bn254_add_since_istanbul,
-    bn254_mul_before_istanbul,
-    bn254_mul_since_istanbul,
-    bn254_pairing_base_before_istanbul,
-    bn254_pairing_base_since_istanbul,
-    bn254_pairing_pair_before_istanbul,
-    bn254_pairing_pair_since_istanbul,
-    blake2f_round,
-    kzg_point_evaluation,
-    bls12_g1add,
-    bls12_g1msm_multiplication,
-    bls12_g2add,
-    bls12_g2msm_multiplication,
-    bls12_pairing_base,
-    bls12_pairing_pair,
-    bls12_map_fp_to_g1,
-    bls12_map_fp2_to_g2,
-    p256verify,
-};
-
-pub const GasSchedule = std.enums.EnumArray(GasParameter, i64);
-
-pub const Error = std.mem.Allocator.Error || error{
-    NotImplemented,
-    OutputBufferTooSmall,
-};
-
-pub const Status = enum(u8) {
-    success,
-    failure,
-    out_of_gas,
-};
-
-pub const Result = struct {
-    status: Status,
-    output_data: []u8,
-    gas_left: i64,
-    output_owned: bool = true,
-};
-
-pub const Call = struct {
-    allocator: std.mem.Allocator,
-    revision: Revision,
-    input_data: []const u8,
-    gas: i64,
-    output_buffer: ?[]u8 = null,
-};
 
 pub const Contract = enum(u16) {
     ecrecover = 0x01,
@@ -98,18 +34,128 @@ pub const Contract = enum(u16) {
     }
 };
 
+pub const contract_slots = @intFromEnum(Contract.p256verify) + 1;
+
+/// Resolved scalar gas inputs consumed by the precompile formulas below.
+/// Exact specifications provide one value per semantic key.
+pub const GasParameter = enum {
+    ecrecover,
+    sha256_base,
+    sha256_word,
+    ripemd160_base,
+    ripemd160_word,
+    identity_base,
+    identity_word,
+    modexp_minimum,
+    modexp_divisor,
+    bn254_add,
+    bn254_mul,
+    bn254_pairing_base,
+    bn254_pairing_pair,
+    blake2f_round,
+    kzg_point_evaluation,
+    bls12_g1add,
+    bls12_g1msm_multiplication,
+    bls12_g2add,
+    bls12_g2msm_multiplication,
+    bls12_pairing_base,
+    bls12_pairing_pair,
+    bls12_map_fp_to_g1,
+    bls12_map_fp2_to_g2,
+    p256verify,
+};
+
+pub const GasSchedule = std.enums.EnumArray(GasParameter, i64);
+
+pub const ModexpPricing = enum {
+    eip198,
+    eip2565,
+    eip7883,
+};
+
+/// One exact precompile execution configuration. No fork identity enters a
+/// precompile invocation after this value is selected.
+pub const Config = struct {
+    active: [contract_slots]bool,
+    gas: GasSchedule,
+    modexp_pricing: ModexpPricing,
+    modexp_max_input_len: ?u256,
+};
+
+/// Bind precompile activation and pricing to one exact engine configuration.
+pub fn Exact(comptime config: Config) type {
+    return struct {
+        pub const Entry = Contract;
+
+        pub fn resolve(target: Address) ?Entry {
+            const entry = contractFromAddress(target) orelse return null;
+            return if (config.active[@intFromEnum(entry)]) entry else null;
+        }
+
+        pub fn active(target: Address) bool {
+            return resolve(target) != null;
+        }
+
+        pub fn execute(
+            entry: Entry,
+            call: precompile_runtime.PrecompileCall,
+        ) Error!precompile_runtime.PrecompileOutcome {
+            return executeWithConfig(entry, call, config);
+        }
+    };
+}
+
+pub fn executeWithConfig(
+    entry: Contract,
+    call: precompile_runtime.PrecompileCall,
+    comptime config: Config,
+) Error!precompile_runtime.PrecompileOutcome {
+    return .{ .result = try executeContract(entry, .{
+        .allocator = call.allocator,
+        .input_data = call.message.input_data,
+        .gas = call.message.gas,
+        .output_buffer = call.output_buffer,
+    }, config) };
+}
+
+pub const Error = std.mem.Allocator.Error || error{
+    NotImplemented,
+    OutputBufferTooSmall,
+};
+
+pub const Status = enum(u8) {
+    success,
+    failure,
+    out_of_gas,
+};
+
+pub const Result = struct {
+    status: Status,
+    output_data: []u8,
+    gas_left: i64,
+    output_owned: bool = true,
+};
+
+pub const Call = struct {
+    allocator: std.mem.Allocator,
+    input_data: []const u8,
+    gas: i64,
+    output_buffer: ?[]u8 = null,
+};
+
 pub fn executeContract(
     contract: Contract,
     call: Call,
-    comptime gas: GasSchedule,
+    comptime config: Config,
 ) Error!Result {
-    validateGasSchedule(gas);
+    validateConfig(config);
+    const gas = config.gas;
     return switch (contract) {
         .ecrecover => ecrecover(call, gas),
         .sha256 => sha256(call, gas),
         .ripemd160 => ripemd160(call, gas),
         .identity => identity(call, gas),
-        .modexp => modexp(call, gas),
+        .modexp => modexp(call, config),
         .bn254_add => bn254Add(call, gas),
         .bn254_mul => bn254Mul(call, gas),
         .bn254_pairing => bn254Pairing(call, gas),
@@ -126,16 +172,15 @@ pub fn executeContract(
     };
 }
 
-fn validateGasSchedule(comptime gas: GasSchedule) void {
+fn validateConfig(comptime config: Config) void {
+    const gas = config.gas;
     inline for (std.enums.values(GasParameter)) |parameter| {
         const value = comptime gas.get(parameter);
         if (value < 0) {
             @compileError("precompile gas parameter must be non-negative: " ++ @tagName(parameter));
         }
         switch (parameter) {
-            .modexp_berlin_divisor,
-            .modexp_byzantium_divisor,
-            => if (value == 0) {
+            .modexp_divisor => if (value == 0) {
                 @compileError("modexp gas divisors must be positive");
             },
             else => {},
@@ -268,17 +313,20 @@ fn identity(call: Call, comptime gas: GasSchedule) Error!Result {
     };
 }
 
-fn modexp(call: Call, comptime gas: GasSchedule) Error!Result {
+fn modexp(call: Call, comptime config: Config) Error!Result {
+    const gas = config.gas;
     const base_len = std.mem.readInt(u256, &paddedWord(call.input_data, 0), .big);
     const exponent_len = std.mem.readInt(u256, &paddedWord(call.input_data, 1), .big);
     const modulus_len = std.mem.readInt(u256, &paddedWord(call.input_data, 2), .big);
-    if (call.revision.isImpl(.osaka) and !modexpLengthsWithinOsakaLimit(base_len, exponent_len, modulus_len)) {
-        return emptyResult(.out_of_gas);
+    if (config.modexp_max_input_len) |max_input_len| {
+        if (!modexpLengthsWithinLimit(base_len, exponent_len, modulus_len, max_input_len)) {
+            return emptyResult(.out_of_gas);
+        }
     }
 
     const exponent_offset = uint256.checkedAdd(96, base_len) orelse return emptyResult(.out_of_gas);
     const exponent_head = modexpExponentHead(call.input_data, exponent_offset, exponent_len);
-    const cost = modexpGas(call.revision, base_len, exponent_len, modulus_len, exponent_head, gas) orelse {
+    const cost = modexpGas(config.modexp_pricing, base_len, exponent_len, modulus_len, exponent_head, gas) orelse {
         return emptyResult(.out_of_gas);
     };
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
@@ -327,7 +375,7 @@ fn modexp(call: Call, comptime gas: GasSchedule) Error!Result {
 }
 
 fn modexpGas(
-    revision: Revision,
+    comptime pricing: ModexpPricing,
     base_len: u256,
     exponent_len: u256,
     modulus_len: u256,
@@ -335,39 +383,41 @@ fn modexpGas(
     comptime gas: GasSchedule,
 ) ?i64 {
     const max_len = @max(base_len, modulus_len);
-    if (revision.isImpl(.osaka)) {
-        const complexity = modexpOsakaMultComplexity(max_len) orelse return null;
-        const iteration_count = modexpOsakaIterationCount(exponent_len, exponent_head) orelse return null;
-        const cost = uint256.checkedMul(complexity, iteration_count) orelse return null;
-        return std.math.cast(i64, @max(cost, @as(u256, @intCast(gas.get(.modexp_osaka_minimum)))));
-    }
-
-    if (revision.isImpl(.berlin)) {
-        const words = uint256.ceilDiv(max_len, 8);
-        const complexity = uint256.checkedMul(words, words) orelse return null;
-        if (complexity == 0) return gas.get(.modexp_berlin_minimum);
-        const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
-        const iterations = @max(iteration_count, 1);
-        const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
-        const divisor: u256 = @intCast(gas.get(.modexp_berlin_divisor));
-        const minimum: u256 = @intCast(gas.get(.modexp_berlin_minimum));
-        const cost = @max(@divFloor(numerator, divisor), minimum);
-        return std.math.cast(i64, cost);
-    }
-
-    const complexity = eip198MultComplexity(max_len) orelse return null;
-    if (complexity == 0) return 0;
-    const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
-    const iterations = @max(iteration_count, 1);
-    const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
-    const cost = @divFloor(numerator, @as(u256, @intCast(gas.get(.modexp_byzantium_divisor))));
-    return std.math.cast(i64, cost);
+    return switch (pricing) {
+        .eip7883 => {
+            const complexity = modexpOsakaMultComplexity(max_len) orelse return null;
+            const iteration_count = modexpOsakaIterationCount(exponent_len, exponent_head) orelse return null;
+            const cost = uint256.checkedMul(complexity, iteration_count) orelse return null;
+            return std.math.cast(i64, @max(cost, @as(u256, @intCast(gas.get(.modexp_minimum)))));
+        },
+        .eip2565 => {
+            const words = uint256.ceilDiv(max_len, 8);
+            const complexity = uint256.checkedMul(words, words) orelse return null;
+            if (complexity == 0) return gas.get(.modexp_minimum);
+            const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
+            const iterations = @max(iteration_count, 1);
+            const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
+            const divisor: u256 = @intCast(gas.get(.modexp_divisor));
+            const minimum: u256 = @intCast(gas.get(.modexp_minimum));
+            const cost = @max(@divFloor(numerator, divisor), minimum);
+            return std.math.cast(i64, cost);
+        },
+        .eip198 => {
+            const complexity = eip198MultComplexity(max_len) orelse return null;
+            if (complexity == 0) return 0;
+            const iteration_count = adjustedExponentLength(exponent_len, exponent_head) orelse return null;
+            const iterations = @max(iteration_count, 1);
+            const numerator = uint256.checkedMul(complexity, iterations) orelse return null;
+            const cost = @divFloor(numerator, @as(u256, @intCast(gas.get(.modexp_divisor))));
+            return std.math.cast(i64, cost);
+        },
+    };
 }
 
-fn modexpLengthsWithinOsakaLimit(base_len: u256, exponent_len: u256, modulus_len: u256) bool {
-    return base_len <= modexp_osaka_max_input_len and
-        exponent_len <= modexp_osaka_max_input_len and
-        modulus_len <= modexp_osaka_max_input_len;
+fn modexpLengthsWithinLimit(base_len: u256, exponent_len: u256, modulus_len: u256, max_input_len: u256) bool {
+    return base_len <= max_input_len and
+        exponent_len <= max_input_len and
+        modulus_len <= max_input_len;
 }
 
 fn modexpOsakaMultComplexity(max_len: u256) ?u256 {
@@ -452,7 +502,7 @@ fn allZero(bytes: []const u8) bool {
 }
 
 fn bn254Add(call: Call, comptime gas: GasSchedule) Error!Result {
-    const gas_left = charge(call, bn254AddGas(call.revision, gas)) orelse return emptyResult(.out_of_gas);
+    const gas_left = charge(call, gas.get(.bn254_add)) orelse return emptyResult(.out_of_gas);
     const output = try allocOutput(call, 64);
     errdefer freeOutput(call, output);
     if (precompile_backend.bn254Add(call.input_data, output[0..64]) != .ok) {
@@ -464,7 +514,7 @@ fn bn254Add(call: Call, comptime gas: GasSchedule) Error!Result {
 }
 
 fn bn254Mul(call: Call, comptime gas: GasSchedule) Error!Result {
-    const gas_left = charge(call, bn254MulGas(call.revision, gas)) orelse return emptyResult(.out_of_gas);
+    const gas_left = charge(call, gas.get(.bn254_mul)) orelse return emptyResult(.out_of_gas);
     const output = try allocOutput(call, 64);
     errdefer freeOutput(call, output);
     if (precompile_backend.bn254Mul(call.input_data, output[0..64]) != .ok) {
@@ -476,7 +526,7 @@ fn bn254Mul(call: Call, comptime gas: GasSchedule) Error!Result {
 }
 
 fn bn254Pairing(call: Call, comptime gas: GasSchedule) Error!Result {
-    const cost = bn254PairingGas(call.revision, call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
+    const cost = bn254PairingGas(call.input_data.len, gas) orelse return emptyResult(.out_of_gas);
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
     if (call.input_data.len % bn254_pair_size != 0) return emptyResult(.failure);
 
@@ -492,21 +542,11 @@ fn bn254Pairing(call: Call, comptime gas: GasSchedule) Error!Result {
 
 const bn254_pair_size = 192;
 
-fn bn254AddGas(revision: Revision, comptime gas: GasSchedule) i64 {
-    return if (revision.isImpl(.istanbul)) gas.get(.bn254_add_since_istanbul) else gas.get(.bn254_add_before_istanbul);
-}
-
-fn bn254MulGas(revision: Revision, comptime gas: GasSchedule) i64 {
-    return if (revision.isImpl(.istanbul)) gas.get(.bn254_mul_since_istanbul) else gas.get(.bn254_mul_before_istanbul);
-}
-
-fn bn254PairingGas(revision: Revision, input_size: usize, comptime gas: GasSchedule) ?i64 {
+fn bn254PairingGas(input_size: usize, comptime gas: GasSchedule) ?i64 {
     const pair_count = input_size / bn254_pair_size;
-    const base = if (revision.isImpl(.istanbul)) gas.get(.bn254_pairing_base_since_istanbul) else gas.get(.bn254_pairing_base_before_istanbul);
-    const per_pair = if (revision.isImpl(.istanbul)) gas.get(.bn254_pairing_pair_since_istanbul) else gas.get(.bn254_pairing_pair_before_istanbul);
     const pair_count_i64 = std.math.cast(i64, pair_count) orelse return null;
-    const variable = std.math.mul(i64, per_pair, pair_count_i64) catch return null;
-    return std.math.add(i64, base, variable) catch null;
+    const variable = std.math.mul(i64, gas.get(.bn254_pairing_pair), pair_count_i64) catch return null;
+    return std.math.add(i64, gas.get(.bn254_pairing_base), variable) catch null;
 }
 
 fn blake2f(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -710,32 +750,71 @@ fn paddedWord(input: []const u8, word_index: usize) [32]u8 {
     return word;
 }
 
-fn executeEthereumPrecompileForTest(allocator: std.mem.Allocator, revision: Revision, target: Address, input_data: []const u8, gas: i64) Error!?Result {
+fn executeEthereumPrecompileForTest(
+    allocator: std.mem.Allocator,
+    comptime revision: @import("eth/revision.zig").Revision,
+    target: Address,
+    input_data: []const u8,
+    gas: i64,
+) Error!?Result {
     const eth_precompile = @import("eth/precompile.zig");
-    const contract = eth_precompile.resolve(revision, target) orelse return null;
+    const config = switch (revision) {
+        .frontier,
+        .frontier_thawing,
+        .homestead,
+        .dao_fork,
+        .tangerine_whistle,
+        .spurious_dragon,
+        => eth_precompile.frontier_config,
+        .byzantium,
+        .constantinople,
+        .petersburg,
+        => eth_precompile.byzantium_config,
+        .istanbul,
+        .muir_glacier,
+        => eth_precompile.istanbul_config,
+        .berlin,
+        .london,
+        .arrow_glacier,
+        .gray_glacier,
+        .merge,
+        .shanghai,
+        => eth_precompile.berlin_config,
+        .cancun => eth_precompile.cancun_config,
+        .prague => eth_precompile.prague_config,
+        .osaka, .amsterdam => eth_precompile.osaka_config,
+    };
+    const ExactConfig = Exact(config);
+    const contract = ExactConfig.resolve(target) orelse return null;
     return try executeContract(contract, .{
         .allocator = allocator,
-        .revision = revision,
         .input_data = input_data,
         .gas = gas,
-    }, eth_precompile.gas_schedule);
+    }, config);
 }
 
-test "Ethereum precompile activation follows revisions" {
+test "Ethereum precompile activation follows exact configs" {
     const eth_precompile = @import("eth/precompile.zig");
+    const Frontier = Exact(eth_precompile.frontier_config);
+    const Byzantium = Exact(eth_precompile.byzantium_config);
+    const Istanbul = Exact(eth_precompile.istanbul_config);
+    const Berlin = Exact(eth_precompile.berlin_config);
+    const Cancun = Exact(eth_precompile.cancun_config);
+    const Prague = Exact(eth_precompile.prague_config);
+    const Osaka = Exact(eth_precompile.osaka_config);
 
-    try std.testing.expectEqual(Contract.ecrecover, eth_precompile.resolve(.frontier, Contract.ecrecover.toAddress()).?);
-    try std.testing.expect(eth_precompile.resolve(.frontier, Contract.modexp.toAddress()) == null);
-    try std.testing.expectEqual(Contract.modexp, eth_precompile.resolve(.byzantium, Contract.modexp.toAddress()).?);
-    try std.testing.expect(eth_precompile.resolve(.byzantium, Contract.blake2f.toAddress()) == null);
-    try std.testing.expectEqual(Contract.blake2f, eth_precompile.resolve(.istanbul, Contract.blake2f.toAddress()).?);
-    try std.testing.expect(eth_precompile.resolve(.shanghai, Contract.kzg_point_evaluation.toAddress()) == null);
-    try std.testing.expectEqual(Contract.kzg_point_evaluation, eth_precompile.resolve(.cancun, Contract.kzg_point_evaluation.toAddress()).?);
-    try std.testing.expect(eth_precompile.resolve(.cancun, Contract.bls12_g1add.toAddress()) == null);
-    try std.testing.expectEqual(Contract.bls12_g1add, eth_precompile.resolve(.prague, Contract.bls12_g1add.toAddress()).?);
-    try std.testing.expect(eth_precompile.resolve(.prague, address.addr(0x12)) == null);
-    try std.testing.expect(eth_precompile.resolve(.prague, Contract.p256verify.toAddress()) == null);
-    try std.testing.expectEqual(Contract.p256verify, eth_precompile.resolve(.osaka, Contract.p256verify.toAddress()).?);
+    try std.testing.expectEqual(Contract.ecrecover, Frontier.resolve(Contract.ecrecover.toAddress()).?);
+    try std.testing.expect(Frontier.resolve(Contract.modexp.toAddress()) == null);
+    try std.testing.expectEqual(Contract.modexp, Byzantium.resolve(Contract.modexp.toAddress()).?);
+    try std.testing.expect(Byzantium.resolve(Contract.blake2f.toAddress()) == null);
+    try std.testing.expectEqual(Contract.blake2f, Istanbul.resolve(Contract.blake2f.toAddress()).?);
+    try std.testing.expect(Berlin.resolve(Contract.kzg_point_evaluation.toAddress()) == null);
+    try std.testing.expectEqual(Contract.kzg_point_evaluation, Cancun.resolve(Contract.kzg_point_evaluation.toAddress()).?);
+    try std.testing.expect(Cancun.resolve(Contract.bls12_g1add.toAddress()) == null);
+    try std.testing.expectEqual(Contract.bls12_g1add, Prague.resolve(Contract.bls12_g1add.toAddress()).?);
+    try std.testing.expect(Prague.resolve(address.addr(0x12)) == null);
+    try std.testing.expect(Prague.resolve(Contract.p256verify.toAddress()) == null);
+    try std.testing.expectEqual(Contract.p256verify, Osaka.resolve(Contract.p256verify.toAddress()).?);
 }
 
 test "Ethereum precompile activation gates catalog execution" {
@@ -752,10 +831,9 @@ test "contract execution is independent from Ethereum activation window" {
 
     const result = try executeContract(.modexp, .{
         .allocator = std.testing.allocator,
-        .revision = .frontier,
         .input_data = &.{},
         .gas = 0,
-    }, @import("eth/precompile.zig").gas_schedule);
+    }, @import("eth/precompile.zig").frontier_config);
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
@@ -909,7 +987,7 @@ test modexp {
     try std.testing.expectEqual(@as(usize, 0), zero_complexity.output_data.len);
 
     var over_osaka_limit_input: [96]u8 = [_]u8{0} ** 96;
-    std.mem.writeInt(u256, over_osaka_limit_input[0..32], modexp_osaka_max_input_len + 1, .big);
+    std.mem.writeInt(u256, over_osaka_limit_input[0..32], @import("eth/precompile.zig").osaka_config.modexp_max_input_len.? + 1, .big);
     const oversized_prague = (try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
     try std.testing.expectEqual(Status.success, oversized_prague.status);
 
@@ -918,7 +996,7 @@ test modexp {
 }
 
 test "P256VERIFY precompile" {
-    const ethereum_p256verify_gas = @import("eth/precompile.zig").gas_schedule.get(.p256verify);
+    const ethereum_p256verify_gas = @import("eth/precompile.zig").osaka_config.gas.get(.p256verify);
     const Scheme = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const Hash = std.crypto.hash.sha2.Sha256;
 
@@ -971,18 +1049,17 @@ test "P256VERIFY precompile" {
     try std.testing.expectEqual(@as(usize, 0), invalid_key.output_data.len);
 }
 
-test "P256VERIFY gas is selected by a derived gas schedule" {
-    const gas = comptime schedule: {
-        var result = @import("eth/precompile.zig").gas_schedule;
-        result.set(.p256verify, 3_450);
-        break :schedule result;
+test "P256VERIFY gas is selected by a derived exact config" {
+    const config = comptime resolved: {
+        var result = @import("eth/precompile.zig").berlin_config;
+        result.gas.set(.p256verify, 3_450);
+        break :resolved result;
     };
     const result = try executeContract(.p256verify, .{
         .allocator = std.testing.allocator,
-        .revision = .cancun,
         .input_data = &.{},
         .gas = 3_451,
-    }, gas);
+    }, config);
 
     try std.testing.expectEqual(Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 1), result.gas_left);

@@ -323,6 +323,30 @@ fn runPayload(
     parent: *ParentContext,
     bal_report: ?*block_stf.BalDifferentialReport,
 ) !block_stf.Result {
+    return switch (revision) {
+        inline else => |exact_revision| runPayloadExact(
+            exact_revision,
+            allocator,
+            fixture,
+            entry,
+            store,
+            block_hashes,
+            parent,
+            bal_report,
+        ),
+    };
+}
+
+fn runPayloadExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    fixture: *const JsonObject,
+    entry: *const JsonObject,
+    store: *evmz.state.MemoryStore,
+    block_hashes: *FixtureBlockHashes,
+    parent: *ParentContext,
+    bal_report: ?*block_stf.BalDifferentialReport,
+) !block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -357,8 +381,7 @@ fn runPayload(
     };
 
     const block_hash_source = block_hashes.source();
-    const result = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = revision,
+    const result = try block_stf.Exact(revision).applyAssumeDecoded(scratch, .{
         .env = .{
             .chain_id = fixture_config.chain_id,
             .coinbase = try addressField(&payload, "feeRecipient"),
@@ -589,12 +612,12 @@ fn parentBeaconBlockRoot(params: JsonArray) !?[32]u8 {
 }
 
 fn blobBaseFee(
-    revision: evmz.eth.Revision,
+    comptime revision: evmz.eth.Revision,
     blob_schedule: ?evmz.transaction.BlobSchedule,
     excess_blob_gas: ?u256,
 ) !u256 {
     if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse evmz.Evm.TransactionProtocol.transaction.blobSchedule(revision) orelse return 0;
+    const schedule = blob_schedule orelse evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
     return evmz.transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas orelse 0) orelse error.BlobGasOverflow;
 }
 

@@ -2,11 +2,11 @@ const evmz = @import("../evm.zig");
 
 const FrameStore = @import("./frame_store.zig");
 const Interpreter = evmz.interpreter;
-const Journal = @import("../state/Journal.zig");
+const ScopeCheckpoint = @import("../state/TrackedState.zig").Checkpoint;
 const CallToken = @import("../trace/call_arena.zig").Token;
 
 pub const ChildCreate = struct {
-    checkpoint_state: Journal.Checkpoint,
+    checkpoint_state: ScopeCheckpoint,
     address: evmz.Address,
     kind: evmz.Host.CallKind,
     msg: evmz.Host.Message,
@@ -15,7 +15,7 @@ pub const ChildCreate = struct {
 
 pub const Kind = union(enum) {
     root_call,
-    call: Journal.Checkpoint,
+    call: ScopeCheckpoint,
     create: ChildCreate,
 };
 

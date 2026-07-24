@@ -1,8 +1,8 @@
-//! Fork-neutral opcode vocabulary and static per-opcode metadata.
+//! Shared EVM opcode vocabulary and static per-opcode metadata.
 
 const std = @import("std");
 
-/// Shared ISA metadata / fork-neutral vocabulary
+/// Shared ISA metadata and EVM vocabulary.
 pub const Opcode = enum(u8) {
     STOP = 0x00,
     ADD = 0x01,
@@ -208,14 +208,14 @@ pub const Flags = struct {
 /// truth that the gas / stack / flags / exit / push-width switches collapse into.
 /// Indexed by raw byte via `table`; undefined bytes get the default (invalid) row.
 pub const OpInfo = struct {
-    /// Definition-owned mnemonic. Ethereum-known rows get the base enum tag;
-    /// custom definitions may use chain-local names without extending `Opcode`.
+    /// Shared mnemonic. Ethereum-known rows get the base enum tag;
+    /// custom specs may use chain-local names without extending `Opcode`.
     name: ?[]const u8 = null,
     /// false for the 106 unused byte values in 0x00..0xff (and only those;
     /// INVALID/0xfe is a *defined* opcode with `.exit = .invalid`).
     defined: bool = false,
-    /// Baseline fixed gas before definition revision overrides. This is opcode
-    /// metadata, not a fork-resolved gas query; use a bound protocol's static
+    /// Baseline fixed gas before exact-spec overrides. This is opcode
+    /// metadata, not a fork-resolved gas query; use a bound exact spec's static
     /// gas resolver for execution.
     static_gas: u16 = 0,
     /// Minimum stack height required to execute without underflow.
@@ -477,7 +477,7 @@ test "opcode table reproduces the per-opcode switches" {
     try expectEqual(@as(i16, -1), add.stackChange());
 
     // Historically repriced opcodes keep base gas here; fork-resolved gas
-    // belongs to the protocol definition.
+    // belongs to the exact instruction spec.
     try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.BALANCE)].static_gas);
     try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODESIZE)].static_gas);
     try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODECOPY)].static_gas);

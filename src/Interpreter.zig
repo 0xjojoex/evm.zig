@@ -4,6 +4,7 @@ const std = @import("std");
 const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
+const Spec = @import("./spec.zig").Spec;
 const ExecutionConfig = @import("./ExecutionConfig.zig");
 const evmz = @import("./evm.zig");
 const Stack = @import("./Stack.zig");
@@ -11,12 +12,11 @@ const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
 const tail_dispatch = @import("./interpreter/tail_dispatch.zig");
 const Opcode = @import("./opcode.zig").Opcode;
-const RevisionId = evmz.protocol.RevisionId;
 const TerminalCause = @import("./execution.zig").TerminalCause;
 
 const Error = anyerror;
 
-pub const Status = evmz.protocol.BlockTransactionStatus;
+pub const Status = evmz.execution.Status;
 
 pub const FrameStatus = enum(u8) {
     running,
@@ -170,48 +170,27 @@ pub const RunResult = union(enum) {
     action: Action,
 };
 
-pub fn InitFor(comptime Protocol: type) type {
-    return struct {
-        host: *Host,
-        msg: *const Host.Message,
-        bytecode: *const Bytecode,
-        revision: Protocol.Revision,
-        memory_allocator: ?std.mem.Allocator = null,
-        memory_retain_capacity: bool = false,
-        io: ?*frame_io.Slot = null,
-    };
-}
-
-const FrameInit = struct {
+pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
     bytecode: *const Bytecode,
-    revision_id: RevisionId,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
     io: ?*frame_io.Slot = null,
 };
 
-fn frameInitFor(comptime Protocol: type, options: InitFor(Protocol)) FrameInit {
-    return .{
-        .host = options.host,
-        .msg = options.msg,
-        .bytecode = options.bytecode,
-        .revision_id = evmz.protocol.revisionIdForProtocol(Protocol, options.revision),
-        .memory_allocator = options.memory_allocator,
-        .memory_retain_capacity = options.memory_retain_capacity,
-        .io = options.io,
-    };
-}
-
-pub fn For(comptime ProtocolType: type) type {
+pub fn Interpreter(comptime spec: Spec) type {
     const StatusType = Status;
+    const OwnedCallFrameType = OwnedCallFrameFor(spec);
+
+    const TailDispatch = tail_dispatch.Dispatch(spec, .{ .traced = false });
 
     return struct {
         const Self = @This();
 
-        pub const Protocol = ProtocolType;
+        pub const specification = spec;
         pub const Status = StatusType;
+        pub const OwnedCallFrame = OwnedCallFrameType;
         pub const CapturedResult = struct {
             result: Result,
             span: trace.TraceSpan,
@@ -223,13 +202,6 @@ pub fn For(comptime ProtocolType: type) type {
             return .{ .call_frame = call_frame };
         }
 
-        pub inline fn revision(frame: *const CallFrame) Protocol.Revision {
-            if (comptime @hasDecl(Protocol, "support") and @intFromEnum(Protocol.support.min) == @intFromEnum(Protocol.support.max)) {
-                return Protocol.support.min;
-            }
-            return evmz.protocol.decodeRevisionForProtocol(Protocol, frame.revision_id);
-        }
-
         pub fn execute(self: *Self) Error!Result {
             while (true) {
                 switch (try self.executeUntilAction()) {
@@ -239,7 +211,7 @@ pub fn For(comptime ProtocolType: type) type {
             }
         }
 
-        /// Execute this standalone frame through the protocol's fixed capture
+        /// Execute this standalone frame through the exact spec's fixed capture
         /// table and return a replay-only span. The consumer type never enters
         /// the interpreter type graph.
         pub fn capture(self: *Self, tape: *trace.TraceTape, profile: trace.CaptureProfile) Error!CapturedResult {
@@ -291,12 +263,12 @@ pub fn For(comptime ProtocolType: type) type {
             return .{ .finished = self.call_frame.getResult() };
         }
 
-        /// Execute one captured segment through the protocol's fixed trace
+        /// Execute one captured segment through the exact spec's fixed trace
         /// tail table. A CALL/CREATE suspension leaves its step open until the
         /// captured runtime applies the child result and resumes this frame.
         pub fn executeCapturedUntilAction(self: *Self, frame_capture: *trace.TraceCapture) Error!RunResult {
             if (self.call_frame.status == .running or frame_capture.pending_step != null) {
-                try tail_dispatch.TraceFor(Protocol).executeTraced(
+                try tail_dispatch.Dispatch(spec, .{ .traced = true }).executeTraced(
                     frame_capture,
                     self.call_frame,
                     self.call_frame.bytecode.read_bytes,
@@ -315,7 +287,7 @@ pub fn For(comptime ProtocolType: type) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.status == .running) {
-                try tail_dispatch.For(Protocol).execute(frame, frame.bytecode.read_bytes);
+                try TailDispatch.execute(frame, frame.bytecode.read_bytes);
             }
 
             if (frame.status == .running) {
@@ -355,33 +327,14 @@ pub const CallFrame = struct {
     io: *frame_io.Slot = undefined,
     output_range: Memory.Range = .{},
     bytecode: *const Bytecode = &Bytecode.empty,
-    revision_id: RevisionId = 0,
     pending_action: ?Action = null,
-
-    pub fn initFor(
-        self: *CallFrame,
-        comptime Protocol: type,
-        allocator: std.mem.Allocator,
-        options: InitFor(Protocol),
-        msg_storage: *Host.Message,
-        stack_storage: *Stack.Storage,
-        memory_storage: *Memory.Storage,
-    ) !void {
-        try self.init(
-            allocator,
-            frameInitFor(Protocol, options),
-            msg_storage,
-            stack_storage,
-            memory_storage,
-        );
-    }
 
     pub fn init(
         self: *CallFrame,
         allocator: std.mem.Allocator,
-        options: FrameInit,
+        options: Init,
         msg_storage: *Host.Message,
-        stack_storage: *Stack.Storage,
+        stack: Stack,
         memory_storage: *Memory.Storage,
     ) !void {
         const code = options.bytecode.bytes;
@@ -390,7 +343,7 @@ pub const CallFrame = struct {
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
-        self.stack = Stack.init(stack_storage);
+        self.stack = stack;
         const memory_allocator = options.memory_allocator orelse allocator;
         self.memory = if (options.memory_retain_capacity)
             Memory.initRetainingCapacity(memory_storage, memory_allocator)
@@ -409,7 +362,6 @@ pub const CallFrame = struct {
         self.output_range = .{};
         self.bytecode = options.bytecode;
         self.status = if (code.len == 0) .success else .running;
-        self.revision_id = options.revision_id;
         self.pending_action = null;
     }
 
@@ -455,16 +407,14 @@ pub const CallFrame = struct {
 
     pub fn resumeCallResult(self: *CallFrame, continuation: CallResume, result: Host.CallResult) !void {
         const child_gas_left = @max(result.gas_left, 0);
-        self.trackGas(continuation.gas_limit - child_gas_left);
+        const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
         self.gas_reservoir = result.gas_reservoir;
         self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
         self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
         if (result.status != .success) {
             self.refillStateGas(continuation.state_gas_charged);
         }
-        if (self.status != .running) {
-            return;
-        }
+        if (!gas_charged) return;
         if (result.status == .success) {
             // EIP-2200: child call-frame refunds only survive committed frames.
             self.gas_refund += result.gas_refund;
@@ -479,16 +429,14 @@ pub const CallFrame = struct {
 
     pub fn resumeCreateResult(self: *CallFrame, continuation: CreateResume, result: Host.CreateResult) !void {
         const child_gas_left = @max(result.gas_left, 0);
-        self.trackGas(continuation.gas_limit - child_gas_left);
+        const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
         self.gas_reservoir = result.gas_reservoir;
         self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
         self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
         if (result.status != .success) {
             self.refillStateGas(continuation.state_gas_charged);
         }
-        if (self.status != .running) {
-            return;
-        }
+        if (!gas_charged) return;
         if (result.status == .success) {
             // EIP-2200: child call-frame refunds only survive committed frames.
             self.gas_refund += result.gas_refund;
@@ -503,29 +451,35 @@ pub const CallFrame = struct {
         }
     }
 
-    pub fn trackGas(self: *CallFrame, gas: i64) void {
+    /// Returns whether execution may continue after the charge.
+    pub fn trackGas(self: *CallFrame, gas: i64) bool {
         if (gas > self.gas_left) {
+            @branchHint(.unlikely);
             self.failWithStatus(.out_of_gas);
-            return;
+            return false;
         }
         self.gas_left -= gas;
+        return true;
     }
 
     /// Charge EIP-8037 state gas from the reservoir first, spilling into
-    /// `gas_left` only after the reservoir is empty.
-    pub fn trackStateGas(self: *CallFrame, gas: i64) void {
-        if (gas <= 0) return;
+    /// `gas_left` only after the reservoir is empty. Returns whether execution
+    /// may continue after the charge.
+    pub fn trackStateGas(self: *CallFrame, gas: i64) bool {
+        if (gas <= 0) return true;
         const reservoir_available = @max(self.gas_reservoir, 0);
         const from_reservoir = @min(reservoir_available, gas);
         const from_regular = gas - from_reservoir;
         if (from_regular > self.gas_left) {
+            @branchHint(.unlikely);
             self.failWithStatus(.out_of_gas);
-            return;
+            return false;
         }
         self.gas_reservoir -= from_reservoir;
         self.gas_left -= from_regular;
         self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
         self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+        return true;
     }
 
     /// Refill state gas in LIFO order: gas spilled from `gas_left` is restored
@@ -567,6 +521,7 @@ pub const CallFrame = struct {
 
     pub fn wordToIntOrStatus(self: *CallFrame, comptime T: type, value: u256, status: Status) ?T {
         return std.math.cast(T, value) orelse {
+            @branchHint(.unlikely);
             self.failWithStatus(status);
             return null;
         };
@@ -575,6 +530,7 @@ pub const CallFrame = struct {
     pub fn expandMemory(self: *CallFrame, offset: usize, byte_size: usize) !bool {
         if (byte_size == 0) return true;
         const end = std.math.add(usize, offset, byte_size) catch {
+            @branchHint(.unlikely);
             self.failWithStatus(.out_of_gas);
             return false;
         };
@@ -582,14 +538,12 @@ pub const CallFrame = struct {
 
         const expansion = self.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
             error.OutOfMemory => {
+                @branchHint(.unlikely);
                 self.failWithStatus(.out_of_gas);
                 return false;
             },
         };
-        self.trackGas(expansion.cost);
-        if (self.status != .running) {
-            return false;
-        }
+        if (!self.trackGas(expansion.cost)) return false;
         try self.memory.expandPrepared(expansion);
         return true;
     }
@@ -622,17 +576,19 @@ pub const CallFrameSlot = struct {
     io_storage: frame_io.Slot = undefined,
     msg: Host.Message = undefined,
 
-    pub fn initFor(self: *CallFrameSlot, comptime Protocol: type, allocator: std.mem.Allocator, options: InitFor(Protocol)) !void {
-        try self.initRaw(allocator, frameInitFor(Protocol, options));
-    }
-
-    fn initRaw(self: *CallFrameSlot, allocator: std.mem.Allocator, options: FrameInit) !void {
-        self.io_storage = frame_io.Slot.initGrowable(allocator);
+    pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
+        self.io_storage = frame_io.Slot.init(allocator);
         errdefer self.io_storage.deinit();
 
         var frame_options = options;
         frame_options.io = &self.io_storage;
-        try self.frame.init(allocator, frame_options, &self.msg, &self.stack_storage, &self.memory_storage);
+        try self.frame.init(
+            allocator,
+            frame_options,
+            &self.msg,
+            Stack.init(&self.stack_storage, 0),
+            &self.memory_storage,
+        );
     }
 
     pub fn deinit(self: *CallFrameSlot) void {
@@ -641,8 +597,8 @@ pub const CallFrameSlot = struct {
         self.* = undefined;
     }
 
-    pub fn interpreter(self: *CallFrameSlot, comptime Protocol: type) For(Protocol) {
-        return For(Protocol).init(&self.frame);
+    pub fn interpreter(self: *CallFrameSlot, comptime spec: Spec) Interpreter(spec) {
+        return Interpreter(spec).init(&self.frame);
     }
 };
 
@@ -668,7 +624,7 @@ test "call frame can execute with externally supplied stack storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
+    var io_storage = frame_io.Slot.init(std.testing.allocator);
     defer io_storage.deinit();
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -677,13 +633,13 @@ test "call frame can execute with externally supplied stack storage" {
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
         .io = &io_storage,
-    }, &msg_storage, &stack_storage, &memory_storage);
+    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
     defer frame.deinit();
-    try std.testing.expect(frame.stack.slots == &stack_storage);
+    try std.testing.expectEqual(@intFromPtr(&stack_storage), @intFromPtr(frame.stack.base));
+    try std.testing.expectEqual(@as(u32, 0), frame.stack.base_word);
 
-    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
+    var interpreter = evmz.Evm.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -713,7 +669,7 @@ test "call frame can execute with externally supplied memory storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
+    var io_storage = frame_io.Slot.init(std.testing.allocator);
     defer io_storage.deinit();
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -722,13 +678,12 @@ test "call frame can execute with externally supplied memory storage" {
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
         .io = &io_storage,
-    }, &msg_storage, &stack_storage, &memory_storage);
+    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
 
-    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
+    var interpreter = evmz.Evm.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status);
@@ -758,11 +713,10 @@ test "interpreter trace cursor records step start and end" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -834,11 +788,10 @@ test "interpreter captured tail table records a replay span" {
         .depth = 0,
         .kind = .root,
     });
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -899,18 +852,17 @@ test "captured tail memory exhaustion remains a resource error" {
     var memory_storage: Memory.Storage = .empty;
     try Memory.reserveCapacity(&memory_storage, std.testing.allocator, 32);
     defer memory_storage.deinit(std.testing.allocator);
-    var io_storage = frame_io.Slot.initGrowable(std.testing.allocator);
+    var io_storage = frame_io.Slot.init(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision_id = evmz.protocol.revisionId(evmz.eth.Revision.latest),
         .io = &io_storage,
         .memory_allocator = no_growth_allocator,
         .memory_retain_capacity = true,
-    }, &msg_storage, &stack_storage, &memory_storage);
+    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
     defer frame.deinitRetainingMemoryCapacity();
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -922,7 +874,7 @@ test "captured tail memory exhaustion remains a resource error" {
         .depth = 0,
         .kind = .root,
     });
-    var interpreter = For(evmz.Evm.ExecutionProtocol).init(&frame);
+    var interpreter = evmz.Evm.Interpreter.init(&frame);
 
     try std.testing.expectError(error.OutOfMemory, interpreter.executeCapturedUntilAction(&capture));
     try std.testing.expectEqual(FrameStatus.running, frame.status);
@@ -944,11 +896,10 @@ test "interpreter captured tail table records optional memory writes" {
         .input_data = &.{},
         .value = 0,
     };
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -1009,11 +960,10 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
             .input_data = &.{},
             .value = 0,
         };
-        var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .code = case.code,
-            .revision = .latest,
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
@@ -1046,11 +996,10 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
         .input_data = &.{},
         .value = 0,
     };
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -1070,6 +1019,20 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     );
 }
 
+test "interpreter gas charge reports whether execution may continue" {
+    var frame: CallFrame = undefined;
+    frame.status = .running;
+    frame.gas_left = 10;
+
+    try std.testing.expect(frame.trackGas(4));
+    try std.testing.expectEqual(@as(i64, 6), frame.gas_left);
+    try std.testing.expectEqual(FrameStatus.running, frame.status);
+
+    try std.testing.expect(!frame.trackGas(7));
+    try std.testing.expectEqual(@as(i64, 0), frame.gas_left);
+    try std.testing.expectEqual(FrameStatus.out_of_gas, frame.status);
+}
+
 test "interpreter state gas charges reservoir before gas left and refills LIFO" {
     var frame: CallFrame = undefined;
     frame.status = .running;
@@ -1078,7 +1041,7 @@ test "interpreter state gas charges reservoir before gas left and refills LIFO" 
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
 
-    frame.trackStateGas(8);
+    try std.testing.expect(frame.trackStateGas(8));
     try std.testing.expectEqual(FrameStatus.running, frame.status);
     try std.testing.expectEqual(@as(i64, 7), frame.gas_left);
     try std.testing.expectEqual(@as(i64, 0), frame.gas_reservoir);
@@ -1100,7 +1063,7 @@ test "interpreter state gas charge is atomic on out of gas" {
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
 
-    frame.trackStateGas(8);
+    try std.testing.expect(!frame.trackStateGas(8));
     try std.testing.expectEqual(FrameStatus.out_of_gas, frame.status);
     try std.testing.expectEqual(@as(i64, 0), frame.gas_left);
     try std.testing.expectEqual(@as(i64, 5), frame.gas_reservoir);
@@ -1130,7 +1093,7 @@ test "interpreter reverts frame-local state gas" {
     frame.state_gas_from_gas_left = 0;
     frame.output_range = .{};
 
-    frame.trackStateGas(8);
+    try std.testing.expect(frame.trackStateGas(8));
     frame.failWithStatus(.revert);
     const result = frame.getResult();
 
@@ -1150,7 +1113,7 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     frame.state_gas_from_gas_left = 0;
     frame.output_range = .{};
 
-    frame.trackStateGas(8);
+    try std.testing.expect(frame.trackStateGas(8));
     frame.failWithStatus(.invalid);
     const result = frame.getResult();
 
@@ -1161,34 +1124,30 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
-pub fn OwnedInitFor(comptime Protocol: type) type {
-    return struct {
-        host: *Host,
-        msg: *const Host.Message,
-        /// Convenience byte input. The owned frame prepares it before execution.
-        code: ?[]const u8 = null,
-        /// Borrow an already prepared artifact instead of owning a temporary one.
-        bytecode: ?*const Bytecode = null,
-        revision: Protocol.Revision,
-        config: ExecutionConfig = .base,
-        memory_allocator: ?std.mem.Allocator = null,
-        memory_retain_capacity: bool = false,
-    };
-}
+pub const OwnedInit = struct {
+    host: *Host,
+    msg: *const Host.Message,
+    /// Convenience byte input. The owned frame prepares it before execution.
+    code: ?[]const u8 = null,
+    /// Borrow an already prepared artifact instead of owning a temporary one.
+    bytecode: ?*const Bytecode = null,
+    config: ExecutionConfig = .base,
+    memory_allocator: ?std.mem.Allocator = null,
+    memory_retain_capacity: bool = false,
+};
 
-pub fn OwnedCallFrame(comptime ProtocolType: type) type {
+fn OwnedCallFrameFor(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 
-        pub const Protocol = ProtocolType;
-        pub const Init = OwnedInitFor(Protocol);
+        pub const Init = OwnedInit;
 
         allocator: std.mem.Allocator,
         slot: *CallFrameSlot,
         frame: *CallFrame,
         owned_bytecode: ?*Bytecode,
 
-        pub fn init(allocator: std.mem.Allocator, options: Init) !Self {
+        pub fn init(allocator: std.mem.Allocator, options: OwnedInit) !Self {
             if (options.code != null and options.bytecode != null) {
                 return error.AmbiguousBytecodeInput;
             }
@@ -1212,11 +1171,10 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
 
             const slot = try allocator.create(CallFrameSlot);
             errdefer allocator.destroy(slot);
-            try slot.initFor(Protocol, allocator, .{
+            try slot.init(allocator, .{
                 .host = options.host,
                 .msg = options.msg,
                 .bytecode = bytecode,
-                .revision = options.revision,
                 .memory_allocator = options.memory_allocator,
                 .memory_retain_capacity = options.memory_retain_capacity,
             });
@@ -1238,31 +1196,26 @@ pub fn OwnedCallFrame(comptime ProtocolType: type) type {
             self.* = undefined;
         }
 
-        pub fn interpreter(self: *Self) For(Protocol) {
-            return For(Protocol).init(self.frame);
+        pub fn interpreter(self: *Self) Interpreter(spec) {
+            return Interpreter(spec).init(self.frame);
         }
     };
 }
 
 comptime {
-    if (@sizeOf(usize) == 8) {
-        assertLayout(@sizeOf(Result) == 64, "Result size changed; rerun call-capture canary benches");
-        assertLayout(@sizeOf(CallFrame) == 400, "CallFrame size changed; rerun VM-loop canary benches");
-        assertLayout(@alignOf(CallFrame) == 16, "CallFrame alignment changed; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "stack") == 240, "CallFrame stack view moved; rerun arithmetic VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "memory") == 256, "CallFrame memory moved; rerun memory VM-loop bench");
-        assertLayout(@offsetOf(CallFrame, "gas_left") == 304, "CallFrame gas_left moved; rerun VM-loop canary benches");
-        assertLayout(@offsetOf(CallFrame, "msg") == 232, "CallFrame msg pointer moved; check message ownership layout");
-        assertLayout(@sizeOf(CallFrameSlot) == 33408, "CallFrameSlot size changed; check pooled frame/message layout");
-        assertLayout(@offsetOf(CallFrameSlot, "frame") == 0, "CallFrameSlot frame moved; check pooled frame/message layout");
-        assertLayout(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame), "CallFrameSlot stack storage no longer follows frame metadata");
-        assertLayout(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage), "CallFrameSlot msg no longer follows frame stack storage");
-        assertLayout(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message), "CallFrameSlot memory storage no longer follows message storage");
-    }
-}
-
-fn assertLayout(comptime ok: bool, comptime message: []const u8) void {
-    if (!ok) @compileError(message);
+    // If any of the following size/align/offset changes, rerun VM-loop canary benches
+    std.debug.assert(@sizeOf(Result) == 64);
+    std.debug.assert(@sizeOf(CallFrame) == 400);
+    std.debug.assert(@alignOf(CallFrame) == 16);
+    std.debug.assert(@offsetOf(CallFrame, "stack") == 240);
+    std.debug.assert(@offsetOf(CallFrame, "memory") == 256);
+    std.debug.assert(@offsetOf(CallFrame, "gas_left") == 304);
+    std.debug.assert(@offsetOf(CallFrame, "msg") == 232);
+    std.debug.assert(@sizeOf(CallFrameSlot) == 33408);
+    std.debug.assert(@offsetOf(CallFrameSlot, "frame") == 0);
+    std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
+    std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));
+    std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
 }
 
 test "interpreter can execute prepared bytecode jumpdest map" {
@@ -1284,11 +1237,10 @@ test "interpreter can execute prepared bytecode jumpdest map" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -1318,11 +1270,10 @@ test "prepared bytecode preserves truncated push semantics" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -1352,11 +1303,10 @@ test "prepared bytecode keeps CODESIZE semantic length" {
         .value = 0,
     };
 
-    var frame = try OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();

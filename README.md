@@ -43,7 +43,6 @@ var memory = evmz.state.MemoryStore.init(allocator);
 defer memory.deinit();
 
 var executor = evmz.Evm.Executor.init(allocator, .{
-    .revision = .latest,
     .state_reader = memory.reader(),
 });
 defer executor.deinit();
@@ -65,13 +64,14 @@ defer execution.discardIfCurrent();
 // Execution is complete, but its rollback cursor remains armed.
 const result = try execution.result();
 // result.status, result.gas.used, result.output
-var diff = try execution.changeset();
-defer diff.deinit(allocator);
+const changes = execution.changes();
 ```
 
-To persist, commit `diff` to the backend first, then call `execution.retain()`
-and `executor.discardChanges()`. If persistence fails, the deferred discard
-still restores the pre-transaction branch.
+Consume or persist the borrowed `changes` before resolving the execution. Then
+call `execution.retain()` to extend the accepted branch, or let the deferred
+discard restore the pre-transaction branch. A block committer consumes
+`executor.acceptedChanges()` once and calls `executor.discardAccepted()` after
+the backend accepts it.
 
 A complete runnable version — deploy code, transact, read storage back — lives
 in `examples/basic.zig`:
@@ -80,70 +80,43 @@ in `examples/basic.zig`:
 zig build example
 ```
 
-## Pin a fork
+## Choose a fork
 
-`Evm` tracks the latest supported revision and lets you pick one at
-runtime. If your embedder targets exactly one fork, bind it at compile time:
-
-```zig
-const CancunVM = evmz.eth.extend(.{
-    .support = evmz.Evm.Support.at(.cancun),
-});
-```
-
-## Bound runtime resources
-
-Normal initialization is infallible and growable. Embedded and zkVM callers
-can reserve a gas-derived capacity envelope explicitly:
+`Evm` is the latest exact Ethereum VM. Bind another complete specification at
+compile time; runtime fork selection belongs to its caller:
 
 ```zig
-var executor = try evmz.Evm.initBoundExecutor(allocator, .{
-    .revision = .cancun,
-    .state_reader = memory.reader(),
-}, .{
-    .max_block_gas = 30_000_000,
-});
-defer executor.deinit();
-
-var block = try evmz.Evm.BlockExecution.init(&executor, .{
-    .gas_limit = 30_000_000,
-});
-defer block.discardIfUnfinished();
+const CancunVM = evmz.Vm(evmz.eth.cancun);
 ```
-
-The bound controls allocation capacity; `Env.gas_limit` remains actual runtime
-block data. Bounded executors validate it when `BlockExecution` runs a
-transaction. Family system operations belong to `BlockSTF`; the optional
-one-worker hook convenience is `Evm.Sequential`.
-Every block execution must reach `finish()` or `discardIfUnfinished()`.
 
 ## Extend Ethereum
 
-`evmz` fixes Ethereum as the semantic substrate. A same-timeline family can
-override Ethereum behavior without assembling an arbitrary VM:
+Each Ethereum fork is one complete `Spec`. Extend the exact base you mean, then
+compile that value into one concrete VM:
 
 ```zig
-const MyEvm = evmz.eth.extend(.{
-    .execution = .{ /* opcodes, gas, precompiles */ },
-    .transaction = .{ /* admission and intrinsic gas */ },
-    .settlement = .{ /* fee and refund rules */ },
-    .authorization = .{ /* authorization-list rules */ },
-    .block = .{ /* block hooks */ },
+const my_cancun = evmz.eth.cancun.extend(.{
+    .transaction = .{
+        .max_initcode_size = 0x10000,
+    },
+    .settlement = .{
+        .gas_refund_cap_divisor = 4,
+    },
 });
+const MyEvm = evmz.Vm(my_cancun);
 ```
 
-Families with their own revision enum use:
+See `examples/custom_fork/` for exact-spec overrides and
+`examples/op_deposit.zig` for an extending spec chain, custom transactions,
+and caller-side runtime selection.
 
-```zig
-const MyRevisions = evmz.eth.revision.Model(MyRevision);
+The dependency flows one way: `evmz.spec` defines the engine contract, while
+`evmz.eth` supplies named Ethereum fork values. Extensions have three tiers:
 
-const MyEvm = evmz.eth.derive(MyRevisions, .{
-    .base_revision = mapToEthereum,
-});
-```
-
-See `examples/custom_fork/` for a same-timeline extension and
-`examples/op_deposit.zig` for revision mapping, custom transactions, and a custom block fold.
+- parameter — patch numbers, toggles, or semantic functions with `Spec.extend`;
+- table — replace the complete instruction or precompile binding;
+- program — bind a custom transaction envelope, transition, or block fold
+  through the exact VM’s `Context`, `Transition`, `Program`, and `Block` APIs.
 
 ## EVMC compatibility package
 
@@ -170,7 +143,7 @@ providers for its maximum-performance configuration. It uses a 100 ms discarded
 warmup and five complete repeats; each cell is the median of five 100-run
 medians per deployed-runtime call:
 
-`for _ in 1 2 3 4 5; do zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -Dnative-keccak=xkcp -Dnative-secp256k1=libsecp256k1 -- --spec osaka --num-runs 100 --warmup-ms 100; done`
+`zig build bench-compare -Dbench-optimize=ReleaseFast -Dbench-support-min=osaka -Dbench-support-max=osaka -Dnative-keccak=xkcp -Dnative-secp256k1=libsecp256k1 -- --spec osaka --num-runs 100 --warmup-ms 100`
 
 | VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
 | ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
@@ -213,13 +186,11 @@ The Linux snapshot ran on a KVM guest pinned to one CPU.
 <details>
 <summary>The evmz approach</summary>
 
-evmz bets on compile-time protocol specialization. A protocol (fork range, gas
-schedules, opcode availability, dispatch targets) is a comptime value; the
-256-entry dispatch table, static gas constants, and fork gates are resolved at
-build time and baked into the binary. There is no runtime revision branching on
-the hot path — a fork-gated opcode either compiles to a direct handler
-(available across the whole supported range), a cheap revision check, or falls
-out of the fast lane entirely.
+evmz bets on compile-time protocol specialization. One complete specification
+(gas schedules, opcode availability, dispatch targets, transaction rules, and
+block hooks) is a comptime value. The 256-entry dispatch table, static gas
+constants, and fork gates are resolved at build time and baked into the binary.
+There is no runtime revision state inside the generated VM.
 
 Execution is two-tier. Prepared tail dispatch carries machine state
 (instruction pointer, stack pointer, gas) in registers and has dedicated

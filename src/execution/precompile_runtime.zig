@@ -1,4 +1,4 @@
-//! Runtime capability for definition-owned stateful precompiles.
+//! Runtime capability for spec-owned stateful precompiles.
 //!
 //! These handles are deliberately separate from the data-only request. An
 //! executor stores copies of the handles across requests, so their `ptr` and
@@ -17,9 +17,9 @@ pub const PrecompileOutcome = union(enum) {
     service_error: anyerror,
 };
 
-/// Optional family runtime used by definition-owned precompile entries.
+/// Optional family runtime used by spec-owned precompile entries.
 ///
-/// The definition remains responsible for address activation and entry
+/// The exact spec remains responsible for address activation and entry
 /// selection. A selected entry may delegate here when it needs family state or
 /// metadata that does not belong in `ExecutionContext`.
 pub const PrecompileRuntime = struct {
@@ -43,7 +43,7 @@ pub const PrecompileCall = struct {
     output_buffer: ?[]u8 = null,
     runtime: ?PrecompileRuntime = null,
 
-    /// Delegate this definition-owned entry to the supplied family runtime.
+    /// Delegate this spec-owned entry to the supplied family runtime.
     ///
     /// Owned output must come from `allocator`. Non-owned nonempty output must
     /// alias a prefix of `output_buffer`; the executor validates that contract.

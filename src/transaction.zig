@@ -1,10 +1,10 @@
-//! Protocol-neutral transaction types, gas accounting, and preparation.
+//! EVM transaction types, gas accounting, and preparation.
 
 const std = @import("std");
 
 const blob_mod = @import("./transaction/blob.zig");
+pub const authorization = @import("./transaction/authorization.zig");
 const gas_mod = @import("./transaction/gas.zig");
-const gas_bound_plan = @import("./transaction/gas_bound_plan.zig");
 const program_mod = @import("./transaction/program.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
@@ -25,6 +25,8 @@ pub const InitialGas = gas_mod.InitialGas;
 pub const GasPlan = gas_mod.GasPlan;
 pub const AccessListEntry = transaction_mod.AccessListEntry;
 pub const AuthorizationTuple = transaction_mod.AuthorizationTuple;
+pub const AuthorizationSuccessInput = authorization.SuccessInput;
+pub const AuthorizationGasAdjustment = authorization.GasAdjustment;
 pub const FeeFields = transaction_mod.FeeFields;
 pub const Transaction = transaction_mod.Transaction;
 pub const TransactionView = transaction_mod.TransactionView;
@@ -119,5 +121,4 @@ test "transaction scope composes with the canonical execution message" {
 
 test {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(gas_bound_plan);
 }

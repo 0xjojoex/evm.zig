@@ -23,33 +23,35 @@ const StateCaptureCounter = struct {
     writes: usize = 0,
     checkpoints: usize = 0,
 
-    fn target(self: *StateCaptureCounter) evmz.executor.CaptureStateTarget {
-        return .init(self, &.{
-            .account_access = accountAccess,
-            .state_read = stateRead,
-            .state_write = stateWrite,
-            .checkpoint = checkpoint,
-        });
+    fn target(self: *StateCaptureCounter) block_stf.ObservationTarget {
+        return .init(self, observe);
     }
 
-    fn accountAccess(ptr: *anyopaque, _: evmz.trace.AccountAccess) !void {
-        const self: *StateCaptureCounter = @ptrCast(@alignCast(ptr));
-        self.account_accesses += 1;
-    }
-
-    fn stateRead(ptr: *anyopaque, _: evmz.trace.StateRead) !void {
-        const self: *StateCaptureCounter = @ptrCast(@alignCast(ptr));
-        self.reads += 1;
-    }
-
-    fn stateWrite(ptr: *anyopaque, _: evmz.trace.StateWrite) !void {
-        const self: *StateCaptureCounter = @ptrCast(@alignCast(ptr));
-        self.writes += 1;
-    }
-
-    fn checkpoint(ptr: *anyopaque, _: evmz.trace.Checkpoint) !void {
+    fn observe(
+        ptr: *anyopaque,
+        _: bal.BlockAccessIndex,
+        observations: state.TrackedState.ObservationsView,
+    ) !void {
         const self: *StateCaptureCounter = @ptrCast(@alignCast(ptr));
         self.checkpoints += 1;
+        var account_index: u32 = 0;
+        while (account_index < observations.accounts.len()) : (account_index += 1) {
+            const account = observations.accounts.at(account_index);
+            if (account.observation.semantic_access) self.account_accesses += 1;
+            if (account.observation.existence_read or
+                account.observation.value_read or
+                account.observation.code_read)
+            {
+                self.reads += 1;
+            }
+            if (account.effect.any()) self.writes += 1;
+        }
+        var storage_index: u32 = 0;
+        while (storage_index < observations.storage.len()) : (storage_index += 1) {
+            const slot = observations.storage.at(storage_index);
+            if (slot.observation.value_read) self.reads += 1;
+            if (slot.effect.written) self.writes += 1;
+        }
     }
 };
 
@@ -70,8 +72,7 @@ const CountingBlockHashSource = struct {
 test "BlockSTF produce returns the owned canonical empty BAL" {
     try std.testing.expect(!@hasField(block_stf.DerivedBlockOutput, "block_hash"));
 
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
         .state_backend = try state.Backend.fromWitness(
             std.testing.allocator,
@@ -100,8 +101,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
     var producer_state = state.MemoryStore.init(std.testing.allocator);
     defer producer_state.deinit();
 
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
         .state_backend = producer_state.backend(),
         .transactions = &.{},
@@ -142,8 +142,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
     var verifier_state = state.MemoryStore.init(std.testing.allocator);
     defer verifier_state.deinit();
     var differential_report = bal.Report{};
-    const verified = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
         .state_backend = verifier_state.backend(),
         .transactions = &.{},
@@ -184,8 +183,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     defer parallel_verifier_state.deinit();
     const raw_transactions = [_][]const u8{&encoded};
 
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
         .state_backend = memory.backend(),
         .transactions = &raw_transactions,
@@ -208,8 +206,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     try std.testing.expectEqual(@as(u64, 10), memory.getAccount(decoded.sender).?.nonce);
     try std.testing.expectEqual(decoded.value, memory.getAccount(target).?.balance);
 
-    const verified = try block_stf.apply(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const verified = try block_stf.Exact(.amsterdam).apply(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
         .state_backend = verifier_state.backend(),
         .transactions = &raw_transactions,
@@ -229,7 +226,6 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = blockEnv(30_000_000),
             .state_backend = parallel_verifier_state.backend(),
             .transactions = &raw_transactions,
@@ -266,7 +262,6 @@ test "BlockSTF parallel raw API owns decode failure cleanup" {
             std.testing.io,
             std.testing.allocator,
             .{
-                .revision = .amsterdam,
                 .state_backend = try state.Backend.fromWitness(
                     std.testing.allocator,
                     evmz.eth.trie.empty_root_hash,
@@ -339,8 +334,7 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
         .base_fee_per_gas = 0,
     };
 
-    var outcome = try block_stf.produceAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = env,
         .block_header = header,
         .state_backend = producer_state.backend(),
@@ -363,7 +357,6 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = env,
             .block_header = header,
             .state_backend = verifier_state.backend(),
@@ -393,8 +386,7 @@ test "BlockSTF produce folds the two-transaction BAL differential fixture" {
     defer producer_state.deinit();
     try fixture.initState(&producer_state);
 
-    var outcome = try block_stf.produceAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = producer_state.backend(),
         .transactions = &fixture.transactions,
@@ -424,8 +416,7 @@ test "BlockSTF produce folds the two-transaction BAL differential fixture" {
     defer verifier_state.deinit();
     try fixture.initState(&verifier_state);
     var differential_report = bal.Report{};
-    const verified = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = verifier_state.backend(),
         .transactions = &fixture.transactions,
@@ -448,8 +439,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     defer producer_state.deinit();
     try fixture.initState(&producer_state);
 
-    var outcome = try block_stf.produceAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = producer_state.backend(),
         .transactions = &fixture.transactions,
@@ -466,8 +456,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     try fixture.initState(&serial_capture_state);
     var serial_capture = StateCaptureCounter{};
     var serial_capture_report = bal.Report{};
-    const serial_capture_result = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const serial_capture_result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = serial_capture_state.backend(),
         .transactions = &fixture.transactions,
@@ -477,7 +466,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         .header_claims = .{
             .block_access_list_hash = produced.output.block_access_list_hash,
         },
-        .capture = .{ .state_target = serial_capture.target() },
+        .capture = .{ .observations = serial_capture.target() },
         .bal_differential = &serial_capture_report,
     });
     try std.testing.expectEqual(block_stf.Status.valid, serial_capture_result.status);
@@ -493,7 +482,6 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
             std.testing.io,
             std.testing.allocator,
             .{
-                .revision = .amsterdam,
                 .env = .{ .gas_limit = 2_000_000 },
                 .state_backend = verifier_state.backend(),
                 .transactions = &fixture.transactions,
@@ -504,7 +492,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
                     .block_access_list_hash = produced.output.block_access_list_hash,
                 },
                 .capture = if (max_in_flight == 2)
-                    .{ .state_target = parallel_capture.target() }
+                    .{ .observations = parallel_capture.target() }
                 else
                     null,
                 .bal_differential = &report,
@@ -537,7 +525,6 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = .{ .gas_limit = 2_000_000 },
             .state_backend = fallback_state.backend(),
             .transactions = &fixture.transactions,
@@ -569,7 +556,6 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = .{ .gas_limit = 2_000_000 },
             .state_backend = concurrent_state.backend(),
             .transactions = &fixture.transactions,
@@ -608,8 +594,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     var oom_producer_state = state.MemoryStore.init(std.testing.allocator);
     defer oom_producer_state.deinit();
     try fixture.initState(&oom_producer_state);
-    var oom_outcome = try block_stf.produceAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var oom_outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = oom_producer_state.backend(),
         .transactions = &oom_transactions,
@@ -636,7 +621,6 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = .{ .gas_limit = 2_000_000 },
             .state_backend = oom_state.backend(),
             .transactions = &oom_transactions,
@@ -721,8 +705,7 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
         .base_fee_per_gas = 0,
     };
 
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = env,
         .block_header = header,
         .state_backend = producer_state.backend(),
@@ -739,8 +722,7 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
     };
 
     var report = bal.Report{};
-    const verified = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = env,
         .block_header = header,
         .state_backend = verifier_state.backend(),
@@ -760,8 +742,7 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
     var memory = state.MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(bal.item_cost - 1),
         .state_backend = memory.backend(),
         .transactions = &.{},
@@ -781,8 +762,7 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
 }
 
 test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
-    var outcome = try block_stf.produce(std.testing.allocator, .{
-        .revision = .prague,
+    var outcome = try block_stf.Exact(.prague).produce(std.testing.allocator, .{
         .state_backend = try state.Backend.fromWitness(
             std.testing.allocator,
             evmz.eth.trie.empty_root_hash,

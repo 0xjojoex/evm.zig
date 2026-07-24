@@ -1,15 +1,14 @@
-//! Fork-neutral opcode implementations and their shared gas constants.
-
 const opcode_info = @import("opcode.zig");
 const Opcode = opcode_info.Opcode;
 const std = @import("std");
-const dispatcher = @import("./protocol/dispatcher.zig");
-const support = @import("./protocol/support.zig");
-const protocol_types = @import("./protocol/types.zig");
+const ExactSpec = @import("./spec.zig").Spec;
+const instruction_table = @import("./instruction/table.zig");
 const evmz = @import("./evm.zig");
-const Interpreter = @import("./Interpreter.zig");
+const interpreter = @import("./Interpreter.zig");
 const trace = @import("./trace.zig");
-const CallFrame = Interpreter.CallFrame;
+
+const Interpreter = interpreter.Interpreter;
+const CallFrame = interpreter.CallFrame;
 
 pub const call_value_cost = 9000;
 pub const account_creation_cost = 25000;
@@ -22,6 +21,11 @@ pub const warm_storage_read_cost = 100;
 // warm_storage_read_cost is count before instruction execution
 pub const cold_account_access_gas = cold_account_access_cost - warm_storage_read_cost;
 pub const cold_sload_gas = cold_sload_cost - warm_storage_read_cost;
+
+pub const Target = instruction_table.Target;
+pub const Entry = instruction_table.Entry;
+pub const Table = instruction_table.Table;
+pub const Spec = instruction_table.Spec;
 
 pub const Error = error{
     UnknownOpcode,
@@ -36,40 +40,6 @@ pub const storage = @import("./instruction/storage.zig");
 pub const system = @import("./instruction/system.zig");
 pub const memory = @import("./instruction/memory.zig");
 pub const logic = @import("./instruction/logic.zig");
-
-pub const Instruction = struct {
-    opcode: Opcode,
-    static_gas: u16,
-};
-
-pub fn decode(opcode_byte: u8) ?Instruction {
-    const opcode: Opcode = @enumFromInt(opcode_byte);
-    const row = opcode_info.info(opcode.toByte());
-    if (!row.defined) return null;
-    return .{ .opcode = opcode, .static_gas = row.static_gas };
-}
-
-test decode {
-    try std.testing.expectEqual(@as(u16, 0), decode(0x00).?.static_gas);
-    try std.testing.expectEqual(@as(u16, 3), decode(0x60).?.static_gas);
-    try std.testing.expectEqual(null, decode(0x0c));
-}
-
-test "decode follows opcode table for every byte" {
-    for (0..256) |index| {
-        const opcode_byte: u8 = @intCast(index);
-        const row = opcode_info.info(opcode_byte);
-        const decoded = decode(opcode_byte);
-        if (!row.defined) {
-            try std.testing.expectEqual(null, decoded);
-            continue;
-        }
-
-        try std.testing.expect(decoded != null);
-        try std.testing.expectEqual(opcode_byte, @intFromEnum(decoded.?.opcode));
-        try std.testing.expectEqual(row.static_gas, decoded.?.static_gas);
-    }
-}
 
 test "fork-gated opcodes are invalid before their activation fork" {
     try evmz.t.expectBytecodeStatusByRevision(.{.RETURNDATASIZE}, .homestead, .invalid);
@@ -104,41 +74,35 @@ test "fork-gated opcodes are invalid before their activation fork" {
 }
 
 test "fork-dependent static gas follows legacy schedules" {
-    const EthInstructions = For(evmz.Evm.ExecutionProtocol);
-    try std.testing.expectEqual(@as(i64, 20), EthInstructions.staticGasForRevision(.frontier, .BALANCE));
-    try std.testing.expectEqual(@as(i64, 400), EthInstructions.staticGasForRevision(.byzantium, .BALANCE));
-    try std.testing.expectEqual(@as(i64, 700), EthInstructions.staticGasForRevision(.istanbul, .BALANCE));
-    try std.testing.expectEqual(@as(i64, 100), EthInstructions.staticGasForRevision(.berlin, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 20), staticGasAt(.frontier, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 400), staticGasAt(.byzantium, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 700), staticGasAt(.istanbul, .BALANCE));
+    try std.testing.expectEqual(@as(i64, 100), staticGasAt(.berlin, .BALANCE));
 
-    try std.testing.expectEqual(@as(i64, 20), EthInstructions.staticGasForRevision(.homestead, .EXTCODECOPY));
-    try std.testing.expectEqual(@as(i64, 700), EthInstructions.staticGasForRevision(.byzantium, .EXTCODECOPY));
-    try std.testing.expectEqual(@as(i64, 400), EthInstructions.staticGasForRevision(.petersburg, .EXTCODEHASH));
-    try std.testing.expectEqual(@as(i64, 700), EthInstructions.staticGasForRevision(.istanbul, .EXTCODEHASH));
+    try std.testing.expectEqual(@as(i64, 20), staticGasAt(.homestead, .EXTCODECOPY));
+    try std.testing.expectEqual(@as(i64, 700), staticGasAt(.byzantium, .EXTCODECOPY));
+    try std.testing.expectEqual(@as(i64, 400), staticGasAt(.petersburg, .EXTCODEHASH));
+    try std.testing.expectEqual(@as(i64, 700), staticGasAt(.istanbul, .EXTCODEHASH));
 
-    try std.testing.expectEqual(@as(i64, 50), EthInstructions.staticGasForRevision(.frontier, .SLOAD));
-    try std.testing.expectEqual(@as(i64, 200), EthInstructions.staticGasForRevision(.byzantium, .SLOAD));
-    try std.testing.expectEqual(@as(i64, 800), EthInstructions.staticGasForRevision(.istanbul, .SLOAD));
+    try std.testing.expectEqual(@as(i64, 50), staticGasAt(.frontier, .SLOAD));
+    try std.testing.expectEqual(@as(i64, 200), staticGasAt(.byzantium, .SLOAD));
+    try std.testing.expectEqual(@as(i64, 800), staticGasAt(.istanbul, .SLOAD));
 
-    try std.testing.expectEqual(@as(i64, 0), EthInstructions.staticGasForRevision(.homestead, .SELFDESTRUCT));
-    try std.testing.expectEqual(@as(i64, 5000), EthInstructions.staticGasForRevision(.tangerine_whistle, .SELFDESTRUCT));
+    try std.testing.expectEqual(@as(i64, 0), staticGasAt(.homestead, .SELFDESTRUCT));
+    try std.testing.expectEqual(@as(i64, 5000), staticGasAt(.tangerine_whistle, .SELFDESTRUCT));
 }
 
 test "execute charges dynamic and fixed static gas" {
-    const Mainnet = evmz.Evm.ExecutionProtocol;
-    const IstanbulProtocol = evmz.eth.fork(.istanbul).ExecutionProtocol;
-
-    try std.testing.expectEqual(@as(i64, 99_980), try executeBalance(Mainnet, .frontier));
-    try std.testing.expectEqual(@as(i64, 99_300), try executeBalance(Mainnet, .istanbul));
-    try std.testing.expectEqual(@as(i64, 99_300), try executeBalance(IstanbulProtocol, .istanbul));
+    try std.testing.expectEqual(@as(i64, 99_980), try executeBalance(evmz.eth.frontier));
+    try std.testing.expectEqual(@as(i64, 99_300), try executeBalance(evmz.eth.istanbul));
 }
 
-test "execute uses definition availability from support window" {
-    const FrontierProtocol = evmz.eth.fork(.frontier).ExecutionProtocol;
-    try expectOpcodeStatus(FrontierProtocol, .frontier, .BASEFEE, .invalid_opcode);
+test "execute uses exact instruction availability" {
+    try expectOpcodeStatus(evmz.eth.frontier, .BASEFEE, .invalid_opcode);
 }
 
 test "execute uses resolved dispatch target for hot opcodes" {
-    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
+    const spec = instructionOverrideSpec(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -146,22 +110,21 @@ test "execute uses resolved dispatch target for hot opcodes" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(Opcode.ADD)};
 
-    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(2);
     try frame.frame.stack.push(3);
-    try For(OverrideProtocol).execute(@intFromEnum(Opcode.ADD), frame.frame);
-    try std.testing.expectEqual(Interpreter.FrameStatus.invalid_opcode, frame.frame.status);
+    try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
+    try std.testing.expectEqual(interpreter.FrameStatus.invalid_opcode, frame.frame.status);
 }
 
 test "untraced interpreter raw fallback respects resolved dispatch target" {
-    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
+    const spec = instructionOverrideSpec(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -175,22 +138,21 @@ test "untraced interpreter raw fallback respects resolved dispatch target" {
         @intFromEnum(Opcode.ADD),
     };
 
-    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
-    var interpreter = frame.interpreter();
+    var intpr = frame.interpreter();
 
-    const result = try interpreter.execute();
+    const result = try intpr.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(interpreter.Status.invalid, result.status);
 }
 
 test "untraced interpreter tail dispatch respects resolved dispatch target" {
-    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .invalid);
+    const spec = instructionOverrideSpec(.ADD, .invalid);
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -206,18 +168,17 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
-    var interpreter = frame.interpreter();
+    var intpr = frame.interpreter();
 
-    const result = try interpreter.execute();
+    const result = try intpr.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(interpreter.Status.invalid, result.status);
 }
 
 test "execute calls custom dispatch target directly" {
@@ -227,7 +188,7 @@ test "execute calls custom dispatch target directly" {
             return frame.stack.push(42);
         }
     };
-    const OverrideProtocol = DispatchOverrideProtocol(.ADD, .{ .custom = CustomHandler });
+    const spec = instructionOverrideSpec(.ADD, .{ .custom = CustomHandler });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -235,17 +196,16 @@ test "execute calls custom dispatch target directly" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(Opcode.ADD)};
 
-    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
 
-    try For(OverrideProtocol).execute(@intFromEnum(Opcode.ADD), frame.frame);
+    try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(u256, 42), frame.frame.stack.pop());
     try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
 }
@@ -257,7 +217,7 @@ test "captured custom MSTORE handler retains inherited trace effects" {
             return memory.mstore(frame);
         }
     };
-    const OverrideProtocol = DispatchOverrideProtocol(.MSTORE, .{ .custom = CustomMstore });
+    const spec = instructionOverrideSpec(.MSTORE, .{ .custom = CustomMstore });
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .STOP });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
@@ -265,20 +225,19 @@ test "captured custom MSTORE handler retains inherited trace effects" {
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var frame = try Interpreter.OwnedCallFrame(OverrideProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .latest,
     });
     defer frame.deinit();
-    var interpreter = frame.interpreter();
+    var intpr = frame.interpreter();
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
 
-    const captured = try interpreter.capture(&tape, .{ .memory = .writes });
+    const captured = try intpr.capture(&tape, .{ .memory = .writes });
     defer tape.resolve(captured.span) catch unreachable;
-    try std.testing.expectEqual(Interpreter.Status.success, captured.result.status);
+    try std.testing.expectEqual(interpreter.Status.success, captured.result.status);
 
     var cursor = trace.TraceCursor.init(captured.span);
     cursor.enterFrame(captured.span.frames[0]);
@@ -292,139 +251,64 @@ test "captured custom MSTORE handler retains inherited trace effects" {
     try std.testing.expectEqual(@as(u8, 0x2a), bytes[31]);
 }
 
-fn DispatchOverrideProtocol(comptime overridden_opcode: Opcode, comptime override_target: dispatcher.ExecutionTarget) type {
-    const opcode_to_override = overridden_opcode;
-    const target_for_override = override_target;
-    return struct {
-        pub const Revision = evmz.eth.Revision;
-        pub const hot_cold_dispatch_enabled = true;
-        pub const Instruction = evmz.Evm.ExecutionProtocol.Instruction;
-        pub const storage = evmz.Evm.ExecutionProtocol.storage;
-        pub const call = evmz.Evm.ExecutionProtocol.call;
-        pub const create = evmz.Evm.ExecutionProtocol.create;
-        pub const self_destruct = evmz.Evm.ExecutionProtocol.self_destruct;
-
-        pub fn staticGas(comptime opcode: Opcode) support.StaticGas {
-            return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
-        }
-
-        pub fn dispatchEntry(comptime opcode: Opcode) dispatcher.DispatchEntry {
-            return dispatchEntryByte(@intFromEnum(opcode));
-        }
-
-        pub fn dispatchEntryByte(comptime opcode_byte: u8) dispatcher.DispatchEntry {
-            const info = opcode_info.info(opcode_byte);
-            const target: dispatcher.ExecutionTarget = if (comptime opcode_byte == @intFromEnum(opcode_to_override))
-                target_for_override
-            else if (comptime info.defined)
-                .{ .builtin = @enumFromInt(opcode_byte) }
-            else
-                .invalid;
-            return .{
-                .opcode_byte = opcode_byte,
-                .opcode = @enumFromInt(opcode_byte),
-                .info = info,
-                .availability = if (comptime info.defined) .always else .never,
-                .static_gas = .{ .constant = @intCast(info.static_gas) },
-                .tier = if (comptime opcode_byte == @intFromEnum(opcode_to_override)) .hot else .cold,
-                .execution_target = target,
-                .hot_path = opcode_byte == @intFromEnum(opcode_to_override),
-            };
-        }
-
-        pub fn dispatchTable() dispatcher.DispatchTable {
-            @setEvalBranchQuota(10_000);
-            var table: dispatcher.DispatchTable = undefined;
-            inline for (0..256) |index| {
-                table[index] = dispatchEntryByte(@intCast(index));
-            }
-            return table;
-        }
-    };
+fn instructionOverrideSpec(
+    comptime opcode: Opcode,
+    comptime target: instruction_table.Target,
+) evmz.eth.Spec {
+    var exact = evmz.eth.amsterdam.instruction;
+    exact.table[@intFromEnum(opcode)].target = target;
+    return evmz.eth.amsterdam.extend(.{
+        .instruction = exact,
+    });
 }
 
-fn testDispatchTable(comptime TestProtocol: type) dispatcher.DispatchTable {
-    @setEvalBranchQuota(10_000);
-    var table: dispatcher.DispatchTable = undefined;
-    inline for (0..256) |index| {
-        table[index] = testDispatchEntryByte(TestProtocol, @intCast(index));
-    }
-    return table;
+fn instructionGasSpec(comptime opcode: Opcode, comptime gas: i64) evmz.eth.Spec {
+    var exact = evmz.eth.frontier.instruction;
+    exact.table[@intFromEnum(opcode)].static_gas = gas;
+    return evmz.eth.frontier.extend(.{
+        .instruction = exact,
+    });
 }
 
-fn testDispatchEntryByte(comptime TestProtocol: type, comptime opcode_byte: u8) dispatcher.DispatchEntry {
-    const info = opcode_info.info(opcode_byte);
-    const opcode: Opcode = @enumFromInt(opcode_byte);
-    const availability: support.Resolution = if (comptime std.meta.hasFn(TestProtocol, "availability"))
-        TestProtocol.availability(opcode)
-    else if (comptime info.defined)
-        .always
-    else
-        .never;
-    const static_gas: support.StaticGas = if (comptime std.meta.hasFn(TestProtocol, "staticGas"))
-        TestProtocol.staticGas(opcode)
-    else
-        .{ .constant = @intCast(info.static_gas) };
-    const tier: support.OpcodeTier = if (opcode == .ADD) .hot else .cold;
-    const execution_target: dispatcher.ExecutionTarget = if (!info.defined)
-        .invalid
-    else switch (opcode) {
-        .INVALID => .invalid,
-        else => .{ .builtin = opcode },
-    };
-    const constant_static_gas = switch (static_gas) {
-        .constant => true,
-        .revision_bands => false,
-    };
-    return .{
-        .opcode_byte = opcode_byte,
-        .opcode = opcode,
-        .info = info,
-        .availability = availability,
-        .static_gas = static_gas,
-        .tier = tier,
-        .execution_target = execution_target,
-        .hot_path = availability == .always and constant_static_gas and tier == .hot,
-    };
+fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
+    return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).static_gas;
 }
 
-fn executeBalance(comptime Protocol: type, revision: Protocol.Revision) !i64 {
+fn executeBalance(comptime spec: evmz.eth.Spec) !i64 {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(Opcode.BALANCE)};
 
-    var frame = try Interpreter.OwnedCallFrame(Protocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = revision,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(0);
-    try For(Protocol).execute(@intFromEnum(Opcode.BALANCE), frame.frame);
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try Instruction(spec).execute(@intFromEnum(Opcode.BALANCE), frame.frame);
+    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
     return frame.frame.gas_left;
 }
 
-fn expectOpcodeStatus(comptime Protocol: type, revision: Protocol.Revision, opcode: Opcode, expected: Interpreter.FrameStatus) !void {
+fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: interpreter.FrameStatus) !void {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(opcode)};
 
-    var frame = try Interpreter.OwnedCallFrame(Protocol).init(std.testing.allocator, .{
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = revision,
     });
     defer frame.deinit();
 
-    try For(Protocol).execute(@intFromEnum(opcode), frame.frame);
+    try Instruction(spec).execute(@intFromEnum(opcode), frame.frame);
     try std.testing.expectEqual(expected, frame.frame.status);
 }
 
@@ -435,421 +319,15 @@ test "static gas helper uses resolved rule gas" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(Opcode.CALL)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Vm(evmz.eth.frontier).Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .frontier,
     });
     defer frame.deinit();
 
-    const ConstantProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub fn staticGas(comptime opcode: Opcode) support.StaticGas {
-            _ = opcode;
-            return .{ .constant = 7 };
-        }
-
-        pub fn dispatchTable() dispatcher.DispatchTable {
-            return testDispatchTable(@This());
-        }
-
-        pub fn staticGasForRevision(revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
-            _ = revision;
-            _ = opcode;
-            return 99;
-        }
-    };
-    const BandedProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub fn staticGas(comptime opcode: Opcode) support.StaticGas {
-            _ = opcode;
-            return .{ .revision_bands = support.StaticGasBands.from(.{
-                .{ .since = evmz.eth.Revision.frontier, .gas = 11 },
-                .{ .since = evmz.eth.Revision.homestead, .gas = 13 },
-            }) };
-        }
-
-        pub fn dispatchTable() dispatcher.DispatchTable {
-            return testDispatchTable(@This());
-        }
-
-        pub fn staticGasForRevision(revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
-            _ = opcode;
-            return if (revision == .frontier) 11 else 13;
-        }
-    };
-
-    try std.testing.expectEqual(@as(i64, 7), For(ConstantProtocol).staticGasForFrame(frame.frame, .CALL));
-    try std.testing.expectEqual(@as(i64, 11), For(BandedProtocol).staticGasForFrame(frame.frame, .CALL));
-}
-
-test "interpreter executes with non-Ethereum revision protocol" {
-    const CustomRevision = enum(u8) {
-        alpha = 10,
-        beta = 2,
-    };
-    const Order = struct {
-        fn order(a: CustomRevision, b: CustomRevision) std.math.Order {
-            const rank = struct {
-                fn of(revision: CustomRevision) u8 {
-                    return switch (revision) {
-                        .alpha => 0,
-                        .beta => 1,
-                    };
-                }
-            }.of;
-            return std.math.order(rank(a), rank(b));
-        }
-    };
-    const Semantics = struct {
-        pub const BaseRevision = CustomRevision;
-
-        pub fn baseRevision(revision_value: CustomRevision) BaseRevision {
-            return revision_value;
-        }
-    };
-    const Gates = struct {
-        fn logging(revision_value: CustomRevision) bool {
-            return revision_value == .beta;
-        }
-    };
-    const revision = support.ModelWithConfig(CustomRevision, .{
-        .revisions = &.{ .alpha, .beta },
-        .order = Order.order,
-        .semantics = Semantics,
-    });
-
-    const CustomProtocol = struct {
-        pub const Revision = CustomRevision;
-        pub const isImpl = revision.isImpl;
-
-        pub fn staticGas(comptime opcode: Opcode) support.StaticGas {
-            if (opcode == .ADD) return .{ .revision_bands = support.StaticGasBands.from(.{
-                .{ .since = CustomRevision.alpha, .gas = 3 },
-                .{ .since = CustomRevision.beta, .gas = 4 },
-            }) };
-            if (opcode == .PUSH1) return .{ .constant = 4 };
-            if (opcode == .SSTORE) return .{ .constant = 17 };
-            return .{ .constant = @intCast(opcode_info.info(@intFromEnum(opcode)).static_gas) };
-        }
-
-        pub fn availability(comptime opcode: Opcode) support.Resolution {
-            if (opcode == .LOG1) return .runtime;
-            return .always;
-        }
-
-        pub fn dispatchTable() dispatcher.DispatchTable {
-            return testDispatchTable(@This());
-        }
-
-        pub const Instruction = struct {
-            pub const Value = u8;
-
-            pub fn fromByte(comptime opcode_byte: u8) Value {
-                return opcode_byte;
-            }
-
-            pub fn rawAvailability(comptime value: Value) revision.Availability {
-                if (value == @intFromEnum(Opcode.LOG1)) return .{ .gate = Gates.logging };
-                return .always;
-            }
-
-            pub fn staticGasForRevision(revision_value: CustomRevision, comptime value: Value) i64 {
-                const opcode: Opcode = @enumFromInt(value);
-                if (opcode == .ADD and revision_value == .beta) return 4;
-                if (opcode == .PUSH1) return 4;
-                if (opcode == .SSTORE) return 17;
-                return @intCast(opcode_info.info(value).static_gas);
-            }
-
-            pub fn expByteGas(revision_value: CustomRevision) i64 {
-                _ = revision_value;
-                return 1;
-            }
-
-            pub fn accountReadColdAccessGas(revision_value: CustomRevision) ?i64 {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn codeAccountAccessGas(revision_value: CustomRevision, status: protocol_types.AccountAccessStatus) ?i64 {
-                _ = revision_value;
-                _ = status;
-                return null;
-            }
-        };
-
-        pub const storage = struct {
-            pub fn sloadColdStorageAccessGas(revision_value: CustomRevision) ?i64 {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn sstoreMinimumGas(revision_value: CustomRevision) ?i64 {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn sstoreStorageAccessGas(revision_value: CustomRevision, status: protocol_types.AccountAccessStatus) ?i64 {
-                _ = revision_value;
-                _ = status;
-                return null;
-            }
-
-            pub fn sstoreGas(revision_value: CustomRevision, status: protocol_types.StorageStatus) protocol_types.StorageGas {
-                _ = revision_value;
-                _ = status;
-                return .{};
-            }
-
-            pub fn sstoreStateGas(revision_value: CustomRevision, status: protocol_types.StorageStatus) protocol_types.StorageStateGas {
-                _ = revision_value;
-                _ = status;
-                return .{};
-            }
-        };
-
-        pub const call = struct {
-            pub fn callBaseGas(revision_value: CustomRevision) i64 {
-                _ = revision_value;
-                return 40;
-            }
-
-            pub fn callColdAccountAccessGas(revision_value: CustomRevision) ?i64 {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn callValueTransferGas(revision_value: CustomRevision) i64 {
-                _ = revision_value;
-                return 0;
-            }
-
-            pub fn callValueStipend(revision_value: CustomRevision) i64 {
-                _ = revision_value;
-                return 0;
-            }
-
-            pub fn callNewAccountGas(revision_value: CustomRevision, input: protocol_types.CallNewAccountInput) protocol_types.CallNewAccountGas {
-                _ = revision_value;
-                _ = input;
-                return .{};
-            }
-
-            pub fn topFrameValueTransferStateGas(revision_value: CustomRevision, input: protocol_types.TopFrameValueTransferInput) i64 {
-                _ = revision_value;
-                _ = input;
-                return 0;
-            }
-
-            pub fn delegatedAccountAccessGas(revision_value: CustomRevision, cold: bool) i64 {
-                _ = revision_value;
-                _ = cold;
-                return 0;
-            }
-
-            pub fn topLevelDelegatedAccountAccess(
-                revision_value: CustomRevision,
-                input: protocol_types.TopLevelDelegatedAccountAccessInput,
-            ) ?protocol_types.DelegatedAccountAccess {
-                _ = revision_value;
-                _ = input;
-                return null;
-            }
-
-            pub fn touchesEmptyCallRecipient(revision_value: CustomRevision) bool {
-                _ = revision_value;
-                return false;
-            }
-
-            pub fn childGas(revision_value: CustomRevision, input: protocol_types.ChildGasInput) protocol_types.ChildGas {
-                _ = revision_value;
-                return .{ .gas = @min(input.requested, input.available) };
-            }
-        };
-
-        pub const create = struct {
-            pub fn createInitCodeSizeLimit(revision_value: CustomRevision) ?usize {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn createInitCodeWordGas(revision_value: CustomRevision, is_create2: bool) i64 {
-                _ = revision_value;
-                _ = is_create2;
-                return 0;
-            }
-
-            pub fn createAccountStateGas(revision_value: CustomRevision, input: protocol_types.CreateAccountStateGasInput) i64 {
-                _ = revision_value;
-                _ = input;
-                return 0;
-            }
-        };
-
-        pub const self_destruct = struct {
-            pub fn selfDestructPolicy(
-                revision_value: CustomRevision,
-                input: protocol_types.SelfDestructPolicyInput,
-            ) protocol_types.SelfDestructPolicy {
-                _ = revision_value;
-                _ = input;
-                return .{
-                    .clear_balance = true,
-                    .reset_nonce = false,
-                    .mark_selfdestructed = true,
-                };
-            }
-
-            pub fn selfDestructFinalization(revision_value: CustomRevision, created_in_transaction: bool) protocol_types.SelfDestructFinalization {
-                _ = revision_value;
-                _ = created_in_transaction;
-                return .{ .delete_account = true, .clear_storage = true };
-            }
-
-            pub fn selfDestructNewAccountGas(
-                revision_value: CustomRevision,
-                input: protocol_types.SelfDestructNewAccountInput,
-            ) protocol_types.CallNewAccountGas {
-                _ = revision_value;
-                _ = input;
-                return .{};
-            }
-
-            pub fn selfDestructColdAccountAccessGas(revision_value: CustomRevision) ?i64 {
-                _ = revision_value;
-                return null;
-            }
-
-            pub fn selfDestructRefundGas(revision_value: CustomRevision) i64 {
-                _ = revision_value;
-                return 0;
-            }
-        };
-    };
-
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-    msg.gas = 100;
-    const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1), 2,
-        @intFromEnum(Opcode.PUSH1), 3,
-        @intFromEnum(Opcode.ADD),   @intFromEnum(Opcode.STOP),
-    };
-
-    var frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &code,
-        .revision = .beta,
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 88), result.gas_left);
-    try std.testing.expectEqual(@as(u256, 5), frame.frame.stack.pop());
-
-    var alpha_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &code,
-        .revision = .alpha,
-    });
-    defer alpha_frame.deinit();
-    var alpha_interpreter = alpha_frame.interpreter();
-    const alpha_result = try alpha_interpreter.execute();
-    try std.testing.expectEqual(Interpreter.Status.success, alpha_result.status);
-    try std.testing.expectEqual(@as(i64, 89), alpha_result.gas_left);
-
-    const storage_code = [_]u8{
-        @intFromEnum(Opcode.PUSH1),  42,
-        @intFromEnum(Opcode.PUSH1),  0,
-        @intFromEnum(Opcode.SSTORE), @intFromEnum(Opcode.STOP),
-    };
-    var storage_msg = evmz.t.defaultMessage();
-    storage_msg.gas = 100;
-
-    var raw_storage_state = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer raw_storage_state.deinit();
-    var raw_storage_host = raw_storage_state.host();
-    var raw_storage_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &raw_storage_host,
-        .msg = &storage_msg,
-        .code = &storage_code,
-        .revision = .beta,
-    });
-    defer raw_storage_frame.deinit();
-    var raw_storage_interpreter = raw_storage_frame.interpreter();
-    const raw_storage_result = try raw_storage_interpreter.execute();
-
-    var storage_bytecode = try evmz.Bytecode.init(std.testing.allocator, &storage_code);
-    defer storage_bytecode.deinit(std.testing.allocator);
-    var prepared_storage_state = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer prepared_storage_state.deinit();
-    var prepared_storage_host = prepared_storage_state.host();
-    var prepared_storage_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &prepared_storage_host,
-        .msg = &storage_msg,
-        .bytecode = &storage_bytecode,
-        .revision = .beta,
-    });
-    defer prepared_storage_frame.deinit();
-    var prepared_storage_interpreter = prepared_storage_frame.interpreter();
-    const prepared_storage_result = try prepared_storage_interpreter.execute();
-
-    try std.testing.expectEqual(Interpreter.Status.success, raw_storage_result.status);
-    try std.testing.expectEqual(Interpreter.Status.success, prepared_storage_result.status);
-    try std.testing.expectEqual(@as(i64, 92), raw_storage_result.gas_left);
-    try std.testing.expectEqual(raw_storage_result.gas_left, prepared_storage_result.gas_left);
-    try std.testing.expectEqual(@as(u256, 42), raw_storage_state.storageValue(0));
-    try std.testing.expectEqual(@as(u256, 42), prepared_storage_state.storageValue(0));
-
-    const log_code = [_]u8{
-        @intFromEnum(Opcode.PUSH1), 0,
-        @intFromEnum(Opcode.PUSH1), 0,
-        @intFromEnum(Opcode.PUSH1), 0,
-        @intFromEnum(Opcode.LOG1),
-    };
-    var log_msg = evmz.t.defaultMessage();
-    log_msg.gas = 10_000;
-    var log_bytecode = try evmz.Bytecode.init(std.testing.allocator, &log_code);
-    defer log_bytecode.deinit(std.testing.allocator);
-    var log_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &log_msg,
-        .bytecode = &log_bytecode,
-        .revision = .alpha,
-    });
-    defer log_frame.deinit();
-    var log_interpreter = log_frame.interpreter();
-
-    const log_result = try log_interpreter.execute();
-
-    try std.testing.expectEqual(Interpreter.Status.invalid, log_result.status);
-    try std.testing.expectEqual(@as(usize, 0), mock_host.logs.items.len);
-
-    var beta_log_state = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer beta_log_state.deinit();
-    var beta_log_host = beta_log_state.host();
-    var beta_log_frame = try Interpreter.OwnedCallFrame(CustomProtocol).init(std.testing.allocator, .{
-        .host = &beta_log_host,
-        .msg = &log_msg,
-        .bytecode = &log_bytecode,
-        .revision = .beta,
-    });
-    defer beta_log_frame.deinit();
-    var beta_log_interpreter = beta_log_frame.interpreter();
-    const beta_log_result = try beta_log_interpreter.execute();
-    try std.testing.expectEqual(Interpreter.Status.success, beta_log_result.status);
-    try std.testing.expectEqual(@as(usize, 1), beta_log_state.logs.items.len);
+    try std.testing.expectEqual(@as(i64, 7), Instruction(instructionGasSpec(.CALL, 7)).staticGasForFrame(frame.frame, .CALL));
+    try std.testing.expectEqual(@as(i64, 11), Instruction(instructionGasSpec(.CALL, 11)).staticGasForFrame(frame.frame, .CALL));
 }
 
 pub fn staticGas(opcode: Opcode) u16 {
@@ -952,28 +430,28 @@ fn LogHandler(comptime opcode: Opcode) type {
 const ExpHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .EXP)) return;
-        return arithmetic.For(Instructions.Protocol).exp(frame);
+        return arithmetic.bind(Instructions.specification).exp(frame);
     }
 };
 
 const BalanceHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .BALANCE)) return;
-        return environment.For(Instructions.Protocol).balance(frame);
+        return environment.bind(Instructions.specification).balance(frame);
     }
 };
 
 const ExtCodeSizeHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .EXTCODESIZE)) return;
-        return environment.For(Instructions.Protocol).extcodesize(frame);
+        return environment.bind(Instructions.specification).extcodesize(frame);
     }
 };
 
 const ExtCodeCopyHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .EXTCODECOPY)) return;
-        return environment.For(Instructions.Protocol).extcodecopy(frame);
+        return environment.bind(Instructions.specification).extcodecopy(frame);
     }
 };
 
@@ -981,7 +459,7 @@ const ExtCodeHashHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.requireOpcode(frame, .EXTCODEHASH)) return;
         if (!Instructions.chargeStaticGas(frame, .EXTCODEHASH)) return;
-        return environment.For(Instructions.Protocol).extcodehash(frame);
+        return environment.bind(Instructions.specification).extcodehash(frame);
     }
 };
 
@@ -995,13 +473,13 @@ const JumpDestHandler = struct {
 const SLoadHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .SLOAD)) return;
-        return storage.For(Instructions.Protocol).sload(frame);
+        return storage.bind(Instructions.specification).sload(frame);
     }
 };
 
 const SStoreHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
-        return storage.For(Instructions.Protocol).sstore(frame);
+        return storage.bind(Instructions.specification).sstore(frame);
     }
 };
 
@@ -1032,7 +510,7 @@ const ExchangeHandler = struct {
 const CreateHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .CREATE)) return;
-        return system.For(Instructions.Protocol).create(frame);
+        return system.bind(Instructions.specification).create(frame);
     }
 };
 
@@ -1044,7 +522,7 @@ fn CallByOpHandler(comptime opcode: Opcode) type {
                 if (!Instructions.requireOpcode(frame, op)) return;
             }
             if (!Instructions.chargeStaticGas(frame, op)) return;
-            return system.For(Instructions.Protocol).callByOp(frame, op);
+            return system.bind(Instructions.specification).callByOp(frame, op);
         }
     };
 }
@@ -1055,7 +533,7 @@ const Create2Handler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.requireOpcode(frame, .CREATE2)) return;
         if (!Instructions.chargeStaticGas(frame, .CREATE2)) return;
-        return system.For(Instructions.Protocol).create2(frame);
+        return system.bind(Instructions.specification).create2(frame);
     }
 };
 
@@ -1069,7 +547,7 @@ const RevertHandler = struct {
 const SelfDestructHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         if (!Instructions.chargeStaticGas(frame, .SELFDESTRUCT)) return;
-        return system.For(Instructions.Protocol).selfdestruct(frame);
+        return system.bind(Instructions.specification).selfdestruct(frame);
     }
 };
 
@@ -1212,109 +690,61 @@ fn assertBuiltinHandlerCatalogCoversBaseOpcodeTable() void {
     }
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn Instruction(comptime spec: ExactSpec) type {
+    const exact_instructions = spec.instruction;
+    comptime instruction_table.validate(exact_instructions.table);
     return struct {
         const Self = @This();
-        const has_dispatch_table = std.meta.hasFn(Protocol, "dispatchTable");
-        const dispatch_table: dispatcher.DispatchTable = if (has_dispatch_table) Protocol.dispatchTable() else undefined;
+        const dispatch_table = exact_instructions.table;
 
-        pub const Protocol = ProtocolType;
+        pub const specification = spec;
+        pub const table = dispatch_table;
 
-        pub fn staticGasForRevision(revision: Protocol.Revision, comptime opcode: Opcode) i64 {
-            return Protocol.Instruction.staticGasForRevision(
-                revision,
-                Protocol.Instruction.fromByte(@intFromEnum(opcode)),
-            );
+        pub fn entry(comptime opcode_byte: u8) instruction_table.Entry {
+            return dispatch_table[opcode_byte];
         }
 
-        pub inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
-            return Interpreter.For(Protocol).revision(frame);
+        pub inline fn staticGasForFrame(_: *CallFrame, comptime opcode: Opcode) i64 {
+            return Self.dispatchEntryForOpcode(opcode).static_gas;
         }
 
-        pub inline fn revisionIncludes(current: Protocol.Revision, activation: Protocol.Revision) bool {
-            if (comptime @hasDecl(Protocol, "isImpl")) {
-                return Protocol.isImpl(current, activation);
-            }
-            return @intFromEnum(current) >= @intFromEnum(activation);
-        }
-
-        pub inline fn staticGasForFrame(frame: *CallFrame, comptime opcode: Opcode) i64 {
-            return switch (comptime Self.dispatchEntryForOpcode(opcode).static_gas) {
-                .constant => |gas| gas,
-                .revision_bands => |bands| Self.staticGasFromBands(Self.frameRevision(frame), bands),
-            };
-        }
-
-        pub inline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
-            if (comptime @hasDecl(Protocol, "hot_cold_dispatch_enabled") and Protocol.hot_cold_dispatch_enabled) {
-                return executeHotCold(opcode_byte, frame);
-            }
-            return executeFull(opcode_byte, frame);
-        }
-
-        inline fn executeHotCold(opcode_byte: u8, frame: *CallFrame) anyerror!void {
-            @setEvalBranchQuota(30_000);
-            return switch (opcode_byte) {
-                inline 0...255 => |byte| {
-                    const dispatch_byte: u8 = @intCast(byte);
-                    if (comptime Self.hotPathByte(dispatch_byte)) {
-                        return Self.executeDispatchEntryForByte(dispatch_byte, frame);
-                    }
-                    return executeCold(dispatch_byte, frame);
-                },
-            };
-        }
-
-        noinline fn executeCold(opcode_byte: u8, frame: *CallFrame) anyerror!void {
-            return executeFull(opcode_byte, frame);
-        }
-
-        inline fn executeFull(opcode_byte: u8, frame: *CallFrame) anyerror!void {
+        pub noinline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             @setEvalBranchQuota(30_000);
             return switch (opcode_byte) {
                 inline 0...255 => |byte| Self.executeDispatchEntryForByte(@as(u8, byte), frame),
             };
         }
 
-        inline fn hotPath(comptime opcode: Opcode) bool {
-            return Self.hotPathByte(@intFromEnum(opcode));
-        }
-
-        inline fn hotPathByte(comptime opcode_byte: u8) bool {
-            return Self.dispatchEntryForByte(opcode_byte).hot_path;
-        }
-
         pub inline fn executeDispatchEntryForByte(comptime opcode_byte: u8, frame: *CallFrame) anyerror!void {
             return Self.executeDispatchEntry(Self.dispatchEntryForByte(opcode_byte), frame);
         }
 
-        pub inline fn tailFastPathBuiltin(comptime opcode: Opcode) ?support.Resolution {
-            const entry = comptime Self.dispatchEntryForOpcode(opcode);
-            return switch (comptime entry.dispatchTarget()) {
-                .builtin => |builtin| if (builtin == opcode) entry.availability else null,
-                .invalid, .custom => null,
+        pub inline fn tailFastPathBuiltin(comptime opcode: Opcode) bool {
+            const dispatch_entry = comptime Self.dispatchEntryForOpcode(opcode);
+            return switch (comptime dispatch_entry.dispatchTarget()) {
+                .builtin => |builtin| builtin == opcode,
+                .invalid, .custom => false,
             };
         }
 
-        inline fn dispatchEntryForOpcode(comptime opcode: Opcode) dispatcher.DispatchEntry {
+        inline fn dispatchEntryForOpcode(comptime opcode: Opcode) instruction_table.Entry {
             return Self.dispatchEntryForByte(@intFromEnum(opcode));
         }
 
-        inline fn dispatchEntryForByte(comptime opcode_byte: u8) dispatcher.DispatchEntry {
-            if (comptime has_dispatch_table) return dispatch_table[opcode_byte];
-            return Protocol.Instruction.entry(Protocol.Instruction.fromByte(opcode_byte));
+        inline fn dispatchEntryForByte(comptime opcode_byte: u8) instruction_table.Entry {
+            return dispatch_table[opcode_byte];
         }
 
-        pub inline fn executeDispatchEntry(comptime entry: dispatcher.DispatchEntry, frame: *CallFrame) anyerror!void {
-            return switch (comptime entry.dispatchTarget()) {
-                .invalid => Self.executeInvalidDispatchEntry(entry, frame),
+        pub inline fn executeDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
+            return switch (comptime dispatch_entry.dispatchTarget()) {
+                .invalid => Self.executeInvalidDispatchEntry(dispatch_entry, frame),
                 .builtin => |opcode| builtinHandlerForOpcode(opcode).execute(Self, frame),
                 .custom => |Handler| Self.executeCustomDispatchEntry(Handler, frame),
             };
         }
 
-        inline fn executeInvalidDispatchEntry(comptime entry: dispatcher.DispatchEntry, frame: *CallFrame) anyerror!void {
-            if (comptime !entry.defined()) return error.UnknownOpcode;
+        inline fn executeInvalidDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
+            if (comptime !dispatch_entry.defined()) return error.UnknownOpcode;
             return system.invalid(frame);
         }
 
@@ -1326,36 +756,14 @@ pub fn For(comptime ProtocolType: type) type {
             return chargeGas(frame, Self.staticGasForFrame(frame, opcode));
         }
 
-        inline fn staticGasFromBands(revision: Protocol.Revision, comptime bands: support.StaticGasBands) i64 {
-            const len: usize = bands.len;
-            inline for (0..len) |offset| {
-                const index = len - 1 - offset;
-                const band = bands.items[index];
-                const activation = support.decodeRevision(Protocol.Revision, band.since);
-                if (Self.revisionIncludes(revision, activation)) return band.gas;
-            }
-            unreachable;
-        }
-
         inline fn chargeGas(frame: *CallFrame, gas: i64) bool {
-            frame.trackGas(gas);
-            return frame.status == .running;
+            return frame.trackGas(gas);
         }
 
         pub inline fn requireOpcode(frame: *CallFrame, comptime opcode: Opcode) bool {
             @setEvalBranchQuota(10_000);
-            return switch (comptime Self.dispatchEntryForOpcode(opcode).availability) {
-                .always => true,
-                .never => failInvalid(frame),
-                .runtime => switch (comptime Protocol.Instruction.rawAvailability(
-                    Protocol.Instruction.fromByte(@intFromEnum(opcode)),
-                )) {
-                    .always => true,
-                    .never => failInvalid(frame),
-                    .since => |activation| if (Self.revisionIncludes(Self.frameRevision(frame), activation)) true else failInvalid(frame),
-                    .gate => |active| if (active(Self.frameRevision(frame))) true else failInvalid(frame),
-                },
-            };
+            if (comptime Self.dispatchEntryForOpcode(opcode).active) return true;
+            return failInvalid(frame);
         }
     };
 }

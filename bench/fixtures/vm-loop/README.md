@@ -17,6 +17,12 @@ The `*-loop` micro fixtures are handrolled bytecode. They use compact counted
 loops with repeated opcode bodies so VM-loop reports can separate null-host
 interpreter work from mock-host storage and log callbacks.
 
+`recursive-self-call` and `wide-stack-child-call-loop` are executor-only
+diagnostics for frame-stack storage. The first amplifies deep frames with empty
+suspended stacks. The second retains 1000 words across 256 child calls to make
+the suspend/resume copy cost visible; run it with
+`--proxy-target-code-path fixtures/vm-loop/stop-target/init.hex`.
+
 `child-return-4k-loop` isolates nested output handling by calling a target that
 returns 4096 zero bytes 256 times. Run it through the executor so the real
 frame lifecycle is included:

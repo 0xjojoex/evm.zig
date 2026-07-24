@@ -2,14 +2,15 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const CaptureContext = evmz.executor.CaptureContext;
-const Default = evmz.Evm.Executor;
+const Default = evmz.Vm(evmz.eth.cancun).Executor;
+const FrontierExecutor = evmz.Vm(evmz.eth.frontier).Executor;
 const MemoryAccount = evmz.state.MemoryAccount;
 
 const CaptureHarness = struct {
     arena: evmz.trace.CallArena,
     context: CaptureContext,
 
-    fn init(self: *CaptureHarness, executor: *Default) void {
+    fn init(self: *CaptureHarness) void {
         self.* = .{
             .arena = evmz.trace.CallArena.init(std.testing.allocator),
             .context = undefined,
@@ -18,26 +19,22 @@ const CaptureHarness = struct {
             std.testing.allocator,
             null,
             .{ .arena = &self.arena },
-            null,
         );
-        executor.setCaptureContext(&self.context);
     }
 
-    fn finish(self: *CaptureHarness, executor: *Default) !evmz.trace.CallSpan {
+    fn finish(self: *CaptureHarness) !evmz.trace.CallSpan {
         _ = try self.context.finish();
-        executor.setCaptureContext(null);
         return self.arena.latest().?;
     }
 
-    fn deinit(self: *CaptureHarness, executor: *Default) void {
-        if (executor.capture_context != null) executor.setCaptureContext(null);
+    fn deinit(self: *CaptureHarness) void {
         self.context.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
 };
 
-fn seedCode(executor: *Default, address: evmz.Address, code: []const u8, balance: u256) !void {
+fn seedCode(executor: anytype, address: evmz.Address, code: []const u8, balance: u256) !void {
     var account = MemoryAccount.init(std.testing.allocator);
     account.balance = balance;
     try account.setCode(code);
@@ -48,7 +45,7 @@ test {
     _ = @import("geth_calltracer_projection.zig");
 }
 
-test "call capture exports neutral primitives without a client projection" {
+test "call capture exports client-independent primitives without a projection" {
     try std.testing.expect(@hasDecl(evmz.trace, "CallArena"));
     try std.testing.expect(@hasDecl(evmz.trace, "CallSpan"));
     try std.testing.expect(@hasDecl(evmz.trace, "CallRow"));
@@ -76,24 +73,25 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
     try seedCode(&executor, grandchild, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 300_000),
         .{ .call = .{ .sender = sender, .recipient = root, .input = &root_input } },
         .legacy(300_000),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 3), span.rows.len);
@@ -117,22 +115,23 @@ test "call capture closes an immediate insufficient-balance call" {
         .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -148,17 +147,17 @@ test "root insufficient-balance capture preserves unspent gas" {
     const gas: u64 = 200_000;
 
     for ([_]evmz.Address{ code_recipient, precompile_recipient }) |recipient| {
-        var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+        var executor = Default.init(std.testing.allocator, .{});
         defer executor.deinit();
         try seedCode(&executor, code_recipient, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
 
         var capture: CaptureHarness = undefined;
-        capture.init(&executor);
-        defer capture.deinit(&executor);
+        capture.init();
+        defer capture.deinit();
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
-        const result = (try executor.runStandalone(
+        const result = (try executor.runStandaloneCaptured(
             evmz.t.defaultTxContext(sender, gas),
             .{ .call = .{
                 .sender = sender,
@@ -166,8 +165,9 @@ test "root insufficient-balance capture preserves unspent gas" {
                 .value = 1,
             } },
             .legacy(gas),
+            &capture.context,
         )).expectCall();
-        const span = try capture.finish(&executor);
+        const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
         try std.testing.expectEqual(evmz.execution.TerminalCause.insufficient_balance, result.cause.?);
@@ -183,15 +183,22 @@ test "call capture retains immediate depth-limit cause" {
     const sender = evmz.addr(0xaaaa);
     const child = evmz.addr(0x1234);
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
+    try executor.beginCapturedTransaction(
+        evmz.t.defaultTxContext(sender, 20_000),
+        sender,
+        child,
+        &capture.context,
+    );
+    defer executor.closeTransaction();
     var host = executor.host();
     const result = (try host.call(.{
         .depth = evmz.Host.max_call_depth + 1,
@@ -203,7 +210,7 @@ test "call capture retains immediate depth-limit cause" {
         .value = 0,
         .code_address = child,
     })).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(evmz.execution.TerminalCause.call_depth_exceeded, result.cause.?);
@@ -222,16 +229,23 @@ test "call capture retains opcode-local CALL depth attempt" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
+    try executor.beginCapturedTransaction(
+        evmz.t.defaultTxContext(sender, 200_000),
+        sender,
+        root,
+        &capture.context,
+    );
+    defer executor.closeTransaction();
     var host = executor.host();
     const result = (try host.call(.{
         .depth = evmz.Host.max_call_depth,
@@ -243,7 +257,7 @@ test "call capture retains opcode-local CALL depth attempt" {
         .value = 0,
         .code_address = root,
     })).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -312,7 +326,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
     for (cases) |case| {
         errdefer std.log.err("opcode-local create case failed: {s}", .{case.name});
 
-        var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+        var executor = Default.init(std.testing.allocator, .{});
         defer executor.deinit();
 
         var root_account = MemoryAccount.init(std.testing.allocator);
@@ -322,11 +336,18 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         try executor.state.seedAccount(root, root_account);
 
         var capture: CaptureHarness = undefined;
-        capture.init(&executor);
-        defer capture.deinit(&executor);
+        capture.init();
+        defer capture.deinit();
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
+        try executor.beginCapturedTransaction(
+            evmz.t.defaultTxContext(sender, 200_000),
+            sender,
+            root,
+            &capture.context,
+        );
+        defer executor.closeTransaction();
         var host = executor.host();
         const result = (try host.call(.{
             .depth = case.depth,
@@ -338,7 +359,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
             .value = 0,
             .code_address = root,
         })).expectCall();
-        const span = try capture.finish(&executor);
+        const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
         try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -348,7 +369,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         try std.testing.expectEqual(@as(i64, 0), span.rows[1].gas_used);
         try std.testing.expectEqual(case.target, span.rows[1].to);
         try std.testing.expectEqual(case.nonce, executor.getAccount(root).?.nonce);
-        try std.testing.expect(!executor.state.warm_accounts.contains(case.target));
+        try std.testing.expect(!executor.state.isAccountWarm(case.target));
     }
 }
 
@@ -361,7 +382,7 @@ test "call capture distinguishes CREATE collision from rollback" {
         .PUSH0, .PUSH0, .PUSH0, .CREATE, .POP, .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var root_account = MemoryAccount.init(std.testing.allocator);
@@ -374,17 +395,18 @@ test "call capture distinguishes CREATE collision from rollback" {
     try executor.state.seedAccount(target, target_account);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -409,22 +431,23 @@ test "call capture retains invalid deployed code and local rollback" {
         0x01,   .PUSH0,        .RETURN,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -442,19 +465,19 @@ test "call capture retains Frontier committed code-store out-of-gas" {
         .PUSH1, 0x01, .PUSH1, 0x00, .RETURN,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .frontier });
+    var executor = FrontierExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 100),
         .{ .create = .{
             .sender = sender,
@@ -462,8 +485,9 @@ test "call capture retains Frontier committed code-store out-of-gas" {
             .init_code = &init_code,
         } },
         .legacy(100),
+        &capture.context,
     )).expectCreate();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, result.cause.?);
@@ -505,22 +529,23 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
     for (cases) |case| {
         errdefer std.log.err("pinned call error case failed: {s}", .{case.name});
 
-        var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+        var executor = Default.init(std.testing.allocator, .{});
         defer executor.deinit();
         try seedCode(&executor, root, case.code, 0);
 
         var capture: CaptureHarness = undefined;
-        capture.init(&executor);
-        defer capture.deinit(&executor);
+        capture.init();
+        defer capture.deinit();
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
-        const result = (try executor.runStandalone(
+        const result = (try executor.runStandaloneCaptured(
             evmz.t.defaultTxContext(sender, 200_000),
             .{ .call = .{ .sender = sender, .recipient = root } },
             .legacy(200_000),
+            &capture.context,
         )).expectCall();
-        const span = try capture.finish(&executor);
+        const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
         try std.testing.expectEqual(case.cause, result.cause.?);
@@ -540,23 +565,24 @@ test "call capture retains pinned write-protection category" {
     });
     const child_code = evmz.t.bytecode(.{.SSTORE});
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
+        &capture.context,
     )).expectCall();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
@@ -571,22 +597,23 @@ test "call capture records SELFDESTRUCT as a semantic child" {
         .PUSH2, 0xbe, 0xef, .SELFDESTRUCT,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 9);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    _ = try executor.runStandalone(
+    _ = try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 100_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(100_000),
+        &capture.context,
     );
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallKind.selfdestruct, span.rows[1].kind);
@@ -606,19 +633,19 @@ test "root CREATE capture closes after runtime-code finalization" {
         .RETURN,
     });
 
-    var executor = Default.init(std.testing.allocator, .{ .revision = .cancun });
+    var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;
-    capture.init(&executor);
-    defer capture.deinit(&executor);
+    capture.init();
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.runStandalone(
+    const result = (try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, 200_000),
         .{ .create = .{
             .sender = sender,
@@ -626,8 +653,9 @@ test "root CREATE capture closes after runtime-code finalization" {
             .init_code = &init_code,
         } },
         .legacy(200_000),
+        &capture.context,
     )).expectCreate();
-    const span = try capture.finish(&executor);
+    const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 1), span.rows.len);

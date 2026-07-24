@@ -2,7 +2,7 @@
 //!
 //! Entries are allocated separately from the map so live pointers remain
 //! stable while the map grows. Multiple preparation keys can coexist, allowing
-//! one caller-owned pool to survive VM reset and fork/configuration changes.
+//! one caller-owned pool to survive VM reset and configuration changes.
 //!
 //! This is an explicitly growable, single-execution-lane convenience preset
 //! for tests, demos, and simple embeddings. It is not synchronized and has no
@@ -16,7 +16,7 @@ const Bytecode = @import("../code/Bytecode.zig");
 const crypto = @import("../crypto.zig");
 
 const InMemoryPreparedPool = @This();
-const CacheKey = [36]u8;
+const CacheKey = [34]u8;
 
 const Entry = struct {
     bytecode: Bytecode,
@@ -119,10 +119,9 @@ fn clearEntriesRetainingCapacity(self: *InMemoryPreparedPool) void {
 
 fn cacheKey(key: PreparationKey, code_hash: [32]u8) CacheKey {
     var result: CacheKey = undefined;
-    std.mem.writeInt(u16, result[0..2], key.revision_id, .little);
-    result[2] = @intFromEnum(key.config.preprocessing);
-    result[3] = @intFromEnum(key.config.jumpdest_strategy);
-    @memcpy(result[4..], &code_hash);
+    result[0] = @intFromEnum(key.config.preprocessing);
+    result[1] = @intFromEnum(key.config.jumpdest_strategy);
+    @memcpy(result[2..], &code_hash);
     return result;
 }
 
@@ -154,7 +153,7 @@ fn backendAdmit(ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8, raw_cod
     return try self.getOrPrepare(key, code_hash, raw_code);
 }
 
-const base_key = PreparationKey{ .revision_id = 1, .config = .base };
+const base_key = PreparationKey{ .config = .base };
 
 test "wrong hash rejects admission atomically" {
     var pool = InMemoryPreparedPool.init(std.testing.allocator);
@@ -209,11 +208,9 @@ test "preparation keys isolate retained configurations" {
     const code = [_]u8{ 0x5b, 0x00 };
     const code_hash = crypto.keccak256(&code);
     const scalar = try pool.getOrPrepare(.{
-        .revision_id = 1,
         .config = .base,
     }, code_hash, &code);
     const simd = try pool.getOrPrepare(.{
-        .revision_id = 1,
         .config = .{ .jumpdest_strategy = .simd_bitmask },
     }, code_hash, &code);
 

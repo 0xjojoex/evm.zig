@@ -112,13 +112,24 @@ fn runVector(
     result: JsonValue,
     summary: *Summary,
 ) !void {
+    return switch (revision) {
+        inline else => |exact_revision| runVectorExact(exact_revision, tx_bytes, result, summary),
+    };
+}
+
+fn runVectorExact(
+    comptime revision: evmz.eth.Revision,
+    tx_bytes: []const u8,
+    result: JsonValue,
+    summary: *Summary,
+) !void {
     const result_obj = asObject(result) orelse return error.MalformedFixture;
     const expected_exception = if (result_obj.get("exception")) |value|
         jsonString(value) orelse return error.MalformedFixture
     else
         null;
 
-    const validation_error = evmz.transaction.envelope.For(evmz.Evm.TransactionProtocol).classifyRawTransaction(revision, tx_bytes);
+    const validation_error = evmz.transaction.envelope.Exact(evmz.eth.specAt(revision).transaction).classifyRawTransaction(tx_bytes);
     if (expected_exception) |expected| {
         if (validation_error) |err| {
             if (tx_validation.rawValidationErrorMatchesEest(err, expected)) {

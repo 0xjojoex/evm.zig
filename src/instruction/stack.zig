@@ -49,7 +49,7 @@ pub fn dupn(frame: *CallFrame) !void {
         frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
-    consumeImmediate(frame);
+    frame.pc += 1;
     try frame.stack.dupDepth(n);
 }
 
@@ -112,7 +112,7 @@ pub fn swapn(frame: *CallFrame) !void {
         frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
-    consumeImmediate(frame);
+    frame.pc += 1;
     try frame.stack.swapDepth(n);
 }
 
@@ -122,16 +122,12 @@ pub fn exchange(frame: *CallFrame) !void {
         frame.failWithFrameStatus(.invalid_opcode);
         return;
     };
-    consumeImmediate(frame);
+    frame.pc += 1;
     try frame.stack.exchangeDepths(n, m);
 }
 
 fn immediateByte(frame: *CallFrame) u8 {
     return if (frame.pc < frame.code.len) frame.code[frame.pc] else 0;
-}
-
-fn consumeImmediate(frame: *CallFrame) void {
-    frame.pc += 1;
 }
 
 fn decodeSingle(x: u8) ?usize {

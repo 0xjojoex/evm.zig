@@ -4,7 +4,6 @@ const common = @import("common.zig");
 const kernel_evmone = @import("kernel_evmone.zig");
 
 const Host = common.Host;
-const Interpreter = evmz.interpreter;
 
 const default_iterations = 100_000;
 const default_repeats = 5;
@@ -285,6 +284,29 @@ fn measureEvmzCapture(
     capture_memory: bool,
     growable: bool,
 ) !Measurement {
+    return switch (revision) {
+        inline else => |exact_revision| measureEvmzCaptureExact(
+            exact_revision,
+            allocator,
+            code,
+            case,
+            iterations,
+            capture_memory,
+            growable,
+        ),
+    };
+}
+
+fn measureEvmzCaptureExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    code: []const u8,
+    case: KernelCase,
+    iterations: usize,
+    capture_memory: bool,
+    growable: bool,
+) !Measurement {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
     var counting_host = common.CountingHost.init(allocator, .null);
     defer counting_host.deinit();
     var host = counting_host.host();
@@ -345,11 +367,10 @@ fn measureEvmzCapture(
     defer tape.deinit();
 
     counting_host.resetCounters();
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
+    var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
-        .revision = revision,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -381,6 +402,23 @@ fn measureEvmz(
     revision: evmz.eth.Revision,
     scope: EvmzMeasureScope,
 ) !Measurement {
+    return switch (revision) {
+        inline else => |exact_revision| measureEvmzExact(
+            exact_revision,
+            allocator,
+            code,
+            scope,
+        ),
+    };
+}
+
+fn measureEvmzExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    code: []const u8,
+    scope: EvmzMeasureScope,
+) !Measurement {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
     var counting_host = common.CountingHost.init(allocator, .null);
     defer counting_host.deinit();
     var host = counting_host.host();
@@ -397,11 +435,10 @@ fn measureEvmz(
 
     counting_host.resetCounters();
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
+    var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = code,
-        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

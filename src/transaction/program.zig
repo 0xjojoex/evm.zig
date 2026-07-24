@@ -1,14 +1,16 @@
 //! Typed transaction-program binding above one reusable Executor branch.
 //!
 //! The program owns transaction representation and semantics. The binder owns
-//! attempt cleanup and the neutral executed lease. Family output is stored
-//! beside that lease, never inside Executor.
+//! attempt cleanup and the uncommitted pending state. Family output is stored
+//! beside that state, never inside Executor.
 
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
+const block_program = @import("../block_program.zig");
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
+const CaptureContext = @import("../executor/capture_context.zig").Context;
 const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
 const Interpreter = @import("../Interpreter.zig");
@@ -33,14 +35,16 @@ pub fn TransactOutcome(comptime Executed: type, comptime Rejection: type) type {
 /// block-prelude error before it reaches a program caller.
 const ContractError = error{TransactionPreludeFailed};
 
+const AttemptMode = union(enum) {
+    normal,
+    observed,
+    captured: *CaptureContext,
+};
+
 /// Bind transaction semantics using flat engine-family and program carriers.
 /// Concrete VM types expose this through `VM.Program(...)`.
 pub fn bind(
-    comptime RevisionType: type,
     comptime ExecutorType: type,
-    comptime TransactionProtocolType: type,
-    comptime TransactionPolicyType: type,
-    comptime default_transaction_policy: TransactionPolicyType,
     comptime TransactionType: type,
     comptime InputType: type,
     comptime OutputType: type,
@@ -51,20 +55,10 @@ pub fn bind(
         std.debug.assert(@hasField(InputType, "tx"));
         std.debug.assert(@FieldType(InputType, "tx") == TransactionType);
     }
-    const ContextType = Context(
-        RevisionType,
-        ExecutorType,
-        TransactionProtocolType,
-        TransactionPolicyType,
-        InputType,
-    );
+    const ContextType = Context(ExecutorType, InputType);
     comptime validateTransition(ContextType, TransactionType, OutputType, RejectionType, ImplementationType);
     return BoundTransaction(
-        RevisionType,
         ExecutorType,
-        TransactionProtocolType,
-        TransactionPolicyType,
-        default_transaction_policy,
         ContextType,
         TransactionType,
         InputType,
@@ -77,7 +71,6 @@ pub fn bind(
 
 fn RuntimeState(
     comptime ExecutorType: type,
-    comptime TransactionPolicyType: type,
     comptime InputType: type,
 ) type {
     const Error = executor_errors.Error || ContractError;
@@ -98,8 +91,8 @@ fn RuntimeState(
         };
 
         executor: *ExecutorType,
-        policy: *const TransactionPolicyType,
         input_value: *const InputType,
+        mode: AttemptMode,
         attempt: ?ExecutorType.TransactionAttempt = null,
         prelude: PreludeState = .none,
 
@@ -109,7 +102,7 @@ fn RuntimeState(
             self.attempt = null;
         }
 
-        fn complete(self: *Self) Error!ExecutorType.ExecutionLease {
+        fn complete(self: *Self) Error!ExecutorType.Pending {
             std.debug.assert(switch (self.prelude) {
                 .none, .consumed => true,
                 .pending, .failed => false,
@@ -120,7 +113,7 @@ fn RuntimeState(
             }
             std.debug.assert(self.attempt != null);
             const attempt = self.attempt orelse unreachable;
-            const executed = attempt.completeLease();
+            const executed = attempt.finish();
             self.attempt = null;
             return executed;
         }
@@ -263,7 +256,6 @@ fn AttemptType(
 }
 
 fn PreludeContext(
-    comptime RevisionType: type,
     comptime ExecutorType: type,
     comptime RuntimeType: type,
     comptime PreludeErrorType: type,
@@ -276,7 +268,7 @@ fn PreludeContext(
         const Self = @This();
 
         pub const Error = ContextError;
-        pub const Revision = RevisionType;
+        pub const specification = ExecutorType.specification;
 
         fn runtimeState(self: Self) *RuntimeType {
             return @ptrCast(@alignCast(self.handle));
@@ -284,10 +276,6 @@ fn PreludeContext(
 
         fn token(self: Self) ExecutorType.TransactionAttempt {
             return self.runtimeState().attempt orelse unreachable;
-        }
-
-        pub fn revision(self: Self) ContextError!RevisionType {
-            return self.token().revision();
         }
 
         pub fn code(self: Self, account_address: Address) ContextError![]const u8 {
@@ -338,14 +326,11 @@ fn Prelude(comptime ContextType: type) type {
 
 /// Concrete family-authoring context assembled from flat lexical carriers.
 pub fn Context(
-    comptime RevisionType: type,
     comptime ExecutorType: type,
-    comptime TransactionProtocolType: type,
-    comptime TransactionPolicyType: type,
     comptime InputType: type,
 ) type {
     const ContextError = executor_errors.Error || ContractError;
-    const RuntimeType = RuntimeState(ExecutorType, TransactionPolicyType, InputType);
+    const RuntimeType = RuntimeState(ExecutorType, InputType);
     const Attempt = AttemptType(ExecutorType, RuntimeType);
 
     return struct {
@@ -354,12 +339,10 @@ pub fn Context(
         const Self = @This();
 
         pub const Error = ContextError;
-        pub const Revision = RevisionType;
         pub const Executor = ExecutorType;
+        pub const specification = ExecutorType.specification;
         pub const Input = InputType;
         pub const AttemptCapability = Attempt;
-        pub const TransactionProtocol = TransactionProtocolType;
-        pub const TransactionPolicy = TransactionPolicyType;
 
         fn runtimeState(self: *const Self) *RuntimeType {
             return @ptrCast(@alignCast(self.handle));
@@ -367,18 +350,6 @@ pub fn Context(
 
         pub fn input(self: *const Self) *const InputType {
             return self.runtimeState().input_value;
-        }
-
-        pub fn revision(self: *const Self) RevisionType {
-            return self.runtimeState().executor.revision();
-        }
-
-        pub fn policy(self: *const Self) *const TransactionPolicyType {
-            return self.runtimeState().policy;
-        }
-
-        pub fn blockGasLimitBound(self: *const Self) ?u64 {
-            return self.runtimeState().executor.blockGasLimitBound();
         }
 
         pub fn preparationState(self: *Self) tx.PreparationStateAccess {
@@ -391,7 +362,11 @@ pub fn Context(
         pub fn beginAttempt(self: *Self) ContextError!Attempt {
             const runtime = self.runtimeState();
             std.debug.assert(runtime.attempt == null);
-            runtime.attempt = runtime.executor.beginTransactionAttemptLifetime() catch |err| return executor_errors.normalize(err);
+            runtime.attempt = switch (runtime.mode) {
+                .normal => runtime.executor.beginTransactionAttemptLifetime(),
+                .observed => runtime.executor.beginObservedTransactionAttemptLifetime(),
+                .captured => |capture| runtime.executor.beginCapturedTransactionAttemptLifetime(capture),
+            } catch |err| return executor_errors.normalize(err);
             return .{ .handle = runtime };
         }
 
@@ -449,11 +424,7 @@ pub fn Context(
 }
 
 fn BoundTransaction(
-    comptime RevisionType: type,
     comptime ExecutorType: type,
-    comptime TransactionProtocolType: type,
-    comptime TransactionPolicyType: type,
-    comptime default_transaction_policy: TransactionPolicyType,
     comptime ContextType: type,
     comptime TransactionType: type,
     comptime TransactInputType: type,
@@ -463,10 +434,9 @@ fn BoundTransaction(
     comptime PreludeErrorType: type,
 ) type {
     const ContextError = executor_errors.Error || ContractError;
-    const Runtime = RuntimeState(ExecutorType, TransactionPolicyType, TransactInputType);
+    const Runtime = RuntimeState(ExecutorType, TransactInputType);
 
     const PreludeContextType = PreludeContext(
-        RevisionType,
         ExecutorType,
         Runtime,
         PreludeErrorType,
@@ -475,50 +445,54 @@ fn BoundTransaction(
     const ProgramError = ContextError || ImplementationType.Error || PreludeErrorType;
 
     const ExecutedType = struct {
-        lease: ExecutorType.ExecutionLease,
+        pending: ExecutorType.Pending,
         output_value: OutputType,
 
         pub const View = struct {
             output: *const OutputType,
-            logs: []const Host.Log,
+            logs: ExecutorType.State.LogView,
         };
 
-        /// Borrow the complete inclusion view after one lease validation.
-        pub fn view(self: *const @This()) ExecutorType.ExecutionLeaseError!View {
+        /// Borrow the complete inclusion view after one pending-state assertion.
+        pub fn view(self: *const @This()) View {
             return .{
                 .output = &self.output_value,
-                .logs = try self.lease.logs(),
+                .logs = self.pending.logView(),
             };
         }
 
-        pub fn output(self: *const @This()) ExecutorType.ExecutionLeaseError!*const OutputType {
-            try self.lease.requireCurrent();
+        pub fn output(self: *const @This()) *const OutputType {
+            self.pending.requireCurrent();
             return &self.output_value;
         }
 
-        pub fn result(self: @This()) ExecutorType.ExecutionLeaseError!OutputType {
-            try self.lease.requireCurrent();
+        pub fn result(self: @This()) OutputType {
+            self.pending.requireCurrent();
             return self.output_value;
         }
 
-        pub fn logs(self: @This()) ExecutorType.ExecutionLeaseError![]const Host.Log {
-            return self.lease.logs();
+        pub fn logs(self: @This()) ExecutorType.State.LogView {
+            return self.pending.logView();
         }
 
-        pub fn allocator(self: @This()) ExecutorType.ExecutionLeaseError!std.mem.Allocator {
-            return self.lease.allocator();
+        pub fn allocator(self: @This()) std.mem.Allocator {
+            return self.pending.allocator();
         }
 
-        pub fn changeset(self: @This()) executor_errors.Error!state.Changeset {
-            return self.lease.changeset() catch |err| return executor_errors.normalize(err);
+        pub fn changes(self: @This()) ExecutorType.State.ChangesView {
+            return self.pending.changes();
+        }
+
+        pub fn observations(self: @This()) ExecutorType.State.ObservationsView {
+            return self.pending.view().observations();
         }
 
         pub fn retain(self: @This()) executor_errors.Error!void {
-            self.lease.retain() catch |err| return executor_errors.normalize(err);
+            self.pending.retain() catch |err| return executor_errors.normalize(err);
         }
 
         /// Retain the attempt's state writes and return the output in one
-        /// step. Read `view`/`logs` first: retention closes the lease.
+        /// step. Read `view`/`logs` first: retention closes pending state.
         /// Borrowed output slices stay valid until the next Executor
         /// operation.
         pub fn retainResult(self: @This()) executor_errors.Error!OutputType {
@@ -527,27 +501,25 @@ fn BoundTransaction(
         }
 
         pub fn discard(self: @This()) executor_errors.Error!void {
-            return self.lease.discard() catch |err| return executor_errors.normalize(err);
+            return self.pending.discard() catch |err| return executor_errors.normalize(err);
         }
 
         pub fn discardIfCurrent(self: @This()) void {
-            self.lease.discardIfCurrent();
+            self.pending.discardIfCurrent();
         }
     };
 
     const OutcomeType = TransactOutcome(ExecutedType, RejectionType);
 
     return struct {
-        pub const Revision = RevisionType;
         pub const Executor = ExecutorType;
-        pub const TransactionProtocol = TransactionProtocolType;
-        pub const TransactionPolicy = TransactionPolicyType;
-        pub const transaction_policy = default_transaction_policy;
+        pub const specification = ExecutorType.specification;
         pub const Context = ContextType;
         pub const Transaction = TransactionType;
         pub const TransactInput = TransactInputType;
         pub const Output = OutputType;
         pub const TransactionLog = Host.Log;
+        pub const TransactionLogs = ExecutorType.State.LogView;
         pub const Rejection = RejectionType;
         pub const Executed = ExecutedType;
         pub const Prelude = PreludeType;
@@ -556,24 +528,33 @@ fn BoundTransaction(
         pub const Error = ProgramError;
 
         executor: *ExecutorType,
-        policy: TransactionPolicyType,
 
         pub fn init(executor: *ExecutorType) @This() {
-            return initWithPolicy(executor, default_transaction_policy);
-        }
-
-        pub fn initWithPolicy(
-            executor: *ExecutorType,
-            policy: TransactionPolicyType,
-        ) @This() {
-            return .{
-                .executor = executor,
-                .policy = policy,
-            };
+            return .{ .executor = executor };
         }
 
         pub fn executorPtr(self: *const @This()) *ExecutorType {
             return self.executor;
+        }
+
+        pub fn Block(
+            comptime EnvironmentType: type,
+            comptime IncludedType: type,
+            comptime ResultType: type,
+            comptime BlockImplementationType: type,
+        ) type {
+            return block_program.bind(
+                @This(),
+                ExecutorType,
+                TransactionType,
+                TransactInputType,
+                OutputType,
+                RejectionType,
+                EnvironmentType,
+                IncludedType,
+                ResultType,
+                BlockImplementationType,
+            );
         }
 
         /// Rebind the same transaction program with block-prelude failures that
@@ -581,11 +562,7 @@ fn BoundTransaction(
         pub fn withPreludeError(comptime AdditionalError: type) type {
             if (AdditionalError == error{}) return @This();
             return BoundTransaction(
-                RevisionType,
                 ExecutorType,
-                TransactionProtocolType,
-                TransactionPolicyType,
-                default_transaction_policy,
                 ContextType,
                 TransactionType,
                 TransactInputType,
@@ -597,19 +574,30 @@ fn BoundTransaction(
         }
 
         /// Rebind this runtime value to a wider block-prelude error set while
-        /// preserving its Executor and owned policy snapshot.
+        /// preserving its Executor.
         pub fn rebindPreludeError(
             self: @This(),
             comptime AdditionalError: type,
         ) withPreludeError(AdditionalError) {
             return .{
                 .executor = self.executor,
-                .policy = self.policy,
             };
         }
 
         pub fn transact(self: *@This(), input_value: TransactInputType) Error!Outcome {
-            return self.transactOwned(input_value, false, null);
+            return self.transactOwned(input_value, false, null, .normal);
+        }
+
+        pub fn transactObserved(self: *@This(), input_value: TransactInputType) Error!Outcome {
+            return self.transactOwned(input_value, false, null, .observed);
+        }
+
+        pub fn transactCaptured(
+            self: *@This(),
+            input_value: TransactInputType,
+            capture: *CaptureContext,
+        ) Error!Outcome {
+            return self.transactOwned(input_value, false, null, .{ .captured = capture });
         }
 
         /// Execute under the exclusive block claim owned by a bound block
@@ -620,7 +608,16 @@ fn BoundTransaction(
             claim: ExecutorType.BlockExecutionClaim,
         ) Error!Outcome {
             try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, null);
+            return self.transactOwned(input_value, true, null, .normal);
+        }
+
+        pub fn transactObservedInBlock(
+            self: *@This(),
+            input_value: TransactInputType,
+            claim: ExecutorType.BlockExecutionClaim,
+        ) Error!Outcome {
+            try claim.requireFor(self.executor);
+            return self.transactOwned(input_value, true, null, .observed);
         }
 
         /// Execute under a block claim with a family prelude that is invoked by
@@ -633,7 +630,28 @@ fn BoundTransaction(
             prelude: PreludeType,
         ) Error!Outcome {
             try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, prelude);
+            return self.transactOwned(input_value, true, prelude, .normal);
+        }
+
+        pub fn transactObservedInBlockWithPrelude(
+            self: *@This(),
+            input_value: TransactInputType,
+            claim: ExecutorType.BlockExecutionClaim,
+            prelude: PreludeType,
+        ) Error!Outcome {
+            try claim.requireFor(self.executor);
+            return self.transactOwned(input_value, true, prelude, .observed);
+        }
+
+        pub fn transactCapturedInBlockWithPrelude(
+            self: *@This(),
+            input_value: TransactInputType,
+            claim: ExecutorType.BlockExecutionClaim,
+            prelude: PreludeType,
+            capture: *CaptureContext,
+        ) Error!Outcome {
+            try claim.requireFor(self.executor);
+            return self.transactOwned(input_value, true, prelude, .{ .captured = capture });
         }
 
         fn transactOwned(
@@ -641,17 +659,18 @@ fn BoundTransaction(
             input_value: TransactInputType,
             block_claimed: bool,
             prelude: ?PreludeType,
+            mode: AttemptMode,
         ) Error!OutcomeType {
             const executor = self.executor;
             if (!block_claimed and executor.hasActiveBlockExecution())
                 return error.BlockExecutionActive;
-            if (executor.hasCurrentTransaction()) return error.ExecutedTransactionActive;
+            std.debug.assert(!executor.hasCurrentTransaction());
             executor.clearLogs();
 
             var runtime: Runtime = .{
                 .executor = executor,
-                .policy = &self.policy,
                 .input_value = &input_value,
+                .mode = mode,
                 .prelude = if (prelude) |value| .{ .pending = .{
                     .handle = value.handle,
                     .run = value.run_fn,
@@ -673,7 +692,7 @@ fn BoundTransaction(
                     break :blk .{ .rejected = reason };
                 },
                 .completed => |output_value| .{ .executed = .{
-                    .lease = try runtime.complete(),
+                    .pending = try runtime.complete(),
                     .output_value = output_value,
                 } },
             };
@@ -690,12 +709,12 @@ fn validateTransition(
 ) void {
     comptime {
         std.debug.assert(@hasDecl(Bound, "Error"));
-        const actual = @TypeOf(Bound.transact(
-            @as(*ContextType, undefined),
-            @as(TransactionType, undefined),
-        ));
-        const expected = Bound.Error!TransitionOutcome(OutputType, RejectionType);
-
-        std.debug.assert(actual == expected);
+        // Inspect the function type only; a call expression here would force
+        // eager analysis of the whole transact graph at every instantiation.
+        const info = @typeInfo(@TypeOf(Bound.transact)).@"fn";
+        std.debug.assert(info.params.len == 2);
+        std.debug.assert(info.params[0].type.? == *ContextType);
+        std.debug.assert(info.params[1].type.? == TransactionType);
+        std.debug.assert(info.return_type.? == Bound.Error!TransitionOutcome(OutputType, RejectionType));
     }
 }

@@ -146,7 +146,6 @@ test "backend failure falls back to one transient artifact" {
 
     var failing = FailingBackend{};
     var execution = Execution.init(std.testing.allocator, failing.backend(), .{
-        .revision_id = 1,
         .config = .base,
     });
     defer execution.deinit();
@@ -162,7 +161,6 @@ test "bounded preparation reports capacity exhaustion without raw fallback" {
     var storage: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     var execution = Execution.init(fixed.allocator(), null, .{
-        .revision_id = 1,
         .config = .base,
     });
     defer execution.deinit();

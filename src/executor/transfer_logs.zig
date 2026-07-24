@@ -3,9 +3,9 @@ const evmz = @import("../evm.zig");
 
 const Host = evmz.Host;
 
-pub fn emit(executor: anytype, input: evmz.protocol.ValueTransferInput) !void {
-    const Protocol = @TypeOf(executor.*).Protocol;
-    const transfer_log = Protocol.valueTransferLog(executor.revision(), input) orelse return;
+pub fn emit(executor: anytype, input: evmz.execution.ValueTransferInput) !void {
+    const spec = @TypeOf(executor.*).specification;
+    const transfer_log = spec.valueTransferLog(input) orelse return;
 
     const topics = [_]u256{
         transfer_log.topic,
@@ -22,15 +22,11 @@ pub fn emit(executor: anytype, input: evmz.protocol.ValueTransferInput) !void {
     });
 }
 
-test "value transfer log metadata comes from comptime protocol" {
-    const CustomProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
+test "value transfer log metadata comes from the exact spec" {
+    const custom = struct {
         pub fn valueTransferLog(
-            revision: Revision,
-            input: evmz.protocol.ValueTransferInput,
-        ) ?evmz.protocol.ValueTransferLog {
-            _ = revision;
+            input: evmz.execution.ValueTransferInput,
+        ) ?evmz.execution.ValueTransferLog {
             _ = input;
             return .{
                 .address = evmz.addr(0x77),
@@ -38,6 +34,9 @@ test "value transfer log metadata comes from comptime protocol" {
             };
         }
     };
+    const custom_spec = evmz.eth.frontier.extend(.{
+        .valueTransferLog = custom.valueTransferLog,
+    });
     const FakeState = struct {
         allocator: std.mem.Allocator,
         logs: std.ArrayList(Host.Log) = .empty,
@@ -63,14 +62,9 @@ test "value transfer log metadata comes from comptime protocol" {
         }
     };
     const FakeExecutor = struct {
-        pub const Protocol = CustomProtocol;
+        pub const specification = custom_spec;
 
         state: FakeState,
-
-        fn revision(self: *const @This()) CustomProtocol.Revision {
-            _ = self;
-            return .frontier;
-        }
     };
 
     var executor = FakeExecutor{ .state = .{ .allocator = std.testing.allocator } };

@@ -1,7 +1,7 @@
 //! Read-only canonical state provider supplied by an Ethereum client.
 //!
-//! Implementations should read from the client's database/trie/cache. Execution
-//! writes belong in `Overlay` until the caller commits a final changeset.
+//! Implementations should read from the client's database/trie/cache.
+//! Speculative writes belong to `TrackedState`.
 
 const std = @import("std");
 

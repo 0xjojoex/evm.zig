@@ -4,7 +4,6 @@ const evmz = @import("../../evm.zig");
 const Allocator = std.mem.Allocator;
 const JsonValue = std.json.Value;
 const bal = evmz.eth.bal;
-const resource_bound = evmz.executor.resource_bound;
 
 const valid_fixtures = @embedFile("../fixtures/bal/valid.json");
 const invalid_fixtures = @embedFile("../fixtures/bal/invalid.json");
@@ -310,12 +309,8 @@ fn assertExpected(test_name: []const u8, value: JsonValue, fixture: ParsedFixtur
     var expected = try expectObject(expected_value);
     try rejectUnknownKeys(&expected, &.{
         "counts",
-        "block_resources",
-        "blockResources",
         "per_index",
         "perIndex",
-        "transaction_resources",
-        "transactionResources",
         "hash",
     });
 
@@ -346,22 +341,6 @@ fn assertExpected(test_name: []const u8, value: JsonValue, fixture: ParsedFixtur
         }
     }
 
-    if (fieldAny(&expected, &.{ "block_resources", "blockResources" })) |resources_value| {
-        var resources_object = try expectObject(resources_value);
-        try rejectUnknownKeys(&resources_object, &.{
-            "accounts",
-            "storage_overlay_entries",
-            "deleted_accounts",
-            "dirty_accounts",
-        });
-        const envelope = resource_bound.declaredEnvelopeFromBal(fixture.block_access_list, .{ .max_live_frames = 1 });
-        try std.testing.expectEqual(resource_bound.Source.declared, envelope.source);
-        try expectOptionalUsize(&resources_object, "accounts", envelope.block.state.accounts);
-        try expectOptionalUsize(&resources_object, "storage_overlay_entries", envelope.block.state.storage_overlay_entries);
-        try expectOptionalUsize(&resources_object, "deleted_accounts", envelope.block.state.deleted_accounts);
-        try expectOptionalUsize(&resources_object, "dirty_accounts", envelope.block.state.dirty_accounts);
-    }
-
     if (fieldAny(&expected, &.{ "per_index", "perIndex" })) |per_index_value| {
         var per_index_object = try expectObject(per_index_value);
         try rejectUnknownKeys(&per_index_object, &.{
@@ -373,13 +352,6 @@ fn assertExpected(test_name: []const u8, value: JsonValue, fixture: ParsedFixtur
         const maxima = plan.maxima();
         try expectOptionalUsize(&per_index_object, "max_storage_write_keys", maxima.storage_write_keys);
         try expectOptionalUsize(&per_index_object, "max_changed_accounts", maxima.changed_accounts);
-    }
-
-    if (fieldAny(&expected, &.{ "transaction_resources", "transactionResources" })) |resources_value| {
-        var resources_object = try expectObject(resources_value);
-        try rejectUnknownKeys(&resources_object, &.{"original_storage_entries"});
-        const transaction = resource_bound.transactionResourcesFromBal(fixture.block_access_list, .{ .max_live_frames = 1 });
-        try expectOptionalUsize(&resources_object, "original_storage_entries", transaction.state.original_storage_entries);
     }
 
     if (fieldAny(&expected, &.{"hash"})) |hash_value| {

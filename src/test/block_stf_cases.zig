@@ -89,8 +89,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
     const empty_accounts: []const bal.AccountChanges = &.{};
     const empty_claim = try bal.encodeAlloc(scratch, empty_accounts);
 
-    const valid = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = .amsterdam,
+    const valid = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -106,8 +105,7 @@ test "BlockSTF semantic case smoke: empty Amsterdam block commitments" {
 
     var wrong_requests_hash = block_stf.empty_requests_hash;
     wrong_requests_hash[31] ^= 1;
-    const mismatch = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = .amsterdam,
+    const mismatch = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -127,8 +125,7 @@ test "BlockSTF semantic case smoke: provided BAL is structurally validated first
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
@@ -146,8 +143,7 @@ test "BlockSTF semantic case smoke: BAL size excess maps to status" {
 
     const accounts = [_]bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const claim = try bal.encodeAlloc(scratch, &accounts);
-    const result = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = bal.item_cost - 1 },
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -189,8 +185,7 @@ test "BlockSTF semantic case smoke: withdrawals coalesce at post index" {
     };
     const claimed_bal = try bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try evmz.state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,

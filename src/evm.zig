@@ -4,7 +4,6 @@ pub const address = @import("./address.zig");
 pub const BlockHashSource = @import("./BlockHashSource.zig");
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
-pub const easm = @import("./easm.zig");
 pub const eth = @import("./eth.zig");
 pub const execution = @import("./execution.zig");
 pub const execution_resources = @import("./execution_resources.zig");
@@ -18,8 +17,8 @@ pub const mpt = @import("mpt");
 pub const opcode = @import("./opcode.zig");
 pub const precompile = @import("./precompile.zig");
 pub const prepared_code = @import("./prepared_code.zig");
-pub const protocol = @import("./protocol.zig");
 pub const rlp = @import("rlp");
+pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
 pub const stateless = @import("./stateless.zig");
 pub const t = @import("./t.zig");
@@ -28,8 +27,11 @@ pub const transaction = @import("./transaction.zig");
 pub const uint256 = @import("./uint256.zig");
 const vm = @import("./vm.zig");
 
-/// The Ethereum-mainnet engine family — the usual ready-to-use entry point.
-pub const Evm = eth.extend(.{});
+/// Compile one complete exact engine specification.
+pub const Vm = vm.Vm;
+
+/// The latest exact Ethereum engine — the usual ready-to-use entry point.
+pub const Evm = Vm(eth.latest);
 
 // Commonly-used types are flat-aliased here for ergonomics.
 pub const addr = address.addr;
@@ -68,7 +70,5 @@ pub fn calcWordSize(comptime T: type, size: T) T {
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("./eth/config.zig");
-    _ = @import("./eth/derive.zig");
     _ = @import("./test.zig");
 }

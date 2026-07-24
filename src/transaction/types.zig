@@ -61,7 +61,7 @@ pub const FeeFields = struct {
     max_fee_per_blob_gas: ?u256 = null,
 };
 
-/// Unvalidated Ethereum-shaped ingress value used by Definition-backed `Vm`
+/// Unvalidated Ethereum-shaped ingress value used by exact `Vm`
 /// types. Representation-changing families own a concrete facade above the
 /// executor rather than replacing this engine transaction value.
 pub const Transaction = struct {
@@ -69,7 +69,7 @@ pub const Transaction = struct {
     sender: Address,
     /// Retain the encoded domain until Transaction validation classifies it.
     /// Account and executable nonces are `u64`; this wider input-only value lets
-    /// an encoded nonce at or above the account limit receive the protocol
+    /// an encoded nonce at or above the account limit receive the exact spec
     /// rejection instead of being misclassified as a decode failure.
     nonce: ?u256 = null,
     gas_limit: u64,
@@ -114,18 +114,18 @@ pub const EnvFacts = struct {
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
     /// Optional dynamic chain/fixture override for blob gas rules.
-    /// When null, transaction validation and settlement use the protocol schedule for the active revision.
+    /// When null, transaction validation and settlement use the exact spec schedule.
     blob_schedule: ?BlobSchedule = null,
 };
 
-/// Minimal account proof consumed during protocol transaction preparation.
+/// Minimal account proof consumed during exact-spec transaction preparation.
 pub const PreparationAccount = struct {
     nonce: u64,
     balance: u256,
     code_hash: [32]u8,
 };
 
-/// Read-only state capability available to protocol transaction preparation.
+/// Read-only state capability available to exact-spec transaction preparation.
 ///
 /// Preparation controls when these reads happen. The VM supplies the current
 /// overlay-backed view, but exposes neither storage nor mutation through this
@@ -254,7 +254,7 @@ pub fn executionRequest(context: execution.ExecutionContext, message: execution.
 /// A validated transaction ready to execute: the pipeline output of `prepare`.
 /// The raw transaction nonce is intentionally absent; execution consumes only
 /// the validated account state and the derived message identity.
-pub fn Prepared(comptime Protocol: type) type {
+pub fn Prepared(comptime SettlementPlan: type) type {
     return struct {
         /// Transaction-scope environment (context + access/authorization lists).
         scope: TransactionScope,
@@ -262,25 +262,20 @@ pub fn Prepared(comptime Protocol: type) type {
         message: execution.Message,
         /// Resolved execution gas; null when the transaction has no execution step.
         execution_gas: ?ExecutionGas,
-        settlement: Protocol.Settlement.Plan,
+        settlement: SettlementPlan,
     };
 }
 
-pub fn PrepareResult(comptime Protocol: type) type {
+pub fn PrepareResult(comptime SettlementPlan: type, comptime Rejection: type) type {
     return union(enum) {
-        rejected: Protocol.Tx.ValidationError,
-        executable: Prepared(Protocol),
+        rejected: Rejection,
+        executable: Prepared(SettlementPlan),
     };
 }
 
-pub fn PrepareInput(comptime Protocol: type) type {
-    return struct {
-        pub const ProtocolType = Protocol;
-
-        revision: Protocol.Revision,
-        tx: Transaction,
-        env: EnvFacts,
-        block: PreparationBlockProgress = .{},
-        state: PreparationStateAccess,
-    };
-}
+pub const PrepareInput = struct {
+    tx: Transaction,
+    env: EnvFacts,
+    block: PreparationBlockProgress = .{},
+    state: PreparationStateAccess,
+};

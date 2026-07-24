@@ -26,9 +26,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, std.math.maxInt(u64));
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -44,7 +42,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    try std.testing.expect(!executor.state.warm_accounts.contains(create_address));
+    try std.testing.expect(!executor.state.isAccountWarm(create_address));
 }
 
 test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
@@ -52,9 +50,7 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     const contract = evmz.addr(0xbbbb);
     const beneficiary = evmz.addr(0xcccc);
     const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -82,9 +78,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -117,9 +111,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
     const tx_context = testTxContext(sender, 1_000_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -136,7 +128,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
         },
     }));
     defer executed.discardIfCurrent();
-    try std.testing.expectEqual(evmz.TxStatus.success, (try executed.result()).status);
+    try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
     const account = executor.getAccount(create_address).?;
     try std.testing.expectEqual(@as(u64, 0), account.nonce);
     try std.testing.expectEqual(@as(u256, 0), account.balance);
@@ -149,9 +141,7 @@ test "Amsterdam transaction program installs delegation before top-level call" {
     const target = evmz.addr(0xcccc);
     var tx_context = testTxContext(sender, 300_000);
     tx_context.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -186,7 +176,7 @@ test "Amsterdam transaction program installs delegation before top-level call" {
         },
     }));
     defer executed.discardIfCurrent();
-    try std.testing.expectEqual(evmz.TxStatus.success, (try executed.result()).status);
+    try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
     try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
@@ -195,9 +185,7 @@ test "Amsterdam top-level delegated call charges cold target access" {
     const authority = evmz.addr(0xbbbb);
     const target = evmz.addr(0xcccc);
     const tx_context = testTxContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -229,11 +217,10 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .revision = .amsterdam,
     });
     defer frame.deinit();
 
@@ -255,11 +242,10 @@ fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.Acces
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .revision = .amsterdam,
     });
     defer frame.deinit();
 
@@ -287,11 +273,10 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
         .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0xcc, 0xcc, .EXTCODECOPY, .STOP,
     });
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &bytecode,
-        .revision = .amsterdam,
     });
     defer frame.deinit();
 

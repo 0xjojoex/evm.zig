@@ -262,7 +262,7 @@ pub fn readSetAssumeValidated(block_access_list: bal.BlockAccessList) ReadSetIte
     return .{ .block_access_list = block_access_list };
 }
 
-/// Zero-allocation final field projection, not `state.Changeset`.
+/// Zero-allocation final field projection over a BAL claim.
 ///
 /// BAL account changes are field-partial, so completing an account update or
 /// deciding account deletion still requires authenticated pre-state and final

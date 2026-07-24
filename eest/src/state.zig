@@ -6,18 +6,6 @@ const tx_validation = @import("tx_validation.zig");
 const Address = evmz.Address;
 const JsonValue = fixture_common.JsonValue;
 const transaction = evmz.transaction;
-const EthTransactionProtocol = evmz.Evm.TransactionProtocol;
-const Evm = evmz.Evm;
-const TxResult = transaction.TransactOutcome(evmz.TxExecutionResult, Evm.Rejection);
-
-const supported_exact_gas_bound_limits = [_]u64{
-    1_000_000,
-    10_000_000,
-    30_000_000,
-    60_000_000,
-    100_000_000,
-    120_000_000,
-};
 
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
@@ -39,7 +27,6 @@ const strip0x = fixture_common.strip0x;
 pub const Options = struct {
     fork_filter: ?[]const u8 = null,
     test_filter: ?[]const u8 = null,
-    exact_gas_bound: bool = false,
 };
 
 pub const FailReason = enum(u8) {
@@ -101,9 +88,9 @@ pub const Summary = struct {
 };
 
 pub fn runFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
-    var runner = Runner{};
-    defer runner.deinit();
-    return runner.runFile(io, allocator, path, options);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024 * 1024));
+    defer allocator.free(bytes);
+    return runSlice(allocator, bytes, options);
 }
 
 pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Options) !Summary {
@@ -113,11 +100,7 @@ pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Option
 }
 
 pub const Runner = struct {
-    exact_hosts: ExactGasBoundHostPool = .{},
-
-    pub fn deinit(self: *Runner) void {
-        self.exact_hosts.deinit();
-    }
+    pub fn deinit(_: *Runner) void {}
 
     pub fn runFile(self: *Runner, io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024 * 1024));
@@ -125,16 +108,15 @@ pub const Runner = struct {
         return self.runSlice(allocator, bytes, options);
     }
 
-    pub fn runSlice(self: *Runner, allocator: std.mem.Allocator, bytes: []const u8, options: Options) !Summary {
-        return runSliceWithExactHosts(allocator, bytes, options, &self.exact_hosts);
+    pub fn runSlice(_: *Runner, allocator: std.mem.Allocator, bytes: []const u8, options: Options) !Summary {
+        return runSliceImpl(allocator, bytes, options);
     }
 };
 
-fn runSliceWithExactHosts(
+fn runSliceImpl(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     options: Options,
-    exact_hosts: *ExactGasBoundHostPool,
 ) !Summary {
     var parsed = try std.json.parseFromSlice(JsonValue, allocator, bytes, .{
         .parse_numbers = false,
@@ -151,7 +133,7 @@ fn runSliceWithExactHosts(
         }
 
         summary.fixtures += 1;
-        runFixture(allocator, test_name, entry.value_ptr.*, options, exact_hosts, &summary) catch |err| {
+        runFixture(allocator, test_name, entry.value_ptr.*, options, &summary) catch |err| {
             summary.vectors += 1;
             summary.countFail(switch (err) {
                 error.UnsupportedFixtureKey => .unsupported_fixture_key,
@@ -168,7 +150,6 @@ fn runFixture(
     test_name: []const u8,
     fixture: JsonValue,
     options: Options,
-    exact_hosts: *ExactGasBoundHostPool,
     summary: *Summary,
 ) !void {
     _ = test_name;
@@ -193,25 +174,41 @@ fn runFixture(
             continue;
         };
 
-        for (vectors.items) |post| {
-            summary.vectors += 1;
-            runVector(allocator, &fixture_obj, post, revision, options, exact_hosts, summary) catch |err| {
-                summary.countFail(switch (err) {
-                    error.UnsupportedFixtureKey => .unsupported_fixture_key,
-                    else => .malformed_fixture,
-                });
-            };
+        switch (revision) {
+            inline else => |exact_revision| try runForkVectors(
+                exact_revision,
+                allocator,
+                &fixture_obj,
+                vectors,
+                summary,
+            ),
         }
     }
 }
 
-fn runVector(
+fn runForkVectors(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    fixture: *const std.json.ObjectMap,
+    vectors: std.json.Array,
+    summary: *Summary,
+) !void {
+    for (vectors.items) |post| {
+        summary.vectors += 1;
+        runVectorExact(revision, allocator, fixture, post, summary) catch |err| {
+            summary.countFail(switch (err) {
+                error.UnsupportedFixtureKey => .unsupported_fixture_key,
+                else => .malformed_fixture,
+            });
+        };
+    }
+}
+
+fn runVectorExact(
+    comptime revision: evmz.eth.Revision,
     allocator: std.mem.Allocator,
     fixture: *const std.json.ObjectMap,
     post: JsonValue,
-    revision: evmz.eth.Revision,
-    options: Options,
-    exact_hosts: *ExactGasBoundHostPool,
     summary: *Summary,
 ) !void {
     const post_obj = asObject(post) orelse return error.MalformedFixture;
@@ -289,7 +286,7 @@ fn runVector(
     const vm_env = try parseVmEnv(revision, &env, config);
     if (expected_exception) |expected| {
         if (try serializedTransactionExceptionMatches(allocator, &post_obj, expected)) {
-            var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
+            var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
             defer host.deinit();
             try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
             return;
@@ -297,7 +294,7 @@ fn runVector(
     }
     if (try optionalU256(&tx, "chainId")) |tx_chain_id| {
         if (tx_chain_id != vm_env.chain_id) {
-            var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
+            var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
             defer host.deinit();
             if (expected_exception) |expected| {
                 if (tx_validation.exceptionNameMatches("TransactionException.INVALID_CHAINID", expected)) {
@@ -329,12 +326,7 @@ fn runVector(
         .authorization_count = authorization_list.count,
     };
 
-    if (options.exact_gas_bound) {
-        try runExactGasBoundVector(exact_hosts, allocator, fixture, &post_obj, &pre, vm_env, revision, public_tx, expected_exception, summary);
-        return;
-    }
-
-    var host = try FixtureHost.init(allocator, &pre, vm_env, revision);
+    var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
     defer host.deinit();
     const result = try host.transact(public_tx);
     try finishVectorResult(allocator, fixture, &post_obj, &host, result, expected_exception, summary);
@@ -363,7 +355,7 @@ fn finishVectorResult(
     fixture: *const std.json.ObjectMap,
     post_obj: *const std.json.ObjectMap,
     host: anytype,
-    result: TxResult,
+    result: anytype,
     expected_exception: ?[]const u8,
     summary: *Summary,
 ) !void {
@@ -388,116 +380,10 @@ fn finishVectorResult(
     }
 }
 
-fn validationFailReason(err: EthTransactionProtocol.Tx.ValidationError) FailReason {
+fn validationFailReason(err: evmz.eth.transaction_validation.ValidationError) FailReason {
     return switch (err) {
         .nonce_too_low, .nonce_too_high => .transaction_nonce_mismatch,
         else => .unexpected_status,
-    };
-}
-
-fn runExactGasBoundVector(
-    exact_hosts: *ExactGasBoundHostPool,
-    allocator: std.mem.Allocator,
-    fixture: *const std.json.ObjectMap,
-    post_obj: *const std.json.ObjectMap,
-    pre: *const std.json.ObjectMap,
-    vm_env: evmz.Env,
-    spec: evmz.eth.Revision,
-    tx: evmz.Transaction,
-    expected_exception: ?[]const u8,
-    summary: *Summary,
-) !void {
-    inline for (supported_exact_gas_bound_limits) |gas_limit| {
-        if (vm_env.gas_limit == gas_limit) {
-            try exact_hosts.runFor(gas_limit, allocator, fixture, post_obj, pre, vm_env, spec, tx, expected_exception, summary);
-            return;
-        }
-    }
-
-    summary.skipped += 1;
-}
-
-const ExactGasBoundHostPool = struct {
-    gas_1m: ExactGasBoundHostSlot(1_000_000) = .{},
-    gas_10m: ExactGasBoundHostSlot(10_000_000) = .{},
-    gas_30m: ExactGasBoundHostSlot(30_000_000) = .{},
-    gas_60m: ExactGasBoundHostSlot(60_000_000) = .{},
-    gas_100m: ExactGasBoundHostSlot(100_000_000) = .{},
-    gas_120m: ExactGasBoundHostSlot(120_000_000) = .{},
-
-    fn deinit(self: *ExactGasBoundHostPool) void {
-        inline for (supported_exact_gas_bound_limits) |gas_limit| {
-            self.slotFor(gas_limit).deinit();
-        }
-    }
-
-    fn runFor(
-        self: *ExactGasBoundHostPool,
-        comptime gas_limit: u64,
-        allocator: std.mem.Allocator,
-        fixture: *const std.json.ObjectMap,
-        post_obj: *const std.json.ObjectMap,
-        pre: *const std.json.ObjectMap,
-        vm_env: evmz.Env,
-        spec: evmz.eth.Revision,
-        tx: evmz.Transaction,
-        expected_exception: ?[]const u8,
-        summary: *Summary,
-    ) !void {
-        std.debug.assert(vm_env.gas_limit == gas_limit);
-        var host = try self.slotFor(gas_limit).resetOrInit(allocator, pre, vm_env, spec);
-        const result = try host.transact(tx);
-        try finishVectorResult(allocator, fixture, post_obj, host, result, expected_exception, summary);
-    }
-
-    fn slotFor(self: *ExactGasBoundHostPool, comptime gas_limit: u64) *ExactGasBoundHostSlot(gas_limit) {
-        return switch (gas_limit) {
-            1_000_000 => &self.gas_1m,
-            10_000_000 => &self.gas_10m,
-            30_000_000 => &self.gas_30m,
-            60_000_000 => &self.gas_60m,
-            100_000_000 => &self.gas_100m,
-            120_000_000 => &self.gas_120m,
-            else => @compileError("unsupported exact gas-bound bucket"),
-        };
-    }
-};
-
-fn ExactGasBoundHostSlot(comptime gas_limit: u64) type {
-    const HostForGas = ExactFixtureHost(gas_limit);
-
-    return struct {
-        host: ?HostForGas = null,
-        spec: ?evmz.eth.Revision = null,
-
-        const Self = @This();
-
-        fn deinit(self: *Self) void {
-            if (self.host) |*host| host.deinit();
-            self.host = null;
-            self.spec = null;
-        }
-
-        fn resetOrInit(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            pre: *const std.json.ObjectMap,
-            env: evmz.Env,
-            spec: evmz.eth.Revision,
-        ) !*HostForGas {
-            if (self.host) |*host| {
-                if (self.spec != null and self.spec.? == spec) {
-                    try host.reset(pre, env, spec);
-                    return host;
-                }
-            }
-
-            self.deinit();
-            self.host = try HostForGas.init(allocator, pre, env, spec);
-            self.spec = spec;
-            if (self.host) |*host| return host;
-            unreachable;
-        }
     };
 }
 
@@ -660,7 +546,7 @@ test "EEST fixture config selects Amsterdam blob schedule" {
 }
 
 fn parseVmEnv(
-    revision: evmz.eth.Revision,
+    comptime revision: evmz.eth.Revision,
     env: *const std.json.ObjectMap,
     config: FixtureConfig,
 ) !evmz.Env {
@@ -694,13 +580,17 @@ test "EEST env parser reads Amsterdam slotNumber" {
     try std.testing.expectEqual(@as(u64, 0x1234), parsed_env.slot_number);
 }
 
-fn parseBlobBaseFee(revision: evmz.eth.Revision, env: *const std.json.ObjectMap, config: FixtureConfig) !u256 {
+fn parseBlobBaseFee(
+    comptime revision: evmz.eth.Revision,
+    env: *const std.json.ObjectMap,
+    config: FixtureConfig,
+) !u256 {
     if (env.get("currentBlobBaseFee")) |value| return parseU256FromValue(value);
     const excess_blob_gas = if (env.get("currentExcessBlobGas")) |value| try parseU256FromValue(value) else 0;
     if (config.blob_schedule) |schedule| {
         return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
     }
-    const schedule = Evm.transaction_policy.transaction.blobSchedule(revision) orelse return 0;
+    const schedule = evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
     return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
 }
 
@@ -739,92 +629,15 @@ fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
     return .legacy;
 }
 
-const FixtureHost = struct {
-    allocator: std.mem.Allocator,
-    store: *evmz.state.MemoryStore,
-    executor: Evm.Executor,
-    env: evmz.Env,
-    revision: evmz.eth.Revision,
-
-    const Self = @This();
-
-    fn init(
-        allocator: std.mem.Allocator,
-        pre: *const std.json.ObjectMap,
-        env: evmz.Env,
-        revision: evmz.eth.Revision,
-    ) !Self {
-        const store = try allocator.create(evmz.state.MemoryStore);
-        errdefer allocator.destroy(store);
-        store.* = evmz.state.MemoryStore.init(allocator);
-        errdefer store.deinit();
-
-        try seedMemoryStore(allocator, store, pre);
-
-        var executor = Evm.Executor.init(allocator, .{
-            .revision = revision,
-            .state_reader = store.reader(),
-            .block_hash_source = EestStateBlockHashSource.source(),
-        });
-        errdefer executor.deinit();
-
-        return .{
-            .allocator = allocator,
-            .store = store,
-            .executor = executor,
-            .env = env,
-            .revision = revision,
-        };
-    }
-
-    fn deinit(self: *Self) void {
-        self.executor.deinit();
-        self.store.deinit();
-        self.allocator.destroy(self.store);
-    }
-
-    fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
-        return accountView(&self.executor, address);
-    }
-
-    fn getStorage(self: *Self, address: Address, key: u256) !u256 {
-        return self.executor.getStorage(address, key);
-    }
-
-    fn transact(self: *Self, tx: evmz.Transaction) !TxResult {
-        var block = try Evm.BlockExecution.init(
-            &self.executor,
-            self.env,
-        );
-        defer block.discardIfUnfinished();
-        const outcome = try block.transact(tx);
-        return switch (outcome) {
-            .included => |included| blk: {
-                _ = try block.finish();
-                break :blk .{ .executed = included.result };
-            },
-            .rejected => |err| .{ .rejected = err },
-        };
-    }
-
-    fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-        var changeset = try self.executor.changeset();
-        defer changeset.deinit(self.executor.allocator);
-        return self.store.stateRootAfterChangesetWithOptions(allocator, &changeset, .{
-            .empty_accounts = if (self.revision.isImpl(.spurious_dragon)) .omit else .include,
-        });
-    }
-};
-
-fn ExactFixtureHost(comptime gas_limit: u64) type {
-    const ExactEvm = evmz.Evm;
+fn FixtureHost(comptime revision: evmz.eth.Revision) type {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    const TxResult = transaction.TransactOutcome(evmz.TxExecutionResult, ExactVm.Rejection);
 
     return struct {
         allocator: std.mem.Allocator,
         store: *evmz.state.MemoryStore,
-        executor: ExactEvm.Executor,
+        executor: ExactVm.Executor,
         env: evmz.Env,
-        revision: evmz.eth.Revision,
 
         const Self = @This();
 
@@ -832,7 +645,6 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             allocator: std.mem.Allocator,
             pre: *const std.json.ObjectMap,
             env: evmz.Env,
-            spec: evmz.eth.Revision,
         ) !Self {
             const store = try allocator.create(evmz.state.MemoryStore);
             errdefer allocator.destroy(store);
@@ -841,12 +653,9 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
 
             try seedMemoryStore(allocator, store, pre);
 
-            var executor = try ExactEvm.initBoundExecutor(allocator, .{
-                .revision = spec,
+            var executor = ExactVm.Executor.init(allocator, .{
                 .state_reader = store.reader(),
                 .block_hash_source = EestStateBlockHashSource.source(),
-            }, .{
-                .max_block_gas = gas_limit,
             });
             errdefer executor.deinit();
 
@@ -855,7 +664,6 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
                 .store = store,
                 .executor = executor,
                 .env = env,
-                .revision = spec,
             };
         }
 
@@ -863,24 +671,6 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
             self.executor.deinit();
             self.store.deinit();
             self.allocator.destroy(self.store);
-        }
-
-        fn reset(
-            self: *Self,
-            pre: *const std.json.ObjectMap,
-            env: evmz.Env,
-            spec: evmz.eth.Revision,
-        ) !void {
-            self.store.clearAccounts();
-            try seedMemoryStore(self.allocator, self.store, pre);
-
-            try self.executor.reset(.{
-                .revision = spec,
-                .state_reader = self.store.reader(),
-                .block_hash_source = EestStateBlockHashSource.source(),
-            });
-            self.env = env;
-            self.revision = spec;
         }
 
         fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
@@ -892,7 +682,7 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         }
 
         fn transact(self: *Self, tx: evmz.Transaction) !TxResult {
-            var block = try ExactEvm.BlockExecution.init(
+            var block = try ExactVm.BlockExecution.init(
                 &self.executor,
                 self.env,
             );
@@ -908,16 +698,14 @@ fn ExactFixtureHost(comptime gas_limit: u64) type {
         }
 
         fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-            var changeset = try self.executor.changeset();
-            defer changeset.deinit(self.executor.allocator);
-            return self.store.stateRootAfterChangesetWithOptions(allocator, &changeset, .{
-                .empty_accounts = if (self.revision.isImpl(.spurious_dragon)) .omit else .include,
+            return self.store.stateRootAfterChangesWithOptions(allocator, self.executor.acceptedChanges(), .{
+                .empty_accounts = if (revision.isImpl(.spurious_dragon)) .omit else .include,
             });
         }
     };
 }
 
-fn accountView(executor: *Evm.Executor, address: Address) !?evmz.AccountView {
+fn accountView(executor: anytype, address: Address) !?evmz.AccountView {
     const account = try executor.getAccountOrLoad(address) orelse return null;
     return .{
         .nonce = account.nonce,
@@ -1178,49 +966,13 @@ fn runMinimalStateFixtureWithOptions(
     return runSlice(std.testing.allocator, fixture, options);
 }
 
-test "EEST exact gas-bound mode runs supported common block gas bucket" {
-    const summary = try runMinimalStateFixtureWithOptions(
-        "0x0f4240",
-        "",
-        "0x0186a0",
-        "0x",
-        "",
-        "\"storage\":{\"0x00\":\"0x2a\"}",
-        .{ .exact_gas_bound = true },
-    );
-    try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
-    try std.testing.expectEqual(@as(usize, 1), summary.vectors);
-    try std.testing.expectEqual(@as(usize, 1), summary.passed);
-    try std.testing.expectEqual(@as(usize, 0), summary.failed);
-    try std.testing.expectEqual(@as(usize, 0), summary.skipped);
-    try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
-}
-
-test "EEST exact gas-bound mode skips unsupported block gas bucket" {
-    const summary = try runMinimalStateFixtureWithOptions(
-        "0x030d40",
-        "",
-        "0x0186a0",
-        "0x",
-        "",
-        "\"storage\":{\"0x00\":\"0x2a\"}",
-        .{ .exact_gas_bound = true },
-    );
-    try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
-    try std.testing.expectEqual(@as(usize, 1), summary.vectors);
-    try std.testing.expectEqual(@as(usize, 0), summary.passed);
-    try std.testing.expectEqual(@as(usize, 0), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.skipped);
-    try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
-}
-
-test "EEST exact gas-bound mode reuses host without leaking fixture state" {
+test "EEST runner handles consecutive fixtures without leaking state" {
     const fixture = try std.fmt.allocPrint(std.testing.allocator,
         \\{{"{s}":{{"env":{{"currentCoinbase":"0x0000000000000000000000000000000000000000","currentGasLimit":"0x0f4240","currentNumber":"0x01","currentDifficulty":"0x00","currentTimestamp":"0x00","currentBaseFee":"0x00"}},"pre":{{"0x0000000000000000000000000000000000001000":{{"balance":"0x00","nonce":"0x00","code":"0x60{s}600055","storage":{{}}}},"0x000000000000000000000000000000000000aaaa":{{"balance":"0xffff","nonce":"0x00","code":"0x","storage":{{}}}}}},"transaction":{{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x0000000000000000000000000000000000001000","gasLimit":["0x0186a0"],"gasPrice":"0x00","value":["0x00"],"data":["0x"]}},"post":{{"Cancun":[{{"indexes":{{"data":0,"gas":0,"value":0}},"state":{{"0x0000000000000000000000000000000000001000":{{"storage":{{"0x00":"0x{s}"}}}}}}}}]}}}},"{s}":{{"env":{{"currentCoinbase":"0x0000000000000000000000000000000000000000","currentGasLimit":"0x0f4240","currentNumber":"0x02","currentDifficulty":"0x00","currentTimestamp":"0x00","currentBaseFee":"0x00"}},"pre":{{"0x0000000000000000000000000000000000001000":{{"balance":"0x00","nonce":"0x00","code":"0x60{s}600055","storage":{{}}}},"0x000000000000000000000000000000000000aaaa":{{"balance":"0xffff","nonce":"0x00","code":"0x","storage":{{}}}}}},"transaction":{{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x0000000000000000000000000000000000001000","gasLimit":["0x0186a0"],"gasPrice":"0x00","value":["0x00"],"data":["0x"]}},"post":{{"Cancun":[{{"indexes":{{"data":0,"gas":0,"value":0}},"state":{{"0x0000000000000000000000000000000000001000":{{"storage":{{"0x00":"0x{s}"}}}}}}}}]}}}}}}
     , .{ "first_sstore", "2a", "2a", "second_sstore", "2b", "2b" });
     defer std.testing.allocator.free(fixture);
 
-    const summary = try runSlice(std.testing.allocator, fixture, .{ .exact_gas_bound = true });
+    const summary = try runSlice(std.testing.allocator, fixture, .{});
     try std.testing.expectEqual(@as(usize, 2), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 2), summary.vectors);
     try std.testing.expectEqual(@as(usize, 2), summary.passed);
@@ -1241,7 +993,7 @@ test "EEST transaction nonce mismatch fails" {
     try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.transaction_nonce_mismatch)]);
 }
 
-test "EEST oversized transaction nonce reaches protocol validation" {
+test "EEST oversized transaction nonce reaches exact-spec validation" {
     const summary = try runMinimalStateFixture(
         ",\"nonce\":\"0x010000000000000000\"",
         "0x0186a0",

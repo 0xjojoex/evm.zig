@@ -7,7 +7,7 @@ const std = @import("std");
 const ssz = @import("ssz");
 const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
-const EthTransaction = @import("../../eth/transaction.zig").Transaction;
+const eth_spec = @import("../../eth/spec.zig");
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
 const EthWithdrawal = @import("../../eth/Withdrawal.zig");
@@ -1297,7 +1297,9 @@ fn activationApplies(activation: ForkActivation, block_number: u64, timestamp: u
 }
 
 fn normalizeBlobSchedule(schedule: BlobSchedule, revision: Revision) Error!transaction.BlobSchedule {
-    var out = EthTransaction.blobSchedule(revision) orelse return error.UnsupportedBlobScheduleOverride;
+    var out = switch (revision) {
+        inline else => |exact_revision| eth_spec.specAt(exact_revision).transaction.blob_schedule,
+    } orelse return error.UnsupportedBlobScheduleOverride;
     out.target = schedule.target;
     out.max = schedule.max;
     out.base_fee_update_fraction = schedule.base_fee_update_fraction;

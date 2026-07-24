@@ -89,11 +89,28 @@ fn execute(
         .code_address = fromEvmcAddress(msg.*.code_address),
     };
 
-    var frame = evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.heap.c_allocator, .{
-        .host = &host_,
-        .msg = &message,
-        .code = code[0..code_size],
-        .revision = revision,
+    return switch (revision) {
+        inline else => |supported_revision| executeExact(
+            @field(evmz.eth.Revision, @tagName(supported_revision)),
+            &host_,
+            &message,
+            code[0..code_size],
+        ),
+    };
+}
+
+// TODO: per revision build by build options
+fn executeExact(
+    comptime revision: evmz.eth.Revision,
+    host: *evmz.Host,
+    message: *const evmz.Host.Message,
+    code: []const u8,
+) evmc.evmc_result {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    var frame = ExactVm.Interpreter.OwnedCallFrame.init(std.heap.c_allocator, .{
+        .host = host,
+        .msg = message,
+        .code = code,
     }) catch |err| {
         log.err("execute failed: {}", .{err});
         return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{});
@@ -502,7 +519,25 @@ fn accessStatusFromEvmc(status: evmc.evmc_access_status) !evmz.Host.AccessStatus
     };
 }
 
-fn evmcRevisionToEthereumRevision(rev: evmc.evmc_revision) error{UnmatchedRevision}!evmz.eth.Revision {
+const SupportedRevision = enum {
+    frontier,
+    homestead,
+    tangerine_whistle,
+    spurious_dragon,
+    byzantium,
+    petersburg,
+    istanbul,
+    berlin,
+    london,
+    merge,
+    shanghai,
+    cancun,
+    prague,
+    osaka,
+    amsterdam,
+};
+
+fn evmcRevisionToEthereumRevision(rev: evmc.evmc_revision) error{UnmatchedRevision}!SupportedRevision {
     return switch (rev) {
         evmc.EVMC_FRONTIER => .frontier,
         evmc.EVMC_HOMESTEAD => .homestead,
@@ -607,7 +642,7 @@ test "EVMC execute returns owned output through mock host" {
 }
 
 test "EVMC Paris revision maps to Merge revision" {
-    try std.testing.expectEqual(evmz.eth.Revision.merge, try evmcRevisionToEthereumRevision(evmc.EVMC_PARIS));
+    try std.testing.expectEqual(SupportedRevision.merge, try evmcRevisionToEthereumRevision(evmc.EVMC_PARIS));
 }
 
 test "EVMC execute carries blob hashes through tx context" {

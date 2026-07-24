@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const EthTransaction = @import("../../eth/transaction.zig").Transaction;
+const eth_spec = @import("../../eth/spec.zig");
 const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const smoke = @import("./v1_smoke.zig");
@@ -72,7 +72,7 @@ test "stateless wire v1 decodes but does not trust public-key hints" {
     try std.testing.expectEqual(block_stf.Status.valid, result.status);
 }
 
-test "stateless wire v1 normalizes protocol blob schedule metadata" {
+test "stateless wire v1 normalizes fork blob schedule metadata" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -89,7 +89,7 @@ test "stateless wire v1 normalizes protocol blob schedule metadata" {
     try std.testing.expectEqual(@as(u64, 7), schedule.target);
     try std.testing.expectEqual(@as(u64, 8), schedule.max);
     try std.testing.expectEqual(@as(u256, 123_456), schedule.base_fee_update_fraction);
-    try std.testing.expectEqual(EthTransaction.blobSchedule(.prague).?.gas_per_blob, schedule.gas_per_blob);
+    try std.testing.expectEqual(eth_spec.prague.transaction.blob_schedule.?.gas_per_blob, schedule.gas_per_blob);
 }
 
 test "stateless wire v1 rejects a payload shape from another fork" {
@@ -316,7 +316,7 @@ test "stateless wire v1 returns failure result for malformed guest input" {
     }
 }
 
-test "stateless wire v1 protocol fork values match tests-zkevm v0.5" {
+test "stateless wire v1 fork values match tests-zkevm v0.5" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(13));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(20));
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(24));

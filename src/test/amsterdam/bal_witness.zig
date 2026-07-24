@@ -31,8 +31,7 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
     const encoded = try bal.encodeAlloc(std.testing.allocator, &claim);
     defer std.testing.allocator.free(encoded);
 
-    const result = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
         .state_backend = try evmz.state.Backend.fromWitness(
             std.testing.allocator,
@@ -69,8 +68,7 @@ test "BlockSTF forwards the validated BAL resource plan to a successful preparer
     defer std.testing.allocator.free(encoded);
 
     var preparer = RecordingPreparer{};
-    const result = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
         .state_backend = try evmz.state.Backend.fromWitness(
             std.testing.allocator,
@@ -103,8 +101,7 @@ test "BlockSTF forwards the validated BAL resource plan to a successful preparer
 
 test "BlockSTF resource preparation failure falls back to lazy execution" {
     var preparer = RecordingPreparer{ .fail = true };
-    const result = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
         .state_backend = try evmz.state.Backend.fromWitness(
             std.testing.allocator,

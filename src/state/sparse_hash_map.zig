@@ -26,6 +26,10 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         const Index = u32;
         const empty_slot: Index = 0;
 
+        /// Dense entry identity. Stable across growth, but invalidated by
+        /// removal or `clearRetainingCapacity`.
+        pub const EntryId = enum(u32) { _ };
+
         const Row = struct {
             key: K,
             value: V,
@@ -40,6 +44,13 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         pub const Entry = struct {
             key_ptr: *const K,
             value_ptr: *V,
+            entry_id: EntryId,
+        };
+
+        pub const ConstEntry = struct {
+            key_ptr: *const K,
+            value_ptr: *const V,
+            entry_id: EntryId,
         };
 
         pub const KV = struct {
@@ -50,6 +61,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         pub const GetOrPutResult = struct {
             key_ptr: *const K,
             value_ptr: *V,
+            entry_id: EntryId,
             found_existing: bool,
         };
 
@@ -74,6 +86,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                 return .{
                     .key_ptr = &self.entries[self.index].key,
                     .value_ptr = &self.entries[self.index].value,
+                    .entry_id = @enumFromInt(self.index),
                 };
             }
         };
@@ -127,6 +140,17 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             self.* = undefined;
         }
 
+        pub fn clone(self: *const Self, allocator: std.mem.Allocator) !Self {
+            var result = Self.initContext(allocator, self.context);
+            errdefer result.deinit();
+
+            try result.ensureTotalCapacity(self.len);
+            for (self.entries[0..self.len]) |entry| {
+                result.putAssumeCapacityNoClobber(entry.key, entry.value);
+            }
+            return result;
+        }
+
         pub fn count(self: Self) Index {
             return self.len;
         }
@@ -144,9 +168,39 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             return self.entries[self.index[slot] - 1].value;
         }
 
+        pub fn getEntryId(self: Self, key: K) ?EntryId {
+            const slot = self.findSlot(key) orelse return null;
+            return @enumFromInt(self.index[slot] - 1);
+        }
+
         pub fn getPtr(self: *Self, key: K) ?*V {
             const slot = self.findSlot(key) orelse return null;
             return &self.entries[self.index[slot] - 1].value;
+        }
+
+        /// Access a dense row by an identity returned from `getOrPut`.
+        pub fn keyById(self: *const Self, entry_id: EntryId) *const K {
+            const row_index: Index = @intFromEnum(entry_id);
+            std.debug.assert(row_index < self.len);
+            return &self.entries[row_index].key;
+        }
+
+        /// Access a dense row by an identity returned from `getOrPut`.
+        pub fn valuePtrById(self: *Self, entry_id: EntryId) *V {
+            const row_index: Index = @intFromEnum(entry_id);
+            std.debug.assert(row_index < self.len);
+            return &self.entries[row_index].value;
+        }
+
+        /// Access one dense row. Ordering is internal and not stable across
+        /// removal; callers that need ordering own that projection.
+        pub fn entryAt(self: *const Self, index: Index) ConstEntry {
+            std.debug.assert(index < self.len);
+            return .{
+                .key_ptr = &self.entries[index].key,
+                .value_ptr = &self.entries[index].value,
+                .entry_id = @enumFromInt(index),
+            };
         }
 
         pub fn keyIterator(self: *Self) KeyIterator {
@@ -183,10 +237,12 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn getOrPut(self: *Self, key: K) !GetOrPutResult {
             if (self.findSlot(key)) |slot| {
-                const entry = &self.entries[self.index[slot] - 1];
+                const row_index = self.index[slot] - 1;
+                const entry = &self.entries[row_index];
                 return .{
                     .key_ptr = &entry.key,
                     .value_ptr = &entry.value,
+                    .entry_id = @enumFromInt(row_index),
                     .found_existing = true,
                 };
             }
@@ -211,10 +267,12 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             if (self.findSlotForInsert(key)) |slot| {
                 const stored = self.index[slot];
                 if (stored != empty_slot) {
-                    const entry = &self.entries[stored - 1];
+                    const row_index = stored - 1;
+                    const entry = &self.entries[row_index];
                     return .{
                         .key_ptr = &entry.key,
                         .value_ptr = &entry.value,
+                        .entry_id = @enumFromInt(row_index),
                         .found_existing = true,
                     };
                 }
@@ -231,6 +289,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                 return .{
                     .key_ptr = &self.entries[entry_index].key,
                     .value_ptr = &self.entries[entry_index].value,
+                    .entry_id = @enumFromInt(entry_index),
                     .found_existing = false,
                 };
             }
@@ -253,6 +312,24 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             };
             self.removeSlot(slot);
             return result;
+        }
+
+        /// Remove matching dense rows without allocating. The predicate sees
+        /// values before removal; moved tail rows are checked in place.
+        pub fn removeIf(
+            self: *Self,
+            context: anytype,
+            comptime predicate: fn (@TypeOf(context), K, V) bool,
+        ) void {
+            var row_index: Index = 0;
+            while (row_index < self.len) {
+                const row = &self.entries[row_index];
+                if (predicate(context, row.key, row.value)) {
+                    self.removeSlot(row.slot);
+                } else {
+                    row_index += 1;
+                }
+            }
         }
 
         pub fn clearRetainingCapacity(self: *Self) void {
@@ -441,6 +518,39 @@ test "sparse hash map updates existing entry at full capacity" {
     try std.testing.expectEqual(@as(?u64, 12), map.get(1));
 }
 
+test "sparse hash map dense entry identity survives growth" {
+    var map = Auto(u64, u64).init(std.testing.allocator);
+    defer map.deinit();
+
+    const first = try map.getOrPut(7);
+    first.value_ptr.* = 70;
+    const first_id = first.entry_id;
+
+    for (0..64) |i| {
+        const key: u64 = @intCast(i + 100);
+        try map.put(key, key * 10);
+    }
+
+    try std.testing.expectEqual(@as(u64, 7), map.keyById(first_id).*);
+    try std.testing.expectEqual(@as(u64, 70), map.valuePtrById(first_id).*);
+}
+
+test "sparse hash map clone owns independent dense rows" {
+    var original = Auto(u64, u64).init(std.testing.allocator);
+    defer original.deinit();
+    try original.put(1, 11);
+    try original.put(2, 22);
+
+    var cloned = try original.clone(std.testing.allocator);
+    defer cloned.deinit();
+    try std.testing.expectEqual(@as(?u64, 11), cloned.get(1));
+    try std.testing.expectEqual(@as(?u64, 22), cloned.get(2));
+
+    cloned.getPtr(1).?.* = 33;
+    try std.testing.expectEqual(@as(?u64, 11), original.get(1));
+    try std.testing.expectEqual(@as(?u64, 33), cloned.get(1));
+}
+
 test "sparse hash map removal preserves probe clusters" {
     const BadContext = struct {
         pub fn hash(_: @This(), _: u64) u64 {
@@ -470,4 +580,25 @@ test "sparse hash map removal preserves probe clusters" {
 
     try map.put(6, 106);
     try std.testing.expectEqual(@as(?u64, 106), map.get(6));
+}
+
+test "sparse hash map removeIf checks moved tail rows" {
+    const Context = struct {
+        threshold: u64,
+
+        fn below(self: @This(), key: u64, _: void) bool {
+            return key < self.threshold;
+        }
+    };
+
+    var map = Auto(u64, void).init(std.testing.allocator);
+    defer map.deinit();
+
+    for (0..8) |key| try map.put(@intCast(key), {});
+    map.removeIf(Context{ .threshold = 6 }, Context.below);
+
+    try std.testing.expectEqual(@as(u32, 2), map.count());
+    try std.testing.expect(map.contains(6));
+    try std.testing.expect(map.contains(7));
+    for (0..6) |key| try std.testing.expect(!map.contains(@intCast(key)));
 }

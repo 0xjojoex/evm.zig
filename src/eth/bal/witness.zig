@@ -31,7 +31,7 @@ pub const OwnedPlan = struct {
     }
 };
 
-/// Materialize the source-neutral merged state domain of a shape-validated
+/// Materialize the source-independent merged state domain of a shape-validated
 /// BAL. This does not fetch or verify any resource.
 pub fn planAllocAssumeValidated(
     allocator: Allocator,
@@ -134,7 +134,7 @@ const ProbeReader = struct {
     }
 };
 
-test "BAL supplies a source-neutral plan that the state reader can probe" {
+test "BAL supplies a source-independent plan that the state reader can probe" {
     const first = address.addr(1);
     const second = address.addr(2);
     const changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 9 }};

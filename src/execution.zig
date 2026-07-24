@@ -1,6 +1,6 @@
 //! Concrete values at the reusable EVM execution boundary.
 //!
-//! These values describe one root EVM invocation and the neutral transaction-
+//! These values describe one root EVM invocation and the engine transaction-
 //! local state needed when opening its scope. Family transaction decoding,
 //! validation, authorization, settlement, receipts, and continuations remain
 //! outside this module.
@@ -16,7 +16,117 @@ pub const PrecompileCall = precompile_runtime.PrecompileCall;
 pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
 pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
 
-/// Neutral reason an EVM execution stopped.
+// TODO: more status code
+pub const Status = enum(u8) {
+    success,
+    revert,
+    invalid,
+    out_of_gas,
+};
+
+// TODO: merge with Host.AccountAccessStatus
+pub const AccountAccessStatus = enum {
+    cold,
+    warm,
+};
+
+pub const StorageStatus = enum {
+    assigned,
+    added,
+    deleted,
+    modified,
+    deleted_added,
+    modified_deleted,
+    deleted_restored,
+    added_deleted,
+    modified_restored,
+};
+
+pub const StorageGas = struct {
+    cost: i64 = 0,
+    refund: i64 = 0,
+};
+
+pub const StorageStateGas = struct {
+    charge: i64 = 0,
+    refund: i64 = 0,
+};
+
+pub const CallNewAccountGas = struct {
+    regular: i64 = 0,
+    state: i64 = 0,
+};
+
+pub const CallNewAccountInput = struct {
+    value: u256,
+    account_exists: bool,
+};
+
+pub const CreateAccountStateGasInput = struct {
+    target_alive: bool,
+};
+
+pub const TopFrameValueTransferInput = struct {
+    value: u256,
+    same_address: bool,
+    creates_account: bool,
+};
+
+pub const TopLevelDelegatedAccountAccessInput = struct {
+    target_is_precompile: bool,
+    already_warm: bool,
+};
+
+pub const DelegatedAccountAccess = struct {
+    status: AccountAccessStatus,
+    gas: i64 = 0,
+};
+
+pub const ChildGasInput = struct {
+    requested: i64,
+    available: i64,
+};
+
+pub const ChildGas = struct {
+    gas: i64,
+    out_of_gas: bool = false,
+};
+
+pub const SelfDestructPolicyInput = struct {
+    same_address: bool,
+    created_in_transaction: bool,
+};
+
+pub const SelfDestructPolicy = struct {
+    clear_balance: bool,
+    reset_nonce: bool,
+    mark_selfdestructed: bool,
+};
+
+pub const SelfDestructFinalization = struct {
+    delete_account: bool = false,
+    clear_storage: bool = false,
+    reset_account: bool = false,
+};
+
+pub const SelfDestructNewAccountInput = struct {
+    same_address: bool,
+    transfers_balance: bool,
+    account_exists: bool,
+};
+
+pub const ValueTransferInput = struct {
+    from: Address,
+    to: Address,
+    amount: u256,
+};
+
+pub const ValueTransferLog = struct {
+    address: Address,
+    topic: u256,
+};
+
+/// Engine-level reason an EVM execution stopped.
 ///
 /// `invalid` is the compatibility fallback while opcode-local invalid reasons
 /// are migrated one by one. Projection-specific strings do not belong here.
@@ -173,7 +283,7 @@ pub const InitialWarmSet = struct {
     storage_slots: []const WarmStorageSlot = &.{},
 };
 
-/// Neutral transaction-local state applied while opening an execution scope.
+/// Engine transaction-local state applied while opening an execution scope.
 pub const ExecutionScopeInit = struct {
     pub const WarmSet = InitialWarmSet;
     pub const WarmSlot = WarmStorageSlot;

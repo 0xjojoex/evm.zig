@@ -42,17 +42,53 @@ const StatefulRuntime = struct {
     }
 };
 
+const ReentrantRuntime = struct {
+    child: evmz.Address,
+    called: bool = false,
+
+    fn service(self: *ReentrantRuntime) execution.PrecompileRuntime {
+        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
+    }
+
+    fn execute(ptr: *anyopaque, call: execution.PrecompileCall) !evmz.precompile.Result {
+        const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
+        const result = (try call.host.call(.{
+            .depth = call.message.depth + 1,
+            .kind = .call,
+            .gas = call.message.gas,
+            .recipient = self.child,
+            .sender = call.message.recipient,
+            .input_data = &.{},
+            .value = 0,
+            .is_static = call.message.is_static,
+            .code_address = self.child,
+        })).expectCall();
+        self.called = true;
+        return .{
+            .status = if (result.status == .success) .success else .failure,
+            // Keep this empty and unowned: this test isolates stack-arena
+            // rebinding from the separate borrowed precompile-output lifetime.
+            .output_data = &.{},
+            .gas_left = result.gas_left,
+            .output_owned = false,
+        };
+    }
+};
+
 const StatefulPrecompile = struct {
     const target = evmz.addr(0x1234);
 
     pub const Entry = enum { family };
 
-    pub fn resolve(_: evmz.eth.Revision, address: evmz.Address) ?Entry {
+    pub fn resolve(address: evmz.Address) ?Entry {
         return if (std.mem.eql(u8, &address, &target)) .family else null;
     }
 
+    pub fn active(address: evmz.Address) bool {
+        return resolve(address) != null;
+    }
+
     pub fn execute(
-        _: evmz.eth.Revision,
         _: Entry,
         call: execution.PrecompileCall,
     ) evmz.precompile.Error!execution.PrecompileOutcome {
@@ -60,16 +96,14 @@ const StatefulPrecompile = struct {
     }
 };
 
-const StatefulVm = evmz.eth.extend(.{ .execution = .{
-    .name = "stateful-precompile-service-test",
+const StatefulVm = evmz.Vm(evmz.eth.cancun.extend(.{
     .precompile = StatefulPrecompile,
-} });
+}));
 
 test "family precompile runtime can use host state and keeps EVM rollback semantics" {
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .revision = .cancun,
         .precompile_runtime = runtime.service(),
     });
     defer executor.deinit();
@@ -104,28 +138,14 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
         error.InvalidPrecompileOutput,
         executor.runStandaloneRequest(request(sender, StatefulPrecompile.target, &.{}), .{}),
     );
-
-    runtime.invalid_borrow = false;
-    runtime.tx_kind = 0x55;
-    var bounded = try StatefulVm.Executor.initWithRuntimeResources(std.testing.allocator, .{
-        .revision = .cancun,
-        .precompile_runtime = runtime.service(),
-    }, .{ .bounded = .{ .result_bytes = 1 } });
-    defer bounded.deinit();
-    const bounded_result = (try bounded.runStandaloneRequest(
-        request(sender, StatefulPrecompile.target, &.{}),
-        .{},
-    )).expectCall();
-    try std.testing.expectEqualSlices(u8, &.{0x55}, bounded_result.output_data);
 }
 
-test "bounded Executor reset preserves and replaces the precompile runtime" {
+test "Executor reset preserves and replaces the precompile runtime" {
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
-    var executor = try StatefulVm.initBoundExecutor(std.testing.allocator, .{
-        .revision = .cancun,
+    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
         .precompile_runtime = first_runtime.service(),
-    }, .{ .max_block_gas = 100_000 });
+    });
     defer executor.deinit();
 
     const first = (try executor.runStandaloneRequest(
@@ -136,7 +156,6 @@ test "bounded Executor reset preserves and replaces the precompile runtime" {
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
     try executor.reset(.{
-        .revision = .cancun,
         .precompile_runtime = second_runtime.service(),
     });
     const second = (try executor.runStandaloneRequest(
@@ -144,6 +163,61 @@ test "bounded Executor reset preserves and replaces the precompile runtime" {
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
+}
+
+test "reentrant precompile call preserves parent stack across arena growth" {
+    const sender = evmz.addr(0xaaaa);
+    const parent = evmz.addr(0xbbbb);
+    const child = evmz.addr(0x5678);
+    const filler_words = 599;
+    const parent_tail = evmz.t.bytecode(.{
+        // Together with the filler, retain 600 words below CALL's operands.
+        .PUSH1, 0x2a,
+        .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0,
+        .PUSH0, .PUSH2,
+        0x12,   0x34,
+        .GAS,   .CALL,
+        .POP,   .PUSH1,
+        0x2a,   .EQ,
+        .PUSH0, .SSTORE,
+        .STOP,
+    });
+    var parent_code: [filler_words + parent_tail.len]u8 = undefined;
+    @memset(parent_code[0..filler_words], evmz.Opcode.PUSH0.toByte());
+    @memcpy(parent_code[filler_words..], &parent_tail);
+
+    const child_code = evmz.t.bytecode(.{
+        // Leave one live word while recursively calling this same account.
+        // This raises the lazy row high-water mark and grows the packed arena.
+        .PUSH1, 0x77,   .PUSH1, 0x09,   .SSTORE,
+        .PUSH1, 0x2a,   .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH0, .PUSH2, 0x56,   0x78,
+        .GAS,   .CALL,  .POP,   .STOP,
+    });
+
+    var runtime = ReentrantRuntime{ .child = child };
+    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
+        .precompile_runtime = runtime.service(),
+    });
+    defer executor.deinit();
+
+    var parent_account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try parent_account.setCode(&parent_code);
+    try executor.state.seedAccount(parent, parent_account);
+    var child_account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try child_account.setCode(&child_code);
+    try executor.state.seedAccount(child, child_account);
+
+    const result = (try executor.runStandaloneRequest(request(sender, parent, &.{}), .{})).expectCall();
+
+    try std.testing.expect(runtime.called);
+    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(parent, 0));
+    try std.testing.expectEqual(@as(u256, 0x77), try executor.getStorage(child, 9));
+    try std.testing.expect(executor.frame_store.maxStackBase() >= 600);
+    try std.testing.expect(executor.frame_store.maxStackWordCount() >= 600 + 1024);
+    try std.testing.expect(executor.frame_store.maxRowCount() > 8);
 }
 
 fn request(sender: evmz.Address, recipient: evmz.Address, input: []const u8) evmz.execution.EvmExecutionRequest {

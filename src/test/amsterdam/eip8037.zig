@@ -6,12 +6,11 @@ const Address = evmz.Address;
 const Executor = evmz.Evm.Executor;
 const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
-const trace = evmz.trace;
 const transaction = evmz.transaction;
 const eth_tx = evmz.eth.transaction;
 
 test "Amsterdam authorization policy charges the first authority write" {
-    const adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = false,
         .clears_delegation = false,
@@ -26,7 +25,7 @@ test "Amsterdam authorization policy charges the first authority write" {
 }
 
 test "Amsterdam authorization policy charges a newly-created authority leaf" {
-    const adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = true,
@@ -40,14 +39,14 @@ test "Amsterdam authorization policy charges a newly-created authority leaf" {
 }
 
 test "Amsterdam authorization policy charges create then clear only once" {
-    var adjustment = evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+    var adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = false,
         .delegated_before_transaction = false,
         .delegation_set_before = false,
     });
-    adjustment.add(evmz.Evm.TransactionProtocol.authorization.successGasAdjustment(.amsterdam, .{
+    adjustment.add(evmz.Evm.specification.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = true,
         .clears_delegation = true,
@@ -61,7 +60,7 @@ test "Amsterdam authorization policy charges create then clear only once" {
 }
 
 test "Amsterdam invalid authorization policy has no runtime charge" {
-    const adjustment = evmz.Evm.TransactionProtocol.authorization.invalidGasAdjustment(.amsterdam);
+    const adjustment = evmz.Evm.specification.authorization.invalid_gas_adjustment;
 
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_state_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_write_charge);
@@ -76,9 +75,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     const target = evmz.addr(0xdddd);
     var tx_context = testTxContext(sender, 300_000);
     tx_context.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -112,7 +109,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
         },
     }));
     defer executed.discardIfCurrent();
-    try std.testing.expectEqual(evmz.TxStatus.success, (try executed.result()).status);
+    try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
     try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
@@ -122,9 +119,7 @@ test "Amsterdam CREATE collision with alive target skips state charge before chi
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, 1);
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -157,9 +152,7 @@ test "Amsterdam CREATE to pre-existing account leaves state reservoir available"
         .PUSH0, .PUSH0, .PUSH0, .CREATE, .POP,
         .PUSH1, 0x01,   .PUSH0, .SSTORE, .STOP,
     });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -192,21 +185,9 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, 0);
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var recorder = AccountAccessRecorder{};
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var observations = AccountObservation{ .address = create_address };
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    var capture = evmz.executor.CaptureContext.init(
-        std.testing.allocator,
-        null,
-        recorder.target(),
-    );
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    defer executor.setCaptureContext(null);
-    try capture.begin();
-    defer if (capture.isActive()) capture.abort() catch {};
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
@@ -216,35 +197,23 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     try contract_account.setCode(&code);
     try executor.state.seedAccount(contract, contract_account);
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
+    try executor.beginObservedTransaction(testTxContext(sender, 100_000), sender, contract);
     defer executor.closeTransaction();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     }, 0);
-    _ = try capture.finish();
+    try executor.closeTransactionObserved(&observations);
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
-    try std.testing.expect(recorder.contains(create_address));
+    try std.testing.expect(observations.found);
 }
 
 test "Amsterdam root CREATE records and charges a storage-only target before collision" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
-    var recorder = AccountAccessRecorder{};
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var observations = AccountObservation{ .address = create_address };
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    var capture = evmz.executor.CaptureContext.init(
-        std.testing.allocator,
-        null,
-        recorder.target(),
-    );
-    defer capture.deinit();
-    executor.setCaptureContext(&capture);
-    defer executor.setCaptureContext(null);
-    try capture.begin();
-    defer if (capture.isActive()) capture.abort() catch {};
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = 1_000_000;
@@ -263,14 +232,14 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     const request = transaction.executionRequest(context, message, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     });
-    try executor.beginMessageScope(request, .{});
+    try executor.beginObservedMessageScope(request, .{});
     defer executor.closeTransaction();
     const outcome = try executor.executeTransactionRequestPhased(request);
-    _ = try capture.finish();
+    try executor.closeTransactionObserved(&observations);
 
     try std.testing.expectEqual(evmz.executor.TransactionExecutionStage.preparation, outcome.stage);
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, outcome.result.status);
-    try std.testing.expect(recorder.contains(create_address));
+    try std.testing.expect(observations.found);
 }
 
 test "Amsterdam value CALL to new account keeps debited state reservoir" {
@@ -281,9 +250,7 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
         .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH1, 0x01, .PUSH2, 0xc0, 0xc0, .PUSH2, 0x27, 0x10, .CALL,
         .STOP,
     });
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -320,9 +287,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     defer std.testing.allocator.free(input);
     @memset(input, 0);
 
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var sender_account = MemoryAccount.init(std.testing.allocator);
@@ -346,26 +311,24 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
 
 const testTxContext = evmz.t.defaultTxContext;
 
-const AccountAccessRecorder = struct {
-    addresses: [16]Address = undefined,
-    len: usize = 0,
+const AccountObservation = struct {
+    address: Address,
+    found: bool = false,
 
-    fn target(self: *@This()) evmz.executor.capture_context.StateTarget {
-        return .init(self, &.{ .account_access = accountAccess });
-    }
-
-    fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) !void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        if (self.len == self.addresses.len) return error.AccessRecorderFull;
-        self.addresses[self.len] = event.address;
-        self.len += 1;
-    }
-
-    fn contains(self: *const @This(), target_address: Address) bool {
-        for (self.addresses[0..self.len]) |address_value| {
-            if (std.mem.eql(u8, &address_value, &target_address)) return true;
+    pub fn observe(
+        self: *@This(),
+        pending: evmz.state.TrackedState.PendingView,
+    ) !void {
+        const accounts = pending.observations().accounts;
+        var index: u32 = 0;
+        while (index < accounts.len()) : (index += 1) {
+            const fact = accounts.at(index);
+            if (std.mem.eql(u8, &fact.address, &self.address)) {
+                try std.testing.expect(fact.observation.semantic_access);
+                self.found = true;
+                return;
+            }
         }
-        return false;
     }
 };
 

@@ -22,11 +22,11 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
     const log_cost = std.math.mul(i64, 8, size_i64) catch {
+        @branchHint(.unlikely);
         frame.failWithStatus(.out_of_gas);
         return;
     };
-    frame.trackGas(log_cost);
-    if (frame.status != .running) return;
+    if (!frame.trackGas(log_cost)) return;
 
     const data = frame.memory.readBytes(offset_usize, size_usize);
 

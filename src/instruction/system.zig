@@ -2,6 +2,7 @@ const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const std = @import("std");
 
 const addr = evmz.addr;
@@ -48,23 +49,18 @@ pub inline fn revert(frame: *CallFrame) !void {
     frame.status = .revert;
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn bind(comptime spec: ExactSpec) type {
     return struct {
         const Self = @This();
-
-        pub const Protocol = ProtocolType;
-
-        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
-            return Interpreter.For(Protocol).revision(frame);
-        }
 
         pub fn callByOp(frame: *CallFrame, comptime op: Opcode) !void {
             comptime std.debug.assert(op == Opcode.CALL or op == Opcode.STATICCALL or op == Opcode.DELEGATECALL or op == Opcode.CALLCODE);
 
-            const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size = if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
-                const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);
-                break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
-            };
+            const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size =
+                if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
+                    const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);
+                    break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
+                };
             const address = evmz.address.fromWord(address_word);
 
             const in_size_usize = frame.wordToUsizeOrOog(in_size) orelse return;
@@ -76,14 +72,11 @@ pub fn For(comptime ProtocolType: type) type {
                 return error.StaticCallViolation;
             }
 
-            const revision = Self.frameRevision(frame);
-            frame.trackGas(Protocol.call.callBaseGas(revision) - evmz.instruction.For(Protocol).staticGasForFrame(frame, op));
-            if (frame.status != .running) return;
+            if (!frame.trackGas(spec.call.base_gas - evmz.instruction.Instruction(spec).staticGasForFrame(frame, op))) return;
 
-            if (Protocol.call.callColdAccountAccessGas(revision)) |cold_account_access_gas| {
+            if (spec.call.cold_account_access_gas) |cold_account_access_gas| {
                 if (try frame.host.accessAccount(address) == .cold) {
-                    frame.trackGas(cold_account_access_gas);
-                    if (frame.status != .running) return;
+                    if (!frame.trackGas(cold_account_access_gas)) return;
                 }
             }
 
@@ -105,9 +98,8 @@ pub fn For(comptime ProtocolType: type) type {
                 .gas_reservoir = frame.gas_reservoir,
             };
 
-            const value_transfer_gas: i64 = if (value > 0) Protocol.call.callValueTransferGas(revision) else 0;
-            frame.trackGas(value_transfer_gas);
-            if (frame.status != .running) return;
+            const value_transfer_gas: i64 = if (value > 0) spec.call.value_transfer_gas else 0;
+            if (!frame.trackGas(value_transfer_gas)) return;
 
             try frame.traceAccountAccess(address);
 
@@ -115,42 +107,41 @@ pub fn For(comptime ProtocolType: type) type {
 
             if (op == Opcode.CALL) {
                 const account_exists = try frame.host.accountExists(address);
-                const new_account_gas = Protocol.call.callNewAccountGas(revision, .{
+                const new_account_gas = spec.call.newAccountGas(.{
                     .value = value,
                     .account_exists = account_exists,
                 });
-                frame.trackGas(new_account_gas.regular);
-                if (frame.status != .running) return;
+                if (!frame.trackGas(new_account_gas.regular)) return;
                 account_state_gas = new_account_gas.state;
             }
 
-            frame.trackStateGas(account_state_gas);
-            if (frame.status != .running) return;
+            if (!frame.trackStateGas(account_state_gas)) return;
 
             if (try frame.host.accessDelegatedAccount(address)) |delegated_access_status| {
-                const delegated_access_cost = Protocol.call.delegatedAccountAccessGas(revision, delegated_access_status == .cold);
-                frame.trackGas(delegated_access_cost);
-                if (frame.status != .running) return;
+                const delegated_access_cost = spec.call.delegatedAccountAccessGas(delegated_access_status == .cold);
+                if (!frame.trackGas(delegated_access_cost)) return;
             }
 
-            const child_gas = Protocol.call.childGas(revision, .{
+            const child_gas = spec.call.childGas(.{
                 .requested = msg.gas,
                 .available = frame.gas_left,
             });
             if (child_gas.out_of_gas) {
+                @branchHint(.unlikely);
                 frame.failWithStatus(.out_of_gas);
                 return;
             }
             msg.gas = child_gas.gas;
 
             if (value > 0) {
-                const stipend = Protocol.call.callValueStipend(revision);
+                const stipend = spec.call.value_stipend;
                 msg.gas += stipend;
                 frame.gas_left += stipend;
             }
             msg.gas_reservoir = frame.gas_reservoir;
 
             if (frame.msg.depth >= Host.max_call_depth) {
+                @branchHint(.unlikely);
                 msg.precheck_failure = .call_depth_exceeded;
             }
 
@@ -187,9 +178,9 @@ pub fn For(comptime ProtocolType: type) type {
             const size_usize = frame.wordToUsizeOrOog(size) orelse return;
             const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
-            const revision = Self.frameRevision(frame);
-            if (Protocol.create.createInitCodeSizeLimit(revision)) |limit| {
+            if (spec.create.initcode_size_limit) |limit| {
                 if (size_usize > limit) {
+                    @branchHint(.unlikely);
                     frame.failWithStatus(.out_of_gas);
                     return;
                 }
@@ -198,13 +189,12 @@ pub fn For(comptime ProtocolType: type) type {
             if (!try frame.expandMemory(offset_usize, size_usize)) return;
 
             const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
-            const init_code_word_cost = Protocol.create.createInitCodeWordGas(revision, is_create2);
+            const init_code_word_cost = spec.create.initcodeWordGas(is_create2);
             const init_code_cost = std.math.mul(i64, init_code_word_cost, evmz.calcWordSize(i64, size_i64)) catch {
                 frame.failWithStatus(.out_of_gas);
                 return;
             };
-            frame.trackGas(init_code_cost);
-            if (frame.status != .running) return;
+            if (!frame.trackGas(init_code_cost)) return;
 
             const init_code = frame.memory.readBytes(offset_usize, size_usize);
             try frame.replaceReturnData(&.{});
@@ -255,11 +245,10 @@ pub fn For(comptime ProtocolType: type) type {
                 const code_hash = try frame.host.getCodeHash(target);
                 break :blk code_hash != 0 and code_hash != evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
             };
-            const account_state_gas = Protocol.create.createAccountStateGas(revision, .{
+            const account_state_gas = spec.create.accountStateGas(.{
                 .target_alive = target_alive,
             });
-            frame.trackStateGas(account_state_gas);
-            if (frame.status != .running) return;
+            if (!frame.trackStateGas(account_state_gas)) return;
 
             queueCreate(frame, target, value, init_code, account_state_gas, is_create2, null);
         }
@@ -273,7 +262,6 @@ pub fn For(comptime ProtocolType: type) type {
             comptime is_create2: bool,
             precheck_failure: ?evmz.execution.TerminalCause,
         ) void {
-            const revision = Self.frameRevision(frame);
             var msg = Host.Message{
                 .depth = nextDepth(frame.msg.depth),
                 .kind = if (is_create2) .create2 else .create,
@@ -286,11 +274,12 @@ pub fn For(comptime ProtocolType: type) type {
                 .precheck_failure = precheck_failure,
             };
 
-            const child_gas = Protocol.call.childGas(revision, .{
+            const child_gas = spec.call.childGas(.{
                 .requested = msg.gas,
                 .available = frame.gas_left,
             });
             if (child_gas.out_of_gas) {
+                @branchHint(.unlikely);
                 frame.failWithStatus(.out_of_gas);
                 return;
             }
@@ -318,37 +307,54 @@ pub fn For(comptime ProtocolType: type) type {
             const balance = try frame.host.getBalance(frame.msg.recipient);
             const same_address = std.mem.eql(u8, &frame.msg.recipient, &address);
             const transfers_balance = balance > 0 and !same_address;
-            const revision = Self.frameRevision(frame);
-
-            if (Protocol.self_destruct.selfDestructColdAccountAccessGas(revision)) |cold_account_access_cost| {
+            if (spec.self_destruct.cold_account_access_gas) |cold_account_access_cost| {
                 if (try frame.host.accessAccount(address) == .cold) {
-                    frame.trackGas(cold_account_access_cost);
-                    if (frame.status != .running) return;
+                    if (!frame.trackGas(cold_account_access_cost)) return;
                 }
             }
             try frame.traceAccountAccess(address);
 
-            const new_account_gas = Protocol.self_destruct.selfDestructNewAccountGas(
-                revision,
-                .{
-                    .same_address = same_address,
-                    .transfers_balance = transfers_balance,
-                    .account_exists = try frame.host.accountExists(address),
-                },
-            );
-            frame.trackGas(new_account_gas.regular);
-            if (frame.status != .running) return;
-            frame.trackStateGas(new_account_gas.state);
-            if (frame.status != .running) return;
+            const new_account_gas = spec.self_destruct.newAccountGas(.{
+                .same_address = same_address,
+                .transfers_balance = transfers_balance,
+                .account_exists = try frame.host.accountExists(address),
+            });
+            if (!frame.trackGas(new_account_gas.regular)) return;
+            if (!frame.trackStateGas(new_account_gas.state)) return;
             const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
 
             if (should_refund) {
-                frame.gas_refund += Protocol.self_destruct.selfDestructRefundGas(revision);
+                frame.gas_refund += spec.self_destruct.refund_gas;
             }
 
             frame.status = .success;
         }
     };
+}
+
+test "CREATE initcode limit is independent from transaction validation" {
+    const spec = evmz.eth.cancun.extend(.{
+        .transaction = .{ .max_initcode_size = 64 },
+        .create = .{ .initcode_size_limit = .{ .replace = 1 } },
+    });
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+    });
+    defer frame.deinit();
+
+    try frame.frame.stack.push(2);
+    try frame.frame.stack.push(0);
+    try frame.frame.stack.push(0);
+    try bind(spec).create(frame.frame);
+
+    try std.testing.expectEqual(Interpreter.FrameStatus.out_of_gas, frame.frame.status);
 }
 
 test "RETURN zero length ignores oversized offset" {

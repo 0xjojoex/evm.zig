@@ -65,8 +65,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     defer producer_state.deinit();
     try initState(&producer_state);
 
-    var outcome = try block_stf.produceAssumeDecoded(allocator, .{
-        .revision = .amsterdam,
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = producer_state.backend(),
         .transactions = &transactions,
@@ -93,7 +92,6 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
         io,
         allocator,
         .{
-            .revision = .amsterdam,
             .env = .{ .gas_limit = 2_000_000 },
             .state_backend = verifier_state.backend(),
             .transactions = &transactions,

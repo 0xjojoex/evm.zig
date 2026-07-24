@@ -20,7 +20,7 @@ pub const StateReadDomain = struct {
     storage_slots: []const StorageSlot = &.{},
 };
 
-/// Source-neutral, borrowed description of resources useful for execution.
+/// Source-independent, borrowed description of resources useful for execution.
 ///
 /// BAL is one possible producer. Witness manifests and schedulers may produce
 /// or merge plans without changing executor semantics. Future resource kinds
@@ -50,7 +50,7 @@ pub const Preparer = struct {
     }
 };
 
-test "execution resource preparer receives a borrowed source-neutral plan" {
+test "execution resource preparer receives a borrowed source-independent plan" {
     const address = @import("./address.zig");
     const Probe = struct {
         account: Address = [_]u8{0} ** 20,

@@ -1,12 +1,13 @@
-//! Neutral EIP-7702 delegation-indicator codec.
+//! EIP-7702 delegation-indicator mechanism.
 
 const std = @import("std");
 const address = @import("../address.zig");
-const params = @import("../eth/eip/7702.zig");
 
 pub const Address = address.Address;
-pub const delegation_designator = params.delegation_designator;
-pub const delegation_code_len = params.delegation_code_len;
+pub const delegation_designator = [_]u8{ 0xef, 0x01, 0x00 };
+pub const delegation_address_len: usize = 20;
+pub const delegation_code_len: usize = delegation_designator.len + delegation_address_len;
+pub const delegation_indicator_state_bytes: u64 = @intCast(delegation_code_len);
 
 pub const DecodeError = error{
     InvalidDelegationLength,

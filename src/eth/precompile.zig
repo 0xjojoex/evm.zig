@@ -1,101 +1,83 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
-const precompile_runtime = @import("../execution/precompile_runtime.zig");
 const precompile = @import("../precompile.zig");
-const Revision = @import("revision.zig").Revision;
-
-const Address = address.Address;
 
 pub const Entry = precompile.Contract;
 
-/// Canonical Ethereum values for the generic precompile gas vocabulary.
-/// Derived families may copy this table and replace individual semantic keys.
-pub const gas_schedule = precompile.GasSchedule.init(.{
-    .ecrecover = 3_000,
-    .sha256_base = 60,
-    .sha256_word = 12,
-    .ripemd160_base = 600,
-    .ripemd160_word = 120,
-    .identity_base = 15,
-    .identity_word = 3,
-    .modexp_osaka_minimum = 500,
-    .modexp_berlin_minimum = 200,
-    .modexp_berlin_divisor = 3,
-    .modexp_byzantium_divisor = 20,
-    .bn254_add_before_istanbul = 500,
-    .bn254_add_since_istanbul = 150,
-    .bn254_mul_before_istanbul = 40_000,
-    .bn254_mul_since_istanbul = 6_000,
-    .bn254_pairing_base_before_istanbul = 100_000,
-    .bn254_pairing_base_since_istanbul = 45_000,
-    .bn254_pairing_pair_before_istanbul = 80_000,
-    .bn254_pairing_pair_since_istanbul = 34_000,
-    .blake2f_round = 1,
-    .kzg_point_evaluation = 50_000,
-    .bls12_g1add = 375,
-    .bls12_g1msm_multiplication = 12_000,
-    .bls12_g2add = 600,
-    .bls12_g2msm_multiplication = 22_500,
-    .bls12_pairing_base = 37_700,
-    .bls12_pairing_pair = 32_600,
-    .bls12_map_fp_to_g1 = 5_500,
-    .bls12_map_fp2_to_g2 = 23_800,
-    .p256verify = 6_900,
-});
+/// Exact precompile values extend forward with the fork chain. Inactive
+/// contracts may already have values here; `resolve` owns activation.
+pub const frontier_config: precompile.Config = .{
+    .active = active: {
+        var result = [_]bool{false} ** precompile.contract_slots;
+        for ([_]Entry{ .ecrecover, .sha256, .ripemd160, .identity }) |entry| {
+            result[@intFromEnum(entry)] = true;
+        }
+        break :active result;
+    },
+    .gas = precompile.GasSchedule.init(.{
+        .ecrecover = 3_000,
+        .sha256_base = 60,
+        .sha256_word = 12,
+        .ripemd160_base = 600,
+        .ripemd160_word = 120,
+        .identity_base = 15,
+        .identity_word = 3,
+        .modexp_minimum = 0,
+        .modexp_divisor = 20,
+        .bn254_add = 500,
+        .bn254_mul = 40_000,
+        .bn254_pairing_base = 100_000,
+        .bn254_pairing_pair = 80_000,
+        .blake2f_round = 1,
+        .kzg_point_evaluation = 50_000,
+        .bls12_g1add = 375,
+        .bls12_g1msm_multiplication = 12_000,
+        .bls12_g2add = 600,
+        .bls12_g2msm_multiplication = 22_500,
+        .bls12_pairing_base = 37_700,
+        .bls12_pairing_pair = 32_600,
+        .bls12_map_fp_to_g1 = 5_500,
+        .bls12_map_fp2_to_g2 = 23_800,
+        .p256verify = 6_900,
+    }),
+    .modexp_pricing = .eip198,
+    .modexp_max_input_len = null,
+};
 
-pub fn resolve(revision: Revision, target: Address) ?Entry {
-    const contract = precompile.contractFromAddress(target) orelse return null;
-    if (!revision.isImpl(minimumRevision(contract))) return null;
-    return contract;
-}
+pub const byzantium_config: precompile.Config = config: {
+    var result = frontier_config;
+    activate(&result, &.{ .modexp, .bn254_add, .bn254_mul, .bn254_pairing });
+    break :config result;
+};
 
-pub fn active(revision: Revision, target: Address) bool {
-    return resolve(revision, target) != null;
-}
+pub const istanbul_config: precompile.Config = config: {
+    var result = byzantium_config;
+    activate(&result, &.{.blake2f});
+    result.gas.set(.bn254_add, 150);
+    result.gas.set(.bn254_mul, 6_000);
+    result.gas.set(.bn254_pairing_base, 45_000);
+    result.gas.set(.bn254_pairing_pair, 34_000);
+    break :config result;
+};
 
-pub fn execute(
-    revision: Revision,
-    entry: Entry,
-    call: precompile_runtime.PrecompileCall,
-) precompile.Error!precompile_runtime.PrecompileOutcome {
-    return executeWithGasSchedule(revision, entry, call, gas_schedule);
-}
+pub const berlin_config: precompile.Config = config: {
+    var result = istanbul_config;
+    result.gas.set(.modexp_minimum, 200);
+    result.gas.set(.modexp_divisor, 3);
+    result.modexp_pricing = .eip2565;
+    break :config result;
+};
 
-/// Execute the Ethereum catalog with an already resolved gas schedule.
-/// Activation remains the caller's domain decision.
-pub fn executeWithGasSchedule(
-    revision: Revision,
-    entry: Entry,
-    call: precompile_runtime.PrecompileCall,
-    comptime resolved_gas: precompile.GasSchedule,
-) precompile.Error!precompile_runtime.PrecompileOutcome {
-    return .{ .result = try precompile.executeContract(entry, .{
-        .allocator = call.allocator,
-        .revision = revision,
-        .input_data = call.message.input_data,
-        .gas = call.message.gas,
-        .output_buffer = call.output_buffer,
-    }, resolved_gas) };
-}
+pub const cancun_config: precompile.Config = config: {
+    var result = berlin_config;
+    activate(&result, &.{.kzg_point_evaluation});
+    break :config result;
+};
 
-fn minimumRevision(contract: Entry) Revision {
-    return switch (contract) {
-        .ecrecover,
-        .sha256,
-        .ripemd160,
-        .identity,
-        => .frontier,
-
-        .modexp,
-        .bn254_add,
-        .bn254_mul,
-        .bn254_pairing,
-        => .byzantium,
-
-        .blake2f => .istanbul,
-        .kzg_point_evaluation => .cancun,
-
+pub const prague_config: precompile.Config = config: {
+    var result = cancun_config;
+    activate(&result, &.{
         .bls12_g1add,
         .bls12_g1msm,
         .bls12_g2add,
@@ -103,35 +85,62 @@ fn minimumRevision(contract: Entry) Revision {
         .bls12_pairing_check,
         .bls12_map_fp_to_g1,
         .bls12_map_fp2_to_g2,
-        => .prague,
+    });
+    break :config result;
+};
 
-        .p256verify => .osaka,
-    };
+pub const osaka_config: precompile.Config = config: {
+    var result = prague_config;
+    activate(&result, &.{.p256verify});
+    result.gas.set(.modexp_minimum, 500);
+    result.modexp_pricing = .eip7883;
+    result.modexp_max_input_len = 1_024;
+    break :config result;
+};
+
+fn activate(config: *precompile.Config, comptime entries: []const Entry) void {
+    inline for (entries) |entry| config.active[@intFromEnum(entry)] = true;
 }
 
-test "Ethereum owns canonical precompile gas parameters" {
-    try std.testing.expectEqual(@as(i64, 3_000), gas_schedule.get(.ecrecover));
-    try std.testing.expectEqual(@as(i64, 50_000), gas_schedule.get(.kzg_point_evaluation));
-    try std.testing.expectEqual(@as(i64, 6_900), gas_schedule.get(.p256verify));
+pub const Exact = precompile.Exact;
+pub const executeWithConfig = precompile.executeWithConfig;
+
+test "Ethereum exact precompile configs extend resolved values" {
+    try std.testing.expectEqual(@as(i64, 3_000), frontier_config.gas.get(.ecrecover));
+    try std.testing.expectEqual(@as(i64, 500), frontier_config.gas.get(.bn254_add));
+    try std.testing.expectEqual(@as(i64, 150), istanbul_config.gas.get(.bn254_add));
+    try std.testing.expectEqual(precompile.ModexpPricing.eip2565, berlin_config.modexp_pricing);
+    try std.testing.expectEqual(@as(?u256, 1_024), osaka_config.modexp_max_input_len);
+    try std.testing.expectEqual(@as(i64, 6_900), osaka_config.gas.get(.p256verify));
 }
 
-test "precompile activation follows Ethereum revisions" {
-    try std.testing.expectEqual(Entry.ecrecover, resolve(.frontier, Entry.ecrecover.toAddress()).?);
-    try std.testing.expect(resolve(.frontier, Entry.modexp.toAddress()) == null);
-    try std.testing.expectEqual(Entry.modexp, resolve(.byzantium, Entry.modexp.toAddress()).?);
-    try std.testing.expect(resolve(.byzantium, Entry.blake2f.toAddress()) == null);
-    try std.testing.expectEqual(Entry.blake2f, resolve(.istanbul, Entry.blake2f.toAddress()).?);
-    try std.testing.expect(resolve(.shanghai, Entry.kzg_point_evaluation.toAddress()) == null);
-    try std.testing.expectEqual(Entry.kzg_point_evaluation, resolve(.cancun, Entry.kzg_point_evaluation.toAddress()).?);
-    try std.testing.expect(resolve(.cancun, Entry.bls12_g1add.toAddress()) == null);
-    try std.testing.expectEqual(Entry.bls12_g1add, resolve(.prague, Entry.bls12_g1add.toAddress()).?);
-    try std.testing.expect(resolve(.prague, address.addr(0x12)) == null);
-    try std.testing.expect(resolve(.prague, Entry.p256verify.toAddress()) == null);
-    try std.testing.expectEqual(Entry.p256verify, resolve(.osaka, Entry.p256verify.toAddress()).?);
+test "precompile activation extends exact configs" {
+    const Frontier = Exact(frontier_config);
+    const Byzantium = Exact(byzantium_config);
+    const Istanbul = Exact(istanbul_config);
+    const Berlin = Exact(berlin_config);
+    const Cancun = Exact(cancun_config);
+    const Prague = Exact(prague_config);
+    const Osaka = Exact(osaka_config);
+
+    try std.testing.expectEqual(Entry.ecrecover, Frontier.resolve(Entry.ecrecover.toAddress()).?);
+    try std.testing.expect(Frontier.resolve(Entry.modexp.toAddress()) == null);
+    try std.testing.expectEqual(Entry.modexp, Byzantium.resolve(Entry.modexp.toAddress()).?);
+    try std.testing.expect(Byzantium.resolve(Entry.blake2f.toAddress()) == null);
+    try std.testing.expectEqual(Entry.blake2f, Istanbul.resolve(Entry.blake2f.toAddress()).?);
+    try std.testing.expect(Berlin.resolve(Entry.kzg_point_evaluation.toAddress()) == null);
+    try std.testing.expectEqual(Entry.kzg_point_evaluation, Cancun.resolve(Entry.kzg_point_evaluation.toAddress()).?);
+    try std.testing.expect(Cancun.resolve(Entry.bls12_g1add.toAddress()) == null);
+    try std.testing.expectEqual(Entry.bls12_g1add, Prague.resolve(Entry.bls12_g1add.toAddress()).?);
+    try std.testing.expect(Prague.resolve(address.addr(0x12)) == null);
+    try std.testing.expect(Prague.resolve(Entry.p256verify.toAddress()) == null);
+    try std.testing.expectEqual(Entry.p256verify, Osaka.resolve(Entry.p256verify.toAddress()).?);
 }
 
 test "precompile execution applies Ethereum activation before catalog execution" {
-    try std.testing.expectEqual(null, resolve(.frontier, Entry.modexp.toAddress()));
+    const Frontier = Exact(frontier_config);
+    const Byzantium = Exact(byzantium_config);
+    try std.testing.expectEqual(null, Frontier.resolve(Entry.modexp.toAddress()));
 
     var mock_host = @import("../t.zig").MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -144,7 +153,7 @@ test "precompile execution applies Ethereum activation before catalog execution"
         .input_data = &.{},
         .value = 0,
     };
-    const outcome = try execute(.byzantium, .modexp, .{
+    const outcome = try Byzantium.execute(.modexp, .{
         .allocator = std.testing.allocator,
         .host = &host,
         .message = &message,

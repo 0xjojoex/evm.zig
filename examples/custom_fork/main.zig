@@ -1,72 +1,39 @@
+//! Custom-fork showcase: every seam of the exact spec API in one tour.
+//!
+//! A fork is a plain comptime `Spec` value. `extend` patches any subset of
+//! it and `evmz.Vm(spec)` compiles one exact VM per value — no revision
+//! checks survive into execution. Each module demonstrates one seam:
+//!
+//! - `create_limits`: scalar value patches and `OptionalPatch` replacement,
+//!   including removing an optional limit outright.
+//! - `gas_rules`: replacing a semantic `*const fn` policy (calldata pricing).
+//! - `custom_opcode`: instruction-table surgery — a new custom opcode on an
+//!   unassigned byte, a retired opcode, and a repriced builtin.
+//! - `precompiles`: a derived precompile config plus a fully custom
+//!   precompile type owning its own address.
+//!
+//! `spec.block` (system-call hooks) and `spec.valueTransferLog` follow the
+//! same patch pattern; `examples/op_deposit.zig` composes them — together
+//! with a family-owned transaction type — into a complete OP-style fork.
+
 const std = @import("std");
-const evmz = @import("evmz");
 
-const Revision = evmz.eth.Revision;
+const create_limits = @import("create_limits.zig");
+const custom_opcode = @import("custom_opcode.zig");
+const gas_rules = @import("gas_rules.zig");
+const precompiles = @import("precompiles.zig");
 
-const CustomEvm = evmz.eth.extend(.{
-    .support = .at(.cancun),
-    .execution = .{
-        .name = "custom-fork",
-        .create = .{
-            .createCodeSizeLimit = createCodeSizeLimit,
-            .createInitCodeSizeLimit = createInitCodeSizeLimit,
-        },
-    },
-    .transaction = .{
-        .maxInitcodeSize = maxInitcodeSize,
-        .transactionWarmsCoinbase = transactionWarmsCoinbase,
-    },
-    .settlement = .{
-        .gasRefundCapDivisor = gasRefundCapDivisor,
-    },
-    .authorization = .{
-        .warmsDelegatedTarget = warmsDelegatedTarget,
-    },
-});
-const CustomExecutionProtocol = CustomEvm.ExecutionProtocol;
-const CustomTransactionProtocol = CustomEvm.TransactionProtocol;
-
-fn warmsDelegatedTarget(revision: Revision) bool {
-    return revision.isImpl(.prague);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    try create_limits.run(allocator);
+    try gas_rules.run(allocator);
+    try custom_opcode.run(allocator);
+    try precompiles.run(allocator);
 }
 
-fn maxInitcodeSize(revision: Revision) usize {
-    if (!revision.isImpl(.shanghai)) return std.math.maxInt(usize);
-    return 0x10000;
-}
-
-fn transactionWarmsCoinbase(revision: Revision) bool {
-    return revision.isImpl(.london);
-}
-
-fn gasRefundCapDivisor(revision: Revision) u64 {
-    if (!revision.isImpl(.london)) return 2;
-    return 4;
-}
-
-fn createCodeSizeLimit(revision: Revision) ?usize {
-    if (!revision.isImpl(.spurious_dragon)) return null;
-    return 0x8000;
-}
-
-fn createInitCodeSizeLimit(revision: Revision) ?usize {
-    if (!revision.isImpl(.shanghai)) return null;
-    return 0x10000;
-}
-
-comptime {
-    if (CustomExecutionProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) @compileError("custom create limit mismatch");
-    if (CustomTransactionProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) @compileError("custom transaction limit mismatch");
-    if (CustomTransactionProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) @compileError("custom settlement mismatch");
-    if (!CustomTransactionProtocol.authorization.warmsDelegatedTarget(.prague)) @compileError("custom authorization mismatch");
-    if (!CustomTransactionProtocol.transaction.transactionWarmsCoinbase(.london)) @compileError("custom transaction warming mismatch");
-}
-
-pub fn main(_: std.process.Init) !void {
-    if (CustomExecutionProtocol.create.createCodeSizeLimit(.cancun) != 0x8000) return error.CustomLimitMismatch;
-    if (CustomTransactionProtocol.transaction.maxInitcodeSize(.cancun) != 0x10000) return error.CustomTransactionLimitMismatch;
-    if (CustomTransactionProtocol.settlement.gasRefundCapDivisor(.cancun) != 4) return error.CustomSettlementMismatch;
-    if (!CustomTransactionProtocol.authorization.warmsDelegatedTarget(.prague)) return error.CustomAuthorizationMismatch;
-    if (!CustomTransactionProtocol.transaction.transactionWarmsCoinbase(.london)) return error.CustomTransactionWarmingMismatch;
-    std.debug.print("custom-fork: code size limit {d}\n", .{CustomExecutionProtocol.create.createCodeSizeLimit(.cancun).?});
+test {
+    _ = create_limits;
+    _ = custom_opcode;
+    _ = gas_rules;
+    _ = precompiles;
 }

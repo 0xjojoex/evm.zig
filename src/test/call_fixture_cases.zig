@@ -1,6 +1,6 @@
 //! Compact semantic inputs for call-capture regression and differential runs.
 //!
-//! These are programs and neutral expectations, not captured client output.
+//! These are programs and client-independent expectations, not captured output.
 
 pub const sender = "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b";
 pub const sender_secret_key = "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8";

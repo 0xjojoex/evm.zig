@@ -2,22 +2,23 @@
 
 const std = @import("std");
 
-const Changeset = @import("Changeset.zig");
 const Committer = @import("Committer.zig");
 const Reader = @import("Reader.zig");
+const TrackedState = @import("TrackedState.zig");
 const WitnessStateReader = @import("WitnessStateReader.zig");
 const trie = @import("../eth/trie.zig");
+const ChangesView = TrackedState.ChangesView;
 
 pub const RootProvider = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        afterChangeset: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, changeset: *const Changeset) anyerror![32]u8,
+        afterChanges: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, changes: ChangesView) anyerror![32]u8,
     };
 
-    pub fn afterChangeset(self: RootProvider, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
-        return self.vtable.afterChangeset(self.ptr, allocator, changeset);
+    pub fn afterChanges(self: RootProvider, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
+        return self.vtable.afterChanges(self.ptr, allocator, changes);
     }
 };
 
@@ -65,13 +66,12 @@ pub const Backend = union(enum) {
         };
     }
 
-    pub fn stateRootAfterChangeset(self: *Backend, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
+    pub fn stateRootAfterChanges(self: *Backend, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
         return switch (self.*) {
-            .witness => |witness| trie.stateRootAfterChangesetIndexed(
+            .witness => |witness| witnessRootAfterChanges(
                 allocator,
-                witness.state_root,
-                witness.indexed,
-                changeset,
+                witness,
+                changes,
             ) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.ResourceLimitExceeded => error.ResourceLimitExceeded,
@@ -94,17 +94,32 @@ pub const Backend = union(enum) {
                 => error.InvalidWitness,
                 else => err,
             },
-            .external => |external| external.root_provider.afterChangeset(allocator, changeset),
+            .external => |external| external.root_provider.afterChanges(allocator, changes),
         };
     }
 
-    pub fn commit(self: *Backend, changeset: *const Changeset) !void {
+    pub fn commit(self: *Backend, changes: ChangesView) !void {
         switch (self.*) {
             .witness => {},
-            .external => |external| if (external.committer) |committer| try committer.commit(changeset),
+            .external => |external| if (external.committer) |committer| try committer.commit(changes),
         }
     }
 };
+
+fn witnessRootAfterChanges(
+    allocator: std.mem.Allocator,
+    witness: WitnessStateReader,
+    changes: ChangesView,
+) ![32]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    return trie.stateRootAfterChangesIndexed(
+        arena.allocator(),
+        witness.state_root,
+        witness.indexed,
+        changes,
+    );
+}
 
 test "witness backend releases its owned node index" {
     const nodes = [_][]const u8{"encoded witness node"};
@@ -115,4 +130,35 @@ test "witness backend releases its owned node index" {
         &.{},
     );
     backend.deinit();
+}
+
+test "witness backend derives root directly from tracked changes" {
+    const address = @import("../address.zig");
+    var state = TrackedState.init(std.testing.allocator);
+    defer state.deinit();
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    try state.setBalance(address.addr(1), 1);
+    _ = try state.setStorage(address.addr(1), 2, 3);
+    state.closeScope();
+    state.seal(attempt);
+    state.retain(attempt);
+    const changes = state.acceptedView().changes();
+
+    var backend = try Backend.fromWitness(
+        std.testing.allocator,
+        trie.empty_root_hash,
+        &.{},
+        &.{},
+    );
+    defer backend.deinit();
+
+    const actual = try backend.stateRootAfterChanges(std.testing.allocator, changes);
+    const expected = try trie.stateRootAfterChanges(
+        std.testing.allocator,
+        trie.empty_root_hash,
+        &.{},
+        changes,
+    );
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
 }

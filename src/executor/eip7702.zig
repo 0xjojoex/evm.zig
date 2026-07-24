@@ -1,17 +1,16 @@
 //! EIP-7702 runtime helpers and authorization-signature validation.
 //!
-//! This is the *behavior* half of EIP-7702, distinct from `eth/eip/7702.zig`,
-//! which owns the *parameter table* (magic byte, gas costs, prefix, lengths).
-//! The neutral delegation codec lives under `code/`; signature behavior stays
-//! here in the executor layer.
+//! Delegation bytes live under `code/`; authorization costs and signing
+//! parameters live under `transaction/`. Signature behavior stays here in the
+//! executor layer.
 const std = @import("std");
 const address = @import("../address.zig");
 const delegation = @import("../code/eip7702.zig");
 
 const Address = address.Address;
-/// Delegation indicator prefix (`0xef0100`); re-exported from the eth table.
+/// Delegation indicator prefix (`0xef0100`).
 pub const delegation_designator = delegation.delegation_designator;
-/// Byte length of a full delegation indicator; re-exported from the eth table.
+/// Byte length of a full delegation indicator.
 pub const delegation_code_len = delegation.delegation_code_len;
 
 /// secp256k1 group order `n`; upper bound for a valid signature `r`/`s` scalar.

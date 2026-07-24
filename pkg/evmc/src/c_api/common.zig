@@ -5,9 +5,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 
 comptime {
-    if (evmc.EVMC_ABI_VERSION != 18) {
-        @compileError("EVMC ABI changed; update the evmz EVMC adapter");
-    }
+    std.debug.assert(evmc.EVMC_ABI_VERSION == 18);
 }
 
 pub fn toEvmcAddress(addr: ?evmz.Address) evmc.evmc_address {
@@ -24,7 +22,7 @@ pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
     return std.mem.readInt(u256, &b.bytes, .big);
 }
 
-pub const max_blob_hashes: usize = @intCast(evmz.Evm.transaction_policy.transaction.blobSchedule(.amsterdam).?.max);
+pub const max_blob_hashes: usize = @intCast(evmz.eth.amsterdam.transaction.blob_schedule.?.max);
 
 pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
     var result = std.mem.zeroes(evmc.evmc_bytes32);

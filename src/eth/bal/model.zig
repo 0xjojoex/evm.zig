@@ -320,7 +320,7 @@ pub fn decodeWithBudget(
     return .{ .accounts = @constCast(accounts) };
 }
 
-/// Finite fallback for callers without protocol context.
+/// Finite fallback for callers without exact spec context.
 fn inputDecodeLimits(encoded_len: usize) rlp.Limits {
     return .{
         .max_depth = max_rlp_depth,

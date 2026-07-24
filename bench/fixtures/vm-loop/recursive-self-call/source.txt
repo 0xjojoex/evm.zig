@@ -1,0 +1,4 @@
+handrolled executor-only fixture: recursively CALL self until gas exhaustion, then unwind
+host: mock
+runtime bytes: 10
+purpose: deep frames with empty suspended parent stacks

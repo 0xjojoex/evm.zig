@@ -14,9 +14,7 @@
 //! into block execution would reject blocks the network considers valid.
 
 const std = @import("std");
-const definition_support = @import("../protocol/support.zig");
 const rlp = @import("rlp");
-const EthRevision = @import("../eth/revision.zig").Revision;
 const eip7702 = @import("../executor/eip7702.zig");
 const tx = @import("./types.zig");
 const tx_type_id = @import("./type_id.zig");
@@ -57,26 +55,22 @@ pub fn decodeEnvelope(bytes: []const u8) !TransactionEnvelope {
     return error.InvalidTransactionEnvelope;
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn Exact(comptime transaction_spec: anytype) type {
     return struct {
         const Self = @This();
-        const transaction = ProtocolType.transaction;
 
-        pub const Protocol = ProtocolType;
-
-        pub fn classifyRawTransaction(revision: Protocol.Revision, bytes: []const u8) ?RawValidationError {
-            definition_support.assertRevisionSupported(Protocol, revision);
+        pub fn classifyRawTransaction(bytes: []const u8) ?RawValidationError {
             const envelope = decodeEnvelope(bytes) catch return .type_4_invalid_authorization_format;
             return switch (envelope) {
                 .legacy => null,
-                .typed => |typed| Self.validateTypedTransaction(revision, typed),
+                .typed => |typed| Self.validateTypedTransaction(typed),
             };
         }
 
-        fn validateTypedTransaction(revision: Protocol.Revision, typed: TypedEnvelope) ?RawValidationError {
+        fn validateTypedTransaction(typed: TypedEnvelope) ?RawValidationError {
             return switch (typed.type_id) {
                 set_code_transaction_type => {
-                    Self.validateSetCodeTransaction(revision, typed.payload) catch |err| return switch (err) {
+                    Self.validateSetCodeTransaction(typed.payload) catch |err| return switch (err) {
                         error.Type4PreFork => .type_4_tx_pre_fork,
                         error.EmptyAuthorizationList => .type_4_empty_authorization_list,
                         error.InvalidAuthorizationFormat => .type_4_invalid_authorization_format,
@@ -89,8 +83,8 @@ pub fn For(comptime ProtocolType: type) type {
             };
         }
 
-        fn validateSetCodeTransaction(revision: Protocol.Revision, payload: []const u8) DecodeError!void {
-            if (!transaction.kindActive(revision, tx.TxKind.set_code)) return error.Type4PreFork;
+        fn validateSetCodeTransaction(payload: []const u8) DecodeError!void {
+            if (!transaction_spec.active_kinds.contains(.set_code)) return error.Type4PreFork;
 
             validateSetCodePayload(payload) catch |err| return switch (err) {
                 error.EmptyAuthorizationList => error.EmptyAuthorizationList,
@@ -191,36 +185,29 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
 }
 
 test "set-code transaction rejects empty authorization list" {
-    const Ethereum = @import("../eth.zig").Protocol.TransactionProtocol;
+    const eth = @import("../eth.zig");
     const hex = "04f86401808007830186a09400000000000000000000000000000000000000008080c0c001a04319a2e8066a9beedd85b227bf40cdecfb6134e6c1254f1e680895bc3131df31a059efad54e662f062d9af60acca08efb1d3d312742e381a600aac7c7989f892cc";
     var bytes: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, hex);
     try std.testing.expectEqual(
         RawValidationError.type_4_empty_authorization_list,
-        For(Ethereum).classifyRawTransaction(.prague, &bytes).?,
+        Exact(eth.prague.transaction).classifyRawTransaction(&bytes).?,
     );
 }
 
 test "raw transaction validation uses comptime transaction kind policy" {
-    const Ethereum = @import("../eth.zig").Protocol.TransactionProtocol;
-    const EarlySetCodeProtocol = struct {
-        pub const Revision = EthRevision;
-
-        pub const transaction = struct {
-            pub fn kindActive(revision: Revision, kind: tx.TxKind) bool {
-                _ = revision;
-                return kind == .set_code;
-            }
-        };
+    const eth = @import("../eth.zig");
+    const EarlySetCode = struct {
+        pub const active_kinds = std.EnumSet(tx.TxKind).initMany(&.{.set_code});
     };
     const malformed_set_code = [_]u8{ 0x04, 0xc0 };
 
     try std.testing.expectEqual(
         RawValidationError.type_4_tx_pre_fork,
-        For(Ethereum).classifyRawTransaction(.cancun, &malformed_set_code).?,
+        Exact(eth.cancun.transaction).classifyRawTransaction(&malformed_set_code).?,
     );
     try std.testing.expectEqual(
         RawValidationError.type_4_invalid_authorization_format,
-        For(EarlySetCodeProtocol).classifyRawTransaction(.cancun, &malformed_set_code).?,
+        Exact(EarlySetCode).classifyRawTransaction(&malformed_set_code).?,
     );
 }

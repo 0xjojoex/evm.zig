@@ -2,11 +2,9 @@ const std = @import("std");
 
 const address = @import("../address.zig");
 const Address = address.Address;
-const definition = @import("../definition.zig");
-const definition_support = @import("../protocol/support.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const tx_blob = @import("blob.zig");
 const tx_gas = @import("gas.zig");
-const EthRevision = @import("../eth/revision.zig").Revision;
 
 pub const FeeInput = struct {
     gas_price: u256,
@@ -15,11 +13,10 @@ pub const FeeInput = struct {
     max_priority_fee_per_gas: ?u256 = null,
 };
 
-/// Engine-owned Ethereum-style settlement plan used by Definition-backed VMs.
+/// Engine-owned Ethereum-style settlement plan used by exact VMs.
 /// Representation-changing families keep distinct fee plans in their STF and
 /// compose executor lifecycle/state primitives directly.
 pub const DefaultPlan = struct {
-    revision_id: definition_support.RevisionId,
     payer: ?Address = null,
     gas_limit: u64,
     intrinsic_gas: u64,
@@ -109,7 +106,7 @@ pub const ResultGas = struct {
     block: BlockGas = .{},
 };
 
-/// Engine-owned settlement costs for the Definition-backed transaction shell.
+/// Engine-owned settlement costs for the exact transaction shell.
 pub const DefaultCosts = struct {
     gas: ResultGas,
     /// Amount returned to the payer for unused gas.
@@ -124,48 +121,23 @@ pub const Precharge = struct {
     minimum_balance: u256 = 0,
 };
 
-/// Type-bearing settlement values for the Definition-backed transaction shell.
-/// Definition value hooks live separately on `Protocol.settlement`.
+/// Type-bearing settlement values for the exact transaction shell.
+/// Exact values live separately on `Spec.settlement`.
 pub const Default = struct {
     pub const Plan = DefaultPlan;
     pub const Costs = DefaultCosts;
 };
 
-const EthereumSettlementProtocol = struct {
-    pub const Revision = EthRevision;
-
-    pub const settlement = struct {
-        pub fn baseFeeActive(revision: Revision) bool {
-            return revision.isImpl(.london);
-        }
-
-        pub fn gasRefundCapDivisor(revision: Revision) u64 {
-            return if (revision.isImpl(.london)) 5 else 2;
-        }
-
-        pub fn usesStateGasAccounting(revision: Revision) bool {
-            return revision.isImpl(.amsterdam);
-        }
-        pub fn appliesCalldataFloorToBlockRegularGas(revision: Revision) bool {
-            return revision.isImpl(.amsterdam);
-        }
-    };
-};
-
-/// Settlement planner borrowing one immutable transaction-policy snapshot.
-pub fn Runtime(
-    comptime ProtocolType: type,
-    comptime TransactionPolicy: type,
-) type {
+/// Stateless settlement planner closed over one exact VM specification.
+pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
-        pub const Protocol = ProtocolType;
+        pub const specification = spec;
         const Self = @This();
+        const settlement = spec.settlement;
+        const transaction = spec.transaction;
 
-        policy: *const TransactionPolicy,
-
-        pub fn effectivePriorityFee(self: Self, revision: Protocol.Revision, input: FeeInput) u256 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            if (!self.policy.settlement.baseFeeActive(revision)) return input.gas_price;
+        pub fn effectivePriorityFee(_: Self, input: FeeInput) u256 {
+            if (!settlement.base_fee_active) return input.gas_price;
             if (input.max_fee_per_gas) |max_fee| {
                 const max_priority_fee = input.max_priority_fee_per_gas orelse 0;
                 if (max_fee <= input.base_fee) return 0;
@@ -175,10 +147,9 @@ pub fn Runtime(
             return input.gas_price - input.base_fee;
         }
 
-        pub fn defaultPlanFromGasPlan(self: Self, revision: Protocol.Revision, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
-            const upfront_debit = prechargeCost(self.policy.transaction.blobSchedule, revision, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
+        pub fn defaultPlanFromGasPlan(_: Self, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
+            const upfront_debit = prechargeCost(transaction.blob_schedule, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
             return .{
-                .revision_id = definition_support.revisionIdForProtocol(Protocol, revision),
                 .payer = fees.payer,
                 .gas_limit = gas_limit,
                 .intrinsic_gas = plan.intrinsic_gas,
@@ -189,10 +160,6 @@ pub fn Runtime(
                 .upfront_debit = upfront_debit,
                 .minimum_balance = std.math.add(u256, upfront_debit, fees.value) catch std.math.maxInt(u256),
             };
-        }
-
-        pub fn planRevisionId(_: Self, plan: DefaultPlan) definition_support.RevisionId {
-            return plan.revision_id;
         }
 
         pub fn planPrecharge(_: Self, plan: DefaultPlan) Precharge {
@@ -211,58 +178,32 @@ pub fn Runtime(
             return costs.gas;
         }
 
-        pub fn defaultCosts(self: Self, settlement: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
-            const revision = definition_support.decodeRevisionForProtocol(Protocol, settlement.revision_id);
+        pub fn defaultCosts(_: Self, plan: DefaultPlan, result: ExecutionGasResult) !DefaultCosts {
             return calculateDefaultCosts(
-                settlement,
+                plan,
                 result,
-                self.policy.settlement.usesStateGasAccounting(revision),
-                self.policy.settlement.gasRefundCapDivisor(revision),
-                self.policy.settlement.appliesCalldataFloorToBlockRegularGas(revision),
+                settlement.uses_state_gas_accounting,
+                settlement.gas_refund_cap_divisor,
+                settlement.applies_calldata_floor_to_block_regular_gas,
             );
         }
     };
 }
 
-fn StaticPolicy(comptime Protocol: type) type {
-    return struct {
-        settlement: definition.SettlementConfig(Protocol.Revision),
-        transaction: definition.TransactionPolicyConfig(Protocol.Revision),
-    };
+fn runtime(comptime spec: ExactSpec) Runtime(spec) {
+    return .{};
 }
 
-/// Static-policy adapter for protocol-level helpers and tests. Settlement
-/// behavior remains implemented only by `Runtime`.
-pub fn For(comptime ProtocolType: type) Runtime(ProtocolType, StaticPolicy(ProtocolType)) {
-    const Policy = StaticPolicy(ProtocolType);
-    const Values = struct {
-        const policy: Policy = .{
-            .settlement = definition.projectSettlementConfig(
-                ProtocolType.Revision,
-                ProtocolType.settlement,
-            ),
-            .transaction = definition.projectTransactionConfig(
-                ProtocolType.Revision,
-                if (@hasDecl(ProtocolType, "transaction"))
-                    ProtocolType.transaction
-                else
-                    definition.TransactionConfig(ProtocolType.Revision).default,
-            ),
-        };
-    };
-    return .{ .policy = &Values.policy };
-}
-
-fn prechargeCost(blob_schedule_for_revision: anytype, revision: anytype, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn prechargeCost(spec_schedule: ?tx_blob.BlobSchedule, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
     const gas_cost = checkedGasCost(gas_limit, gas_price) catch return null;
-    const blob_gas = blobGasForCount(blob_schedule_for_revision, revision, blob_count, blob_schedule) orelse return null;
+    const blob_gas = blobGasForCount(spec_schedule, blob_count, blob_schedule) orelse return null;
     const blob_cost = std.math.mul(u256, blob_gas, blob_base_fee) catch return null;
     return std.math.add(u256, gas_cost, blob_cost) catch null;
 }
 
-fn blobGasForCount(blob_schedule_for_revision: anytype, revision: anytype, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn blobGasForCount(spec_schedule: ?tx_blob.BlobSchedule, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = blob_schedule orelse blob_schedule_for_revision(revision) orelse return null;
+    const schedule = blob_schedule orelse spec_schedule orelse return null;
     return tx_blob.blobGasForSchedule(schedule, blob_count);
 }
 
@@ -325,24 +266,28 @@ fn positiveGas(gas: i64) u64 {
 }
 
 test "effective priority fee follows legacy and dynamic fee policy" {
-    try std.testing.expectEqual(@as(u256, 7), For(EthereumSettlementProtocol).effectivePriorityFee(.berlin, .{
+    const eth = @import("../eth.zig");
+    const Berlin = exactEthereum(eth.berlin);
+    const London = exactEthereum(eth.london);
+
+    try std.testing.expectEqual(@as(u256, 7), runtime(Berlin).effectivePriorityFee(.{
         .gas_price = 7,
     }));
-    try std.testing.expectEqual(@as(u256, 0), For(EthereumSettlementProtocol).effectivePriorityFee(.london, .{
+    try std.testing.expectEqual(@as(u256, 0), runtime(London).effectivePriorityFee(.{
         .gas_price = 9,
         .base_fee = 10,
     }));
-    try std.testing.expectEqual(@as(u256, 2), For(EthereumSettlementProtocol).effectivePriorityFee(.london, .{
+    try std.testing.expectEqual(@as(u256, 2), runtime(London).effectivePriorityFee(.{
         .gas_price = 12,
         .base_fee = 10,
     }));
-    try std.testing.expectEqual(@as(u256, 3), For(EthereumSettlementProtocol).effectivePriorityFee(.london, .{
+    try std.testing.expectEqual(@as(u256, 3), runtime(London).effectivePriorityFee(.{
         .gas_price = 0,
         .base_fee = 10,
         .max_fee_per_gas = 20,
         .max_priority_fee_per_gas = 3,
     }));
-    try std.testing.expectEqual(@as(u256, 0), For(EthereumSettlementProtocol).effectivePriorityFee(.london, .{
+    try std.testing.expectEqual(@as(u256, 0), runtime(London).effectivePriorityFee(.{
         .gas_price = 0,
         .base_fee = 20,
         .max_fee_per_gas = 20,
@@ -350,28 +295,8 @@ test "effective priority fee follows legacy and dynamic fee policy" {
     }));
 }
 
-test "effective priority fee uses comptime base fee policy" {
-    const CustomRevision = enum { custom };
-    const LegacyFeeProtocol = struct {
-        pub const Revision = CustomRevision;
-
-        pub const settlement = struct {
-            pub fn baseFeeActive(revision: Revision) bool {
-                _ = revision;
-                return false;
-            }
-        };
-    };
-    const BaseFeeProtocol = struct {
-        pub const Revision = CustomRevision;
-
-        pub const settlement = struct {
-            pub fn baseFeeActive(revision: Revision) bool {
-                _ = revision;
-                return true;
-            }
-        };
-    };
+test "effective priority fee uses exact spec base fee policy" {
+    const eth = @import("../eth.zig");
     const input = FeeInput{
         .gas_price = 12,
         .base_fee = 10,
@@ -379,14 +304,13 @@ test "effective priority fee uses comptime base fee policy" {
         .max_priority_fee_per_gas = 3,
     };
 
-    try std.testing.expectEqual(@as(u256, 12), For(LegacyFeeProtocol).effectivePriorityFee(.custom, input));
-    try std.testing.expectEqual(@as(u256, 3), For(BaseFeeProtocol).effectivePriorityFee(.custom, input));
+    try std.testing.expectEqual(@as(u256, 12), runtime(eth.berlin).effectivePriorityFee(input));
+    try std.testing.expectEqual(@as(u256, 3), runtime(eth.london).effectivePriorityFee(input));
 }
 
 test "settlement costs cap gas refund by fork" {
     const coinbase = address.addr(0xbeef);
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.london),
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .floor_gas = 0,
@@ -394,7 +318,8 @@ test "settlement costs cap gas refund by fork" {
         .priority_fee = 2,
         .fee_recipient = coinbase,
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.london)).defaultCosts(settlement, .{
         .gas_left = 40,
         .gas_refund = 100,
         .gas_reservoir = 0,
@@ -409,24 +334,13 @@ test "settlement costs cap gas refund by fork" {
 }
 
 test "settlement costs use runtime gas accounting policy" {
-    const CustomRevision = enum(u8) { custom };
-    const CustomSettlementProtocol = struct {
-        pub const Revision = CustomRevision;
-
-        pub const settlement = struct {
-            pub fn gasRefundCapDivisor(revision: Revision) u64 {
-                _ = revision;
-                return 4;
-            }
-
-            pub fn usesStateGasAccounting(revision: Revision) bool {
-                _ = revision;
-                return true;
-            }
-        };
-    };
+    const eth = @import("../eth.zig");
+    const custom_spec = eth.amsterdam.extend(.{ .settlement = .{
+        .gas_refund_cap_divisor = 4,
+        .uses_state_gas_accounting = true,
+        .applies_calldata_floor_to_block_regular_gas = false,
+    } });
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(CustomRevision.custom),
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .floor_gas = 30,
@@ -434,7 +348,7 @@ test "settlement costs use runtime gas accounting policy" {
         .priority_fee = 2,
         .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(CustomSettlementProtocol).defaultCosts(settlement, .{
+    const costs = try runtime(custom_spec).defaultCosts(settlement, .{
         .gas_left = 20,
         .gas_refund = 100,
         .gas_reservoir = 30,
@@ -451,37 +365,18 @@ test "settlement costs use runtime gas accounting policy" {
 }
 
 test "settlement policy selects calldata floor contribution to dimensional block gas" {
-    const CustomRevision = enum(u8) { custom };
-    const WithoutBlockFloor = struct {
-        pub const Revision = CustomRevision;
-        pub const settlement = struct {
-            pub fn gasRefundCapDivisor(_: Revision) u64 {
-                return 5;
-            }
-            pub fn usesStateGasAccounting(_: Revision) bool {
-                return true;
-            }
-            pub fn appliesCalldataFloorToBlockRegularGas(_: Revision) bool {
-                return false;
-            }
-        };
-    };
-    const WithBlockFloor = struct {
-        pub const Revision = CustomRevision;
-        pub const settlement = struct {
-            pub fn gasRefundCapDivisor(_: Revision) u64 {
-                return 5;
-            }
-            pub fn usesStateGasAccounting(_: Revision) bool {
-                return true;
-            }
-            pub fn appliesCalldataFloorToBlockRegularGas(_: Revision) bool {
-                return true;
-            }
-        };
-    };
+    const eth = @import("../eth.zig");
+    const without_block_floor = eth.amsterdam.extend(.{ .settlement = .{
+        .gas_refund_cap_divisor = 5,
+        .uses_state_gas_accounting = true,
+        .applies_calldata_floor_to_block_regular_gas = false,
+    } });
+    const with_block_floor = eth.amsterdam.extend(.{ .settlement = .{
+        .gas_refund_cap_divisor = 5,
+        .uses_state_gas_accounting = true,
+        .applies_calldata_floor_to_block_regular_gas = true,
+    } });
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(CustomRevision.custom),
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .floor_gas = 30,
@@ -496,8 +391,8 @@ test "settlement policy selects calldata floor contribution to dimensional block
         .state_gas_spent = 0,
     };
 
-    const without_floor = try For(WithoutBlockFloor).defaultCosts(settlement, result);
-    const with_floor = try For(WithBlockFloor).defaultCosts(settlement, result);
+    const without_floor = try runtime(without_block_floor).defaultCosts(settlement, result);
+    const with_floor = try runtime(with_block_floor).defaultCosts(settlement, result);
 
     try std.testing.expectEqual(@as(u64, 30), without_floor.gas.used);
     try std.testing.expectEqual(@as(u64, 20), without_floor.gas.block.regular);
@@ -508,7 +403,6 @@ test "settlement costs enforce Prague calldata floor after refunds" {
     // EIP-7623 charges the calldata floor after execution gas refunds.
     const coinbase = address.addr(0xbeef);
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.prague),
         .gas_limit = 21_100,
         .intrinsic_gas = 21_016,
         .floor_gas = 21_040,
@@ -516,7 +410,8 @@ test "settlement costs enforce Prague calldata floor after refunds" {
         .priority_fee = 0,
         .fee_recipient = coinbase,
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.prague)).defaultCosts(settlement, .{
         .gas_left = 84,
         .gas_refund = 0,
         .gas_reservoir = 0,
@@ -542,7 +437,6 @@ test "Amsterdam block gas sums dimensions before selecting the header total" {
 
 test "Amsterdam block gas keeps receipt floor and state-dominant header gas separate" {
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 200,
         .intrinsic_gas = 20,
         .floor_gas = 30,
@@ -550,7 +444,8 @@ test "Amsterdam block gas keeps receipt floor and state-dominant header gas sepa
         .priority_fee = 2,
         .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
         .gas_left = 20,
         .gas_refund = 0,
         .gas_reservoir = 100,
@@ -565,7 +460,6 @@ test "Amsterdam block gas keeps receipt floor and state-dominant header gas sepa
 
 test "Amsterdam block gas accounting excludes refunds" {
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .floor_gas = 0,
@@ -573,7 +467,8 @@ test "Amsterdam block gas accounting excludes refunds" {
         .priority_fee = 2,
         .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
         .gas_left = 40,
         .gas_refund = 100,
         .gas_reservoir = 0,
@@ -590,7 +485,6 @@ test "Amsterdam block gas accounting excludes refunds" {
 test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
     const eth_tx = @import("../eth/transaction.zig");
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 120_000_000,
         .intrinsic_gas = 21_000,
         .floor_gas = 21_000,
@@ -598,7 +492,8 @@ test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
         .priority_fee = 3,
         .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
         .gas_left = 0,
         .gas_refund = 0,
         .gas_reservoir = 120_000_000 - eth_tx.max_transaction_gas_limit,
@@ -615,7 +510,6 @@ test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
 test "Amsterdam failed create refills state gas before floor charge" {
     const eth_tx = @import("../eth/transaction.zig");
     const settlement = DefaultPlan{
-        .revision_id = definition_support.revisionId(EthRevision.amsterdam),
         .gas_limit = 282_798,
         .intrinsic_gas = 88_198,
         .floor_gas = 282_776,
@@ -623,7 +517,8 @@ test "Amsterdam failed create refills state gas before floor charge" {
         .priority_fee = 3,
         .fee_recipient = address.addr(0xbeef),
     };
-    const costs = try For(EthereumSettlementProtocol).defaultCosts(settlement, .{
+    const eth = @import("../eth.zig");
+    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
         .gas_left = 0,
         .gas_refund = 0,
         .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
@@ -637,4 +532,8 @@ test "Amsterdam failed create refills state gas before floor charge" {
     try std.testing.expectEqual(@as(u64, 22), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 220), costs.payer_refund);
     try std.testing.expectEqual(@as(u256, 848_328), costs.fee_payment);
+}
+
+fn exactEthereum(comptime spec: ExactSpec) ExactSpec {
+    return spec;
 }

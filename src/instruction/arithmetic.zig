@@ -1,9 +1,10 @@
-const Interpreter = @import("../Interpreter.zig");
+const interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const evmz = @import("../evm.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const uint256 = @import("../uint256.zig");
 
-const CallFrame = Interpreter.CallFrame;
+const CallFrame = interpreter.CallFrame;
 
 pub fn add(frame: *CallFrame) !void {
     const a, const b = try frame.stack.popN(2);
@@ -57,21 +58,13 @@ pub fn mulmod(frame: *CallFrame) !void {
     frame.stack.pushUnchecked(uint256.mulMod(a, b, c));
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn bind(comptime spec: ExactSpec) type {
     return struct {
-        const Self = @This();
-
-        pub const Protocol = ProtocolType;
-
-        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
-            return Interpreter.For(Protocol).revision(frame);
-        }
-
         pub fn exp(frame: *CallFrame) !void {
             const a, const exponent = try frame.stack.popN(2);
 
             const exponent_byte_size = countSignificantBytesSize(exponent);
-            frame.trackGas(Protocol.Instruction.expByteGas(Self.frameRevision(frame)) * exponent_byte_size);
+            if (!frame.trackGas(spec.instruction.exp_byte_gas * exponent_byte_size)) return;
 
             const result = wrapExp(a, exponent);
             frame.stack.pushUnchecked(result);
@@ -104,8 +97,7 @@ pub fn keccak256(frame: *CallFrame) !void {
     if (!try frame.expandMemory(offset, size)) return;
     const min_word_size = (size + 31) / 32;
     const gas_for_word: i64 = @intCast(6 * min_word_size);
-    frame.trackGas(gas_for_word);
-    if (frame.status != .running) return;
+    if (!frame.trackGas(gas_for_word)) return;
 
     const value = frame.memory.readBytes(offset, size);
 
@@ -172,17 +164,15 @@ test wrapExp {
     try std.testing.expectEqual(@as(u256, 0), result);
 }
 
-test "EXP byte gas comes from comptime protocol" {
-    const CheapExpProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub const Instruction = struct {
-            pub fn expByteGas(revision: evmz.eth.Revision) i64 {
-                _ = revision;
-                return 1;
-            }
-        };
+test "EXP byte gas comes from the exact spec" {
+    const exact = comptime exact: {
+        var result = evmz.eth.spurious_dragon.instruction;
+        result.exp_byte_gas = 1;
+        break :exact result;
     };
+    const spec = evmz.eth.spurious_dragon.extend(.{
+        .instruction = exact,
+    });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -190,20 +180,19 @@ test "EXP byte gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.EXP)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .spurious_dragon,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(0x0100);
     try frame.frame.stack.push(2);
 
-    try For(CheapExpProtocol).exp(frame.frame);
+    try bind(spec).exp(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_998), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }

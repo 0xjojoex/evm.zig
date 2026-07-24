@@ -25,7 +25,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     try fixture.initState(&pre_state);
 
     const tx_root = try trie.transactionRoot(scratch, &.{ txs[0].encoded, txs[1].encoded });
-    const baseline = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const baseline = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &pre_state,
         null,
         roots([_]u8{0xff} ** 32, tx_root, [_]u8{0xff} ** 32),
@@ -74,7 +74,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     defer correct_output.deinit();
     var correct_report = bal.Report{ .mismatch_writer = &correct_output.writer };
     const correct_encoded = try bal.encodeAlloc(scratch, &correct_claim);
-    const correct = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const correct = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &correct_store,
         correct_encoded,
         expected_roots,
@@ -96,7 +96,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var overdeclared_store = try pre_state.clone(std.testing.allocator);
     defer overdeclared_store.deinit();
     var overdeclared_report = bal.Report{};
-    const overdeclared = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const overdeclared = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &overdeclared_store,
         try bal.encodeAlloc(scratch, &overdeclared_claim),
         expected_roots,
@@ -118,7 +118,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         null,
     );
     prechecked_input.precheck_block_access_list_state = true;
-    const prechecked = try block_stf.applyAssumeDecoded(scratch, prechecked_input);
+    const prechecked = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, prechecked_input);
     try std.testing.expectEqual(block_stf.Status.valid, prechecked.status);
     try std.testing.expectEqual(correct.gas_used, prechecked.gas_used);
     try std.testing.expectEqual(correct.block_gas_used, prechecked.block_gas_used);
@@ -138,7 +138,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var dropped_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer dropped_output.deinit();
     var dropped_report = bal.Report{ .mismatch_writer = &dropped_output.writer };
-    const dropped = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const dropped = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &dropped_store,
         try bal.encodeAlloc(scratch, &dropped_storage_claim),
         expected_roots,
@@ -172,7 +172,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var shifted_store = try pre_state.clone(std.testing.allocator);
     defer shifted_store.deinit();
     var shifted_report = bal.Report{};
-    const shifted = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const shifted = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &shifted_store,
         try bal.encodeAlloc(scratch, &shifted_claim),
         expected_roots,
@@ -199,13 +199,13 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var lied_store = try pre_state.clone(std.testing.allocator);
     defer lied_store.deinit();
     var lied_report = bal.Report{};
-    const lied = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const lied = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &lied_store,
         try bal.encodeAlloc(scratch, &lied_claim),
         expected_roots,
         &lied_report,
     ));
-    try expectContainedMismatch(baseline, lied, lied_report, .changeset_fold_mismatch);
+    try expectContainedMismatch(baseline, lied, lied_report, .transition_fold_mismatch);
 
     const lied_storage_value_changes = [_]bal.StorageChange{
         .{ .block_access_index = 1, .new_value = 7 },
@@ -227,7 +227,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var lied_storage_store = try pre_state.clone(std.testing.allocator);
     defer lied_storage_store.deinit();
     var lied_storage_report = bal.Report{};
-    const lied_storage = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const lied_storage = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &lied_storage_store,
         try bal.encodeAlloc(scratch, &lied_storage_claim),
         expected_roots,
@@ -237,13 +237,13 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         baseline,
         lied_storage,
         lied_storage_report,
-        .changeset_fold_mismatch,
+        .transition_fold_mismatch,
     );
 
     // Fold verification is intentionally claim-subset-only: omitting target
     // balance changes does not affect outputs/logs and passes that local
     // check. Whole-candidate reconstruction is two-sided, so the missing
-    // intermediate balance makes its final changeset diverge from serial.
+    // intermediate balance makes its final candidate state diverge from serial.
     const underdeclared_claim = [_]bal.AccountChanges{
         correct_claim[0],
         correct_claim[1],
@@ -255,7 +255,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     var underdeclared_store = try pre_state.clone(std.testing.allocator);
     defer underdeclared_store.deinit();
     var underdeclared_report = bal.Report{};
-    const underdeclared = try block_stf.applyAssumeDecoded(scratch, blockInput(
+    const underdeclared = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &underdeclared_store,
         try bal.encodeAlloc(scratch, &underdeclared_claim),
         expected_roots,
@@ -313,8 +313,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     const encoded_claim = try bal.encodeAlloc(std.testing.allocator, &claim);
     defer std.testing.allocator.free(encoded_claim);
     var rejected_report = bal.Report{};
-    const rejected = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = rejected_store.backend(),
         .transactions = &transactions,
@@ -343,7 +342,6 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
         std.testing.io,
         std.testing.allocator,
         .{
-            .revision = .amsterdam,
             .env = .{ .gas_limit = 2_000_000 },
             .state_backend = parallel_rejected_store.backend(),
             .transactions = &transactions,
@@ -386,8 +384,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     const lied_encoded_claim = try bal.encodeAlloc(std.testing.allocator, &lied_claim);
     defer std.testing.allocator.free(lied_encoded_claim);
     var lied_report = bal.Report{};
-    const lied_rejected = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const lied_rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = lied_store.backend(),
         .transactions = &transactions,
@@ -420,11 +417,10 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     defer blob_store.deinit();
     const empty_claim = try bal.encodeAlloc(std.testing.allocator, &.{});
     defer std.testing.allocator.free(empty_claim);
-    var blob_schedule = evmz.eth.transaction.Transaction.blobSchedule(.amsterdam).?;
+    var blob_schedule = evmz.eth.amsterdam.transaction.blob_schedule.?;
     blob_schedule.max = 1;
     var blob_report = bal.Report{};
-    const blob_rejected = try block_stf.applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .amsterdam,
+    const blob_rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{
             .gas_limit = 21_000,
             .blob_base_fee = 1,
@@ -450,7 +446,6 @@ fn blockInput(
     report: ?*bal.Report,
 ) block_stf.AssumeDecodedBlockInput {
     return .{
-        .revision = .amsterdam,
         .env = .{ .gas_limit = 2_000_000 },
         .state_backend = store.backend(),
         .transactions = &txs,

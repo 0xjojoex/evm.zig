@@ -4,7 +4,6 @@ const evmz_evmc = @import("evmz_evmc");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
-const Interpreter = evmz.interpreter;
 const evmc = evmz_evmc.evmc;
 const evmc_common = evmz_evmc.common;
 const host2c = evmz_evmc.testing.host2c;
@@ -332,6 +331,23 @@ fn runBytecodeHostOp(
     iterations: usize,
     revision: evmz.eth.Revision,
 ) !Measurement {
+    return switch (revision) {
+        inline else => |exact_revision| runBytecodeHostOpExact(
+            exact_revision,
+            allocator,
+            op,
+            iterations,
+        ),
+    };
+}
+
+fn runBytecodeHostOpExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    op: Operation,
+    iterations: usize,
+) !Measurement {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
     const bytecode = try storageBytecode(allocator, op, iterations);
     defer allocator.free(bytecode);
 
@@ -351,11 +367,10 @@ fn runBytecodeHostOp(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(allocator, .{
+    var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
-        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

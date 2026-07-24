@@ -2,8 +2,14 @@ const std = @import("std");
 const evmz = @import("../../evm.zig");
 
 const Address = evmz.Address;
-const Protocol = evmz.Evm.TransactionProtocol;
+const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
+const ValidationError = evmz.eth.transaction_validation.ValidationError;
+const SettlementPlan = @import("../../transaction/settlement.zig").DefaultPlan;
 const transaction = evmz.transaction;
+const PrepareResult = transaction.PrepareResult(SettlementPlan, ValidationError);
+const EnvOverrides = struct {
+    base_fee: u256 = 0,
+};
 
 const PreparationReadProbe = struct {
     const Read = enum {
@@ -71,7 +77,7 @@ test "Amsterdam prepare rejects max transaction nonce before sender account read
         .gas_price = 1,
     }, .{});
 
-    try std.testing.expectEqual(Protocol.Tx.ValidationError.nonce_is_max, try rejected(result));
+    try std.testing.expectEqual(ValidationError.nonce_is_max, try rejected(result));
     try probe.expectReads(&.{});
 }
 
@@ -106,7 +112,7 @@ test "Amsterdam prepare reads sender code only after nonce and funds checks" {
         .gas_limit = 30_000,
         .gas_price = 1,
     }, .{});
-    try std.testing.expectEqual(Protocol.Tx.ValidationError.nonce_too_high, try rejected(nonce_too_high));
+    try std.testing.expectEqual(ValidationError.nonce_too_high, try rejected(nonce_too_high));
     try probe.expectReads(&.{.account_summary});
 
     probe.resetReads();
@@ -118,7 +124,7 @@ test "Amsterdam prepare reads sender code only after nonce and funds checks" {
         .gas_limit = 30_000,
         .gas_price = 1,
     }, .{});
-    try std.testing.expectEqual(Protocol.Tx.ValidationError.insufficient_account_funds, try rejected(insufficient_funds));
+    try std.testing.expectEqual(ValidationError.insufficient_account_funds, try rejected(insufficient_funds));
     try probe.expectReads(&.{.account_summary});
 
     probe.resetReads();
@@ -170,7 +176,7 @@ test "prepare accepts delegation-shaped sender code only after EIP-7702 activate
         },
         .code_bytes = &delegation_code,
     };
-    const value = Protocol.Tx.Value{
+    const value = transaction.Transaction{
         .sender = evmz.addr(0xaaaa),
         .nonce = 0,
         .to = evmz.addr(0xbbbb),
@@ -178,12 +184,12 @@ test "prepare accepts delegation-shaped sender code only after EIP-7702 activate
         .gas_price = 1,
     };
 
-    const cancun = try prepare(&probe, value, .{ .revision = .cancun });
-    try std.testing.expectEqual(Protocol.Tx.ValidationError.sender_not_eoa, try rejected(cancun));
+    const cancun = try prepareFor(evmz.Vm(evmz.eth.cancun), &probe, value, .{});
+    try std.testing.expectEqual(ValidationError.sender_not_eoa, try rejected(cancun));
     try probe.expectReads(&.{ .account_summary, .code });
 
     probe.resetReads();
-    const prague = try prepare(&probe, value, .{ .revision = .prague });
+    const prague = try prepareFor(evmz.Vm(evmz.eth.prague), &probe, value, .{});
     switch (prague) {
         .executable => {},
         .rejected => return error.UnexpectedRejection,
@@ -193,14 +199,20 @@ test "prepare accepts delegation-shaped sender code only after EIP-7702 activate
 
 fn prepare(
     probe: *PreparationReadProbe,
-    value: Protocol.Tx.Value,
-    env_overrides: struct {
-        revision: Protocol.Revision = .amsterdam,
-        base_fee: u256 = 0,
-    },
-) !transaction.PrepareResult(Protocol) {
-    return Protocol.Tx.prepare(Protocol, &evmz.Evm.transaction_policy, .{
-        .revision = env_overrides.revision,
+    value: transaction.Transaction,
+    env_overrides: EnvOverrides,
+) !PrepareResult {
+    return prepareFor(Amsterdam, probe, value, env_overrides);
+}
+
+fn prepareFor(
+    comptime ExactVm: type,
+    probe: *PreparationReadProbe,
+    value: transaction.Transaction,
+    env_overrides: EnvOverrides,
+) !PrepareResult {
+    const Runtime = evmz.eth.transaction_prepare.Runtime(ExactVm.specification);
+    return (Runtime{}).prepare(.{
         .tx = value,
         .env = .{
             .coinbase = evmz.addr(0xcccc),
@@ -211,7 +223,7 @@ fn prepare(
     });
 }
 
-fn rejected(result: transaction.PrepareResult(Protocol)) !Protocol.Tx.ValidationError {
+fn rejected(result: PrepareResult) !ValidationError {
     return switch (result) {
         .rejected => |reason| reason,
         .executable => error.UnexpectedExecutableTransaction,

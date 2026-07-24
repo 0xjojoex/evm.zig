@@ -305,11 +305,29 @@ fn runBlock(
     fixture_block: *const JsonObject,
     block: *const JsonObject,
 ) !block_stf.Result {
+    const revision = try fixtureRevision(fixture);
+    return switch (revision) {
+        inline else => |exact_revision| runBlockExact(
+            exact_revision,
+            allocator,
+            fixture,
+            fixture_block,
+            block,
+        ),
+    };
+}
+
+fn runBlockExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    fixture: *const JsonObject,
+    fixture_block: *const JsonObject,
+    block: *const JsonObject,
+) !block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const revision = try fixtureRevision(fixture);
     const fixture_config = try parseFixtureConfig(fixture, revision);
     const genesis_header = asObject(fixture.get("genesisBlockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
     const block_header = asObject(block.get("blockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
@@ -337,8 +355,7 @@ fn runBlock(
         if (!std.mem.eql(u8, &expected_bal_hash, &actual_bal_hash)) return error.MalformedFixture;
     }
 
-    return try block_stf.applyAssumeDecoded(scratch, .{
-        .revision = revision,
+    return try block_stf.Exact(revision).applyAssumeDecoded(scratch, .{
         .env = .{
             .chain_id = fixture_config.chain_id,
             .coinbase = try addressField(&block_header, "coinbase"),
@@ -439,12 +456,12 @@ fn fixtureRevision(fixture: *const JsonObject) !evmz.eth.Revision {
 }
 
 fn blobBaseFee(
-    revision: evmz.eth.Revision,
+    comptime revision: evmz.eth.Revision,
     blob_schedule: ?evmz.transaction.BlobSchedule,
     excess_blob_gas: ?u256,
 ) !u256 {
     if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse evmz.Evm.TransactionProtocol.transaction.blobSchedule(revision) orelse return 0;
+    const schedule = blob_schedule orelse evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
     return evmz.transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas orelse 0) orelse error.BlobGasOverflow;
 }
 

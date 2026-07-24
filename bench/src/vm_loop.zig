@@ -4,15 +4,8 @@ const build_options = @import("build_options");
 const common = @import("common.zig");
 
 const Host = evmz.Host;
-const Interpreter = evmz.interpreter;
-const BenchVM = evmz.eth.extend(.{
-    .support = .{
-        .min = parseBuildSpec(build_options.support_min),
-        .max = parseBuildSpec(build_options.support_max),
-    },
-});
-const BenchExecutionProtocol = BenchVM.ExecutionProtocol;
-const Executor = BenchVM.Executor;
+const support_min = parseBuildSpec(build_options.support_min);
+const support_max = parseBuildSpec(build_options.support_max);
 const CountingHost = common.CountingHost;
 const HostCounters = common.HostCounters;
 const HostProfile = common.HostProfile;
@@ -31,7 +24,6 @@ const Options = struct {
     gas_limit: ?u64 = null,
     revision: evmz.eth.Revision = .latest,
     engine: Engine = .evmz,
-    executor_resources: ExecutorResources = .growable,
     host_profile: ?HostProfile = null,
     summary: bool = false,
 };
@@ -46,7 +38,6 @@ const ResolvedOptions = struct {
     gas_limit: u64,
     revision: evmz.eth.Revision,
     engine: Engine,
-    executor_resources: ExecutorResources,
     host_profile: HostProfile,
     summary: bool,
 };
@@ -54,22 +45,6 @@ const ResolvedOptions = struct {
 const Engine = enum {
     evmz,
     evmz_executor,
-};
-
-const ExecutorResources = enum {
-    growable,
-    bounded_frames,
-    bounded_frame_memory,
-    bounded_scratch,
-    bounded_access,
-    bounded_journal,
-    bounded_state,
-    bounded_state_small,
-    bounded_logs,
-    bounded_overlay,
-    bounded_overlay_small,
-    bounded_small,
-    bounded,
 };
 
 const WarmupStats = struct {
@@ -82,94 +57,90 @@ const RuntimeMeasurement = struct {
     counters: HostCounters,
 };
 
-const ExecutorRuntimeRunner = struct {
-    allocator: std.mem.Allocator,
-    executor: Executor,
-    bytecode: evmz.Bytecode,
-    baseline: Executor.Snapshot,
+fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
+    const Executor = ExactVm.Executor;
+    return struct {
+        const Self = @This();
 
-    fn init(
         allocator: std.mem.Allocator,
-        runtime_code: []const u8,
-        proxy_target_runtime_code: ?[]const u8,
-        revision: evmz.eth.Revision,
-        executor_resources: ExecutorResources,
-    ) !ExecutorRuntimeRunner {
-        var executor = switch (executor_resources) {
-            .growable => Executor.init(allocator, .{ .revision = revision }),
-            else => try Executor.initWithRuntimeResources(allocator, .{
-                .revision = revision,
-            }, .{ .bounded = benchBoundedRuntimeResources(executor_resources) }),
-        };
-        errdefer executor.deinit();
+        executor: Executor,
+        bytecode: evmz.Bytecode,
+        baseline: ?Executor.BranchCheckpoint = null,
 
-        const sender = try executor.getOrCreateAccount(common.caller_address);
-        sender.balance = std.math.maxInt(u256);
+        fn init(
+            allocator: std.mem.Allocator,
+            runtime_code: []const u8,
+            proxy_target_runtime_code: ?[]const u8,
+        ) !Self {
+            var executor = Executor.init(allocator, .{});
+            errdefer executor.deinit();
 
-        _ = try executor.getOrCreateAccount(common.contract_address);
-        try executor.state.setCode(common.contract_address, runtime_code);
-        if (proxy_target_runtime_code) |target_code| {
-            _ = try executor.getOrCreateAccount(proxy_target_address);
-            try executor.state.setCode(proxy_target_address, target_code);
+            var sender = evmz.state.MemoryAccount.init(allocator);
+            sender.balance = std.math.maxInt(u256);
+            try executor.state.seedAccount(common.caller_address, sender);
+
+            var contract = evmz.state.MemoryAccount.init(allocator);
+            try contract.setCode(runtime_code);
+            try executor.state.seedAccount(common.contract_address, contract);
+            if (proxy_target_runtime_code) |target_code| {
+                var target = evmz.state.MemoryAccount.init(allocator);
+                try target.setCode(target_code);
+                try executor.state.seedAccount(proxy_target_address, target);
+            }
+
+            var bytecode = try executor.prepareBytecode(runtime_code);
+            errdefer bytecode.deinit(allocator);
+
+            return .{
+                .allocator = allocator,
+                .executor = executor,
+                .bytecode = bytecode,
+            };
         }
 
-        var bytecode = try executor.prepareBytecode(runtime_code);
-        errdefer bytecode.deinit(allocator);
-
-        var baseline = try executor.snapshot();
-        errdefer baseline.deinit(allocator);
-
-        return .{
-            .allocator = allocator,
-            .executor = executor,
-            .bytecode = bytecode,
-            .baseline = baseline,
-        };
-    }
-
-    fn deinit(self: *ExecutorRuntimeRunner) void {
-        self.baseline.deinit(self.allocator);
-        self.bytecode.deinit(self.allocator);
-        self.executor.deinit();
-    }
-
-    fn timeRuntimeCall(self: *ExecutorRuntimeRunner, call_data: []const u8, gas_limit: u64) !u64 {
-        try self.executor.restore(&self.baseline);
-        try self.executor.beginTransaction(executorTxContext(gas_limit), common.caller_address, common.contract_address);
-
-        var pre_execution = try self.executor.snapshot();
-        defer pre_execution.deinit(self.allocator);
-
-        const start_ns = try common.monotonicNowNs();
-        const call_options = Executor.PreparedCallTransaction{
-            .bytecode = &self.bytecode,
-            .sender = common.caller_address,
-            .recipient = common.contract_address,
-            .input = call_data,
-            .gas = gas_limit,
-            .value = 0,
-        };
-        const result = try self.executor.executePreparedCallTransaction(call_options);
-        const end_ns = try common.monotonicNowNs();
-
-        if (Executor.executionRolledBack(result.status)) {
-            try self.executor.restore(&pre_execution);
-        } else {
-            try self.executor.commitTransaction();
+        fn deinit(self: *Self) void {
+            if (self.baseline) |*baseline| baseline.deinit();
+            self.bytecode.deinit(self.allocator);
+            self.executor.deinit();
         }
-        if (result.status != .success) return error.CallFailed;
 
-        return end_ns - start_ns;
-    }
-};
+        fn timeRuntimeCall(self: *Self, call_data: []const u8, gas_limit: u64) !u64 {
+            if (self.baseline == null) self.baseline = try self.executor.branchCheckpoint();
+            var baseline = try self.baseline.?.clone();
+            defer baseline.deinit();
+            self.executor.restoreBranch(&baseline);
+            try self.executor.beginTransaction(executorTxContext(gas_limit), common.caller_address, common.contract_address);
+
+            var pre_execution = try self.executor.branchCheckpoint();
+            defer pre_execution.deinit();
+
+            const start_ns = try common.monotonicNowNs();
+            const call_options = Executor.PreparedCallTransaction{
+                .bytecode = &self.bytecode,
+                .sender = common.caller_address,
+                .recipient = common.contract_address,
+                .input = call_data,
+                .gas = gas_limit,
+                .value = 0,
+            };
+            const result = try self.executor.executePreparedCallTransaction(call_options);
+            const end_ns = try common.monotonicNowNs();
+
+            if (Executor.executionRolledBack(result.status)) {
+                self.executor.restoreBranch(&pre_execution);
+            } else {
+                try self.executor.commitTransaction();
+            }
+            if (result.status != .success) return error.CallFailed;
+
+            return end_ns - start_ns;
+        }
+    };
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = try common.benchmarkAllocator(init);
     const arena = init.arena.allocator();
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
@@ -226,11 +197,6 @@ pub fn main(init: std.process.Init) !void {
             options.engine = parseEngine(value) orelse return error.InvalidEngine;
         } else if (common.stripPrefix(arg, "--engine=")) |value| {
             options.engine = parseEngine(value) orelse return error.InvalidEngine;
-        } else if (std.mem.eql(u8, arg, "--executor-resources")) {
-            const value = args.next() orelse return error.MissingExecutorResources;
-            options.executor_resources = parseExecutorResources(value) orelse return error.InvalidExecutorResources;
-        } else if (common.stripPrefix(arg, "--executor-resources=")) |value| {
-            options.executor_resources = parseExecutorResources(value) orelse return error.InvalidExecutorResources;
         } else if (std.mem.eql(u8, arg, "--host-profile")) {
             const value = args.next() orelse return error.MissingHostProfile;
             options.host_profile = common.parseHostProfile(value) orelse return error.InvalidHostProfile;
@@ -256,13 +222,34 @@ pub fn main(init: std.process.Init) !void {
         printUsage();
         return error.MissingContractCodePath;
     }
-    if (!BenchExecutionProtocol.support.contains(resolved.revision)) {
+    if (!compiledSupportContains(resolved.revision)) {
         std.debug.print(
             "spec {s} is outside compiled support range {s}..{s}\n",
-            .{ @tagName(resolved.revision), @tagName(BenchExecutionProtocol.support.min), @tagName(BenchExecutionProtocol.support.max) },
+            .{ @tagName(resolved.revision), @tagName(support_min), @tagName(support_max) },
         );
         return error.SpecOutsideSupportRange;
     }
+
+    return switch (resolved.revision) {
+        inline else => |revision| if (comptime compiledSupportContains(revision))
+            runExact(revision, init, allocator, resolved)
+        else
+            error.SpecOutsideSupportRange,
+    };
+}
+
+fn runExact(
+    comptime revision: evmz.eth.Revision,
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    resolved: ResolvedOptions,
+) !void {
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    const Runner = ExecutorRuntimeRunner(ExactVm);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
     const call_data = try common.decodeHexAlloc(allocator, resolved.call_data_hex);
     defer allocator.free(call_data);
@@ -270,17 +257,23 @@ pub fn main(init: std.process.Init) !void {
     var deploy_host = CountingHost.init(allocator, resolved.host_profile);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime_code = try loadRuntimeCode(init.io, allocator, &deploy_host_iface, contract_code_path, resolved.revision);
+    const runtime_code = try loadRuntimeCode(
+        revision,
+        init.io,
+        allocator,
+        &deploy_host_iface,
+        resolved.contract_code_path,
+    );
     defer allocator.free(runtime_code);
     const proxy_target_runtime_code = if (resolved.proxy_target_code_path) |target_path|
-        try loadRuntimeCode(init.io, allocator, &deploy_host_iface, target_path, resolved.revision)
+        try loadRuntimeCode(revision, init.io, allocator, &deploy_host_iface, target_path)
     else
         null;
     defer if (proxy_target_runtime_code) |target_code| allocator.free(target_code);
     try common.rejectNullHostTouches(resolved.host_profile, deploy_host.counters);
 
-    var executor_runner: ?ExecutorRuntimeRunner = if (isExecutorEngine(resolved.engine))
-        try ExecutorRuntimeRunner.init(allocator, runtime_code, proxy_target_runtime_code, resolved.revision, resolved.executor_resources)
+    var executor_runner: ?Runner = if (isExecutorEngine(resolved.engine))
+        try Runner.init(allocator, runtime_code, proxy_target_runtime_code)
     else
         null;
     defer {
@@ -288,6 +281,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const warmup = try warmRuntimeCalls(
+        revision,
+        Runner,
         allocator,
         if (executor_runner) |*runner| runner else null,
         runtime_code,
@@ -299,6 +294,8 @@ pub fn main(init: std.process.Init) !void {
     var run_index: usize = 0;
     while (run_index < resolved.num_runs) : (run_index += 1) {
         const measurement = try measureRuntimeCall(
+            revision,
+            Runner,
             allocator,
             if (executor_runner) |*runner| runner else null,
             runtime_code,
@@ -321,8 +318,8 @@ pub fn main(init: std.process.Init) !void {
                 measureScopeName(resolved),
                 @tagName(resolved.host_profile),
                 @tagName(resolved.revision),
-                @tagName(BenchExecutionProtocol.support.min),
-                @tagName(BenchExecutionProtocol.support.max),
+                @tagName(support_min),
+                @tagName(support_max),
                 resolved.gas_limit,
                 runtime_code.len,
                 if (proxy_target_runtime_code) |target_code| target_code.len else 0,
@@ -335,6 +332,17 @@ pub fn main(init: std.process.Init) !void {
             },
         );
         timed_counters.print("timed");
+        if (executor_runner) |*runner| {
+            std.debug.print(
+                "frame_max_rows={d} stack_max_base_words={d} stack_max_window_words={d} stack_capacity_words={d}\n",
+                .{
+                    runner.executor.frame_store.maxRowCount(),
+                    runner.executor.frame_store.maxStackBase(),
+                    runner.executor.frame_store.maxStackWordCount(),
+                    runner.executor.frame_store.stackWordCapacity(),
+                },
+            );
+        }
     }
 }
 
@@ -354,7 +362,6 @@ fn printUsage() void {
         \\  --gas-limit <n>               finite gas for each timed runtime call, default maxInt(i64)
         \\  --spec <name>                 fork spec, default latest; must be inside compiled support range
         \\  --engine <name>               evmz, evmz-executor
-        \\  --executor-resources <mode>   growable, bounded, or bounded-* probe mode; evmz-executor only
         \\  --host-profile <null|mock>    host boundary, default null
         \\  --summary                     print host callback counts to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp      opt into std.heap.smp_allocator for allocator probes
@@ -377,9 +384,6 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
     var gas_limit = options.gas_limit;
     var host_profile = options.host_profile;
 
-    if (options.engine != .evmz_executor and options.executor_resources != .growable) {
-        return error.ExecutorResourcesRequireExecutorEngine;
-    }
     if (options.engine != .evmz_executor and options.proxy_target_code_path != null) {
         return error.ProxyTargetRequiresExecutorEngine;
     }
@@ -418,7 +422,6 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
         .gas_limit = gas_limit orelse defaultGasLimit(),
         .revision = options.revision,
         .engine = options.engine,
-        .executor_resources = options.executor_resources,
         .host_profile = host_profile orelse .null,
         .summary = options.summary,
     };
@@ -426,13 +429,6 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
 
 fn parseEngine(value: []const u8) ?Engine {
     inline for (std.meta.fields(Engine)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
-    }
-    return null;
-}
-
-fn parseExecutorResources(value: []const u8) ?ExecutorResources {
-    inline for (std.meta.fields(ExecutorResources)) |field| {
         if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
     }
     return null;
@@ -455,145 +451,7 @@ fn isExecutorEngine(engine: Engine) bool {
 fn measureScopeName(options: ResolvedOptions) []const u8 {
     return switch (options.engine) {
         .evmz => "interpreter-prepared-execute",
-        .evmz_executor => switch (options.executor_resources) {
-            .growable => "executor-prepared-call-growable",
-            .bounded_frames => "executor-prepared-call-bounded-frames",
-            .bounded_frame_memory => "executor-prepared-call-bounded-frame-memory",
-            .bounded_scratch => "executor-prepared-call-bounded-scratch",
-            .bounded_access => "executor-prepared-call-bounded-access",
-            .bounded_journal => "executor-prepared-call-bounded-journal",
-            .bounded_state => "executor-prepared-call-bounded-state",
-            .bounded_state_small => "executor-prepared-call-bounded-state-small",
-            .bounded_logs => "executor-prepared-call-bounded-logs",
-            .bounded_overlay => "executor-prepared-call-bounded-overlay",
-            .bounded_overlay_small => "executor-prepared-call-bounded-overlay-small",
-            .bounded_small => "executor-prepared-call-bounded-small",
-            .bounded => "executor-prepared-call-bounded",
-        },
-    };
-}
-
-fn benchBoundedRuntimeResources(resources: ExecutorResources) Executor.BoundedRuntimeResources {
-    var bounded = Executor.BoundedRuntimeResources{
-        .max_live_frames = Executor.default_max_live_frames,
-    };
-
-    switch (resources) {
-        .growable => unreachable,
-        .bounded_frames => {},
-        .bounded_frame_memory => {
-            bounded.memory_bytes_per_frame = 16 * 1024;
-            bounded.io_bytes_per_frame = 16 * 1024;
-            bounded.result_bytes = 16 * 1024;
-        },
-        .bounded_scratch => {
-            bounded.scratch_bytes_per_frame = 64 * 1024;
-        },
-        .bounded_access => {
-            bounded.access = broadAccessResources();
-        },
-        .bounded_journal => {
-            bounded.journal_entries = 64 * 1024;
-        },
-        .bounded_state => {
-            bounded.state = broadStateResources();
-        },
-        .bounded_state_small => {
-            bounded.state = smallStateResources();
-        },
-        .bounded_logs => {
-            bounded.logs = broadLogResources();
-        },
-        .bounded_overlay => {
-            bounded.logs = broadLogResources();
-            bounded.journal_entries = 64 * 1024;
-            bounded.access = broadAccessResources();
-            bounded.state = broadStateResources();
-            bounded.transient_storage_entries = 64 * 1024;
-        },
-        .bounded_overlay_small => {
-            bounded.logs = smallLogResources();
-            bounded.journal_entries = 32 * 1024;
-            bounded.access = smallAccessResources();
-            bounded.state = smallStateResources();
-            bounded.transient_storage_entries = 8 * 1024;
-        },
-        .bounded_small => {
-            bounded.memory_bytes_per_frame = 16 * 1024;
-            bounded.io_bytes_per_frame = 16 * 1024;
-            bounded.scratch_bytes_per_frame = 64 * 1024;
-            bounded.logs = smallLogResources();
-            bounded.journal_entries = 32 * 1024;
-            bounded.access = smallAccessResources();
-            bounded.state = smallStateResources();
-            bounded.transient_storage_entries = 8 * 1024;
-            bounded.result_bytes = 16 * 1024;
-        },
-        .bounded => {
-            bounded.memory_bytes_per_frame = 16 * 1024;
-            bounded.io_bytes_per_frame = 16 * 1024;
-            bounded.scratch_bytes_per_frame = 64 * 1024;
-            bounded.logs = broadLogResources();
-            bounded.journal_entries = 64 * 1024;
-            bounded.access = broadAccessResources();
-            bounded.state = broadStateResources();
-            bounded.transient_storage_entries = 64 * 1024;
-            bounded.result_bytes = 16 * 1024;
-        },
-    }
-
-    return bounded;
-}
-
-fn broadLogResources() evmz.state.Overlay.LogResources {
-    return .{
-        .entries = 16 * 1024,
-        .data_bytes = 4 * 1024 * 1024,
-    };
-}
-
-fn smallLogResources() evmz.state.Overlay.LogResources {
-    return .{
-        .entries = 8 * 1024,
-        .data_bytes = 2 * 1024 * 1024,
-    };
-}
-
-fn broadAccessResources() evmz.state.Overlay.AccessResources {
-    return .{
-        .accounts = 16 * 1024,
-        .storage_keys = 64 * 1024,
-    };
-}
-
-fn smallAccessResources() evmz.state.Overlay.AccessResources {
-    return .{
-        .accounts = 1024,
-        .storage_keys = 8 * 1024,
-    };
-}
-
-fn broadStateResources() evmz.state.Overlay.StateResources {
-    return .{
-        .accounts = 16 * 1024,
-        .original_storage_entries = 64 * 1024,
-        .storage_overlay_entries = 64 * 1024,
-        .selfdestructed_accounts = 16 * 1024,
-        .created_contracts = 16 * 1024,
-        .deleted_accounts = 16 * 1024,
-        .dirty_accounts = 16 * 1024,
-    };
-}
-
-fn smallStateResources() evmz.state.Overlay.StateResources {
-    return .{
-        .accounts = 1024,
-        .original_storage_entries = 8 * 1024,
-        .storage_overlay_entries = 8 * 1024,
-        .selfdestructed_accounts = 1024,
-        .created_contracts = 1024,
-        .deleted_accounts = 1024,
-        .dirty_accounts = 1024,
+        .evmz_executor => "executor-prepared-call",
     };
 }
 
@@ -671,21 +529,27 @@ fn parseBuildSpec(comptime value: []const u8) evmz.eth.Revision {
     @compileError("invalid VM-loop support revision: " ++ value);
 }
 
+fn compiledSupportContains(revision: evmz.eth.Revision) bool {
+    return @intFromEnum(revision) >= @intFromEnum(support_min) and
+        @intFromEnum(revision) <= @intFromEnum(support_max);
+}
+
 fn deployRuntime(
+    comptime revision: evmz.eth.Revision,
     allocator: std.mem.Allocator,
     host: *Host,
     contract_code: []const u8,
-    revision: evmz.eth.Revision,
 ) ![]u8 {
-    return deployRuntimeForProtocol(BenchExecutionProtocol, allocator, host, contract_code, revision);
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    return deployRuntimeForVm(ExactVm, allocator, host, contract_code);
 }
 
 fn loadRuntimeCode(
+    comptime revision: evmz.eth.Revision,
     io: std.Io,
     allocator: std.mem.Allocator,
     host: *Host,
     init_code_path: []const u8,
-    revision: evmz.eth.Revision,
 ) ![]u8 {
     const init_code_hex = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -697,15 +561,14 @@ fn loadRuntimeCode(
 
     const init_code = try common.decodeHexAlloc(allocator, init_code_hex);
     defer allocator.free(init_code);
-    return deployRuntime(allocator, host, init_code, revision);
+    return deployRuntime(revision, allocator, host, init_code);
 }
 
-fn deployRuntimeForProtocol(
-    comptime Protocol: type,
+fn deployRuntimeForVm(
+    comptime ExactVm: type,
     allocator: std.mem.Allocator,
     host: *Host,
     contract_code: []const u8,
-    revision: Protocol.Revision,
 ) ![]u8 {
     const msg = Host.Message{
         .depth = 0,
@@ -718,11 +581,10 @@ fn deployRuntimeForProtocol(
         .code_address = common.contract_address,
     };
 
-    var frame = try Interpreter.OwnedCallFrame(Protocol).init(allocator, .{
+    var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
         .code = contract_code,
-        .revision = revision,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -733,19 +595,29 @@ fn deployRuntimeForProtocol(
 }
 
 fn timeRuntimeCall(
+    comptime revision: evmz.eth.Revision,
     allocator: std.mem.Allocator,
     host: *Host,
     runtime_code: []const u8,
     call_data: []const u8,
-    revision: evmz.eth.Revision,
     gas_limit: u64,
 ) !u64 {
-    return timeRuntimeCallForProtocol(BenchExecutionProtocol, allocator, host, runtime_code, call_data, revision, gas_limit);
+    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    return timeRuntimeCallForVm(
+        ExactVm,
+        allocator,
+        host,
+        runtime_code,
+        call_data,
+        gas_limit,
+    );
 }
 
 fn warmRuntimeCalls(
+    comptime revision: evmz.eth.Revision,
+    comptime Runner: type,
     allocator: std.mem.Allocator,
-    executor_runner: ?*ExecutorRuntimeRunner,
+    executor_runner: ?*Runner,
     runtime_code: []const u8,
     call_data: []const u8,
     options: ResolvedOptions,
@@ -757,7 +629,15 @@ fn warmRuntimeCalls(
     const start_ns = try common.monotonicNowNs();
     var stats = WarmupStats{};
     while (stats.elapsed_ns < target_ns) {
-        _ = try measureRuntimeCall(allocator, executor_runner, runtime_code, call_data, options);
+        _ = try measureRuntimeCall(
+            revision,
+            Runner,
+            allocator,
+            executor_runner,
+            runtime_code,
+            call_data,
+            options,
+        );
         stats.calls = std.math.add(usize, stats.calls, 1) catch return error.WarmupCallCountOverflow;
         stats.elapsed_ns = (try common.monotonicNowNs()) - start_ns;
     }
@@ -765,8 +645,10 @@ fn warmRuntimeCalls(
 }
 
 fn measureRuntimeCall(
+    comptime revision: evmz.eth.Revision,
+    comptime Runner: type,
     allocator: std.mem.Allocator,
-    executor_runner: ?*ExecutorRuntimeRunner,
+    executor_runner: ?*Runner,
     runtime_code: []const u8,
     call_data: []const u8,
     options: ResolvedOptions,
@@ -782,7 +664,14 @@ fn measureRuntimeCall(
     defer run_host.deinit();
     var run_host_iface = run_host.host();
 
-    const elapsed_ns = try timeRuntimeCall(allocator, &run_host_iface, runtime_code, call_data, options.revision, options.gas_limit);
+    const elapsed_ns = try timeRuntimeCall(
+        revision,
+        allocator,
+        &run_host_iface,
+        runtime_code,
+        call_data,
+        options.gas_limit,
+    );
     try common.rejectNullHostTouches(options.host_profile, run_host.counters);
 
     return .{
@@ -791,13 +680,12 @@ fn measureRuntimeCall(
     };
 }
 
-fn timeRuntimeCallForProtocol(
-    comptime Protocol: type,
+fn timeRuntimeCallForVm(
+    comptime ExactVm: type,
     allocator: std.mem.Allocator,
     host: *Host,
     runtime_code: []const u8,
     call_data: []const u8,
-    revision: Protocol.Revision,
     gas_limit: u64,
 ) !u64 {
     const msg = Host.Message{
@@ -814,11 +702,10 @@ fn timeRuntimeCallForProtocol(
     var bytecode = try evmz.Bytecode.init(allocator, runtime_code);
     defer bytecode.deinit(allocator);
 
-    var frame = try Interpreter.OwnedCallFrame(Protocol).init(allocator, .{
+    var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = revision,
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
@@ -840,17 +727,10 @@ test "engine parser accepts aliases" {
     try std.testing.expect(parseEngine("evmz-call-total") == null);
     try std.testing.expect(parseEngine("evmz-advanced") == null);
     try std.testing.expect(parseEngine("evmz-advanced-executor") == null);
-    try std.testing.expectEqual(ExecutorResources.growable, parseExecutorResources("growable").?);
-    try std.testing.expectEqual(ExecutorResources.bounded, parseExecutorResources("bounded").?);
-    try std.testing.expectEqual(ExecutorResources.bounded_frames, parseExecutorResources("bounded-frames").?);
-    try std.testing.expectEqual(ExecutorResources.bounded_frame_memory, parseExecutorResources("bounded-frame-memory").?);
-    try std.testing.expectEqual(ExecutorResources.bounded_overlay, parseExecutorResources("bounded-overlay").?);
-    try std.testing.expectEqual(ExecutorResources.bounded_state_small, parseExecutorResources("bounded-state-small").?);
-    try std.testing.expectEqual(ExecutorResources.bounded_small, parseExecutorResources("bounded-small").?);
 }
 
 test "compiled support range accepts default latest spec" {
-    try std.testing.expect(BenchExecutionProtocol.support.contains(.latest));
+    try std.testing.expect(compiledSupportContains(.latest));
 }
 
 test "build support spec parser accepts latest and hyphen aliases" {
@@ -868,11 +748,10 @@ test "engine scope names make benchmark boundary explicit" {
         .gas_limit = defaultGasLimit(),
         .revision = .latest,
         .engine = .evmz,
-        .executor_resources = .growable,
         .host_profile = .null,
         .summary = false,
     }));
-    try std.testing.expectEqualStrings("executor-prepared-call-growable", measureScopeName(.{
+    try std.testing.expectEqualStrings("executor-prepared-call", measureScopeName(.{
         .fixture_dir = null,
         .contract_code_path = "x",
         .call_data_hex = "",
@@ -881,20 +760,6 @@ test "engine scope names make benchmark boundary explicit" {
         .gas_limit = defaultGasLimit(),
         .revision = .latest,
         .engine = .evmz_executor,
-        .executor_resources = .growable,
-        .host_profile = .null,
-        .summary = false,
-    }));
-    try std.testing.expectEqualStrings("executor-prepared-call-bounded", measureScopeName(.{
-        .fixture_dir = null,
-        .contract_code_path = "x",
-        .call_data_hex = "",
-        .num_runs = 1,
-        .warmup_ms = 0,
-        .gas_limit = defaultGasLimit(),
-        .revision = .latest,
-        .engine = .evmz_executor,
-        .executor_resources = .bounded,
         .host_profile = .null,
         .summary = false,
     }));
@@ -906,7 +771,7 @@ test "deploys runtime and runs empty bytecode under null host" {
     var deploy_host = CountingHost.init(std.testing.allocator, .null);
     defer deploy_host.deinit();
     var deploy_host_iface = deploy_host.host();
-    const runtime = try deployRuntime(std.testing.allocator, &deploy_host_iface, &init_code, .latest);
+    const runtime = try deployRuntime(.latest, std.testing.allocator, &deploy_host_iface, &init_code);
     defer std.testing.allocator.free(runtime);
 
     try std.testing.expectEqualSlices(u8, &.{0x00}, runtime);
@@ -914,10 +779,18 @@ test "deploys runtime and runs empty bytecode under null host" {
     var run_host = CountingHost.init(std.testing.allocator, .null);
     defer run_host.deinit();
     var run_host_iface = run_host.host();
-    _ = try timeRuntimeCall(std.testing.allocator, &run_host_iface, runtime, &.{}, .latest, defaultGasLimit());
+    _ = try timeRuntimeCall(
+        .latest,
+        std.testing.allocator,
+        &run_host_iface,
+        runtime,
+        &.{},
+        defaultGasLimit(),
+    );
     try std.testing.expectEqual(@as(u64, 0), run_host.counters.total());
 
-    var executor_runner = try ExecutorRuntimeRunner.init(std.testing.allocator, runtime, null, .latest, .growable);
+    const Runner = ExecutorRuntimeRunner(evmz.Evm);
+    var executor_runner = try Runner.init(std.testing.allocator, runtime, null);
     defer executor_runner.deinit();
     _ = try executor_runner.timeRuntimeCall(&.{}, defaultGasLimit());
 }

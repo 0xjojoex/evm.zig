@@ -1,17 +1,18 @@
 const std = @import("std");
 const Interpreter = @import("../Interpreter.zig");
 const evmz = @import("../evm.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const CallFrame = Interpreter.CallFrame;
 const Host = evmz.Host;
-const AccountAccessStatus = evmz.protocol.AccountAccessStatus;
+const AccountAccessStatus = evmz.execution.AccountAccessStatus;
 
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {
+        @branchHint(.unlikely);
         frame.failWithStatus(.out_of_gas);
         return false;
     };
-    frame.trackGas(evmz.calcWordSize(i64, size_i64) * 3);
-    return frame.status == .running;
+    return frame.trackGas(evmz.calcWordSize(i64, size_i64) * 3);
 }
 
 fn sourceFromOffset(source: []const u8, offset_word: u256) []const u8 {
@@ -27,31 +28,24 @@ fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
     };
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn bind(comptime spec: ExactSpec) type {
+    const exact_instructions = spec.instruction;
     return struct {
         const Self = @This();
 
-        pub const Protocol = ProtocolType;
-
-        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
-            return Interpreter.For(Protocol).revision(frame);
-        }
-
         fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.Address) !bool {
-            if (Protocol.Instruction.codeAccountAccessGas(Self.frameRevision(frame), .warm) == null) return true;
+            if (exact_instructions.codeAccountAccessGas(.warm) == null) return true;
             const access_status = accountAccessStatus(try frame.host.accessAccount(target_address));
-            const access_gas = Protocol.Instruction.codeAccountAccessGas(Self.frameRevision(frame), access_status) orelse 0;
-            frame.trackGas(access_gas);
-            return frame.status == .running;
+            const access_gas = exact_instructions.codeAccountAccessGas(access_status) orelse 0;
+            return frame.trackGas(access_gas);
         }
 
         pub fn balance(frame: *CallFrame) !void {
             const target_address_word = try frame.stack.pop();
             const target_address = evmz.address.fromWord(target_address_word);
-            if (Protocol.Instruction.accountReadColdAccessGas(Self.frameRevision(frame))) |cold_access_gas| {
+            if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
                 if (try frame.host.accessAccount(target_address) == .cold) {
-                    frame.trackGas(cold_access_gas);
-                    if (frame.status != .running) return;
+                    if (!frame.trackGas(cold_access_gas)) return;
                 }
             }
             try frame.traceAccountAccess(target_address);
@@ -93,10 +87,9 @@ pub fn For(comptime ProtocolType: type) type {
         pub fn extcodehash(frame: *CallFrame) !void {
             const address_word = try frame.stack.pop();
             const target_address = evmz.address.fromWord(address_word);
-            if (Protocol.Instruction.accountReadColdAccessGas(Self.frameRevision(frame))) |cold_access_gas| {
+            if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
                 if (try frame.host.accessAccount(target_address) == .cold) {
-                    frame.trackGas(cold_access_gas);
-                    if (frame.status != .running) return;
+                    if (!frame.trackGas(cold_access_gas)) return;
                 }
             }
             try frame.traceAccountAccess(target_address);
@@ -237,17 +230,15 @@ pub fn selfbalance(frame: *CallFrame) !void {
     try frame.stack.push(address_balance);
 }
 
-test "BALANCE cold account access gas comes from comptime protocol" {
-    const CustomProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub const Instruction = struct {
-            pub fn accountReadColdAccessGas(revision: evmz.eth.Revision) ?i64 {
-                _ = revision;
-                return 7;
-            }
-        };
+test "BALANCE cold account access gas comes from the exact spec" {
+    const exact = comptime exact: {
+        var result = evmz.eth.frontier.instruction;
+        result.account_read_cold_access_gas = 7;
+        break :exact result;
     };
+    const spec = evmz.eth.frontier.extend(.{
+        .instruction = exact,
+    });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -255,36 +246,31 @@ test "BALANCE cold account access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.BALANCE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .frontier,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
-    try For(CustomProtocol).balance(frame.frame);
+    try bind(spec).balance(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 
-test "EXTCODESIZE account access gas comes from comptime protocol" {
-    const CustomProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub const Instruction = struct {
-            pub fn codeAccountAccessGas(revision: evmz.eth.Revision, status: AccountAccessStatus) ?i64 {
-                _ = revision;
-                return switch (status) {
-                    .cold => 9,
-                    .warm => 4,
-                };
-            }
-        };
+test "EXTCODESIZE account access gas comes from the exact spec" {
+    const exact = comptime exact: {
+        var result = evmz.eth.frontier.instruction;
+        result.code_account_cold_access_gas = 9;
+        result.code_account_warm_access_gas = 4;
+        break :exact result;
     };
+    const spec = evmz.eth.frontier.extend(.{
+        .instruction = exact,
+    });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -292,16 +278,15 @@ test "EXTCODESIZE account access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.EXTCODESIZE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .frontier,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
-    try For(CustomProtocol).extcodesize(frame.frame);
+    try bind(spec).extcodesize(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_991), frame.frame.gas_left);
@@ -331,11 +316,11 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
         0x3c, // EXTCODECOPY
     };
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Cancun = evmz.Vm(evmz.eth.cancun);
+    var frame = try Cancun.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = bytecode,
-        .revision = .cancun,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -358,10 +343,12 @@ pub fn returndatacopy(frame: *CallFrame) !void {
     if (!trackCopyGas(frame, size)) return;
 
     const offset = std.math.cast(usize, offset_word) orelse {
+        @branchHint(.unlikely);
         frame.failWithFrameStatus(.return_data_out_of_bounds);
         return;
     };
     if (offset > frame.return_data.len or size > frame.return_data.len - offset) {
+        @branchHint(.unlikely);
         frame.failWithFrameStatus(.return_data_out_of_bounds);
         return;
     }
@@ -372,6 +359,7 @@ pub fn blobhash(frame: *CallFrame) !void {
     const index_word = try frame.stack.pop();
     const tx_context = try frame.host.getTxContext();
     const index = std.math.cast(usize, index_word) orelse {
+        @branchHint(.unlikely);
         frame.stack.pushUnchecked(0);
         return;
     };

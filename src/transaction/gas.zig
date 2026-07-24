@@ -1,6 +1,5 @@
 const std = @import("std");
-const definition = @import("../definition.zig");
-const definition_support = @import("../protocol/support.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const ExecutionGas = @import("../execution/gas.zig").ExecutionGas;
 const Transaction = @import("./types.zig");
 
@@ -19,7 +18,7 @@ pub const IntrinsicGasOptions = struct {
 /// Facts used to derive the transaction input-data floor.
 ///
 /// Keeping this as one named value lets future transaction families add
-/// floor-relevant facts without changing the Definition hook signature.
+/// floor-relevant facts without changing the exact-spec function signature.
 pub const FloorGasInput = struct {
     input: []const u8,
     options: IntrinsicGasOptions = .{},
@@ -65,51 +64,43 @@ pub const GasPlan = struct {
     execution: ?ExecutionGas,
 };
 
-/// Runtime gas planner borrowing one transaction-policy snapshot.
-pub fn Runtime(
-    comptime ProtocolType: type,
-    comptime TransactionPolicyConfig: type,
-) type {
+/// Stateless gas planner closed over one exact VM specification.
+pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
-        pub const Protocol = ProtocolType;
+        pub const specification = spec;
         const Self = @This();
+        const transaction = spec.transaction;
 
-        transaction: *const TransactionPolicyConfig,
-
-        pub fn intrinsicGas(self: Self, revision: Protocol.Revision, input: []const u8, authorization_count: usize, access_list_counts: AccessListCounts) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.intrinsicGasForTransaction(revision, input, .{
+        pub fn intrinsicGas(self: Self, input: []const u8, authorization_count: usize, access_list_counts: AccessListCounts) ?u64 {
+            return self.intrinsicGasForTransaction(input, .{
                 .authorization_count = authorization_count,
                 .access_list_counts = access_list_counts,
             });
         }
 
-        pub fn maxInitcodeSize(self: Self, revision: Protocol.Revision) usize {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.transaction.maxInitcodeSize(revision);
+        pub fn maxInitcodeSize(_: Self) usize {
+            return transaction.max_initcode_size;
         }
 
-        pub fn intrinsicGasForTransaction(self: Self, revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const transaction = self.transaction;
-            var gas: u64 = transaction.intrinsicBaseGas(revision, options) orelse return null;
+        pub fn intrinsicGasForTransaction(_: Self, input: []const u8, options: IntrinsicGasOptions) ?u64 {
+            var gas: u64 = transaction.intrinsicBaseGas(options) orelse return null;
             if (options.is_create) {
-                gas = std.math.add(u64, gas, transaction.createIntrinsicGas(revision) orelse return null) catch return null;
+                gas = std.math.add(u64, gas, transaction.create_intrinsic_gas) catch return null;
             }
-            gas = std.math.add(u64, gas, transaction.calldataGas(revision, input) orelse return null) catch return null;
+            gas = std.math.add(u64, gas, transaction.calldataGas(input) orelse return null) catch return null;
             if (options.access_list_counts.addresses != 0) {
                 const count = std.math.cast(u64, options.access_list_counts.addresses) orelse return null;
-                const cost = std.math.mul(u64, count, transaction.accessListAddressGas(revision)) catch return null;
+                const cost = std.math.mul(u64, count, transaction.access_list_address_gas) catch return null;
                 gas = std.math.add(u64, gas, cost) catch return null;
             }
             if (options.access_list_counts.storage_keys != 0) {
                 const count = std.math.cast(u64, options.access_list_counts.storage_keys) orelse return null;
-                const cost = std.math.mul(u64, count, transaction.storageKeyGas(revision)) catch return null;
+                const cost = std.math.mul(u64, count, transaction.storage_key_gas) catch return null;
                 gas = std.math.add(u64, gas, cost) catch return null;
             }
-            gas = std.math.add(u64, gas, transaction.accessListDataGas(revision, options.access_list_counts) orelse return null) catch return null;
+            gas = std.math.add(u64, gas, transaction.accessListDataGas(options.access_list_counts) orelse return null) catch return null;
             if (options.is_create) {
-                const initcode_word_charge = transaction.initCodeWordGas(revision);
+                const initcode_word_charge = transaction.initcode_word_gas;
                 if (initcode_word_charge != 0) {
                     const words = std.math.cast(u64, wordCount(input.len)) orelse return null;
                     const initcode_cost = std.math.mul(u64, words, initcode_word_charge) catch return null;
@@ -118,27 +109,25 @@ pub fn Runtime(
             }
             if (options.authorization_count != 0) {
                 const count = std.math.cast(u64, options.authorization_count) orelse return null;
-                const cost = std.math.mul(u64, count, transaction.authorizationIntrinsicGas(revision)) catch return null;
+                const cost = std.math.mul(u64, count, transaction.authorization_intrinsic_gas) catch return null;
                 gas = std.math.add(u64, gas, cost) catch return null;
             }
             return gas;
         }
 
-        pub fn intrinsicBaseGas(self: Self, revision: Protocol.Revision, options: IntrinsicGasOptions) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.transaction.intrinsicBaseGas(revision, options);
+        pub fn intrinsicBaseGas(_: Self, options: IntrinsicGasOptions) ?u64 {
+            return transaction.intrinsicBaseGas(options);
         }
 
-        pub fn gasPlan(self: Self, revision: Protocol.Revision, input: []const u8, gas_limit: u64, options: IntrinsicGasOptions) GasPlan {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const intrinsic_gas = self.intrinsicGasForTransaction(revision, input, options) orelse std.math.maxInt(u64);
-            const floor_gas = self.floorGasForTransaction(revision, input, options) orelse 0;
+        pub fn gasPlan(self: Self, input: []const u8, gas_limit: u64, options: IntrinsicGasOptions) GasPlan {
+            const intrinsic_gas = self.intrinsicGasForTransaction(input, options) orelse std.math.maxInt(u64);
+            const floor_gas = self.floorGasForTransaction(input, options) orelse 0;
             const initial_gas = InitialGas{
                 .regular = intrinsic_gas,
                 .floor = floor_gas,
             };
             const minimum_gas = initial_gas.minimum();
-            const regular_gas_limit = self.regularGasLimit(revision, gas_limit);
+            const regular_gas_limit = self.regularGasLimit(gas_limit);
             const execution = if (gas_limit >= minimum_gas and regular_gas_limit >= intrinsic_gas) blk: {
                 const execution_total = gas_limit - intrinsic_gas;
                 const regular_budget = regular_gas_limit - intrinsic_gas;
@@ -157,34 +146,30 @@ pub fn Runtime(
             };
         }
 
-        pub fn regularGasLimit(self: Self, revision: Protocol.Revision, gas_limit: u64) u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.transaction.regularGasLimit(revision, gas_limit);
+        pub fn regularGasLimit(_: Self, gas_limit: u64) u64 {
+            const cap = transaction.regular_gas_cap orelse return gas_limit;
+            return @min(gas_limit, cap);
         }
 
-        pub fn minimumGas(self: Self, revision: Protocol.Revision, input: []const u8, authorization_count: usize, access_list_counts: AccessListCounts) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.minimumGasForTransaction(revision, input, .{
+        pub fn minimumGas(self: Self, input: []const u8, authorization_count: usize, access_list_counts: AccessListCounts) ?u64 {
+            return self.minimumGasForTransaction(input, .{
                 .authorization_count = authorization_count,
                 .access_list_counts = access_list_counts,
             });
         }
 
-        pub fn minimumGasForTransaction(self: Self, revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            const intrinsic = self.intrinsicGasForTransaction(revision, input, options) orelse return null;
-            const floor = self.floorGasForTransaction(revision, input, options) orelse return intrinsic;
+        pub fn minimumGasForTransaction(self: Self, input: []const u8, options: IntrinsicGasOptions) ?u64 {
+            const intrinsic = self.intrinsicGasForTransaction(input, options) orelse return null;
+            const floor = self.floorGasForTransaction(input, options) orelse return intrinsic;
             return @max(intrinsic, floor);
         }
 
-        pub fn floorGas(self: Self, revision: Protocol.Revision, input: []const u8) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.floorGasForTransaction(revision, input, .{});
+        pub fn floorGas(self: Self, input: []const u8) ?u64 {
+            return self.floorGasForTransaction(input, .{});
         }
 
-        pub fn floorGasForTransaction(self: Self, revision: Protocol.Revision, input: []const u8, options: IntrinsicGasOptions) ?u64 {
-            definition_support.assertRevisionSupported(Protocol, revision);
-            return self.transaction.floorGas(revision, .{
+        pub fn floorGasForTransaction(_: Self, input: []const u8, options: IntrinsicGasOptions) ?u64 {
+            return transaction.floorGas(.{
                 .input = input,
                 .options = options,
             });
@@ -192,18 +177,8 @@ pub fn Runtime(
     };
 }
 
-/// Static-policy adapter for protocol-level helpers and tests. There is one gas
-/// implementation: this merely lends the protocol's comptime policy value to
-/// the runtime planner.
-pub fn For(comptime ProtocolType: type) Runtime(ProtocolType, definition.TransactionPolicyConfig(ProtocolType.Revision)) {
-    const Policy = definition.TransactionPolicyConfig(ProtocolType.Revision);
-    const Values = struct {
-        const transaction: Policy = definition.projectTransactionConfig(
-            ProtocolType.Revision,
-            ProtocolType.transaction,
-        );
-    };
-    return .{ .transaction = &Values.transaction };
+fn runtime(comptime spec: ExactSpec) Runtime(spec) {
+    return .{};
 }
 
 pub fn accessListCounts(access_list: []const AccessListEntry) AccessListCounts {
@@ -227,50 +202,58 @@ fn wordCount(len: usize) usize {
 
 test "transaction gas helpers" {
     const eth = @import("../eth.zig");
-    const Ethereum = eth.Protocol.TransactionProtocol;
-    const EthGas = For(Ethereum);
+    const Frontier = runtime(eth.frontier);
+    const Homestead = runtime(eth.homestead);
+    const Byzantium = runtime(eth.byzantium);
+    const Istanbul = runtime(eth.istanbul);
+    const Berlin = runtime(eth.berlin);
+    const London = runtime(eth.london);
+    const Shanghai = runtime(eth.shanghai);
+    const Prague = runtime(eth.prague);
+    const Osaka = runtime(eth.osaka);
+    const Amsterdam = runtime(eth.amsterdam);
 
-    try std.testing.expectEqual(@as(u64, 21_072), EthGas.intrinsicGas(.byzantium, &.{ 0, 1 }, 0, .{}));
-    try std.testing.expectEqual(@as(u64, 21_020), EthGas.intrinsicGas(.istanbul, &.{ 0, 1 }, 0, .{}));
-    try std.testing.expectEqual(@as(u64, 46_020), EthGas.intrinsicGas(.prague, &.{ 0, 1 }, 1, .{}));
-    try std.testing.expectEqual(@as(u64, 29_120), EthGas.intrinsicGas(.berlin, &.{ 0, 1 }, 0, .{
+    try std.testing.expectEqual(@as(u64, 21_072), Byzantium.intrinsicGas(&.{ 0, 1 }, 0, .{}));
+    try std.testing.expectEqual(@as(u64, 21_020), Istanbul.intrinsicGas(&.{ 0, 1 }, 0, .{}));
+    try std.testing.expectEqual(@as(u64, 46_020), Prague.intrinsicGas(&.{ 0, 1 }, 1, .{}));
+    try std.testing.expectEqual(@as(u64, 29_120), Berlin.intrinsicGas(&.{ 0, 1 }, 0, .{
         .addresses = 1,
         .storage_keys = 3,
     }));
     try std.testing.expectEqual(@as(u64, 5), eth.transaction.calldataTokenCount(&.{ 0, 1 }));
-    try std.testing.expectEqual(@as(u64, 21_020), EthGas.minimumGas(.istanbul, &.{ 0, 1 }, 0, .{}));
-    try std.testing.expectEqual(@as(u64, 21_050), EthGas.minimumGas(.prague, &.{ 0, 1 }, 0, .{}));
-    try std.testing.expectEqual(@as(u64, 15_128), EthGas.minimumGas(.amsterdam, &.{ 0, 1 }, 0, .{}));
-    try std.testing.expectEqual(@as(u64, 46_020), EthGas.minimumGas(.prague, &.{ 0, 1 }, 1, .{}));
-    try std.testing.expectEqual(@as(u64, 21_008), EthGas.intrinsicGasForTransaction(.frontier, &.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 53_008), EthGas.intrinsicGasForTransaction(.homestead, &.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 53_010), EthGas.intrinsicGasForTransaction(.shanghai, &.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 23_010), EthGas.intrinsicGasForTransaction(.amsterdam, &.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 88_198), EthGas.intrinsicGasForTransaction(.amsterdam, &([_]u8{1} ** 4059), .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 12_000), EthGas.intrinsicBaseGas(.amsterdam, .{ .is_self_transfer = true }));
-    try std.testing.expectEqual(@as(u64, 15_000), EthGas.intrinsicBaseGas(.amsterdam, .{}));
-    try std.testing.expectEqual(@as(u64, 21_000), EthGas.intrinsicBaseGas(.amsterdam, .{ .value = 1 }));
-    try std.testing.expectEqual(@as(u64, 21_000), EthGas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
+    try std.testing.expectEqual(@as(u64, 21_020), Istanbul.minimumGas(&.{ 0, 1 }, 0, .{}));
+    try std.testing.expectEqual(@as(u64, 21_050), Prague.minimumGas(&.{ 0, 1 }, 0, .{}));
+    try std.testing.expectEqual(@as(u64, 15_128), Amsterdam.minimumGas(&.{ 0, 1 }, 0, .{}));
+    try std.testing.expectEqual(@as(u64, 46_020), Prague.minimumGas(&.{ 0, 1 }, 1, .{}));
+    try std.testing.expectEqual(@as(u64, 21_008), Frontier.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 53_008), Homestead.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 53_010), Shanghai.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 23_010), Amsterdam.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 88_198), Amsterdam.intrinsicGasForTransaction(&([_]u8{1} ** 4059), .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 12_000), Amsterdam.intrinsicBaseGas(.{ .is_self_transfer = true }));
+    try std.testing.expectEqual(@as(u64, 15_000), Amsterdam.intrinsicBaseGas(.{}));
+    try std.testing.expectEqual(@as(u64, 21_000), Amsterdam.intrinsicBaseGas(.{ .value = 1 }));
+    try std.testing.expectEqual(@as(u64, 21_000), Amsterdam.intrinsicGasForTransaction(&.{}, .{
         .value = 1,
         .creates_account = true,
     }));
-    try std.testing.expectEqual(@as(u64, 23_000), EthGas.intrinsicBaseGas(.amsterdam, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 24_756), EthGas.intrinsicBaseGas(.amsterdam, .{ .is_create = true, .value = 1 }));
-    try std.testing.expectEqual(@as(u64, 24_328), EthGas.intrinsicGasForTransaction(.amsterdam, &.{}, .{ .access_list_counts = .{
+    try std.testing.expectEqual(@as(u64, 23_000), Amsterdam.intrinsicBaseGas(.{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 24_756), Amsterdam.intrinsicBaseGas(.{ .is_create = true, .value = 1 }));
+    try std.testing.expectEqual(@as(u64, 24_328), Amsterdam.intrinsicGasForTransaction(&.{}, .{ .access_list_counts = .{
         .addresses = 1,
         .storage_keys = 1,
     } }));
-    try std.testing.expectEqual(@as(u64, 22_816), EthGas.intrinsicGasForTransaction(.amsterdam, &.{}, .{ .authorization_count = 1 }));
-    try std.testing.expectEqual(@as(u64, 32_144), EthGas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
+    try std.testing.expectEqual(@as(u64, 22_816), Amsterdam.intrinsicGasForTransaction(&.{}, .{ .authorization_count = 1 }));
+    try std.testing.expectEqual(@as(u64, 32_144), Amsterdam.intrinsicGasForTransaction(&.{}, .{
         .authorization_count = 1,
         .access_list_counts = .{
             .addresses = 1,
             .storage_keys = 1,
         },
     }));
-    try std.testing.expectEqual(std.math.maxInt(usize), EthGas.maxInitcodeSize(.london));
-    try std.testing.expectEqual(@as(usize, 49_152), EthGas.maxInitcodeSize(.osaka));
-    try std.testing.expectEqual(@as(usize, 131_072), EthGas.maxInitcodeSize(.amsterdam));
+    try std.testing.expectEqual(std.math.maxInt(usize), London.maxInitcodeSize());
+    try std.testing.expectEqual(@as(usize, 49_152), Osaka.maxInitcodeSize());
+    try std.testing.expectEqual(@as(usize, 131_072), Amsterdam.maxInitcodeSize());
     try std.testing.expectEqual(@as(u64, 7_424), eth.transaction.accessListDataCost(.{ .addresses = 1, .storage_keys = 3 }));
     const storage_keys = [_]u256{ 1, 2, 3 };
     try std.testing.expectEqual(AccessListCounts{
@@ -283,26 +266,29 @@ test "transaction gas helpers" {
 }
 
 test "transaction gas plan computes executable gas after intrinsic and floor costs" {
-    const EthGas = For(@import("../eth.zig").Protocol.TransactionProtocol);
-    const istanbul = EthGas.gasPlan(.istanbul, &.{ 0, 1 }, 100_000, .{});
+    const eth = @import("../eth.zig");
+    const Istanbul = runtime(eth.istanbul);
+    const Prague = runtime(eth.prague);
+    const Amsterdam = runtime(eth.amsterdam);
+    const istanbul = Istanbul.gasPlan(&.{ 0, 1 }, 100_000, .{});
     try std.testing.expectEqual(@as(u64, 21_020), istanbul.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 0), istanbul.floor_gas);
     try std.testing.expectEqual(@as(u64, 21_020), istanbul.minimum_gas);
     try std.testing.expectEqual(@as(u64, 78_980), istanbul.execution.?.regular_left);
 
-    const prague_floor = EthGas.gasPlan(.prague, &.{ 1, 1, 1, 1 }, 21_100, .{});
+    const prague_floor = Prague.gasPlan(&.{ 1, 1, 1, 1 }, 21_100, .{});
     try std.testing.expectEqual(@as(u64, 21_064), prague_floor.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 21_160), prague_floor.floor_gas);
     try std.testing.expectEqual(@as(u64, 21_160), prague_floor.minimum_gas);
     try std.testing.expectEqual(null, prague_floor.execution);
 
-    const amsterdam_floor = EthGas.gasPlan(.amsterdam, &.{ 1, 1, 1, 1 }, 16_000, .{});
+    const amsterdam_floor = Amsterdam.gasPlan(&.{ 1, 1, 1, 1 }, 16_000, .{});
     try std.testing.expectEqual(@as(u64, 15_064), amsterdam_floor.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 15_256), amsterdam_floor.floor_gas);
     try std.testing.expectEqual(@as(u64, 15_256), amsterdam_floor.minimum_gas);
     try std.testing.expectEqual(@as(u64, 936), amsterdam_floor.execution.?.regular_left);
 
-    const amsterdam_access_list = EthGas.gasPlan(.amsterdam, &.{ 0, 1 }, 100_000, .{ .access_list_counts = .{
+    const amsterdam_access_list = Amsterdam.gasPlan(&.{ 0, 1 }, 100_000, .{ .access_list_counts = .{
         .addresses = 1,
         .storage_keys = 3,
     } });
@@ -311,79 +297,50 @@ test "transaction gas plan computes executable gas after intrinsic and floor cos
     try std.testing.expectEqual(@as(u64, 34_444), amsterdam_access_list.minimum_gas);
     try std.testing.expectEqual(@as(u64, 65_556), amsterdam_access_list.execution.?.regular_left);
 
-    const prague_authorization = EthGas.gasPlan(.prague, &.{}, 100_000, .{ .authorization_count = 1 });
+    const prague_authorization = Prague.gasPlan(&.{}, 100_000, .{ .authorization_count = 1 });
     try std.testing.expectEqual(@as(u64, 46_000), prague_authorization.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 21_000), prague_authorization.floor_gas);
     try std.testing.expectEqual(@as(u64, 46_000), prague_authorization.minimum_gas);
     try std.testing.expectEqual(@as(u64, 54_000), prague_authorization.execution.?.regular_left);
 }
 
-test "transaction gas plan uses comptime protocol" {
-    const CustomRevision = enum { custom };
-    const CustomProtocol = struct {
-        pub const Revision = CustomRevision;
+test "transaction gas plan uses an extended exact spec" {
+    const custom = struct {
+        fn intrinsicBaseGas(_: IntrinsicGasOptions) ?u64 {
+            return 5;
+        }
 
-        pub const transaction = struct {
-            pub fn intrinsicBaseGas(revision: Revision, options: IntrinsicGasOptions) ?u64 {
-                _ = revision;
-                _ = options;
-                return 5;
+        fn calldataGas(input: []const u8) ?u64 {
+            var result: u64 = 0;
+            for (input) |byte| {
+                result = std.math.add(u64, result, if (byte == 0) 2 else 3) catch return null;
             }
+            return result;
+        }
 
-            pub fn createIntrinsicGas(revision: Revision) ?u64 {
-                _ = revision;
-                return 7;
-            }
+        fn accessListDataGas(counts: AccessListCounts) ?u64 {
+            return @as(u64, @intCast(counts.addresses + counts.storage_keys));
+        }
 
-            pub fn calldataGas(revision: Revision, input: []const u8) ?u64 {
-                _ = revision;
-                var gas: u64 = 0;
-                for (input) |byte| {
-                    gas = std.math.add(u64, gas, if (byte == 0) 2 else 3) catch return null;
-                }
-                return gas;
-            }
-
-            pub fn accessListAddressGas(revision: Revision) u64 {
-                _ = revision;
-                return 11;
-            }
-
-            pub fn storageKeyGas(revision: Revision) u64 {
-                _ = revision;
-                return 13;
-            }
-
-            pub fn accessListDataGas(revision: Revision, counts: AccessListCounts) ?u64 {
-                _ = revision;
-                return @as(u64, @intCast(counts.addresses + counts.storage_keys));
-            }
-
-            pub fn initCodeWordGas(revision: Revision) u64 {
-                _ = revision;
-                return 17;
-            }
-
-            pub fn authorizationIntrinsicGas(revision: Revision) u64 {
-                _ = revision;
-                return 19;
-            }
-
-            pub fn floorGas(revision: Revision, input: FloorGasInput) ?u64 {
-                _ = revision;
-                _ = input;
-                return 31;
-            }
-
-            pub fn regularGasLimit(revision: Revision, gas_limit: u64) u64 {
-                _ = revision;
-                return @min(gas_limit, 50);
-            }
-        };
+        fn floorGas(_: FloorGasInput) ?u64 {
+            return 31;
+        }
     };
-
-    const CustomGas = For(CustomProtocol);
-    const plan = CustomGas.gasPlan(.custom, &.{ 0, 1 }, 100, .{
+    const custom_spec = @import("../eth/spec.zig").frontier.extend(.{ .transaction = .{
+        .max_initcode_size = std.math.maxInt(usize),
+        .create_intrinsic_gas = 7,
+        .access_list_address_gas = 11,
+        .storage_key_gas = 13,
+        .initcode_word_gas = 17,
+        .authorization_intrinsic_gas = 19,
+        .intrinsicBaseGas = custom.intrinsicBaseGas,
+        .calldataGas = custom.calldataGas,
+        .accessListDataGas = custom.accessListDataGas,
+        .floorGas = custom.floorGas,
+        .regular_gas_cap = .{ .replace = 50 },
+    } });
+    const CustomGas = runtime(custom_spec);
+    const plan = CustomGas.gasPlan(&.{ 0, 1 }, 100, .{
         .authorization_count = 2,
         .access_list_counts = .{ .addresses = 1, .storage_keys = 2 },
         .is_create = true,
@@ -396,33 +353,34 @@ test "transaction gas plan uses comptime protocol" {
 
 test "Amsterdam gas plan executes only capped regular gas" {
     const eth = @import("../eth.zig");
-    const plan = For(eth.Protocol.TransactionProtocol).gasPlan(.amsterdam, &.{}, 120_000_000, .{});
+    const Amsterdam = runtime(eth.amsterdam);
+    const plan = Amsterdam.gasPlan(&.{}, 120_000_000, .{});
     try std.testing.expectEqual(@as(u64, 15_000), plan.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, eth.transaction.max_transaction_gas_limit - 15_000), plan.execution.?.regular_left);
     try std.testing.expectEqual(@as(u64, 120_000_000 - eth.transaction.max_transaction_gas_limit), plan.execution.?.reservoir);
 }
 
 test "Amsterdam calldata floor includes only decomposed regular transaction primitives" {
-    const EthGas = For(@import("../eth.zig").Protocol.TransactionProtocol);
+    const Amsterdam = runtime(@import("../eth.zig").amsterdam);
     const input = [_]u8{1} ** 4059;
-    const plan = EthGas.gasPlan(.amsterdam, &input, 282_776, .{ .is_create = true });
+    const plan = Amsterdam.gasPlan(&input, 282_776, .{ .is_create = true });
     try std.testing.expectEqual(@as(u64, 88_198), plan.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 282_776), plan.floor_gas);
     try std.testing.expectEqual(@as(u64, 194_578), plan.execution.?.regular_left);
 
-    const value_and_authorization_floor = EthGas.floorGasForTransaction(.amsterdam, &input, .{
+    const value_and_authorization_floor = Amsterdam.floorGasForTransaction(&input, .{
         .value = 1,
         .authorization_count = 1,
     });
     try std.testing.expectEqual(@as(?u64, 280_776), value_and_authorization_floor);
 
-    const self_transfer_floor = EthGas.floorGasForTransaction(.amsterdam, &input, .{
+    const self_transfer_floor = Amsterdam.floorGasForTransaction(&input, .{
         .value = 1,
         .is_self_transfer = true,
     });
     try std.testing.expectEqual(@as(?u64, 271_776), self_transfer_floor);
 
-    const access_list_floor = EthGas.floorGasForTransaction(.amsterdam, &input, .{
+    const access_list_floor = Amsterdam.floorGasForTransaction(&input, .{
         .access_list_counts = .{ .addresses = 1, .storage_keys = 1 },
     });
     try std.testing.expectEqual(@as(?u64, 278_104), access_list_floor);

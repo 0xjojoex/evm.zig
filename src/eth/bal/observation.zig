@@ -1,8 +1,7 @@
 //! Owned, transaction-local semantic state observations used to rebuild BAL.
 //!
-//! This is deliberately separate from `state.Changeset`: the latter remains
-//! the compact authoritative commit boundary, while this artifact retains the
-//! read and original/current information that committers do not need.
+//! This is deliberately separate from state changes: observations retain read
+//! and original/current information that committers do not need.
 
 const std = @import("std");
 const bal = @import("model.zig");
@@ -23,6 +22,7 @@ pub const StorageObservation = struct {
     slot: u256,
     original: u256,
     current: u256,
+    written: bool = false,
 };
 
 pub const CodeObservation = struct {
@@ -44,16 +44,23 @@ pub const AccountObservation = struct {
     nonce: ?NonceObservation = null,
     code: ?CodeObservation = null,
     lifecycle: []const LifecycleKind = &.{},
+    account_reset: bool = false,
+    account_deleted: bool = false,
+    storage_wiped: bool = false,
 };
 
-/// Canonical, index-free output from one completed semantic capture scope.
+/// One owned, index-free transition detached from a sealed tracked transaction.
+///
+/// BAL consumes observations and original/current pairs. Candidate-state folds
+/// consume written fields and final lifecycle flags. This is the only detached
+/// state artifact produced by an isolated execution lane.
 /// Account and storage entries are sorted and unique. Reverted writes and
 /// lifecycle events are absent; original-equal-current entries retain the
 /// access needed to classify a BAL read.
-pub const StateObservationDelta = struct {
+pub const LaneTransition = struct {
     accounts: []AccountObservation = &.{},
 
-    pub fn deinit(self: *StateObservationDelta, allocator: Allocator) void {
+    pub fn deinit(self: *LaneTransition, allocator: Allocator) void {
         for (self.accounts) |account| {
             allocator.free(@constCast(account.storage));
             if (account.code) |code| allocator.free(@constCast(code.current_code));
@@ -67,7 +74,7 @@ pub const StateObservationDelta = struct {
     /// Lifecycle is retained in this delta for policy/fallback decisions but
     /// remains intentionally uninterpreted until the EIP-8246 shape is pinned.
     pub fn toOwnedBlockAccessList(
-        self: StateObservationDelta,
+        self: LaneTransition,
         allocator: Allocator,
         block_access_index: bal.BlockAccessIndex,
     ) !bal.Decoded {

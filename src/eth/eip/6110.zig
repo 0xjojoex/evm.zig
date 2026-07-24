@@ -4,6 +4,7 @@ const std = @import("std");
 
 const address = @import("../../address.zig");
 const Host = @import("../../Host.zig");
+const state = @import("../../state.zig");
 
 pub const request_type: u8 = 0x00;
 pub const deposit_contract_address = address.addr(0x00000000219ab540356cbb839cbe05303d7705fa);
@@ -18,8 +19,9 @@ const amount_offset = 320;
 const signature_offset = 384;
 const index_offset = 512;
 
-pub fn appendRequestDataFromLogs(allocator: std.mem.Allocator, out: *std.ArrayList(u8), logs: []const Host.Log) !void {
-    for (logs) |event_log| {
+pub fn appendRequestDataFromLogs(allocator: std.mem.Allocator, out: *std.ArrayList(u8), logs: state.TrackedState.LogView) !void {
+    for (0..logs.len()) |index| {
+        const event_log = logs.get(index);
         if (!std.mem.eql(u8, &event_log.address, &deposit_contract_address)) continue;
         if (event_log.topics.len == 0 or event_log.topics[0] != deposit_event_signature_hash) continue;
         try appendRequestData(allocator, out, event_log.data);
@@ -80,7 +82,7 @@ test "EIP-6110 derives deposit request bytes from logs" {
 
     var request_data: std.ArrayList(u8) = .empty;
     defer request_data.deinit(std.testing.allocator);
-    try appendRequestDataFromLogs(std.testing.allocator, &request_data, &logs);
+    try appendRequestDataFromLogs(std.testing.allocator, &request_data, .fromSlice(&logs));
     try std.testing.expectEqual(@as(usize, request_data_len), request_data.items.len);
     try std.testing.expectEqualSlices(u8, event_data[pubkey_offset + 32 ..][0..48], request_data.items[0..48]);
     try std.testing.expectEqualSlices(u8, event_data[withdrawal_credentials_offset + 32 ..][0..32], request_data.items[48..80]);
@@ -96,7 +98,7 @@ test "EIP-6110 derives deposit request bytes from logs" {
         .topics = &wrong_topic,
         .data = &event_data,
     }};
-    try appendRequestDataFromLogs(std.testing.allocator, &ignored, &ignored_logs);
+    try appendRequestDataFromLogs(std.testing.allocator, &ignored, .fromSlice(&ignored_logs));
     try std.testing.expectEqual(@as(usize, 0), ignored.items.len);
 
     var invalid = event_data;

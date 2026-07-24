@@ -6,10 +6,10 @@ const eip7702 = @import("./eip7702.zig");
 const Address = evmz.Address;
 const Host = evmz.Host;
 
-pub fn For(comptime Executor: type) type {
+pub fn bind(comptime Executor: type) type {
     return struct {
-        const Protocol = Executor.Protocol;
-        const call_runtime = call_runtime_module.For(Executor);
+        const spec = Executor.specification;
+        const call_runtime = call_runtime_module.bind(Executor);
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
                 .call = Callbacks().call,
@@ -45,8 +45,8 @@ pub fn For(comptime Executor: type) type {
 
                 fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
-                    if (Protocol.Precompile.active(self.revision(), address)) return .warm;
-                    if (self.state.warm_accounts.contains(address)) return .warm;
+                    if (spec.precompile.active(address)) return .warm;
+                    if (self.state.isAccountWarm(address)) return .warm;
                     try self.state.warmAccount(address);
                     return .cold;
                 }
@@ -54,8 +54,8 @@ pub fn For(comptime Executor: type) type {
                 fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     const target = eip7702.delegationTarget(try self.getCode(address)) orelse return null;
-                    if (Protocol.Precompile.active(self.revision(), target)) return .warm;
-                    if (self.state.warm_accounts.contains(target)) return .warm;
+                    if (spec.precompile.active(target)) return .warm;
+                    if (self.state.isAccountWarm(target)) return .warm;
                     try self.state.warmAccount(target);
                     return .cold;
                 }
@@ -70,14 +70,11 @@ pub fn For(comptime Executor: type) type {
                         balance,
                     );
                     const same_address = std.mem.eql(u8, &address, &beneficiary);
-                    const should_refund = !self.state.selfdestructed_accounts.contains(address);
-                    const policy = Protocol.self_destruct.selfDestructPolicy(
-                        self.revision(),
-                        .{
-                            .same_address = same_address,
-                            .created_in_transaction = self.state.created_contracts.contains(address),
-                        },
-                    );
+                    const should_refund = !self.state.wasSelfdestructed(address);
+                    const policy = spec.self_destruct.policy(.{
+                        .same_address = same_address,
+                        .created_in_transaction = self.state.createdInTransaction(address),
+                    });
                     if (balance > 0) {
                         if (!same_address) {
                             try self.state.addBalance(beneficiary, balance);
@@ -90,7 +87,7 @@ pub fn For(comptime Executor: type) type {
                         if (policy.clear_balance) {
                             try self.state.setBalance(address, 0);
                         }
-                    } else if (!same_address and Protocol.self_destruct.touchesBeneficiaryOnZeroTransfer(self.revision())) {
+                    } else if (!same_address and spec.self_destruct.touches_beneficiary_on_zero_transfer) {
                         try self.state.touchAccount(beneficiary);
                     }
                     if (policy.reset_nonce) {
@@ -112,7 +109,8 @@ pub fn For(comptime Executor: type) type {
 
         fn observeAccountAccess(ptr: *anyopaque, address: Address, depth: u16) !void {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            try self.traceAccountAccess(address, depth);
+            _ = depth;
+            try self.traceAccountAccess(address);
         }
 
         fn getBalance(ptr: *anyopaque, address: Address) !u256 {

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const evmz = @import("../evm.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
@@ -68,24 +69,16 @@ const TerminalStatus = enum {
     revert,
 };
 
-pub fn For(comptime ProtocolType: type) type {
-    return DispatchFor(ProtocolType, false);
-}
-
-/// The one concrete replay-capture table for a protocol.
+/// Tail dispatch for an exact specification.
 ///
-/// This type varies only with the protocol, never with the eventual trace
-/// consumer. Captured spans are replayed after execution.
-pub fn TraceFor(comptime ProtocolType: type) type {
-    return DispatchFor(ProtocolType, true);
-}
+/// traced: whether the dispatch table should include traced handlers.
+pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool }) type {
+    const traced = cfg.traced;
 
-fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
     return struct {
         const Self = @This();
-        const Protocol = ProtocolType;
-        const Instructions = instruction.For(Protocol);
-        const StorageInstructions = storage_instruction.For(Protocol);
+        const Instructions = instruction.Instruction(spec);
+        const StorageInstructions = storage_instruction.bind(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
@@ -133,11 +126,21 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             inline fn spill(self: *Context, ip: [*]const u8, sp: [*]u256, gas: i64) void {
                 self.frame.pc = self.pcOf(ip);
                 self.frame.gas_left = gas;
-                self.frame.stack.len = self.stackLen(sp);
+                const stack_len = self.stackLen(sp);
+                std.debug.assert(stack_len <= Stack.capacity);
+                self.frame.stack.len = @intCast(stack_len);
             }
 
             inline fn reloadSp(self: *Context) [*]u256 {
                 return self.stack_base + self.frame.stack.len;
+            }
+
+            /// Cold/custom handlers may synchronously re-enter the host and grow
+            /// the packed arena. Refresh activation-local pointers before the
+            /// tail loop resumes.
+            inline fn refreshStackBase(self: *Context) void {
+                self.stack_base = self.frame.stack.base;
+                self.stack_limit = self.stack_base + Stack.capacity;
             }
 
             inline fn stackLen(self: *const Context, sp: [*]u256) usize {
@@ -224,42 +227,41 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             .{ .opcode = .SHR, .handler = &ShiftHandler(.SHR, .right).run },
         };
 
-        // Direct handlers are installed only when the protocol dispatch table resolves
-        // the opcode to the same builtin. Most entries stay always-only; the small
-        // runtime set performs its own revision check before charging gas.
+        // Direct handlers are installed only when the exact dispatch table
+        // resolves the active opcode to the same builtin.
         const table: [256]*const Handler = blk: {
             @setEvalBranchQuota(20_000);
             var handlers: [256]*const Handler = @splat(&tailCold);
             for (promoted_entries) |entry| {
-                if (tailFastPathSupported(entry.opcode)) {
+                if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
             }
             for (direct_entries) |entry| {
-                if (tailFastPathAlways(entry.opcode)) {
+                if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
             }
             for (runtime_entries) |entry| {
-                if (tailFastPathSupported(entry.opcode)) {
+                if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
             }
             for (@intFromEnum(Opcode.PUSH1)..@intFromEnum(Opcode.PUSH32) + 1) |opcode_byte| {
                 const opcode: Opcode = @enumFromInt(opcode_byte);
-                if (tailFastPathAlways(opcode)) {
+                if (tailFastPath(opcode)) {
                     handlers[opcode_byte] = &PushHandler(opcode).run;
                 }
             }
             for (@intFromEnum(Opcode.DUP1)..@intFromEnum(Opcode.DUP16) + 1) |opcode_byte| {
                 const opcode: Opcode = @enumFromInt(opcode_byte);
-                if (tailFastPathAlways(opcode)) {
+                if (tailFastPath(opcode)) {
                     handlers[opcode_byte] = &DupHandler(opcode).run;
                 }
             }
             for (@intFromEnum(Opcode.SWAP1)..@intFromEnum(Opcode.SWAP16) + 1) |opcode_byte| {
                 const opcode: Opcode = @enumFromInt(opcode_byte);
-                if (tailFastPathAlways(opcode)) {
+                if (tailFastPath(opcode)) {
                     handlers[opcode_byte] = &SwapHandler(opcode).run;
                 }
             }
@@ -336,14 +338,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             };
         }
 
-        inline fn tailFastPathAlways(comptime opcode: Opcode) bool {
-            const availability = comptime Instructions.tailFastPathBuiltin(opcode) orelse return false;
-            return availability == .always;
-        }
-
-        inline fn tailFastPathSupported(comptime opcode: Opcode) bool {
-            const availability = comptime Instructions.tailFastPathBuiltin(opcode) orelse return false;
-            return availability != .never;
+        inline fn tailFastPath(comptime opcode: Opcode) bool {
+            return Instructions.tailFastPathBuiltin(opcode);
         }
 
         pub fn execute(frame: *CallFrame, read_bytes: []const u8) anyerror!void {
@@ -353,7 +349,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
             std.debug.assert(frame.bytecode.jumpdests.analyzed);
-            const stack_base: [*]u256 = frame.stack.slots;
+            const stack_base = frame.stack.base;
             var ctx = Context{
                 .frame = frame,
                 .code_base = code_base,
@@ -376,7 +372,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         }
 
         pub fn executeTraced(capture: *trace.TraceCapture, frame: *CallFrame, read_bytes: []const u8) anyerror!void {
-            if (comptime !traced) @compileError("executeTraced requires tail_dispatch.TraceFor");
+            if (comptime !traced) @compileError("executeTraced requires tail_dispatch.bindTrace");
 
             // A resumed CALL/CREATE completes its parent step before its next
             // opcode begins. Suspended frames retain the pending step until the
@@ -398,7 +394,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
             const code_base = read_bytes.ptr;
             std.debug.assert(frame.bytecode.jumpdests.analyzed);
-            const stack_base: [*]u256 = frame.stack.slots;
+            const stack_base = frame.stack.base;
             var ctx = Context{
                 .frame = frame,
                 .code_base = code_base,
@@ -459,20 +455,8 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         }
 
         inline fn requireOpcode(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?TailStatus {
-            const maybe_availability = comptime Instructions.tailFastPathBuiltin(opcode);
-            const availability = maybe_availability orelse return fail(ctx, ip, sp, gas, .invalid_opcode);
-            return switch (comptime availability) {
-                .always => null,
-                .never => fail(ctx, ip, sp, gas, .invalid_opcode),
-                .runtime => switch (comptime Protocol.Instruction.rawAvailability(
-                    Protocol.Instruction.fromByte(@intFromEnum(opcode)),
-                )) {
-                    .always => null,
-                    .never => fail(ctx, ip, sp, gas, .invalid_opcode),
-                    .since => |activation| if (Instructions.revisionIncludes(Instructions.frameRevision(ctx.frame), activation)) null else fail(ctx, ip, sp, gas, .invalid_opcode),
-                    .gate => |active| if (active(Instructions.frameRevision(ctx.frame))) null else fail(ctx, ip, sp, gas, .invalid_opcode),
-                },
-            };
+            if (comptime Instructions.tailFastPathBuiltin(opcode)) return null;
+            return fail(ctx, ip, sp, gas, .invalid_opcode);
         }
 
         // All fail() exits are exceptional (invalid opcode/stack/static, OOG).
@@ -486,6 +470,12 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             return ctx.finish(ip, sp, 0, .done);
         }
 
+        noinline fn recordError(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, err: anyerror) void {
+            @branchHint(.cold);
+            ctx.spill(ip, sp, gas);
+            ctx.err = err;
+        }
+
         fn tailStop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             ctx.frame.status = .success;
             return ctx.finish(ip, sp, gas, .done);
@@ -496,6 +486,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const opcode_byte = (ip - 1)[0];
             executeColdOpcode(opcode_byte, ctx.frame) catch |err| {
                 if (frameStatusForError(err)) |status| {
+                    ctx.refreshStackBase();
                     if (ctx.frame.status == .running) {
                         ctx.frame.failWithFrameStatus(status);
                     }
@@ -504,6 +495,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
                 ctx.err = err;
                 return .thrown;
             };
+            ctx.refreshStackBase();
             if (ctx.frame.status != .running) {
                 return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
             }
@@ -512,7 +504,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
         noinline fn executeColdOpcode(opcode_byte: u8, frame: *CallFrame) anyerror!void {
             // Common host-bound opcodes already paid the tail spill. Resolve their
-            // protocol entry directly instead of crossing the generic cold switch again.
+            // specification entry directly instead of crossing the generic cold switch again.
             return switch (opcode_byte) {
                 @intFromEnum(Opcode.LOG0) => executeResolvedCold(.LOG0, frame),
                 @intFromEnum(Opcode.LOG1) => executeResolvedCold(.LOG1, frame),
@@ -534,8 +526,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const key_slot = sp - 1;
             ctx.frame.gas_left = next_gas;
             const value = StorageInstructions.sloadAfterPop(ctx.frame, key_slot[0]) catch |err| {
-                ctx.spill(ip, key_slot, ctx.frame.gas_left);
-                ctx.err = err;
+                recordError(ctx, ip, key_slot, ctx.frame.gas_left, err);
                 return .thrown;
             };
             const loaded = value orelse return ctx.finish(ip, key_slot, ctx.frame.gas_left, .done);
@@ -571,8 +562,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
 
             const slot = sp - 1;
             const value = ctx.frame.host.getTransientStorage(ctx.frame.msg.recipient, slot[0]) catch |err| {
-                ctx.spill(ip, slot, next_gas);
-                ctx.err = err;
+                recordError(ctx, ip, slot, next_gas, err);
                 return .thrown;
             };
             slot[0] = value;
@@ -588,8 +578,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const nsp = sp - 2;
             const key = (sp - 1)[0];
             ctx.frame.host.setTransientStorage(ctx.frame.msg.recipient, key, nsp[0]) catch |err| {
-                ctx.spill(ip, nsp, next_gas);
-                ctx.err = err;
+                recordError(ctx, ip, nsp, next_gas, err);
                 return .thrown;
             };
             return tailNext(ip, nsp, next_gas, ctx);
@@ -628,7 +617,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const base = (sp - 1)[0];
             const exponent = (sp - 2)[0];
             const nsp = sp - 1;
-            const byte_gas = Protocol.Instruction.expByteGas(Instructions.frameRevision(ctx.frame));
+            const byte_gas = spec.instruction.exp_byte_gas;
             const dynamic_gas = byte_gas * arithmetic_instruction.countSignificantBytesSize(exponent);
             const final_gas = chargeGas(ip, nsp - 1, next_gas, ctx, dynamic_gas) orelse return .out_of_gas;
             (nsp - 1)[0] = expOutlined(base, exponent);
@@ -1034,8 +1023,7 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
             const next_gas = chargeGas(ip, sp, gas, ctx, expansion.cost) orelse return null;
             ctx.frame.memory.expandPrepared(expansion) catch |err| switch (err) {
                 error.OutOfMemory => {
-                    ctx.spill(ip, sp, next_gas);
-                    ctx.err = err;
+                    recordError(ctx, ip, sp, next_gas, err);
                     return null;
                 },
             };
@@ -1092,41 +1080,29 @@ fn DispatchFor(comptime ProtocolType: type, comptime traced: bool) type {
         }
 
         fn stackPrefixLen(comptime opcode_byte: u8, before_len: usize) usize {
-            const value = comptime Protocol.Instruction.fromByte(opcode_byte);
-            const info = comptime Protocol.Instruction.info(value);
-            if (!info.defined or before_len < info.stack_in) return 0;
+            const entry = comptime spec.instruction.entry(opcode_byte);
+            if (!entry.defined() or before_len < entry.info.stack_in) return 0;
 
-            switch (comptime Protocol.Instruction.context(value)) {
-                .byte => |inherited_byte| {
-                    if (inherited_byte >= @intFromEnum(Opcode.DUP1) and
-                        inherited_byte <= @intFromEnum(Opcode.DUP16))
-                    {
-                        return before_len;
-                    }
-
-                    // These instructions encode their affected suffix in an
-                    // immediate byte. Fall back to a full post-stack until
-                    // prepared-code metadata exposes that depth.
-                    if (inherited_byte == @intFromEnum(Opcode.DUPN) or
-                        inherited_byte == @intFromEnum(Opcode.SWAPN) or
-                        inherited_byte == @intFromEnum(Opcode.EXCHANGE))
-                    {
-                        return 0;
-                    }
-                },
-                .custom => {},
+            if (opcode_byte >= @intFromEnum(Opcode.DUP1) and
+                opcode_byte <= @intFromEnum(Opcode.DUP16))
+            {
+                return before_len;
             }
-            return before_len - info.stack_in;
+
+            // These instructions encode their affected suffix in an
+            // immediate byte. Fall back to a full post-stack until
+            // prepared-code metadata exposes that depth.
+            if (opcode_byte == @intFromEnum(Opcode.DUPN) or
+                opcode_byte == @intFromEnum(Opcode.SWAPN) or
+                opcode_byte == @intFromEnum(Opcode.EXCHANGE))
+            {
+                return 0;
+            }
+            return before_len - entry.info.stack_in;
         }
 
         fn memoryWritePlan(comptime opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
-            const value = comptime Protocol.Instruction.fromByte(opcode_byte);
-            return switch (comptime Protocol.Instruction.context(value)) {
-                .byte => |inherited_byte| builtinMemoryWritePlan(inherited_byte, stack),
-                // New instructions require an explicit trace-effect contract;
-                // their runtime support is intentionally deferred.
-                .custom => null,
-            };
+            return builtinMemoryWritePlan(opcode_byte, stack);
         }
     };
 }

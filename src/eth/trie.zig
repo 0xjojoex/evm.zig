@@ -9,9 +9,10 @@ const crypto = @import("../crypto.zig");
 const rlp = @import("rlp");
 const mpt = @import("mpt");
 const uint256 = @import("../uint256.zig");
-const Changeset = @import("../state/Changeset.zig");
+const TrackedState = @import("../state/TrackedState.zig");
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
+const ChangesView = TrackedState.ChangesView;
 
 const Allocator = std.mem.Allocator;
 
@@ -166,26 +167,11 @@ fn updateRootIndexed(allocator: Allocator, root_hash: [32]u8, indexed: *const In
     return trie.updateSorted(root_hash, indexed.index(), sorted);
 }
 
-pub fn storageRootAfterChangeset(
-    allocator: Allocator,
-    root_hash: [32]u8,
-    nodes: []const []const u8,
-    changeset: *const Changeset,
-    target: address.Address,
-) UpdateError![32]u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    var indexed = try indexNodes(scratch, nodes);
-    defer indexed.deinit();
-    return storageRootAfterChangesetIndexed(scratch, root_hash, indexed, changeset, target);
-}
-
-fn storageRootAfterChangesetIndexed(
+fn storageRootAfterChangesIndexed(
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
-    changeset: *const Changeset,
+    changes: ChangesView,
     target: address.Address,
 ) UpdateError![32]u8 {
     const scratch = allocator;
@@ -193,7 +179,9 @@ fn storageRootAfterChangesetIndexed(
     var updates: std.ArrayList(StorageTrie.Update) = .empty;
     defer updates.deinit(scratch);
 
-    for (changeset.storage_writes.items) |write| {
+    var index: u32 = 0;
+    while (index < changes.storage_writes.len()) : (index += 1) {
+        const write = changes.storage_writes.at(index);
         if (!std.mem.eql(u8, &write.address, &target)) continue;
 
         const value: ?[]const u8 = if (write.value == 0)
@@ -203,42 +191,57 @@ fn storageRootAfterChangesetIndexed(
         try updates.append(scratch, .{ .key = write.key, .value = value });
     }
 
-    return storageTrie(allocator).update(root_hash, indexed.index(), updates.items);
+    const base_root = if (changesWipeStorage(changes, target))
+        empty_root_hash
+    else
+        root_hash;
+    return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
 }
 
-pub fn stateRootAfterChangeset(
+pub fn stateRootAfterChanges(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
-    changeset: *const Changeset,
+    changes: ChangesView,
 ) UpdateError![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
     var indexed = try indexNodes(scratch, nodes);
     defer indexed.deinit();
-    return stateRootAfterChangesetIndexed(scratch, root_hash, indexed, changeset);
+    return stateRootAfterChangesIndexed(scratch, root_hash, indexed, changes);
 }
 
-pub fn stateRootAfterChangesetIndexed(
+pub fn stateRootAfterChangesIndexed(
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
-    changeset: *const Changeset,
+    changes: ChangesView,
 ) UpdateError![32]u8 {
     const scratch = allocator;
 
     var addresses: std.ArrayList(address.Address) = .empty;
     defer addresses.deinit(scratch);
 
-    for (changeset.account_updates.items) |update| {
-        if (!changesetDeletesAccount(changeset, update.address)) {
-            try appendUniqueAddress(scratch, &addresses, update.address);
+    var account_index: u32 = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        if (change.account != null) {
+            try appendUniqueAddress(scratch, &addresses, change.address);
         }
     }
-    for (changeset.storage_writes.items) |write| {
-        if (!changesetDeletesAccount(changeset, write.address)) {
+    var storage_index: u32 = 0;
+    while (storage_index < changes.storage_writes.len()) : (storage_index += 1) {
+        const write = changes.storage_writes.at(storage_index);
+        if (!changesDeleteAccount(changes, write.address)) {
             try appendUniqueAddress(scratch, &addresses, write.address);
+        }
+    }
+    var wipe_index: u32 = 0;
+    while (wipe_index < changes.storage_wipes.len()) : (wipe_index += 1) {
+        const target = changes.storage_wipes.at(wipe_index);
+        if (!changesDeleteAccount(changes, target)) {
+            try appendUniqueAddress(scratch, &addresses, target);
         }
     }
 
@@ -248,9 +251,22 @@ pub fn stateRootAfterChangesetIndexed(
     const accounts = accountTrie(scratch);
     for (addresses.items) |target| {
         const previous = try loadAccountOrEmpty(accounts, root_hash, indexed.index(), target);
-        const account_update = changesetAccountUpdate(changeset, target);
-        const storage_root = try storageRootAfterChangesetIndexed(scratch, previous.storage_root, indexed, changeset, target);
-        const next_account = accountAfterUpdate(previous, account_update, storage_root);
+        const account_change = changesAccount(changes, target);
+        const storage_root = try storageRootAfterChangesIndexed(
+            scratch,
+            previous.storage_root,
+            indexed,
+            changes,
+            target,
+        );
+        var next_account = previous;
+        if (account_change) |change| {
+            const account = change.account orelse unreachable;
+            next_account.nonce = account.nonce;
+            next_account.balance = account.balance;
+            next_account.code_hash = account.code_hash;
+        }
+        next_account.storage_root = storage_root;
 
         const value: ?[]const u8 = if (next_account.isEmpty())
             null
@@ -259,11 +275,11 @@ pub fn stateRootAfterChangesetIndexed(
         try updates.append(scratch, .{ .key = target, .value = value });
     }
 
-    for (changeset.account_deletes.items) |deleted| {
-        try updates.append(scratch, .{
-            .key = deleted,
-            .value = null,
-        });
+    account_index = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        if (change.account != null) continue;
+        try updates.append(scratch, .{ .key = change.address, .value = null });
     }
 
     return accounts.update(root_hash, indexed.index(), updates.items);
@@ -330,27 +346,25 @@ fn loadAccountOrEmpty(
     };
 }
 
-fn accountAfterUpdate(previous: Account, update: ?Changeset.AccountUpdate, storage_root: [32]u8) Account {
-    var account = previous;
-    if (update) |account_update| {
-        account.nonce = account_update.nonce;
-        account.balance = account_update.balance;
-        account.code_hash = account_update.code_hash;
-    }
-    account.storage_root = storage_root;
-    return account;
-}
-
-fn changesetAccountUpdate(changeset: *const Changeset, target: address.Address) ?Changeset.AccountUpdate {
-    for (changeset.account_updates.items) |update| {
-        if (std.mem.eql(u8, &update.address, &target)) return update;
+fn changesAccount(changes: ChangesView, target: address.Address) ?TrackedState.AccountChange {
+    var index: u32 = 0;
+    while (index < changes.accounts.len()) : (index += 1) {
+        const change = changes.accounts.at(index);
+        if (std.mem.eql(u8, &change.address, &target)) return change;
     }
     return null;
 }
 
-fn changesetDeletesAccount(changeset: *const Changeset, target: address.Address) bool {
-    for (changeset.account_deletes.items) |deleted| {
-        if (std.mem.eql(u8, &deleted, &target)) return true;
+fn changesDeleteAccount(changes: ChangesView, target: address.Address) bool {
+    const change = changesAccount(changes, target) orelse return false;
+    return change.account == null;
+}
+
+fn changesWipeStorage(changes: ChangesView, target: address.Address) bool {
+    var index: u32 = 0;
+    while (index < changes.storage_wipes.len()) : (index += 1) {
+        const wiped = changes.storage_wipes.at(index);
+        if (std.mem.eql(u8, &wiped, &target)) return true;
     }
     return false;
 }
@@ -915,151 +929,57 @@ test "MPT update root delete materializes hashed sibling before branch collapse"
     try std.testing.expectError(error.MissingNode, updateRoot(scratch, root_hash, &omitted_sibling, &updates));
 }
 
-test "MPT storage root helper applies Changeset writes and zero deletes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const account = address.addr(0x1000);
-    const other_account = address.addr(0x2000);
-    const key0 = hashedStorageKey(0);
-    const value0 = try storageValue(scratch, 42);
-    const base_pairs = [_]Pair{.{ .key = &key0, .value = value0 }};
-    const root_node = try encodedRootForTest(scratch, &base_pairs);
-    const root_hash = crypto.keccak256(root_node);
-    const nodes = [_][]const u8{root_node};
-
-    var changeset = Changeset.init();
-    defer changeset.deinit(scratch);
-    try changeset.storage_writes.append(scratch, .{ .address = account, .key = 0, .value = 0 });
-    try changeset.storage_writes.append(scratch, .{ .address = account, .key = 2, .value = 9 });
-    try changeset.storage_writes.append(scratch, .{ .address = other_account, .key = 1, .value = 99 });
-    changeset.sort();
-
-    const actual = try storageRootAfterChangeset(scratch, root_hash, &nodes, &changeset, account);
-
-    const key2 = hashedStorageKey(2);
-    const value2 = try storageValue(scratch, 9);
-    const expected_pairs = [_]Pair{.{ .key = &key2, .value = value2 }};
-    const expected = try root(scratch, &expected_pairs);
-    try std.testing.expectEqualSlices(u8, &expected, &actual);
-}
-
-test "MPT state root helper applies account and storage changes" {
+test "MPT state root consumes tracked changes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
     const target = address.addr(0x1000);
-    const key0 = hashedStorageKey(0);
-    const value0 = try storageValue(scratch, 42);
-    const storage_pairs = [_]Pair{.{ .key = &key0, .value = value0 }};
-    const storage_root = try root(scratch, &storage_pairs);
-    const storage_node = try encodedRootForTest(scratch, &storage_pairs);
+    var state = TrackedState.init(scratch);
+    defer state.deinit();
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    try state.setBalance(target, 20);
+    _ = try state.setStorage(target, 1, 7);
+    state.closeScope();
+    state.seal(attempt);
+    state.retain(attempt);
+    const changes = state.acceptedView().changes();
 
+    const direct = try stateRootAfterChanges(scratch, empty_root_hash, &.{}, changes);
+    const storage_key = hashedStorageKey(1);
+    const storage_value = try storageValue(scratch, 7);
+    const storage_root = try root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
     const account_key = hashedAddressKey(target);
     const account_value = try accountValueFrom(scratch, .{
-        .nonce = 1,
-        .balance = 10,
+        .balance = 20,
         .storage_root = storage_root,
-        .code_hash = crypto.keccak256(&.{0x60}),
     });
-    const state_pairs = [_]Pair{.{ .key = &account_key, .value = account_value }};
-    const state_root_node = try encodedRootForTest(scratch, &state_pairs);
-    const state_root = crypto.keccak256(state_root_node);
-    const nodes = [_][]const u8{ state_root_node, storage_node };
+    const expected = try root(scratch, &.{.{ .key = &account_key, .value = account_value }});
+    try std.testing.expectEqualSlices(u8, &expected, &direct);
 
-    var changeset = Changeset.init();
-    defer changeset.deinit(scratch);
-    const new_code = [_]u8{ 0x61, 0x62 };
-    try changeset.account_updates.append(scratch, .{
-        .address = target,
-        .nonce = 2,
-        .balance = 20,
-        .code_hash = crypto.keccak256(&new_code),
-    });
-    try changeset.appendCodeInsert(scratch, crypto.keccak256(&new_code), &new_code);
-    try changeset.storage_writes.append(scratch, .{ .address = target, .key = 0, .value = 0 });
-    try changeset.storage_writes.append(scratch, .{ .address = target, .key = 1, .value = 7 });
-    changeset.sort();
+    const wiped = state.beginTransaction();
+    state.beginScope();
+    try state.setBalance(target, 0);
+    try state.markSelfdestructed(target);
+    try state.finalize(.{ .existing_account = .{
+        .reset_account = true,
+        .clear_storage = true,
+    } });
+    state.closeScope();
+    state.seal(wiped);
+    state.retain(wiped);
+    const wiped_changes = state.acceptedView().changes();
+    try std.testing.expectEqual(@as(u32, 1), wiped_changes.storage_wipes.len());
+    try std.testing.expectEqual(@as(u32, 0), wiped_changes.storage_writes.len());
 
-    const actual = try stateRootAfterChangeset(scratch, state_root, &nodes, &changeset);
-
-    const key1 = hashedStorageKey(1);
-    const value1 = try storageValue(scratch, 7);
-    const expected_storage_pairs = [_]Pair{.{ .key = &key1, .value = value1 }};
-    const expected_storage_root = try root(scratch, &expected_storage_pairs);
-    const expected_account_value = try accountValueFrom(scratch, .{
-        .nonce = 2,
-        .balance = 20,
-        .storage_root = expected_storage_root,
-        .code_hash = crypto.keccak256(&new_code),
-    });
-    const expected_state_pairs = [_]Pair{.{ .key = &account_key, .value = expected_account_value }};
-    const expected = try root(scratch, &expected_state_pairs);
-    try std.testing.expectEqualSlices(u8, &expected, &actual);
-}
-
-test "MPT state root helper applies storage-only changes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const target = address.addr(0x2000);
-    const account_key = hashedAddressKey(target);
-    const account_value = try accountValueFrom(scratch, .{
-        .nonce = 5,
-        .balance = 100,
-        .code_hash = crypto.keccak256(&.{0x5f}),
-    });
-    const state_pairs = [_]Pair{.{ .key = &account_key, .value = account_value }};
-    const state_root_node = try encodedRootForTest(scratch, &state_pairs);
-    const state_root = crypto.keccak256(state_root_node);
-    const nodes = [_][]const u8{state_root_node};
-
-    var changeset = Changeset.init();
-    defer changeset.deinit(scratch);
-    try changeset.storage_writes.append(scratch, .{ .address = target, .key = 3, .value = 4 });
-
-    const actual = try stateRootAfterChangeset(scratch, state_root, &nodes, &changeset);
-
-    const storage_key = hashedStorageKey(3);
-    const storage_value = try storageValue(scratch, 4);
-    const expected_storage_pairs = [_]Pair{.{ .key = &storage_key, .value = storage_value }};
-    const expected_account_value = try accountValueFrom(scratch, .{
-        .nonce = 5,
-        .balance = 100,
-        .storage_root = try root(scratch, &expected_storage_pairs),
-        .code_hash = crypto.keccak256(&.{0x5f}),
-    });
-    const expected_state_pairs = [_]Pair{.{ .key = &account_key, .value = expected_account_value }};
-    const expected = try root(scratch, &expected_state_pairs);
-    try std.testing.expectEqualSlices(u8, &expected, &actual);
-}
-
-test "MPT state root helper deletes accounts" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const target = address.addr(0x3000);
-    const account_key = hashedAddressKey(target);
-    const account_value = try accountValueFrom(scratch, .{
-        .nonce = 1,
-        .balance = 1,
-        .code_hash = crypto.keccak256(&.{0x00}),
-    });
-    const state_pairs = [_]Pair{.{ .key = &account_key, .value = account_value }};
-    const state_root_node = try encodedRootForTest(scratch, &state_pairs);
-    const state_root = crypto.keccak256(state_root_node);
-    const nodes = [_][]const u8{state_root_node};
-
-    var changeset = Changeset.init();
-    defer changeset.deinit(scratch);
-    try changeset.account_deletes.append(scratch, target);
-
-    const actual = try stateRootAfterChangeset(scratch, state_root, &nodes, &changeset);
-    try std.testing.expectEqualSlices(u8, &empty_root_hash, &actual);
+    const wiped_direct = try stateRootAfterChanges(
+        scratch,
+        empty_root_hash,
+        &.{},
+        wiped_changes,
+    );
+    try std.testing.expectEqualSlices(u8, &empty_root_hash, &wiped_direct);
 }
 
 fn sortedPairsForTest(allocator: Allocator, pairs: []const Pair) ![]Pair {

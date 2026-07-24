@@ -104,7 +104,6 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     try contract_account.setCode(&bytecode);
 
     var executor = evmz.Evm.Executor.init(allocator, .{
-        .revision = .latest,
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
@@ -129,16 +128,15 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
         },
     };
     defer executed.discardIfCurrent();
-    const result = try executed.result();
-    var diff = try executed.changeset();
-    defer diff.deinit(allocator);
+    const result = executed.result();
+    const changes = executed.changes();
 
     return .{
         .status = proofStatus(result.status),
         .gas_used = result.gas.used,
         .output_len = @intCast(result.output.len),
         .return_word_low = returnWordLow(result.output),
-        .storage_slot0_low = @truncate(storageValue(&diff, contract, 0)),
+        .storage_slot0_low = @truncate(storageValue(changes.storage_writes, contract, 0)),
     };
 }
 
@@ -156,8 +154,10 @@ fn returnWordLow(output: []const u8) u32 {
     return std.mem.readInt(u32, output[28..32], .big);
 }
 
-fn storageValue(diff: *const evmz.state.Changeset, address: evmz.Address, key: u256) u256 {
-    for (diff.storage_writes.items) |write| {
+fn storageValue(writes: evmz.state.TrackedState.StorageChanges, address: evmz.Address, key: u256) u256 {
+    var index: u32 = 0;
+    while (index < writes.len()) : (index += 1) {
+        const write = writes.at(index);
         if (std.mem.eql(u8, &write.address, &address) and write.key == key) return write.value;
     }
     return 0;

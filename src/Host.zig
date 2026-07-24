@@ -212,11 +212,10 @@ pub fn precheckResult(msg: Message) ?Result {
 }
 
 comptime {
-    if (@sizeOf(usize) == 8) {
-        if (@sizeOf(Message) != 160) @compileError("Host.Message size changed; check opcode-action and pooled-frame layout");
-        if (@sizeOf(CallResult) != 64) @compileError("Host.CallResult size changed; rerun call-capture canary benches");
-        if (@sizeOf(CreateResult) != 80) @compileError("Host.CreateResult size changed; rerun call-capture canary benches");
-    }
+    // Rerun benches if follows size changes
+    std.debug.assert(@sizeOf(Message) == 160);
+    std.debug.assert(@sizeOf(CallResult) == 64);
+    std.debug.assert(@sizeOf(CreateResult) == 80);
 }
 
 pub const CallKind = enum(u8) {

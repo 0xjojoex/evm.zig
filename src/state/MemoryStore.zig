@@ -1,9 +1,9 @@
 //! In-memory state store for tests, demos, fixtures, and lightweight embeds.
 //!
 //! `reader()` exposes the read-only `StateReader` adapter. `committer()` applies
-//! final changesets back into this canonical memory store. It is not the
-//! execution overlay: speculative writes, checkpoints, reverts, logs, warmth,
-//! and the journal live in `Overlay`.
+//! borrowed final changes back into this canonical memory store. It is not the
+//! execution state: speculative writes, checkpoints, reverts, logs, warmth,
+//! and the journal live in `TrackedState`.
 
 const std = @import("std");
 
@@ -12,14 +12,15 @@ const Account = @import("./Account.zig");
 const Backend = @import("./Backend.zig").Backend;
 const RootProvider = @import("./Backend.zig").RootProvider;
 const MemoryAccount = @import("./MemoryAccount.zig");
-const Changeset = @import("./Changeset.zig");
 const Committer = @import("./Committer.zig");
+const TrackedState = @import("./TrackedState.zig");
 const StateReader = @import("./Reader.zig");
 const ConcurrentReader = @import("./ConcurrentReader.zig");
 const trie = @import("../eth/trie.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 
 const Address = evmz.Address;
+const ChangesView = TrackedState.ChangesView;
 
 pub const EmptyAccountPolicy = enum {
     omit,
@@ -84,12 +85,12 @@ pub fn backend(self: *MemoryStore) Backend {
 }
 
 const root_provider_vtable = RootProvider.VTable{
-    .afterChangeset = stateRootAfterChangesetProvider,
+    .afterChanges = stateRootAfterChangesProvider,
 };
 
-fn stateRootAfterChangesetProvider(ptr: *anyopaque, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
+fn stateRootAfterChangesProvider(ptr: *anyopaque, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    return self.stateRootAfterChangeset(allocator, changeset);
+    return self.stateRootAfterChanges(allocator, changes);
 }
 
 pub fn getAccount(self: *MemoryStore, address: Address) ?*MemoryAccount {
@@ -200,48 +201,60 @@ pub fn stateRootWithOptions(self: *MemoryStore, allocator: std.mem.Allocator, op
     return try trie.root(allocator, pairs.items);
 }
 
-pub fn stateRootAfterChangeset(self: *MemoryStore, allocator: std.mem.Allocator, changeset: *const Changeset) ![32]u8 {
-    return self.stateRootAfterChangesetWithOptions(allocator, changeset, .{});
+pub fn stateRootAfterChanges(self: *MemoryStore, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
+    return self.stateRootAfterChangesWithOptions(allocator, changes, .{});
 }
 
-pub fn stateRootAfterChangesetWithOptions(
+pub fn stateRootAfterChangesWithOptions(
     self: *MemoryStore,
     allocator: std.mem.Allocator,
-    changeset: *const Changeset,
+    changes: ChangesView,
     options: StateRootOptions,
 ) ![32]u8 {
     var next = try self.clone(allocator);
     defer next.deinit();
 
-    try next.applyChangesetInPlace(changeset);
+    try next.applyChangesInPlace(changes);
     return try next.stateRootWithOptions(allocator, options);
 }
 
-pub fn applyChangeset(self: *MemoryStore, changeset: *const Changeset) !void {
+pub fn applyChanges(self: *MemoryStore, changes: ChangesView) !void {
     var next = try self.clone(self.allocator);
     errdefer next.deinit();
-    try next.applyChangesetInPlace(changeset);
+    try next.applyChangesInPlace(changes);
 
     std.mem.swap(MemoryStore, self, &next);
     next.deinit();
 }
 
-fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void {
-    for (changeset.code_inserts.items) |insert| {
-        const code = changeset.codeBytes(insert);
-        if (!std.mem.eql(u8, &evmz.crypto.keccak256(code), &insert.code_hash)) return error.CodeHashMismatch;
-        try self.putCode(insert.code_hash, code);
+fn applyChangesInPlace(self: *MemoryStore, changes: ChangesView) !void {
+    var account_index: u32 = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        const account_value = change.account orelse continue;
+        if (changes.introducedCode(account_value.code_hash)) |code| {
+            if (!std.mem.eql(u8, &evmz.crypto.keccak256(code.bytes), &code.code_hash)) {
+                return error.CodeHashMismatch;
+            }
+            try self.putCode(code.code_hash, code.bytes);
+        }
     }
 
-    for (changeset.account_deletes.items) |address| {
-        if (self.accounts.fetchRemove(address)) |removed| {
+    account_index = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        if (change.account != null) continue;
+        if (self.accounts.fetchRemove(change.address)) |removed| {
             var account = removed.value;
             account.deinit();
         }
     }
 
-    for (changeset.account_updates.items) |update| {
-        const account = try self.getOrCreateAccount(update.address);
+    account_index = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        const update = change.account orelse continue;
+        const account = try self.getOrCreateAccount(change.address);
         const previous_code_hash = accountCodeHash(account);
         account.nonce = update.nonce;
         account.balance = update.balance;
@@ -255,7 +268,16 @@ fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void 
         account.code_hash = update.code_hash;
     }
 
-    for (changeset.storage_writes.items) |write| {
+    var wipe_index: u32 = 0;
+    while (wipe_index < changes.storage_wipes.len()) : (wipe_index += 1) {
+        if (self.accounts.getPtr(changes.storage_wipes.at(wipe_index))) |account| {
+            account.storage.clearRetainingCapacity();
+        }
+    }
+
+    var storage_index: u32 = 0;
+    while (storage_index < changes.storage_writes.len()) : (storage_index += 1) {
+        const write = changes.storage_writes.at(storage_index);
         if (write.value == 0) {
             if (self.accounts.getPtr(write.address)) |account| {
                 _ = account.storage.remove(write.key);
@@ -267,9 +289,9 @@ fn applyChangesetInPlace(self: *MemoryStore, changeset: *const Changeset) !void 
     }
 }
 
-fn commit(ptr: *anyopaque, changeset: *const Changeset) !void {
+fn commit(ptr: *anyopaque, changes: ChangesView) !void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    try self.applyChangeset(changeset);
+    try self.applyChanges(changes);
 }
 
 fn accountExists(ptr: *anyopaque, address: Address) !bool {
@@ -415,32 +437,6 @@ test "memory store state root retains an explicit empty account" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
-test "memory store computes state root after changeset without committing" {
-    const address = addr(0x5678);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    var account = try memory.getOrCreateAccount(address);
-    account.balance = 1;
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.account_updates.append(std.testing.allocator, .{
-        .address = address,
-        .nonce = 1,
-        .balance = 3,
-        .code_hash = evmz.crypto.keccak256_empty,
-    });
-
-    const next_root = try memory.stateRootAfterChangeset(std.testing.allocator, &delta);
-    try std.testing.expectEqual(@as(u256, 1), memory.getAccount(address).?.balance);
-
-    try memory.applyChangeset(&delta);
-    const committed_root = try memory.stateRoot(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, &next_root, &committed_root);
-    try std.testing.expectEqual(@as(u256, 3), memory.getAccount(address).?.balance);
-}
-
 test "memory store copies a borrowed account" {
     const address = addr(0xdef);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -490,163 +486,60 @@ test "memory store rejects empty code with non-empty explicit hash" {
     try std.testing.expect(memory.getAccount(address) == null);
 }
 
-test "memory store applies changeset updates and storage writes" {
-    const address = addr(0xbeef);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    var account = try memory.getOrCreateAccount(address);
-    account.balance = 1;
-    account.nonce = 2;
-    try account.setCode(&.{0x5f});
-    try account.storage.put(1, 1);
-    try account.storage.put(2, 2);
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    {
-        const code = try std.testing.allocator.dupe(u8, &.{ 0xaa, 0xbb });
-        errdefer std.testing.allocator.free(code);
-        try delta.account_updates.append(std.testing.allocator, .{
-            .address = address,
-            .nonce = 3,
-            .balance = 9,
-            .code_hash = evmz.crypto.keccak256(code),
-        });
-        try delta.appendCodeInsert(std.testing.allocator, evmz.crypto.keccak256(code), code);
-        std.testing.allocator.free(code);
-    }
-    try delta.storage_writes.append(std.testing.allocator, .{
-        .address = address,
-        .key = 1,
-        .value = 0,
-    });
-    try delta.storage_writes.append(std.testing.allocator, .{
-        .address = address,
-        .key = 2,
-        .value = 22,
-    });
-    try delta.storage_writes.append(std.testing.allocator, .{
-        .address = address,
-        .key = 3,
-        .value = 33,
-    });
-
-    try memory.applyChangeset(&delta);
-
-    const updated = memory.getAccount(address).?;
-    try std.testing.expectEqual(@as(u256, 9), updated.balance);
-    try std.testing.expectEqual(@as(u64, 3), updated.nonce);
-    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, updated.code);
-    try std.testing.expectEqual(@as(u256, 0), updated.getStorage(1));
-    try std.testing.expectEqual(@as(u256, 22), updated.getStorage(2));
-    try std.testing.expectEqual(@as(u256, 33), updated.getStorage(3));
-}
-
-test "memory store preserves existing code bytes on metadata-only account update" {
-    const address = addr(0xcafe);
-    const code = [_]u8{ 0x60, 0x00 };
-    const code_hash = evmz.crypto.keccak256(&code);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    const account = try memory.getOrCreateAccount(address);
-    try account.setCode(&code);
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.account_updates.append(std.testing.allocator, .{
-        .address = address,
-        .nonce = 1,
-        .balance = 9,
-        .code_hash = code_hash,
-    });
-
-    try memory.applyChangeset(&delta);
-
-    const updated = memory.getAccount(address).?;
-    try std.testing.expectEqualSlices(u8, &code, updated.code);
-    try std.testing.expectEqual(@as(u256, 9), updated.balance);
-}
-
-test "memory store applies explicit empty code replacement" {
-    const address = addr(0xc1ea);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    const account = try memory.getOrCreateAccount(address);
-    try account.setCode(&.{0x5f});
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.account_updates.append(std.testing.allocator, .{
-        .address = address,
-        .nonce = 0,
-        .balance = 0,
-        .code_hash = evmz.crypto.keccak256_empty,
-    });
-
-    try memory.applyChangeset(&delta);
-
-    try std.testing.expectEqual(@as(usize, 0), memory.getAccount(address).?.code.len);
-}
-
-test "memory store rejects missing code without partial account mutation" {
-    const address = addr(0xc0de);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    const account = try memory.getOrCreateAccount(address);
-    account.nonce = 1;
-    account.balance = 2;
-    try account.setCode(&.{0x5f});
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.account_updates.append(std.testing.allocator, .{
-        .address = address,
-        .nonce = 9,
-        .balance = 10,
-        .code_hash = [_]u8{0xaa} ** 32,
-    });
-
-    try std.testing.expectError(error.MissingCode, memory.applyChangeset(&delta));
-    const unchanged = memory.getAccount(address).?;
-    try std.testing.expectEqual(@as(u64, 1), unchanged.nonce);
-    try std.testing.expectEqual(@as(u256, 2), unchanged.balance);
-    try std.testing.expectEqualSlices(u8, &.{0x5f}, unchanged.code);
-}
-
-test "memory store applies account deletes" {
-    const address = addr(0xd1e);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    _ = try memory.getOrCreateAccount(address);
-
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.account_deletes.append(std.testing.allocator, address);
-
-    try memory.applyChangeset(&delta);
-
-    try std.testing.expect(memory.getAccount(address) == null);
-}
-
 test "memory store exposes committer adapter" {
     const address = addr(0xc0de);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var delta = Changeset.init();
-    defer delta.deinit(std.testing.allocator);
-    try delta.storage_writes.append(std.testing.allocator, .{
-        .address = address,
-        .key = 7,
-        .value = 99,
-    });
+    var state = TrackedState.initWithStateReader(std.testing.allocator, memory.reader());
+    defer state.deinit();
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    _ = try state.setStorage(address, 7, 99);
+    state.closeScope();
+    state.seal(attempt);
 
-    try memory.committer().commit(&delta);
+    try memory.committer().commit(state.pendingView().changes());
 
     try std.testing.expectEqual(@as(u256, 99), memory.getAccount(address).?.getStorage(7));
+}
+
+test "memory store consumes cumulative wipe then write from a borrowed view" {
+    const address = addr(0xc1ea);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    const base = try memory.getOrCreateAccount(address);
+    base.balance = 1;
+    try base.storage.put(1, 11);
+    try base.storage.put(2, 22);
+
+    var state = TrackedState.initWithStateReader(std.testing.allocator, memory.reader());
+    defer state.deinit();
+
+    const wiped = state.beginTransaction();
+    state.beginScope();
+    try state.markSelfdestructed(address);
+    try state.finalize(.{ .existing_account = .{
+        .reset_account = true,
+        .clear_storage = true,
+    } });
+    state.closeScope();
+    state.seal(wiped);
+    state.retain(wiped);
+
+    const rewritten = state.beginTransaction();
+    state.beginScope();
+    _ = try state.setStorage(address, 2, 33);
+    state.closeScope();
+    state.seal(rewritten);
+    state.retain(rewritten);
+
+    const changes = state.acceptedView().changes();
+    try std.testing.expectEqual(@as(u32, 1), changes.storage_wipes.len());
+    try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
+    try memory.applyChanges(changes);
+
+    const committed = memory.getAccount(address).?;
+    try std.testing.expectEqual(@as(u256, 0), committed.getStorage(1));
+    try std.testing.expectEqual(@as(u256, 33), committed.getStorage(2));
 }

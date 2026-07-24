@@ -1,0 +1,6 @@
+handrolled executor-only fixture: retain 1000 sentinel words across 256 child CALLs
+host: mock
+runtime bytes: 1043
+target: 0x3000000000000000000000000000000000000003
+target init code: ../stop-target/init.hex via --proxy-target-code-path
+purpose: expose the suspended-stack copy tax at a deliberately wide stack

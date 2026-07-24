@@ -1,12 +1,13 @@
 const evmz = @import("../evm.zig");
+const ExactSpec = @import("../spec.zig").Spec;
 const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
 const Host = evmz.Host;
 const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
-const AccountAccessStatus = evmz.protocol.AccountAccessStatus;
-const DefinitionStorageStatus = evmz.protocol.StorageStatus;
+const AccountAccessStatus = evmz.execution.AccountAccessStatus;
+const StorageStatus = evmz.execution.StorageStatus;
 
 fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
     return switch (status) {
@@ -15,7 +16,7 @@ fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
     };
 }
 
-fn storageStatus(status: Host.StorageStatus) DefinitionStorageStatus {
+fn storageStatus(status: Host.StorageStatus) StorageStatus {
     return switch (status) {
         .assigned => .assigned,
         .added => .added,
@@ -30,28 +31,21 @@ fn storageStatus(status: Host.StorageStatus) DefinitionStorageStatus {
 }
 
 test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
-    const storage = evmz.eth.system.Storage;
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 200, .refund = 4800 }, storage.sstoreGas(.constantinople, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 5000, .refund = 0 }, storage.sstoreGas(.petersburg, .modified_restored));
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 800, .refund = 4200 }, storage.sstoreGas(.istanbul, .modified_restored));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 200, .refund = 4800 }, evmz.eth.constantinople.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 5000, .refund = 0 }, evmz.eth.petersburg.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 800, .refund = 4200 }, evmz.eth.istanbul.storage.sstoreGas(.modified_restored));
 }
 
 test "Amsterdam SSTORE separates access and write gas from state gas" {
-    const storage = evmz.eth.system.Storage;
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.amsterdam, .added));
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.amsterdam, .added_deleted));
-    try std.testing.expectEqual(evmz.protocol.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.amsterdam, .deleted_restored));
+    const storage = evmz.eth.amsterdam.storage;
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.added));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.added_deleted));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.deleted_restored));
 }
 
-pub fn For(comptime ProtocolType: type) type {
+pub fn bind(comptime spec: ExactSpec) type {
     return struct {
         const Self = @This();
-
-        pub const Protocol = ProtocolType;
-
-        inline fn frameRevision(frame: *const CallFrame) Protocol.Revision {
-            return Interpreter.For(Protocol).revision(frame);
-        }
 
         pub fn sstore(frame: *CallFrame) !void {
             if (frame.msg.is_static) {
@@ -65,30 +59,27 @@ pub fn For(comptime ProtocolType: type) type {
         pub fn sstoreAfterPop(frame: *CallFrame, key: u256, value: u256) !void {
             const recipient = frame.msg.recipient;
             const host = frame.host;
-            const revision = Self.frameRevision(frame);
-
-            if (Protocol.storage.sstoreMinimumGas(revision)) |minimum_gas| {
+            if (spec.storage.sstore_minimum_gas) |minimum_gas| {
                 if (frame.gas_left <= minimum_gas) {
+                    @branchHint(.unlikely);
                     frame.failWithStatus(.out_of_gas);
                     return;
                 }
             }
 
             const host_status = blk: {
-                if (Protocol.storage.sstoreStorageAccessGas(revision, .warm)) |warm_access_gas| {
-                    const cold_access_gas = Protocol.storage.sstoreStorageAccessGas(revision, .cold) orelse warm_access_gas;
+                if (spec.storage.sstoreAccessGas(.warm)) |warm_access_gas| {
+                    const cold_access_gas = spec.storage.sstoreAccessGas(.cold) orelse warm_access_gas;
                     if (frame.gas_left >= @max(warm_access_gas, cold_access_gas)) {
                         const result = try host.storeStorage(recipient, key, value);
                         const access_status = accountAccessStatus(result.access_status);
-                        frame.trackGas(Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0);
-                        if (frame.status != .running) return;
+                        if (!frame.trackGas(spec.storage.sstoreAccessGas(access_status) orelse 0)) return;
                         break :blk result.storage_status;
                     }
 
                     const access_status = accountAccessStatus(try host.accessStorage(recipient, key));
-                    const access_gas = Protocol.storage.sstoreStorageAccessGas(revision, access_status) orelse 0;
-                    frame.trackGas(access_gas);
-                    if (frame.status != .running) return;
+                    const access_gas = spec.storage.sstoreAccessGas(access_status) orelse 0;
+                    if (!frame.trackGas(access_gas)) return;
                 }
 
                 break :blk try host.setStorage(recipient, key, value);
@@ -96,14 +87,13 @@ pub fn For(comptime ProtocolType: type) type {
 
             const status = storageStatus(host_status);
 
-            const cost = Protocol.storage.sstoreGas(revision, status);
+            const cost = spec.storage.sstoreGas(status);
 
-            frame.trackGas(cost.cost);
-            if (frame.status != .running) return;
+            if (!frame.trackGas(cost.cost)) return;
             frame.gas_refund += cost.refund;
 
-            const state_gas = Protocol.storage.sstoreStateGas(revision, status);
-            frame.trackStateGas(state_gas.charge);
+            const state_gas = spec.storage.sstoreStateGas(status);
+            if (!frame.trackStateGas(state_gas.charge)) return;
             frame.refillStateGas(state_gas.refund);
         }
 
@@ -116,21 +106,17 @@ pub fn For(comptime ProtocolType: type) type {
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
             const host = frame.host;
             const recipient = frame.msg.recipient;
-            const revision = Self.frameRevision(frame);
-
-            if (Protocol.storage.sloadColdStorageAccessGas(revision)) |cold_storage_access_gas| {
+            if (spec.storage.sload_cold_access_gas) |cold_storage_access_gas| {
                 if (frame.gas_left >= cold_storage_access_gas) {
                     const result = try host.loadStorage(recipient, key);
                     if (result.access_status == .cold) {
-                        frame.trackGas(cold_storage_access_gas);
-                        if (frame.status != .running) return null;
+                        if (!frame.trackGas(cold_storage_access_gas)) return null;
                     }
                     return result.value;
                 }
 
                 if (try host.accessStorage(recipient, key) == .cold) {
-                    frame.trackGas(cold_storage_access_gas);
-                    if (frame.status != .running) return null;
+                    if (!frame.trackGas(cold_storage_access_gas)) return null;
                 }
             }
 
@@ -163,17 +149,10 @@ test "transient storage opcodes are only enabled from Cancun" {
     try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH1, 0x01, .PUSH1, 0x00, .TSTORE }, .cancun, .success);
 }
 
-test "SLOAD cold storage access gas comes from comptime protocol" {
-    const CustomProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
-
-        pub const storage = struct {
-            pub fn sloadColdStorageAccessGas(revision: evmz.eth.Revision) ?i64 {
-                _ = revision;
-                return 11;
-            }
-        };
-    };
+test "SLOAD cold storage access gas comes from the exact spec" {
+    const spec = evmz.eth.frontier.extend(.{
+        .storage = .{ .sload_cold_access_gas = .{ .replace = 11 } },
+    });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -181,16 +160,15 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.SLOAD)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .frontier,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(0);
-    try For(CustomProtocol).sload(frame.frame);
+    try bind(spec).sload(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_989), frame.frame.gas_left);
@@ -200,35 +178,27 @@ test "SLOAD cold storage access gas comes from comptime protocol" {
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 
-test "SSTORE gas and state gas come from comptime protocol" {
-    const CustomProtocol = struct {
-        pub const Revision = evmz.eth.Revision;
+test "SSTORE gas and state gas come from the exact spec" {
+    const semantics = struct {
+        fn sstoreAccessGas(_: AccountAccessStatus) ?i64 {
+            return null;
+        }
 
-        pub const storage = struct {
-            pub fn sstoreMinimumGas(revision: evmz.eth.Revision) ?i64 {
-                _ = revision;
-                return null;
-            }
+        fn sstoreGas(_: StorageStatus) evmz.execution.StorageGas {
+            return .{ .cost = 7, .refund = 3 };
+        }
 
-            pub fn sstoreStorageAccessGas(revision: evmz.eth.Revision, status: AccountAccessStatus) ?i64 {
-                _ = revision;
-                _ = status;
-                return null;
-            }
-
-            pub fn sstoreGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.StorageGas {
-                _ = revision;
-                _ = status;
-                return .{ .cost = 7, .refund = 3 };
-            }
-
-            pub fn sstoreStateGas(revision: evmz.eth.Revision, status: DefinitionStorageStatus) evmz.protocol.StorageStateGas {
-                _ = revision;
-                _ = status;
-                return .{ .charge = 5 };
-            }
-        };
+        fn sstoreStateGas(_: StorageStatus) evmz.execution.StorageStateGas {
+            return .{ .charge = 5 };
+        }
     };
+    const spec = evmz.eth.frontier.extend(.{
+        .storage = .{
+            .sstoreAccessGas = semantics.sstoreAccessGas,
+            .sstoreGas = semantics.sstoreGas,
+            .sstoreStateGas = semantics.sstoreStateGas,
+        },
+    });
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -237,17 +207,16 @@ test "SSTORE gas and state gas come from comptime protocol" {
     msg.gas_reservoir = 5;
     const code = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .code = &code,
-        .revision = .frontier,
     });
     defer frame.deinit();
 
     try frame.frame.stack.push(42);
     try frame.frame.stack.push(0);
-    try For(CustomProtocol).sstore(frame.frame);
+    try bind(spec).sstore(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
     try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
@@ -275,11 +244,11 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Berlin = evmz.Vm(evmz.eth.berlin);
+    var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .berlin,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -309,11 +278,11 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
+    var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .amsterdam,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -345,11 +314,11 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
+    var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .amsterdam,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -371,11 +340,11 @@ test "prepared SSTORE rejects static context before host access" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Osaka = evmz.Vm(evmz.eth.osaka);
+    var frame = try Osaka.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .osaka,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -404,11 +373,11 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var frame = try evmz.interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Berlin = evmz.Vm(evmz.eth.berlin);
+    var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .berlin,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();

@@ -1,7 +1,7 @@
 //! Test-only compatibility projection for Geth `callTracer` behavior.
 //!
 //! This is an executable conformance oracle, not part of the `evmz.trace`
-//! library surface. It proves that one neutral `CallSpan` contains enough
+//! library surface. It proves that one client-independent `CallSpan` contains enough
 //! information for Geth-style nested and Parity-style flat representations.
 //! Client-specific JSON, error text, filtering, and envelope policy stay here.
 
@@ -166,7 +166,7 @@ pub fn writeFlat(
 /// Stable normalized Geth text for a retained terminal category.
 ///
 /// Dynamic details such as an invalid opcode byte or stack counts are not
-/// retained by the neutral arena, so those categories deliberately use a
+/// retained by the client-independent arena, so those categories deliberately use a
 /// stable prefix rather than pretending exact formatter data is available.
 pub fn gethError(status: call_arena.Status) ?[]const u8 {
     return switch (status) {
@@ -190,7 +190,7 @@ pub fn gethError(status: call_arena.Status) ?[]const u8 {
 }
 
 /// Geth v1.17.4 flatCallTracer's optional Parity error conversion, expressed
-/// directly from the neutral status so dynamic Geth error text is unnecessary.
+/// directly from the engine status so dynamic Geth error text is unnecessary.
 pub fn parityError(status: call_arena.Status) ?[]const u8 {
     return switch (status) {
         .running, .success, .code_store_out_of_gas_committed => null,

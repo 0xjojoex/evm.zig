@@ -100,7 +100,7 @@ test "copy, terminal, and log handlers match owned and borrowed preparation" {
         },
     };
 
-    for (cases) |case| {
+    inline for (cases) |case| {
         try expectOwnedBorrowedEquivalent(case);
     }
 }
@@ -123,18 +123,16 @@ fn expectOwnedBorrowedEquivalent(case: Case) !void {
     owned_msg.is_static = case.is_static;
     var borrowed_msg = owned_msg;
 
-    var owned_frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var owned_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &owned_host,
         .msg = &owned_msg,
         .code = &code,
-        .revision = .latest,
     });
     defer owned_frame.deinit();
-    var borrowed_frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var borrowed_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &borrowed_host,
         .msg = &borrowed_msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer borrowed_frame.deinit();
 
@@ -161,8 +159,8 @@ fn expectOwnedBorrowedEquivalent(case: Case) !void {
     try std.testing.expectEqual(owned_call_frame.stack.len, borrowed_call_frame.stack.len);
     try std.testing.expectEqualSlices(
         u256,
-        owned_call_frame.stack.slots[0..owned_call_frame.stack.len],
-        borrowed_call_frame.stack.slots[0..borrowed_call_frame.stack.len],
+        owned_call_frame.stack.asSlice(),
+        borrowed_call_frame.stack.asSlice(),
     );
     try std.testing.expectEqual(owned_call_frame.memory.len(), borrowed_call_frame.memory.len());
     try std.testing.expectEqualSlices(
@@ -219,11 +217,10 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .latest,
         });
         defer frame.deinit();
         try frame.frame.stack.push(case.below);
@@ -233,7 +230,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         const result = try interpreter.execute();
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status);
-        try std.testing.expectEqual(@as(usize, 1), interpreter.call_frame.stack.len);
+        try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
 }
@@ -271,11 +268,10 @@ test "prepared tail dispatch executes promoted transient storage, mcopy, and exp
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .latest,
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
@@ -283,7 +279,7 @@ test "prepared tail dispatch executes promoted transient storage, mcopy, and exp
         const result = try interpreter.execute();
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status);
-        try std.testing.expectEqual(@as(usize, 1), interpreter.call_frame.stack.len);
+        try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
 }
@@ -291,41 +287,39 @@ test "prepared tail dispatch executes promoted transient storage, mcopy, and exp
 test "prepared tail dispatch gates promoted Cancun opcodes and static TSTORE" {
     const tstore_code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH1, 0, .TSTORE });
     const mcopy_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY });
-    const cases = [_]struct {
-        code: []const u8,
-        revision: evmz.eth.Revision,
-        is_static: bool,
-        expected_status: Interpreter.Status,
-    }{
-        .{ .code = &tstore_code, .revision = .shanghai, .is_static = false, .expected_status = .invalid },
-        .{ .code = &tstore_code, .revision = .cancun, .is_static = true, .expected_status = .invalid },
-        .{ .code = &tstore_code, .revision = .cancun, .is_static = false, .expected_status = .success },
-        .{ .code = &mcopy_code, .revision = .shanghai, .is_static = false, .expected_status = .invalid },
-        .{ .code = &mcopy_code, .revision = .cancun, .is_static = false, .expected_status = .success },
-    };
+    try expectPreparedStatus(&tstore_code, .shanghai, false, .invalid);
+    try expectPreparedStatus(&tstore_code, .cancun, true, .invalid);
+    try expectPreparedStatus(&tstore_code, .cancun, false, .success);
+    try expectPreparedStatus(&mcopy_code, .shanghai, false, .invalid);
+    try expectPreparedStatus(&mcopy_code, .cancun, false, .success);
+}
 
-    for (cases) |case| {
-        var bytecode = try evmz.Bytecode.init(std.testing.allocator, case.code);
-        defer bytecode.deinit(std.testing.allocator);
+fn expectPreparedStatus(
+    code: []const u8,
+    comptime revision: evmz.eth.Revision,
+    is_static: bool,
+    expected_status: Interpreter.Status,
+) !void {
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
+    defer bytecode.deinit(std.testing.allocator);
 
-        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-        defer mock_host.deinit();
-        var host = mock_host.host();
-        var msg = evmz.t.defaultMessage();
-        msg.is_static = case.is_static;
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
-            .host = &host,
-            .msg = &msg,
-            .bytecode = &bytecode,
-            .revision = case.revision,
-        });
-        defer frame.deinit();
-        var interpreter = frame.interpreter();
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    msg.is_static = is_static;
+    const Exact = evmz.Vm(evmz.eth.specAt(revision));
+    var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .bytecode = &bytecode,
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
 
-        const result = try interpreter.execute();
+    const result = try interpreter.execute();
 
-        try std.testing.expectEqual(case.expected_status, result.status);
-    }
+    try std.testing.expectEqual(expected_status, result.status);
 }
 
 test "prepared tail dispatch rejects SAR before Constantinople" {
@@ -337,11 +331,11 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    const Byzantium = evmz.Vm(evmz.eth.byzantium);
+    var frame = try Byzantium.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .byzantium,
     });
     defer frame.deinit();
     try frame.frame.stack.push(1);
@@ -383,11 +377,10 @@ test "prepared tail dispatch reads frame-local values" {
         msg.sender = sender;
         msg.value = 42;
         msg.input_data = &input;
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .latest,
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -396,7 +389,7 @@ test "prepared tail dispatch reads frame-local values" {
         const result = try interpreter.execute();
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status);
-        try std.testing.expectEqual(@as(usize, 1), interpreter.call_frame.stack.len);
+        try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
 }
@@ -425,11 +418,10 @@ test "prepared tail dispatch copies frame-local byte slices" {
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
         msg.input_data = &input;
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .latest,
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -454,11 +446,10 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
     try frame.frame.replaceReturnData(&.{ 1, 2 });
@@ -491,11 +482,10 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .latest,
         });
         defer frame.deinit();
         try frame.frame.memory.expandToFit(0, output.len);
@@ -522,11 +512,11 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+        const Homestead = evmz.Vm(evmz.eth.homestead);
+        var frame = try Homestead.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
             .bytecode = &bytecode,
-            .revision = .homestead,
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
@@ -554,11 +544,10 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
 
-    var frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -577,11 +566,10 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var static_msg = evmz.t.defaultMessage();
     static_msg.is_static = true;
 
-    var static_frame = try Interpreter.OwnedCallFrame(evmz.Evm.ExecutionProtocol).init(std.testing.allocator, .{
+    var static_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &static_host,
         .msg = &static_msg,
         .bytecode = &bytecode,
-        .revision = .latest,
     });
     defer static_frame.deinit();
     var static_interpreter = static_frame.interpreter();

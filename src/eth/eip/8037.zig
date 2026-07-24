@@ -2,9 +2,9 @@
 //!
 //! The EIP separates gas into regular-gas and state-gas. Constants in this file
 //! mirror the spec's "New parameters" and "Parameter changes" tables; fork
-//! gating stays in the protocol modules.
+//! gating stays in exact spec assembly.
 
-const eip7702 = @import("7702.zig");
+const delegation = @import("../../code/eip7702.zig");
 
 // New parameters: state byte pricing and sizing.
 /// CPSB in the EIP: gas charged for each net-new state byte.
@@ -59,7 +59,7 @@ pub const regular_per_auth_base_cost: u64 = 7_816;
 pub const new_account_state_gas: u64 = state_bytes_per_new_account * cost_per_state_byte;
 
 /// State-gas charged for a new EIP-7702 delegation indicator.
-pub const auth_base_state_gas: u64 = eip7702.delegation_indicator_state_bytes * cost_per_state_byte;
+pub const auth_base_state_gas: u64 = delegation.delegation_indicator_state_bytes * cost_per_state_byte;
 
 /// State-gas charged when SSTORE creates a new storage slot.
 pub const storage_set_state_gas: u64 = state_bytes_per_storage_set * cost_per_state_byte;

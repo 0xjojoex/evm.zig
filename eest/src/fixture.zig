@@ -107,7 +107,10 @@ pub const FixtureConfig = struct {
     blob_schedule: ?evmz.transaction.BlobSchedule = null,
 };
 
-pub fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth.Revision) !FixtureConfig {
+pub fn parseFixtureConfig(
+    fixture: *const std.json.ObjectMap,
+    comptime revision: evmz.eth.Revision,
+) !FixtureConfig {
     const config_value = fixture.get("config") orelse return .{};
     const config = asObject(config_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&config, &.{ "network", "chainid", "chainId", "blobSchedule" });
@@ -139,10 +142,13 @@ pub fn parseFixtureConfig(fixture: *const std.json.ObjectMap, revision: evmz.eth
     return result;
 }
 
-fn parseBlobSchedule(revision: evmz.eth.Revision, value: JsonValue) !evmz.transaction.BlobSchedule {
+fn parseBlobSchedule(
+    comptime revision: evmz.eth.Revision,
+    value: JsonValue,
+) !evmz.transaction.BlobSchedule {
     const schedule = asObject(value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = evmz.Evm.TransactionProtocol.transaction.blobSchedule(revision) orelse return error.MalformedFixture;
+    var result = evmz.eth.specAt(revision).transaction.blob_schedule orelse return error.MalformedFixture;
     result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
     result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
     result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);

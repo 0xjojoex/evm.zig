@@ -8,11 +8,8 @@ const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
-const Gas = transaction.GasRuntime(
-    evmz.Evm.TransactionProtocol,
-    @FieldType(evmz.Evm.TransactionPolicy, "transaction"),
-);
-const gas = Gas{ .transaction = &evmz.Evm.transaction_policy.transaction };
+const Gas = transaction.GasRuntime(evmz.Evm.specification);
+const gas: Gas = .{};
 
 test "Amsterdam value-to-empty account state gas is charged at top frame" {
     const sender = evmz.addr(0xaaaa);
@@ -30,7 +27,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
 }
 
 test "Amsterdam value-to-empty account state gas is not intrinsic" {
-    try std.testing.expectEqual(@as(u64, 21_000), gas.intrinsicGasForTransaction(.amsterdam, &.{}, .{
+    try std.testing.expectEqual(@as(u64, 21_000), gas.intrinsicGasForTransaction(&.{}, .{
         .value = 1,
         .creates_account = true,
     }));
@@ -42,7 +39,7 @@ test "Amsterdam value-to-empty account state gas is not intrinsic" {
         .recipient = recipient,
         .value = 1,
     } };
-    const gas_plan = gas.gasPlan(.amsterdam, &.{}, 21_000, .{
+    const gas_plan = gas.gasPlan(&.{}, 21_000, .{
         .value = message.value(),
         .creates_account = true,
     });
@@ -106,7 +103,7 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
         },
     }));
     defer executed.discardIfCurrent();
-    const result = try executed.result();
+    const result = executed.result();
 
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     // The authorization itself creates state, but the value transfer does not
@@ -150,7 +147,7 @@ test "Amsterdam authorization state-gas OOG is included and rolls back authoriza
         },
     }));
     defer executed.discardIfCurrent();
-    const result = try executed.result();
+    const result = executed.result();
 
     try std.testing.expectEqual(evmz.TxStatus.out_of_gas, result.status);
     try std.testing.expectEqual(@as(u64, 30_000), result.gas.used);
@@ -196,7 +193,7 @@ test "Amsterdam dispatch state-gas OOG rolls back completed authorization" {
         },
     }));
     defer executed.discardIfCurrent();
-    const result = try executed.result();
+    const result = executed.result();
 
     try std.testing.expectEqual(evmz.TxStatus.out_of_gas, result.status);
     try std.testing.expectEqual(@as(u64, 200_000), result.gas.used);
@@ -235,9 +232,7 @@ test "Amsterdam top-frame delegated target honors transaction warmth" {
 }
 
 fn executorWithSender(sender: Address, balance: u256) !Executor {
-    var executor = Executor.init(std.testing.allocator, .{
-        .revision = .amsterdam,
-    });
+    var executor = Executor.init(std.testing.allocator, .{});
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.balance = balance;
     try executor.state.seedAccount(sender, sender_account);

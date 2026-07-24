@@ -86,8 +86,7 @@ pub fn mcopy(frame: *CallFrame) !void {
     if (!try frame.expandMemory(dest_usize, size_usize)) return;
     const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
     const word_copied_cost = evmz.calcWordSize(i64, size_i64) * 3;
-    frame.trackGas(word_copied_cost);
-    if (frame.status != .running) return;
+    if (!frame.trackGas(word_copied_cost)) return;
 
     frame.memory.copy(dest_usize, offset_usize, size_usize);
 }

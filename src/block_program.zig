@@ -6,7 +6,111 @@
 //! above this layer.
 const std = @import("std");
 
+const CaptureContext = @import("./executor/capture_context.zig").Context;
+const Address = @import("./address.zig").Address;
+const execution = @import("./execution.zig");
 const executor_errors = @import("./executor/error.zig");
+
+const AttemptMode = union(enum) {
+    normal,
+    observed,
+    captured: *CaptureContext,
+};
+
+pub const BeforeBlockContext = struct {
+    number: u64,
+    timestamp: u64,
+    parent_hash: ?[32]u8 = null,
+    parent_beacon_block_root: ?[32]u8 = null,
+};
+
+pub const BlockHookInput = union(enum) {
+    none,
+    word: [32]u8,
+    bytes: []const u8,
+
+    pub fn slice(self: *const BlockHookInput) []const u8 {
+        return switch (self.*) {
+            .none => &.{},
+            .word => |*word| word,
+            .bytes => |bytes| bytes,
+        };
+    }
+};
+
+pub const BlockSystemCall = struct {
+    sender: Address,
+    recipient: Address,
+    input: BlockHookInput = .none,
+    gas: u64,
+    state_gas: u64 = 0,
+    require_code: bool = false,
+};
+
+pub const BlockSystemCalls = struct {
+    pub const capacity = 4;
+
+    items: [capacity]BlockSystemCall = undefined,
+    len: usize = 0,
+
+    pub fn append(self: *BlockSystemCalls, call: BlockSystemCall) void {
+        std.debug.assert(self.len < capacity);
+        self.items[self.len] = call;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const BlockSystemCalls) []const BlockSystemCall {
+        return self.items[0..self.len];
+    }
+};
+
+pub const BeforeTransactionContext = struct {
+    number: u64,
+    timestamp: u64,
+    transaction_index: u64,
+};
+
+pub const AfterTransactionContext = struct {
+    number: u64,
+    timestamp: u64,
+    transaction_index: u64,
+    status: execution.Status,
+    gas_used: u64,
+    cumulative_gas_used: u64,
+    cumulative_block_gas: u64,
+    cumulative_state_gas: u64,
+};
+
+pub const FinalizeBlockContext = struct {
+    number: u64,
+    timestamp: u64,
+    transaction_count: u64,
+    gas_used: u64,
+    block_gas: u64,
+    state_gas: u64,
+};
+
+pub const FinalizeSystemCall = struct {
+    call: BlockSystemCall,
+    output_prefix: u8,
+};
+
+pub const FinalizeSystemCalls = struct {
+    pub const capacity = 4;
+
+    items: [capacity]FinalizeSystemCall = undefined,
+    len: usize = 0,
+
+    pub fn append(self: *FinalizeSystemCalls, call: FinalizeSystemCall) void {
+        std.debug.assert(self.len < capacity);
+        self.items[self.len] = call;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const FinalizeSystemCalls) []const FinalizeSystemCall {
+        return self.items[0..self.len];
+    }
+};
 
 pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
     return union(enum) {
@@ -15,12 +119,21 @@ pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
     };
 }
 
+test "block hook collections preserve insertion order" {
+    const first = [_]u8{0x11} ** 20;
+    const second = [_]u8{0x22} ** 20;
+    var calls = BlockSystemCalls{};
+    calls.append(.{ .sender = first, .recipient = second, .gas = 7 });
+
+    try std.testing.expectEqual(@as(usize, 1), calls.slice().len);
+    try std.testing.expectEqual(first, calls.slice()[0].sender);
+    try std.testing.expectEqual(second, calls.slice()[0].recipient);
+}
+
 /// Internal flat binder used by a concrete VM program's `Block(...)` closure.
 pub fn bind(
     comptime TransactionRuntimeType: type,
     comptime ExecutorType: type,
-    comptime BlockPolicyType: type,
-    comptime default_block_policy: BlockPolicyType,
     comptime TransactionType: type,
     comptime TransactInputType: type,
     comptime OutputType: type,
@@ -49,8 +162,6 @@ pub fn bind(
         IncludedType,
         ResultType,
         ImplementationType,
-        BlockPolicyType,
-        default_block_policy,
     );
 }
 
@@ -68,20 +179,18 @@ fn BoundBlockProgram(
     comptime IncludedType: type,
     comptime ResultType: type,
     comptime ImplementationType: type,
-    comptime BlockPolicyType: type,
-    comptime default_block_policy: BlockPolicyType,
 ) type {
     const OutcomeType = TransactOutcome(IncludedType, RejectionType);
     const ContractError = error{
         UncommittedChanges,
     };
     const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ContractError;
-    const TransactionLog = TransactionRuntimeType.TransactionLog;
+    const TransactionLogs = TransactionRuntimeType.TransactionLogs;
     comptime validateImplementation(
         TransactionType,
         TransactInputType,
         OutputType,
-        TransactionLog,
+        TransactionLogs,
         EnvironmentType,
         IncludedType,
         ResultType,
@@ -101,13 +210,10 @@ fn BoundBlockProgram(
         pub const Environment = EnvironmentType;
         pub const Included = IncludedType;
         pub const Result = ResultType;
-        pub const BlockPolicy = BlockPolicyType;
-        pub const block_policy = default_block_policy;
         pub const Outcome = OutcomeType;
         pub const Error = ErrorType;
 
         transaction_runtime: TransactionRuntimeType,
-        policy_value: BlockPolicyType,
         claim: Executor.BlockExecutionClaim,
         environment: Environment,
         state: ImplementationType.State,
@@ -128,48 +234,24 @@ fn BoundBlockProgram(
             transaction_runtime: BaseTransactionRuntimeType,
             environment: Environment,
         ) Error!Self {
-            return initRuntimeWithBlockPolicy(
-                transaction_runtime,
-                default_block_policy,
-                environment,
-            );
+            return initRuntime(transaction_runtime, environment);
         }
 
-        /// Select both runtime policy values without changing program identity.
-        pub fn initWithPolicies(
-            executor: *Executor,
-            transaction_policy: BaseTransactionRuntimeType.TransactionPolicy,
-            block_policy_value: BlockPolicyType,
-            environment: Environment,
-        ) Error!Self {
-            return initRuntimeWithBlockPolicy(
-                BaseTransactionRuntimeType.initWithPolicy(executor, transaction_policy),
-                block_policy_value,
-                environment,
-            );
-        }
-
-        fn initRuntimeWithBlockPolicy(
+        fn initRuntime(
             transaction_runtime: BaseTransactionRuntimeType,
-            policy_value_arg: BlockPolicyType,
             environment: Environment,
         ) Error!Self {
             const runtime = transaction_runtime.rebindPreludeError(ImplementationType.PreludeError);
             const executor = runtime.executorPtr();
             if (executor.hasActiveBlockExecution()) return error.BlockExecutionActive;
-            if (executor.hasCurrentTransaction()) return error.ExecutedTransactionActive;
-            if (executor.hasChanges()) return error.UncommittedChanges;
+            std.debug.assert(!executor.hasCurrentTransaction());
+            if (executor.acceptedView().hasChanges()) return error.UncommittedChanges;
             return .{
                 .transaction_runtime = runtime,
-                .policy_value = policy_value_arg,
                 .claim = executor.claimBlockExecution() catch |err| return executor_errors.normalize(err),
                 .environment = environment,
                 .state = ImplementationType.init(environment),
             };
-        }
-
-        pub fn policy(self: *const Self) *const BlockPolicyType {
-            return &self.policy_value;
         }
 
         pub fn executorPtr(self: *const Self) *Executor {
@@ -177,7 +259,12 @@ fn BoundBlockProgram(
         }
 
         pub fn transact(self: *Self, transaction_value: Transaction) Error!Outcome {
-            return self.transactOwned(transaction_value, null);
+            return self.transactOwned(
+                transaction_value,
+                null,
+                .normal,
+                IgnorePending{},
+            ) catch |err| return @errorCast(err);
         }
 
         /// Fold one transaction whose family prelude shares the transaction
@@ -187,34 +274,82 @@ fn BoundBlockProgram(
             transaction_value: Transaction,
             prelude: Prelude,
         ) Error!Outcome {
-            return self.transactOwned(transaction_value, prelude);
+            return self.transactOwned(
+                transaction_value,
+                prelude,
+                .normal,
+                IgnorePending{},
+            ) catch |err| return @errorCast(err);
+        }
+
+        /// Inspect one included transaction while its state is sealed but still
+        /// pending. The observer must copy or consume borrowed views before
+        /// returning; successful observation is followed by retain.
+        pub fn transactWithPreludeObserved(
+            self: *Self,
+            transaction_value: Transaction,
+            prelude: Prelude,
+            observer: anytype,
+        ) anyerror!Outcome {
+            return self.transactOwned(transaction_value, prelude, .observed, observer);
+        }
+
+        pub fn transactWithPreludeCaptured(
+            self: *Self,
+            transaction_value: Transaction,
+            prelude: Prelude,
+            capture: *CaptureContext,
+            observer: anytype,
+        ) anyerror!Outcome {
+            return self.transactOwned(
+                transaction_value,
+                prelude,
+                .{ .captured = capture },
+                observer,
+            );
         }
 
         fn transactOwned(
             self: *Self,
             transaction_value: Transaction,
             prelude: ?Prelude,
-        ) Error!Outcome {
+            mode: AttemptMode,
+            observer: anytype,
+        ) anyerror!Outcome {
             if (self.finished) return error.BlockExecutionFinished;
             const input = ImplementationType.transactInput(
                 &self.environment,
                 &self.state,
                 &transaction_value,
             );
-            const outcome = if (prelude) |value|
-                try self.transaction_runtime.transactInBlockWithPrelude(
+            const outcome = if (prelude) |value| switch (mode) {
+                .normal => try self.transaction_runtime.transactInBlockWithPrelude(
                     input,
                     self.claim,
                     value,
-                )
-            else
-                try self.transaction_runtime.transactInBlock(input, self.claim);
+                ),
+                .observed => try self.transaction_runtime.transactObservedInBlockWithPrelude(
+                    input,
+                    self.claim,
+                    value,
+                ),
+                .captured => |capture| try self.transaction_runtime.transactCapturedInBlockWithPrelude(
+                    input,
+                    self.claim,
+                    value,
+                    capture,
+                ),
+            } else switch (mode) {
+                .normal => try self.transaction_runtime.transactInBlock(input, self.claim),
+                .observed => try self.transaction_runtime.transactObservedInBlock(input, self.claim),
+                .captured => unreachable,
+            };
             return switch (outcome) {
                 .rejected => |reason| .{ .rejected = reason },
                 .executed => |executed_value| blk: {
                     var executed = executed_value;
                     defer executed.discardIfCurrent();
-                    const view = try executed.view();
+                    const view = executed.view();
                     const plan = try ImplementationType.planInclude(
                         &self.environment,
                         &self.state,
@@ -228,6 +363,7 @@ fn BoundBlockProgram(
                         view.logs,
                         plan,
                     );
+                    try observer.observe(executed.pending.view());
                     try executed.retain();
                     ImplementationType.applyInclude(&self.state, plan);
                     break :blk .{ .included = included };
@@ -251,10 +387,14 @@ fn BoundBlockProgram(
         pub fn discardIfUnfinished(self: *Self) void {
             if (self.finished) return;
             self.claim.requireFor(self.executorPtr()) catch return;
-            self.executorPtr().discardChanges();
+            self.executorPtr().discardAccepted();
             self.claim.release();
             self.finished = true;
         }
+
+        const IgnorePending = struct {
+            pub fn observe(_: IgnorePending, _: ExecutorType.State.PendingView) !void {}
+        };
     };
 }
 
@@ -262,7 +402,7 @@ fn validateImplementation(
     comptime TransactionType: type,
     comptime TransactInputType: type,
     comptime OutputType: type,
-    comptime TransactionLogType: type,
+    comptime TransactionLogsType: type,
     comptime EnvironmentType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
@@ -273,32 +413,45 @@ fn validateImplementation(
         std.debug.assert(@hasDecl(Implementation, "InclusionPlan"));
         std.debug.assert(@hasDecl(Implementation, "Error"));
 
-        std.debug.assert(@TypeOf(Implementation.init(@as(EnvironmentType, undefined))) == Implementation.State);
-        std.debug.assert(@TypeOf(Implementation.transactInput(
-            @as(*const EnvironmentType, undefined),
-            @as(*const Implementation.State, undefined),
-            @as(*const TransactionType, undefined),
-        )) == TransactInputType);
-        std.debug.assert(@TypeOf(Implementation.planInclude(
-            @as(*const EnvironmentType, undefined),
-            @as(*const Implementation.State, undefined),
-            @as(*const TransactionType, undefined),
-            @as(*const OutputType, undefined),
-            @as([]const TransactionLogType, undefined),
-        )) == Implementation.Error!Implementation.InclusionPlan);
-        std.debug.assert(@TypeOf(Implementation.included(
-            @as(*const TransactionType, undefined),
-            @as(*const OutputType, undefined),
-            @as([]const TransactionLogType, undefined),
-            @as(Implementation.InclusionPlan, undefined),
-        )) == IncludedType);
-        std.debug.assert(@TypeOf(Implementation.applyInclude(
-            @as(*Implementation.State, undefined),
-            @as(Implementation.InclusionPlan, undefined),
-        )) == void);
-        std.debug.assert(@TypeOf(Implementation.finish(
-            @as(*const EnvironmentType, undefined),
-            @as(*const Implementation.State, undefined),
-        )) == ResultType);
+        assertSignature(Implementation.init, &.{EnvironmentType}, Implementation.State);
+        assertSignature(Implementation.transactInput, &.{
+            *const EnvironmentType,
+            *const Implementation.State,
+            *const TransactionType,
+        }, TransactInputType);
+        assertSignature(Implementation.planInclude, &.{
+            *const EnvironmentType,
+            *const Implementation.State,
+            *const TransactionType,
+            *const OutputType,
+            TransactionLogsType,
+        }, Implementation.Error!Implementation.InclusionPlan);
+        assertSignature(Implementation.included, &.{
+            *const TransactionType,
+            *const OutputType,
+            TransactionLogsType,
+            Implementation.InclusionPlan,
+        }, IncludedType);
+        assertSignature(Implementation.applyInclude, &.{
+            *Implementation.State,
+            Implementation.InclusionPlan,
+        }, void);
+        assertSignature(Implementation.finish, &.{
+            *const EnvironmentType,
+            *const Implementation.State,
+        }, ResultType);
+    }
+}
+
+/// Inspect the function type only; a call expression under @TypeOf would
+/// force eager analysis of the implementation's whole graph per instantiation.
+fn assertSignature(comptime function: anytype, comptime params: []const type, comptime Return: type) void {
+    comptime {
+        const info = @typeInfo(@TypeOf(function)).@"fn";
+        std.debug.assert(info.params.len == params.len);
+        for (info.params, params) |actual, expected| {
+            std.debug.assert(actual.type.? == expected);
+        }
+        std.debug.assert(info.return_type.? == Return);
     }
 }

@@ -6,6 +6,6 @@ Zig conventions:
 
 - Avoid hidden allocation in execution-critical paths.
 - Prefer shothand `.{}` and `.empty`. Add method to struct for convenience.
-- Use `assert` for boundary conditions and programmer errors.
+- Use `assert` for boundary conditions, domain invariant and programmer errors.
 
 For performance, measure benchmark and guest cycle, they are not guaranteed to be the same.

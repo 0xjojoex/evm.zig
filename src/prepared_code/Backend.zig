@@ -10,13 +10,10 @@
 
 const Bytecode = @import("../code/Bytecode.zig");
 const ExecutionConfig = @import("../ExecutionConfig.zig");
-const RevisionId = @import("../protocol.zig").RevisionId;
-
-/// Identifies the variant an artifact was prepared under. Bytecode preparation
-/// depends on both the active revision and the execution config, so lookups and
-/// admissions are keyed by this pair.
+/// Identifies the representation used to prepare bytecode. Current prepared
+/// artifacts depend only on execution preprocessing options; exact fork
+/// semantics remain in the VM type and do not enter bytecode storage identity.
 pub const PreparationKey = struct {
-    revision_id: RevisionId,
     config: ExecutionConfig,
 };
 

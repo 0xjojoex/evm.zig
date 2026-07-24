@@ -6,6 +6,8 @@ const model = @import("bal/model.zig");
 const block_stf = @import("block_stf.zig");
 const state = @import("../state.zig");
 
+pub const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+
 pub const Address = model.Address;
 pub const BlockAccessIndex = model.BlockAccessIndex;
 pub const item_cost = model.item_cost;
@@ -38,7 +40,7 @@ pub const decode = model.decode;
 pub const decodeWithBudget = model.decodeWithBudget;
 pub const blockDecodeLimits = model.blockDecodeLimits;
 
-pub const Executor = block_stf.BalExecutor;
+pub const Executor = block_stf.Exact(.amsterdam).BalExecutor;
 pub const Report = block_stf.BalDifferentialReport;
 pub const DifferentialStatus = block_stf.BalDifferentialStatus;
 pub const Status = block_stf.Status;
@@ -78,4 +80,8 @@ test "BAL executor releases an unconsumed state backend" {
         .{ .lane_allocator = std.testing.allocator },
     );
     executor.deinit();
+}
+
+test {
+    std.testing.refAllDecls(tracked_state_projector);
 }

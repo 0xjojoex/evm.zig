@@ -8,7 +8,6 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const cases = @import("../test/call_fixture_cases.zig");
 
-const Default = evmz.Evm.Executor;
 const MemoryAccount = evmz.state.MemoryAccount;
 
 const Options = struct {
@@ -50,7 +49,7 @@ const CaptureHarness = struct {
     arena: evmz.trace.CallArena,
     context: evmz.executor.CaptureContext,
 
-    fn init(self: *CaptureHarness, allocator: std.mem.Allocator, executor: *Default) void {
+    fn init(self: *CaptureHarness, allocator: std.mem.Allocator) void {
         self.* = .{
             .arena = evmz.trace.CallArena.init(allocator),
             .context = undefined,
@@ -59,19 +58,15 @@ const CaptureHarness = struct {
             allocator,
             null,
             .{ .arena = &self.arena },
-            null,
         );
-        executor.setCaptureContext(&self.context);
     }
 
-    fn finish(self: *CaptureHarness, executor: *Default) !evmz.trace.CallSpan {
+    fn finish(self: *CaptureHarness) !evmz.trace.CallSpan {
         _ = try self.context.finish();
-        executor.setCaptureContext(null);
         return self.arena.latest().?;
     }
 
-    fn deinit(self: *CaptureHarness, executor: *Default) void {
-        if (executor.capture_context != null) executor.setCaptureContext(null);
+    fn deinit(self: *CaptureHarness) void {
         self.context.deinit();
         self.arena.deinit();
         self.* = undefined;
@@ -239,7 +234,26 @@ fn runCase(
 
     const revision = std.meta.stringToEnum(evmz.eth.Revision, case.fork) orelse
         return error.UnknownRevision;
-    var executor = Default.init(allocator, .{ .revision = revision });
+    const matched = switch (revision) {
+        .frontier => try runEvmzCase(.frontier, allocator, io, work_dir, options.keep_success, case, geth_rows),
+        .cancun => try runEvmzCase(.cancun, allocator, io, work_dir, options.keep_success, case, geth_rows),
+        else => return error.UnsupportedFixtureRevision,
+    };
+    if (!matched) return error.CallObservationMismatch;
+    clean_success = true;
+}
+
+fn runEvmzCase(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    work_dir: []const u8,
+    keep_success: bool,
+    case: cases.Case,
+    geth_rows: []const GethRow,
+) !bool {
+    const Executor = evmz.Vm(evmz.eth.specAt(revision)).Executor;
+    var executor = Executor.init(allocator, .{});
     defer executor.deinit();
     try seedAccount(&executor, allocator, try evmz.address.fromHex(cases.sender), try parseHexInt(u256, case.sender_balance), 0, &.{});
     for (case.accounts) |account| {
@@ -256,12 +270,12 @@ fn runCase(
     }
 
     var capture: CaptureHarness = undefined;
-    capture.init(allocator, &executor);
-    defer capture.deinit(&executor);
+    capture.init(allocator);
+    defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
     const sender = try evmz.address.fromHex(cases.sender);
-    _ = try executor.runStandalone(
+    _ = try executor.runStandaloneCaptured(
         evmz.t.defaultTxContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
@@ -269,18 +283,19 @@ fn runCase(
             .value = try parseHexInt(u256, case.value),
         } },
         .legacy(case.gas),
+        &capture.context,
     );
-    const evmz_span = try capture.finish(&executor);
+    const evmz_span = try capture.finish();
 
     if (!compareRows(case, evmz_span, geth_rows)) {
         try writeObservations(allocator, io, work_dir, evmz_span, geth_rows);
-        return error.CallObservationMismatch;
+        return false;
     }
-    clean_success = true;
-    if (options.keep_success) {
+    if (keep_success) {
         try writeObservations(allocator, io, work_dir, evmz_span, geth_rows);
         std.debug.print("kept successful oracle run: {s}\n", .{work_dir});
     }
+    return true;
 }
 
 fn writeInputs(allocator: std.mem.Allocator, io: std.Io, work_dir: []const u8, case: cases.Case) !void {
@@ -499,7 +514,7 @@ fn writeObservations(
     try writeNamed(allocator, io, work_dir, "geth-observation.json", geth.written());
 }
 
-fn seedAccount(executor: *Default, allocator: std.mem.Allocator, address: evmz.Address, balance: u256, nonce: u64, code: []const u8) !void {
+fn seedAccount(executor: anytype, allocator: std.mem.Allocator, address: evmz.Address, balance: u256, nonce: u64, code: []const u8) !void {
     var account = MemoryAccount.init(allocator);
     account.balance = balance;
     account.nonce = nonce;

@@ -1,88 +1,7 @@
-//! Operation-scoped carrier for the one captured execution runtime.
+//! Operation-scoped carrier for captured step and call runtimes.
 
 const std = @import("std");
 const trace = @import("../trace.zig");
-
-/// Internal fallible target for live state and lifecycle facts.
-///
-/// Step callbacks deliberately do not exist here: step consumers replay a
-/// completed `TraceSpan`. The target remains erased because state hooks are
-/// outside opcode dispatch and must not multiply executor/runtime types.
-pub const StateTarget = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        account_access: ?*const fn (*anyopaque, trace.AccountAccess) anyerror!void = null,
-        state_read: ?*const fn (*anyopaque, trace.StateRead) anyerror!void = null,
-        state_write: ?*const fn (*anyopaque, trace.StateWrite) anyerror!void = null,
-        checkpoint: ?*const fn (*anyopaque, trace.Checkpoint) anyerror!void = null,
-    };
-
-    pub fn init(ptr: *anyopaque, vtable: *const VTable) StateTarget {
-        return .{ .ptr = ptr, .vtable = vtable };
-    }
-
-    pub inline fn accountAccess(self: StateTarget, event: trace.AccountAccess) !void {
-        const callback = self.vtable.account_access orelse return;
-        try callback(self.ptr, event);
-    }
-
-    pub inline fn stateRead(self: StateTarget, event: trace.StateRead) !void {
-        const callback = self.vtable.state_read orelse return;
-        try callback(self.ptr, event);
-    }
-
-    pub inline fn stateWrite(self: StateTarget, event: trace.StateWrite) !void {
-        const callback = self.vtable.state_write orelse return;
-        try callback(self.ptr, event);
-    }
-
-    pub inline fn checkpoint(self: StateTarget, event: trace.Checkpoint) !void {
-        const callback = self.vtable.checkpoint orelse return;
-        try callback(self.ptr, event);
-    }
-};
-
-/// Fixed two-way state fanout used by block capture (for example BAL plus one
-/// runtime compatibility target). It does not change execution types.
-pub const StateFanout = struct {
-    first: ?StateTarget = null,
-    second: ?StateTarget = null,
-
-    pub fn target(self: *StateFanout) StateTarget {
-        return StateTarget.init(self, &.{
-            .account_access = accountAccess,
-            .state_read = stateRead,
-            .state_write = stateWrite,
-            .checkpoint = checkpoint,
-        });
-    }
-
-    fn accountAccess(ptr: *anyopaque, event: trace.AccountAccess) !void {
-        const self: *StateFanout = @ptrCast(@alignCast(ptr));
-        if (self.first) |target_value| try target_value.accountAccess(event);
-        if (self.second) |target_value| try target_value.accountAccess(event);
-    }
-
-    fn stateRead(ptr: *anyopaque, event: trace.StateRead) !void {
-        const self: *StateFanout = @ptrCast(@alignCast(ptr));
-        if (self.first) |target_value| try target_value.stateRead(event);
-        if (self.second) |target_value| try target_value.stateRead(event);
-    }
-
-    fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
-        const self: *StateFanout = @ptrCast(@alignCast(ptr));
-        if (self.first) |target_value| try target_value.stateWrite(event);
-        if (self.second) |target_value| try target_value.stateWrite(event);
-    }
-
-    fn checkpoint(ptr: *anyopaque, event: trace.Checkpoint) !void {
-        const self: *StateFanout = @ptrCast(@alignCast(ptr));
-        if (self.first) |target_value| try target_value.checkpoint(event);
-        if (self.second) |target_value| try target_value.checkpoint(event);
-    }
-};
 
 pub const TraceBinding = struct {
     tape: *trace.TraceTape,
@@ -98,7 +17,6 @@ pub const Context = struct {
     tape: ?*trace.TraceTape = null,
     call_arena: ?*trace.CallArena = null,
     trace_profile: trace.CaptureProfile = .{},
-    state_target: ?StateTarget = null,
     frame_captures: std.ArrayList(trace.TraceCapture) = .empty,
     next_frame_id: u32 = 0,
     mark: ?trace.TraceMark = null,
@@ -109,13 +27,11 @@ pub const Context = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         trace_binding: ?TraceBinding,
-        state_target: ?StateTarget,
     ) Context {
         return .{
             .allocator = allocator,
             .tape = if (trace_binding) |binding| binding.tape else null,
             .trace_profile = if (trace_binding) |binding| binding.profile else .{},
-            .state_target = state_target,
         };
     }
 
@@ -123,9 +39,8 @@ pub const Context = struct {
         allocator: std.mem.Allocator,
         trace_binding: ?TraceBinding,
         call_binding: CallBinding,
-        state_target: ?StateTarget,
     ) Context {
-        var context = init(allocator, trace_binding, state_target);
+        var context = init(allocator, trace_binding);
         context.call_arena = call_binding.arena;
         return context;
     }
@@ -136,13 +51,11 @@ pub const Context = struct {
     pub fn initBounded(
         frame_storage: []trace.TraceCapture,
         trace_binding: ?TraceBinding,
-        state_target: ?StateTarget,
     ) Context {
         return .{
             .allocator = null,
             .tape = if (trace_binding) |binding| binding.tape else null,
             .trace_profile = if (trace_binding) |binding| binding.profile else .{},
-            .state_target = state_target,
             .frame_captures = .initBuffer(frame_storage),
         };
     }
@@ -151,9 +64,8 @@ pub const Context = struct {
         frame_storage: []trace.TraceCapture,
         trace_binding: ?TraceBinding,
         call_binding: CallBinding,
-        state_target: ?StateTarget,
     ) Context {
-        var context = initBounded(frame_storage, trace_binding, state_target);
+        var context = initBounded(frame_storage, trace_binding);
         context.call_arena = call_binding.arena;
         return context;
     }
@@ -275,6 +187,16 @@ pub const Context = struct {
         try self.call_arena.?.finishCall(token, event);
     }
 
+    /// Fix the live-frame sidecar capacity before captured execution starts so
+    /// synchronous host reentry cannot relocate an active TraceCapture.
+    pub fn reserveFrameCapacity(self: *Context, capacity: usize) !void {
+        // TODO: review
+        if (self.frame_captures.items.len != 0) return error.ActiveCaptureFrames;
+        if (self.allocator) |allocator| {
+            try self.frame_captures.ensureTotalCapacityPrecise(allocator, capacity);
+        }
+    }
+
     /// Enable step capture for one sub-operation while keeping the state target
     /// active across a wider scope such as a block.
     pub fn beginTrace(self: *Context, binding: TraceBinding) !void {
@@ -375,30 +297,6 @@ pub const Context = struct {
         _ = self.frame_captures.pop();
     }
 
-    pub inline fn accountAccess(self: *Context, event: trace.AccountAccess) !void {
-        if (!self.active) return;
-        const target = self.state_target orelse return;
-        try target.accountAccess(event);
-    }
-
-    pub inline fn stateRead(self: *Context, event: trace.StateRead) !void {
-        if (!self.active) return;
-        const target = self.state_target orelse return;
-        try target.stateRead(event);
-    }
-
-    pub inline fn stateWrite(self: *Context, event: trace.StateWrite) !void {
-        if (!self.active) return;
-        const target = self.state_target orelse return;
-        try target.stateWrite(event);
-    }
-
-    pub inline fn checkpoint(self: *Context, event: trace.Checkpoint) !void {
-        if (!self.active) return;
-        const target = self.state_target orelse return;
-        try target.checkpoint(event);
-    }
-
     fn detachScopedTape(self: *Context) void {
         if (!self.tape_attached) return;
         self.tape = null;
@@ -413,28 +311,13 @@ pub const Context = struct {
     }
 };
 
-test "capture context scopes tape and fallible state target together" {
-    const Recorder = struct {
-        accesses: usize = 0,
-
-        fn target(self: *@This()) StateTarget {
-            return StateTarget.init(self, &.{ .account_access = accountAccess });
-        }
-
-        fn accountAccess(ptr: *anyopaque, _: trace.AccountAccess) !void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.accesses += 1;
-        }
-    };
-
+test "capture context scopes a trace tape" {
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    var recorder = Recorder{};
-    var context = Context.init(std.testing.allocator, .{ .tape = &tape }, recorder.target());
+    var context = Context.init(std.testing.allocator, .{ .tape = &tape });
     defer context.deinit();
 
     try context.begin();
-    try context.accountAccess(.{ .address = @splat(1) });
     try context.pushFrame(0, .root, &.{}, 0, &.{}, &.{}, 0);
     try context.finishCurrentFrame(.{
         .outcome = .success,
@@ -444,14 +327,13 @@ test "capture context scopes tape and fallible state target together" {
     const span = (try context.finish()).?;
     defer tape.resolve(span) catch unreachable;
 
-    try std.testing.expectEqual(@as(usize, 1), recorder.accesses);
     try std.testing.expectEqual(@as(usize, 1), span.frames.len);
 }
 
 test "call binding attaches for one payload inside a wider capture scope" {
     var arena = trace.CallArena.init(std.testing.allocator);
     defer arena.deinit();
-    var context = Context.init(std.testing.allocator, null, null);
+    var context = Context.init(std.testing.allocator, null);
     defer context.deinit();
 
     try context.begin();
@@ -474,7 +356,7 @@ test "call binding attaches for one payload inside a wider capture scope" {
 test "scoped trace detaches from a reusable state capture context" {
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
-    var context = Context.init(std.testing.allocator, null, null);
+    var context = Context.init(std.testing.allocator, null);
     defer context.deinit();
 
     try context.begin();
@@ -523,7 +405,7 @@ test "bounded capture context rejects live-frame growth before tape mutation" {
         },
     });
     defer tape.deinit();
-    var context = Context.initBounded(&capture_storage, .{ .tape = &tape }, null);
+    var context = Context.initBounded(&capture_storage, .{ .tape = &tape });
     defer context.deinit();
 
     try context.begin();

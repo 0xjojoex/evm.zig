@@ -11,22 +11,24 @@ const bench_config = zbench.Config{
 
 const Address = evmz.Address;
 const StorageKey = evmz.state.StorageKey;
-const AccountState = evmz.state.Account;
-const SparseStorageSlotMap = @FieldType(evmz.state.Overlay, "storage_slots");
-const StorageSlot = @typeInfo(@FieldType(SparseStorageSlotMap.Entry, "value_ptr")).pointer.child;
+const TrackedState = evmz.state.TrackedState;
+const StorageSlot = TrackedState.ScopeStorage;
+const SparseStorageSlotMap = @FieldType(TrackedState.Scope, "storage");
 const StdStorageSlotMap = std.AutoHashMap(StorageKey, StorageSlot);
-const SparseStorageMap = @FieldType(evmz.state.Overlay, "storage_overlay");
-const StdStorageMap = std.AutoHashMap(StorageKey, u256);
-const SparseAddressMap = @FieldType(evmz.state.Overlay, "accounts");
-const StdAddressMap = std.AutoHashMap(Address, AccountState);
+const SparseStorageMap = @FieldType(TrackedState.Transaction, "storage");
+const StdStorageMap = std.AutoHashMap(StorageKey, TrackedState.StorageRow);
+const SparseAddressMap = @FieldType(TrackedState.Transaction, "accounts");
+const StdAddressMap = std.AutoHashMap(Address, TrackedState.AccountRow);
 
 var sparse_clear_small: []SparseStorageSlotMap = &.{};
 var std_clear_small: []StdStorageSlotMap = &.{};
 var sparse_clear_broad: []SparseStorageSlotMap = &.{};
 var std_clear_broad: []StdStorageSlotMap = &.{};
 var clear_storage_keys: []const StorageKey = &.{};
-var accepted_hit_load_overlay: ?*evmz.state.Overlay = null;
-var accepted_miss_load_overlay: ?*evmz.state.Overlay = null;
+var accepted_hit_load_state: ?*TrackedState = null;
+var accepted_miss_load_state: ?*TrackedState = null;
+var accepted_hit_attempt: ?TrackedState.AttemptId = null;
+var accepted_miss_attempt: ?TrackedState.AttemptId = null;
 
 test "micro/state/sparse-hash-map/hash" {
     var keys: [state_map_ops_per_run]StorageKey = undefined;
@@ -219,45 +221,47 @@ test "micro/state/sparse-hash-map/storage-overlay-get" {
     try bench.run(std.testing.io, .stdout());
 }
 
-test "micro/state/overlay/cold-storage-load" {
+test "micro/state/tracked-state/cold-storage-load" {
     var keys: [state_map_ops_per_run]StorageKey = undefined;
     var misses: [state_map_ops_per_run]StorageKey = undefined;
     initStorageKeys(&keys, 0);
     initStorageKeys(&misses, 1_000_000);
 
-    var accepted_hit = evmz.state.Overlay.init(std.testing.allocator);
+    var accepted_hit = TrackedState.init(std.testing.allocator);
     defer accepted_hit.deinit();
-    try configureStorageLoadOverlay(&accepted_hit, &keys, &.{});
+    try configureStorageLoadState(&accepted_hit, &keys);
 
-    var accepted_miss = evmz.state.Overlay.init(std.testing.allocator);
+    var accepted_miss = TrackedState.init(std.testing.allocator);
     defer accepted_miss.deinit();
-    try configureStorageLoadOverlay(&accepted_miss, &misses, &keys);
+    try configureStorageLoadState(&accepted_miss, &misses);
 
-    accepted_hit_load_overlay = &accepted_hit;
-    accepted_miss_load_overlay = &accepted_miss;
+    accepted_hit_load_state = &accepted_hit;
+    accepted_miss_load_state = &accepted_miss;
     defer {
-        accepted_hit_load_overlay = null;
-        accepted_miss_load_overlay = null;
+        if (accepted_hit_attempt) |attempt| accepted_hit.discard(attempt);
+        if (accepted_miss_attempt) |attempt| accepted_miss.discard(attempt);
+        accepted_hit_load_state = null;
+        accepted_miss_load_state = null;
+        accepted_hit_attempt = null;
+        accepted_miss_attempt = null;
     }
 
-    var accepted_hit_context = OverlayStorageLoadBench{ .overlay = &accepted_hit, .keys = &keys };
-    var accepted_miss_context = OverlayStorageLoadBench{ .overlay = &accepted_miss, .keys = &keys };
+    var accepted_hit_context = TrackedStorageLoadBench{ .state = &accepted_hit, .keys = &keys };
+    var accepted_miss_context = TrackedStorageLoadBench{ .state = &accepted_miss, .keys = &keys };
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
     try bench.addParam(
-        "overlay/cold-storage-load/accepted-hit/1024x",
-        @as(*const OverlayStorageLoadBench, &accepted_hit_context),
+        "tracked-state/cold-storage-load/accepted-hit/1024x",
+        @as(*const TrackedStorageLoadBench, &accepted_hit_context),
         .{ .hooks = .{ .before_each = prepareAcceptedHitStorageLoads } },
     );
     try bench.addParam(
-        "overlay/cold-storage-load/accepted-miss/1024x",
-        @as(*const OverlayStorageLoadBench, &accepted_miss_context),
+        "tracked-state/cold-storage-load/accepted-miss/1024x",
+        @as(*const TrackedStorageLoadBench, &accepted_miss_context),
         .{ .hooks = .{ .before_each = prepareAcceptedMissStorageLoads } },
     );
 
     try bench.run(std.testing.io, .stdout());
-    accepted_hit.closeTransaction();
-    accepted_miss.closeTransaction();
 }
 
 test "micro/state/sparse-hash-map/account-get-ptr" {
@@ -458,7 +462,13 @@ fn GetPtrBench(comptime Map: type, comptime Key: type) type {
             const mask = self.keys.len - 1;
             var acc: u64 = 0;
             for (0..state_map_ops_per_run) |index| {
-                if (self.map.getPtr(self.keys[index & mask])) |value| acc +%= value.nonce;
+                if (self.map.getPtr(self.keys[index & mask])) |row| {
+                    const current = row.current orelse continue;
+                    acc +%= switch (current) {
+                        .loaded => |account| account.nonce,
+                        .absent, .exists_only => 0,
+                    };
+                }
             }
             std.mem.doNotOptimizeAway(acc);
         }
@@ -477,21 +487,21 @@ fn StorageGetBench(comptime Map: type) type {
             const mask = self.keys.len - 1;
             var acc: u256 = 0;
             for (0..state_map_ops_per_run) |index| {
-                if (self.map.get(self.keys[index & mask])) |value| acc +%= value;
+                if (self.map.get(self.keys[index & mask])) |row| acc +%= row.current orelse 0;
             }
             std.mem.doNotOptimizeAway(acc);
         }
     };
 }
 
-const OverlayStorageLoadBench = struct {
-    overlay: *evmz.state.Overlay,
+const TrackedStorageLoadBench = struct {
+    state: *TrackedState,
     keys: []const StorageKey,
 
-    pub fn run(self: *OverlayStorageLoadBench, _: std.mem.Allocator) void {
+    pub fn run(self: *TrackedStorageLoadBench, _: std.mem.Allocator) void {
         var acc: u256 = 0;
         for (self.keys) |key| {
-            const result = self.overlay.loadStorage(key.address, key.key) catch unreachable;
+            const result = self.state.loadStorage(key.address, key.key) catch unreachable;
             acc +%= result.value;
         }
         std.mem.doNotOptimizeAway(acc);
@@ -598,12 +608,17 @@ fn fillStorageSlotMap(map: anytype, keys: []const StorageKey) void {
 }
 
 fn fillStorageMap(map: anytype, keys: []const StorageKey) void {
-    for (keys, 0..) |key, index| map.putAssumeCapacityNoClobber(key, mixedWord(@intCast(index + 42)));
+    for (keys, 0..) |key, index| map.putAssumeCapacityNoClobber(
+        key,
+        .{ .current = mixedWord(@intCast(index + 42)) },
+    );
 }
 
 fn fillAddressMap(map: anytype, keys: []const Address) void {
     for (keys, 0..) |key, index| {
-        map.putAssumeCapacityNoClobber(key, .{ .nonce = @intCast(index + 1) });
+        map.putAssumeCapacityNoClobber(key, .{
+            .current = .{ .loaded = .{ .nonce = @intCast(index + 1) } },
+        });
     }
 }
 
@@ -632,7 +647,7 @@ fn expectAddressMapParity(
 ) !void {
     try std.testing.expectEqual(@as(usize, sparse.count()), standard.count());
     for (hits) |key| {
-        try std.testing.expectEqual(sparse.getPtr(key).?.nonce, standard.getPtr(key).?.nonce);
+        try std.testing.expectEqualDeep(sparse.getPtr(key).?.*, standard.getPtr(key).?.*);
     }
     for (misses) |key| {
         try std.testing.expectEqual(sparse.getPtr(key) == null, standard.getPtr(key) == null);
@@ -646,29 +661,38 @@ fn expectStorageMapParity(
     misses: []const StorageKey,
 ) !void {
     try std.testing.expectEqual(@as(usize, sparse.count()), standard.count());
-    for (hits) |key| try std.testing.expectEqual(sparse.get(key), standard.get(key));
-    for (misses) |key| try std.testing.expectEqual(sparse.get(key), standard.get(key));
+    for (hits) |key| try std.testing.expectEqualDeep(sparse.get(key), standard.get(key));
+    for (misses) |key| try std.testing.expectEqualDeep(sparse.get(key), standard.get(key));
 }
 
-fn configureStorageLoadOverlay(
-    overlay: *evmz.state.Overlay,
-    accepted_keys: []const StorageKey,
-    seeded_keys: []const StorageKey,
-) !void {
-    try overlay.configureJournalEntries(state_map_ops_per_run);
-    try overlay.reserveAccessHint(.{ .accounts = 0, .storage_keys = state_map_ops_per_run });
-    try overlay.storage_overlay.ensureTotalCapacity(@intCast(accepted_keys.len));
-    try overlay.seeded_storage.ensureTotalCapacity(@intCast(seeded_keys.len));
-    fillStorageMap(&overlay.storage_overlay, accepted_keys);
-    fillStorageMap(&overlay.seeded_storage, seeded_keys);
+fn configureStorageLoadState(state: *TrackedState, accepted_keys: []const StorageKey) !void {
+    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    for (accepted_keys, 0..) |key, index| {
+        try account.storage.put(key.key, mixedWord(@intCast(index + 42)));
+    }
+    try state.seedAccount(accepted_keys[0].address, account);
 }
 
 fn prepareAcceptedHitStorageLoads() void {
-    accepted_hit_load_overlay.?.beginTransaction();
+    if (accepted_hit_attempt) |attempt| accepted_hit_load_state.?.discard(attempt);
+    const attempt = accepted_hit_load_state.?.beginTransaction();
+    accepted_hit_load_state.?.beginScope();
+    accepted_hit_load_state.?.reserveAccessHint(.{
+        .accounts = 1,
+        .storage_keys = state_map_ops_per_run,
+    }) catch unreachable;
+    accepted_hit_attempt = attempt;
 }
 
 fn prepareAcceptedMissStorageLoads() void {
-    accepted_miss_load_overlay.?.beginTransaction();
+    if (accepted_miss_attempt) |attempt| accepted_miss_load_state.?.discard(attempt);
+    const attempt = accepted_miss_load_state.?.beginTransaction();
+    accepted_miss_load_state.?.beginScope();
+    accepted_miss_load_state.?.reserveAccessHint(.{
+        .accounts = 1,
+        .storage_keys = state_map_ops_per_run,
+    }) catch unreachable;
+    accepted_miss_attempt = attempt;
 }
 
 const ClearHooks = struct {

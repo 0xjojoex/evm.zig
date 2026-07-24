@@ -4,7 +4,7 @@
 //! boundaries. It is deliberately independent from opcode-step capture and
 //! tracked state.
 //!
-//! Rows retain client-neutral facts only. Serialization shape, error text,
+//! Rows retain client-independent facts only. Serialization shape, error text,
 //! filtering, and transaction or block envelope metadata belong to consumers.
 
 const std = @import("std");

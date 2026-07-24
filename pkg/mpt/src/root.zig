@@ -7,7 +7,8 @@ const std = @import("std");
 const rlp = @import("rlp");
 
 const Error = @import("error.zig").BuildError;
-const Root = @import("hash.zig").Root;
+const node_hash = @import("hash.zig");
+const Root = node_hash.Root;
 const nibble = @import("nibble.zig");
 const Workspace = @import("workspace.zig").Workspace;
 
@@ -170,7 +171,7 @@ pub fn rootSorted(
     needed: Requirements,
 ) Error!Root {
     workspace.reset();
-    if (entries.len == 0) return @import("hash.zig").empty_root;
+    if (entries.len == 0) return node_hash.empty_root;
     try validateEntries(entries, true);
     return buildRoot(keccak_context, workspace, entries, needed);
 }
@@ -184,7 +185,7 @@ pub fn root(
     needed: Requirements,
 ) Error!Root {
     workspace.reset();
-    if (entries.len == 0) return @import("hash.zig").empty_root;
+    if (entries.len == 0) return node_hash.empty_root;
     try validateEntries(entries, false);
 
     var fixed = std.heap.FixedBufferAllocator.init(workspace.buffer);

@@ -314,7 +314,7 @@ fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
     var tape = evmz.trace.TraceTape.initGrowable(allocator);
     defer tape.deinit();
     _ = evmz.stateless.wire.validateStatelessResultBytesWithCapture(allocator, input, .{
-        .state_target = printer.stateTarget(),
+        .observations = printer.observationTarget(),
         .steps = .{
             .tape = &tape,
             .profile = .{ .stack = .omitted },
@@ -327,12 +327,86 @@ fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
 }
 
 const GasTracePrinter = struct {
-    fn stateTarget(self: *@This()) evmz.executor.CaptureStateTarget {
-        return evmz.executor.CaptureStateTarget.init(self, &.{ .state_write = stateWrite });
+    fn observationTarget(self: *@This()) evmz.eth.block_stf.ObservationTarget {
+        return .init(self, observe);
     }
 
     fn traceTarget(self: *@This()) evmz.trace.TraceSpanTarget {
         return evmz.trace.TraceSpanTarget.init(self, consumeTrace);
+    }
+
+    fn observe(
+        ptr: *anyopaque,
+        block_access_index: evmz.eth.bal.BlockAccessIndex,
+        observations: evmz.state.TrackedState.ObservationsView,
+    ) !void {
+        _ = ptr;
+        var account_index: u32 = 0;
+        while (account_index < observations.accounts.len()) : (account_index += 1) {
+            const fact = observations.accounts.at(account_index);
+            if (fact.observation.semantic_access) {
+                std.debug.print("    trace account index={} addr={x}\n", .{
+                    block_access_index,
+                    fact.address,
+                });
+            }
+            if (fact.effect.balance_written) printBalance(block_access_index, fact);
+            if (fact.effect.nonce_written) printNonce(block_access_index, fact);
+            if (fact.effect.code_written) {
+                std.debug.print("    trace code index={} addr={x}\n", .{
+                    block_access_index,
+                    fact.address,
+                });
+            }
+        }
+
+        var storage_index: u32 = 0;
+        while (storage_index < observations.storage.len()) : (storage_index += 1) {
+            const fact = observations.storage.at(storage_index);
+            std.debug.print(
+                "    trace storage index={} addr={x} key={x} previous={x} value={x} written={}\n",
+                .{
+                    block_access_index,
+                    fact.address,
+                    fact.key,
+                    fact.original,
+                    fact.current,
+                    fact.effect.written,
+                },
+            );
+        }
+    }
+
+    fn printBalance(
+        block_access_index: evmz.eth.bal.BlockAccessIndex,
+        fact: evmz.state.TrackedState.AccountObservationFact,
+    ) void {
+        const original = account(fact.original);
+        const current = account(fact.current);
+        std.debug.print(
+            "    trace balance index={} addr={x} previous={x} value={x}\n",
+            .{ block_access_index, fact.address, original.balance, current.balance },
+        );
+    }
+
+    fn printNonce(
+        block_access_index: evmz.eth.bal.BlockAccessIndex,
+        fact: evmz.state.TrackedState.AccountObservationFact,
+    ) void {
+        const original = account(fact.original);
+        const current = account(fact.current);
+        std.debug.print(
+            "    trace nonce index={} addr={x} previous={} value={}\n",
+            .{ block_access_index, fact.address, original.nonce, current.nonce },
+        );
+    }
+
+    fn account(value: ?evmz.state.TrackedState.AccountValue) evmz.state.Account {
+        return switch (value orelse .absent) {
+            .loaded => |loaded| loaded,
+            .absent => .{},
+            .exists_only => unreachable,
+        };
     }
 
     fn consumeTrace(ptr: *anyopaque, span: evmz.trace.TraceSpan) !void {
@@ -366,41 +440,6 @@ const GasTracePrinter = struct {
             view.row.gas_after,
             status,
         });
-    }
-
-    fn stateWrite(ptr: *anyopaque, event: evmz.trace.StateWrite) !void {
-        _ = ptr;
-        switch (event) {
-            .balance => |write| std.debug.print("    trace balance depth={} addr={x} previous={x} value={x}\n", .{
-                write.depth,
-                write.address,
-                write.previous,
-                write.value,
-            }),
-            .nonce => |write| std.debug.print("    trace nonce depth={} addr={x} previous={} value={}\n", .{
-                write.depth,
-                write.address,
-                write.previous,
-                write.value,
-            }),
-            .storage => |write| std.debug.print("    trace storage depth={} addr={x} key={x} previous={x} value={x}\n", .{
-                write.depth,
-                write.address,
-                write.key,
-                write.previous,
-                write.value,
-            }),
-            .warm_account => |write| std.debug.print("    trace warm_account depth={} addr={x}\n", .{
-                write.depth,
-                write.address,
-            }),
-            .warm_storage => |write| std.debug.print("    trace warm_storage depth={} addr={x} key={x}\n", .{
-                write.depth,
-                write.address,
-                write.key,
-            }),
-            else => {},
-        }
     }
 };
 

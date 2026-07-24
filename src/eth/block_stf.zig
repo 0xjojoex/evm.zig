@@ -16,10 +16,10 @@ const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_diff = @import("bal/diff.zig");
 const bal_differential = @import("bal/differential.zig");
-const BalRecorder = @import("bal/recorder.zig").Recorder;
+const tracked_state_projector = @import("bal/tracked_state_projector.zig");
 const ClaimView = @import("bal/ClaimView.zig");
 const bal_witness = @import("bal/witness.zig");
-const candidate_state = @import("bal/candidate_state.zig");
+const candidate_transition = @import("bal/candidate_transition.zig");
 const execution_resources = @import("../execution_resources.zig");
 const eth_header = @import("header.zig");
 const eip6110 = @import("eip/6110.zig");
@@ -27,9 +27,8 @@ const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
 const eip7685 = @import("eip/7685.zig");
 const eip8282 = @import("eip/8282.zig");
-const family_builder = @import("derive.zig");
+const eth_spec = @import("spec.zig");
 const eth_system = @import("system.zig");
-const eth_transaction = @import("transaction.zig");
 const trie = @import("trie.zig");
 const prepared_code = @import("../prepared_code.zig");
 const Withdrawal = @import("Withdrawal.zig");
@@ -41,84 +40,100 @@ const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
 
-const Engine = family_builder.extend(.{});
-const BlockExecution = Engine.BlockExecution;
-const BalDifferentialOperations = struct {
-    pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
-    pub const Withdrawal = @import("Withdrawal.zig");
+fn BalDifferentialOperations(
+    comptime revision: Revision,
+    comptime Engine: type,
+) type {
+    return struct {
+        pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
+        pub const Withdrawal = @import("Withdrawal.zig");
 
-    pub fn appendCandidateDepositRequestData(
-        allocator: std.mem.Allocator,
-        revision: Revision,
-        output: *std.ArrayList(u8),
-        logs: []const Host.Log,
-    ) !void {
-        if (revision.isImpl(.prague)) try eip6110.appendRequestDataFromLogs(allocator, output, logs);
-    }
+        pub fn appendCandidateDepositRequestData(
+            allocator: std.mem.Allocator,
+            output: *std.ArrayList(u8),
+            logs: []const Host.Log,
+        ) !void {
+            if (revision.isImpl(.prague))
+                try eip6110.appendRequestDataFromLogs(allocator, output, .fromSlice(logs));
+        }
 
-    pub fn encodeCandidateReceipt(
-        allocator: std.mem.Allocator,
-        kind: @TypeOf(@as(Engine.Transaction, undefined).kind),
-        receipt: vm.TxReceiptView,
-    ) ![]u8 {
-        return encodeReceipt(allocator, kind, receipt);
-    }
+        pub fn encodeCandidateReceipt(
+            allocator: std.mem.Allocator,
+            kind: transaction.TxKind,
+            receipt: vm.TxReceiptView,
+        ) ![]u8 {
+            return encodeReceipt(allocator, kind, receipt);
+        }
 
-    pub fn candidateLogsBloom(logs: []const Host.Log) [256]u8 {
-        return logsBloom(logs);
-    }
+        pub fn candidateLogsBloom(logs: []const Host.Log) [256]u8 {
+            return logsBloom(.fromSlice(logs));
+        }
 
-    pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
-        mergeLogsBloom(target, source);
-    }
+        pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
+            mergeLogsBloom(target, source);
+        }
 
-    pub fn applyCandidateWithdrawals(
-        executor: *Engine.Executor,
-        withdrawals: []const @import("Withdrawal.zig"),
-    ) !void {
-        try applyWithdrawals(executor, withdrawals);
-    }
+        pub fn applyCandidateWithdrawals(
+            executor: *Engine.Executor,
+            tx_context: Host.TxContext,
+            withdrawals: []const @import("Withdrawal.zig"),
+            observer: anytype,
+        ) !void {
+            try applyWithdrawals(executor, tx_context, withdrawals, observer);
+        }
 
-    pub fn deriveCandidateRequests(
-        allocator: std.mem.Allocator,
-        executor: *Engine.Executor,
-        block_policy: *const Engine.BlockPolicy,
-        env: vm.Env,
-        progress: vm.BlockResult,
-        deposit_request_data: []const u8,
-    ) ![]const []const u8 {
-        return deriveRequests(allocator, executor, block_policy, env, progress, deposit_request_data);
-    }
+        pub fn deriveCandidateRequests(
+            allocator: std.mem.Allocator,
+            executor: *Engine.Executor,
+            env: vm.Env,
+            progress: vm.BlockResult,
+            deposit_request_data: []const u8,
+            observer: anytype,
+        ) ![]const []const u8 {
+            return deriveRequests(
+                allocator,
+                executor,
+                env,
+                progress,
+                deposit_request_data,
+                observer,
+            );
+        }
 
-    pub fn freeCandidateRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
-        freeRequests(allocator, requests);
-    }
+        pub fn freeCandidateRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
+            freeRequests(allocator, requests);
+        }
 
-    pub fn candidateRequestsHash(allocator: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
-        return requestsHash(allocator, requests);
-    }
+        pub fn candidateRequestsHash(allocator: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
+            return requestsHash(allocator, requests);
+        }
 
-    pub fn candidateReceiptsRoot(allocator: std.mem.Allocator, receipts: []const []const u8) ![32]u8 {
-        return trie.receiptRoot(allocator, receipts);
-    }
+        pub fn candidateReceiptsRoot(allocator: std.mem.Allocator, receipts: []const []const u8) ![32]u8 {
+            return trie.receiptRoot(allocator, receipts);
+        }
 
-    pub fn candidateTransactionBlobGasUsed(
-        revision: Revision,
-        blob_schedule: ?transaction.BlobSchedule,
-        tx: Engine.Transaction,
-    ) !u64 {
-        return transactionBlobGasUsed(revision, blob_schedule, tx);
-    }
+        pub fn candidateTransactionBlobGasUsed(
+            blob_schedule: ?transaction.BlobSchedule,
+            tx: transaction.Transaction,
+        ) !u64 {
+            return transactionBlobGasUsed(revision, Engine, blob_schedule, tx);
+        }
 
-    pub fn candidateBlockBlobGasLimit(
-        revision: Revision,
-        blob_schedule: ?transaction.BlobSchedule,
-    ) !u64 {
-        return blockBlobGasLimit(revision, blob_schedule);
-    }
-};
-const BalDifferentialRunner = bal_differential.Runner(Engine, BalDifferentialOperations);
-pub const TransactionProtocol = Engine.TransactionProtocol;
+        pub fn candidateBlockBlobGasLimit(
+            blob_schedule: ?transaction.BlobSchedule,
+        ) !u64 {
+            return blockBlobGasLimit(revision, Engine, blob_schedule);
+        }
+    };
+}
+
+fn BalDifferentialRunner(comptime revision: Revision, comptime Engine: type) type {
+    return bal_differential.Runner(
+        Engine,
+        BalDifferentialOperations(revision, Engine),
+    );
+}
+
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
 pub const ParentBlobGas = transaction.ExcessBlobGasInput;
@@ -164,163 +179,170 @@ pub const ParallelResources = struct {
 /// every result, while `deinit` releases it when execution never starts.
 /// Scheduling the whole `run` call through another task is valid, but the
 /// caller must join or cancel that task before calling `deinit`.
-pub const BalExecutor = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    input: Input,
-    strategy: ParallelStrategy,
-    resources: ParallelResources,
-    lifecycle: Lifecycle = .ready,
+fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
+    return struct {
+        const Self = @This();
 
-    const Input = union(enum) {
-        checked: BlockInput,
-        assume_decoded: AssumeDecodedBlockInput,
-    };
-
-    const Lifecycle = enum {
-        ready,
-        running,
-        finished,
-    };
-
-    /// Bind checked raw transaction input to the caller's I/O runtime.
-    pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
-        input: BlockInput,
+        input: Input,
         strategy: ParallelStrategy,
         resources: ParallelResources,
-    ) BalExecutor {
-        strategy.assertRequest(input.bal_differential);
-        return .{
-            .io = io,
-            .allocator = allocator,
-            .input = .{ .checked = input },
-            .strategy = strategy,
-            .resources = resources,
+        lifecycle: Lifecycle = .ready,
+
+        const Input = union(enum) {
+            checked: BlockInput,
+            assume_decoded: AssumeDecodedBlockInput,
         };
-    }
 
-    /// Bind values decoded by a trusted adapter to the caller's I/O runtime.
-    pub fn initAssumeDecoded(
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        input: AssumeDecodedBlockInput,
-        strategy: ParallelStrategy,
-        resources: ParallelResources,
-    ) BalExecutor {
-        strategy.assertRequest(input.bal_differential);
-        return .{
-            .io = io,
-            .allocator = allocator,
-            .input = .{ .assume_decoded = input },
-            .strategy = strategy,
-            .resources = resources,
+        const Lifecycle = enum {
+            ready,
+            running,
+            finished,
         };
-    }
 
-    /// Execute and join all private candidate work before returning.
-    pub fn run(self: *BalExecutor) !Result {
-        std.debug.assert(self.lifecycle == .ready);
-        self.lifecycle = .running;
-        defer self.lifecycle = .finished;
-
-        return switch (self.input) {
-            .checked => |input| self.runChecked(input),
-            .assume_decoded => |input| self.runAssumeDecoded(input),
-        };
-    }
-
-    fn runChecked(self: *const BalExecutor, input: BlockInput) !Result {
-        var state_backend = input.state_backend;
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
-            state_backend.deinit();
-            return err;
-        };
-        return self.runAssumeDecoded(assumeDecodedBlockInput(
-            input,
-            state_backend,
-            transactions,
-        ));
-    }
-
-    fn runAssumeDecoded(self: *const BalExecutor, input: AssumeDecodedBlockInput) !Result {
-        resetBalReport(input);
-        const parallel_execution = self.parallelExecution(input);
-        var no_produced_bal: ?[]u8 = null;
-        const result = try serialFold(
-            self.allocator,
-            input,
-            .compare,
-            &no_produced_bal,
-            parallel_execution,
-        );
-        std.debug.assert(no_produced_bal == null);
-        return result;
-    }
-
-    fn parallelExecution(
-        self: *const BalExecutor,
-        input: AssumeDecodedBlockInput,
-    ) ?bal_differential.ParallelExecution {
-        const report = input.bal_differential.?;
-        const concurrent_reader = self.resources.state_reader orelse {
-            report.parallel_fallback = .concurrent_state_reader_unavailable;
-            return null;
-        };
-        if (input.block_hash_source != null and self.resources.block_hash_source == null) {
-            report.parallel_fallback = .concurrent_block_hash_source_unavailable;
-            return null;
+        /// Bind checked raw transaction input to the caller's I/O runtime.
+        pub fn init(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            input: BlockInput,
+            strategy: ParallelStrategy,
+            resources: ParallelResources,
+        ) Self {
+            strategy.assertRequest(input.bal_differential);
+            return .{
+                .io = io,
+                .allocator = allocator,
+                .input = .{ .checked = input },
+                .strategy = strategy,
+                .resources = resources,
+            };
         }
-        return .{
-            .io = self.io,
-            .submission = self.strategy.submission,
-            .max_in_flight = self.strategy.max_in_flight,
-            .lane_allocator = self.resources.lane_allocator,
-            .state_reader = concurrent_reader.reader(),
-            .block_hash_source = if (input.block_hash_source != null)
-                self.resources.block_hash_source.?.source()
-            else
-                null,
-        };
-    }
 
-    /// Release a transferred backend when `run` was never called.
-    pub fn deinit(self: *BalExecutor) void {
-        std.debug.assert(self.lifecycle != .running);
-        if (self.lifecycle == .ready) {
-            switch (self.input) {
-                .checked => self.input.checked.state_backend.deinit(),
-                .assume_decoded => self.input.assume_decoded.state_backend.deinit(),
+        /// Bind values decoded by a trusted adapter to the caller's I/O runtime.
+        pub fn initAssumeDecoded(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            input: AssumeDecodedBlockInput,
+            strategy: ParallelStrategy,
+            resources: ParallelResources,
+        ) Self {
+            strategy.assertRequest(input.bal_differential);
+            return .{
+                .io = io,
+                .allocator = allocator,
+                .input = .{ .assume_decoded = input },
+                .strategy = strategy,
+                .resources = resources,
+            };
+        }
+
+        /// Execute and join all private candidate work before returning.
+        pub fn run(self: *Self) !Result {
+            std.debug.assert(self.lifecycle == .ready);
+            self.lifecycle = .running;
+            defer self.lifecycle = .finished;
+
+            return switch (self.input) {
+                .checked => |input| self.runChecked(input),
+                .assume_decoded => |input| self.runAssumeDecoded(input),
+            };
+        }
+
+        fn runChecked(self: *const Self, input: BlockInput) !Result {
+            var state_backend = input.state_backend;
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
+                state_backend.deinit();
+                return err;
+            };
+            return self.runAssumeDecoded(assumeDecodedBlockInput(
+                input,
+                state_backend,
+                transactions,
+            ));
+        }
+
+        fn runAssumeDecoded(self: *const Self, input: AssumeDecodedBlockInput) !Result {
+            resetBalReport(input);
+            const parallel_execution = self.parallelExecution(input);
+            var no_produced_bal: ?[]u8 = null;
+            const result = try serialFold(
+                revision,
+                Engine,
+                self.allocator,
+                input,
+                .compare,
+                &no_produced_bal,
+                parallel_execution,
+            );
+            std.debug.assert(no_produced_bal == null);
+            return result;
+        }
+
+        fn parallelExecution(
+            self: *const Self,
+            input: AssumeDecodedBlockInput,
+        ) ?bal_differential.ParallelExecution {
+            const report = input.bal_differential.?;
+            const concurrent_reader = self.resources.state_reader orelse {
+                report.parallel_fallback = .concurrent_state_reader_unavailable;
+                return null;
+            };
+            if (input.block_hash_source != null and self.resources.block_hash_source == null) {
+                report.parallel_fallback = .concurrent_block_hash_source_unavailable;
+                return null;
             }
+            return .{
+                .io = self.io,
+                .submission = self.strategy.submission,
+                .max_in_flight = self.strategy.max_in_flight,
+                .lane_allocator = self.resources.lane_allocator,
+                .state_reader = concurrent_reader.reader(),
+                .block_hash_source = if (input.block_hash_source != null)
+                    self.resources.block_hash_source.?.source()
+                else
+                    null,
+            };
         }
-        self.* = undefined;
-    }
-};
+
+        /// Release a transferred backend when `run` was never called.
+        pub fn deinit(self: *Self) void {
+            std.debug.assert(self.lifecycle != .running);
+            if (self.lifecycle == .ready) {
+                switch (self.input) {
+                    .checked => self.input.checked.state_backend.deinit(),
+                    .assume_decoded => self.input.assume_decoded.state_backend.deinit(),
+                }
+            }
+            self.* = undefined;
+        }
+    };
+}
 
 pub const TransactionInput = struct {
-    tx: Engine.Transaction,
+    tx: transaction.Transaction,
     encoded: []const u8,
 
     /// Construct an ingress value when a trusted adapter has already decoded
     /// `encoded` into `tx`. This does not prove that both representations
     /// describe the same transaction; prefer the raw-byte `produce` API when
     /// the bytes are not already inside a trusted boundary.
-    pub fn initAssumeDecoded(tx: Engine.Transaction, encoded: []const u8) TransactionInput {
+    pub fn initAssumeDecoded(tx: transaction.Transaction, encoded: []const u8) TransactionInput {
         return .{ .tx = tx, .encoded = encoded };
     }
 };
 
 /// Explicit diagnostic capture for authoritative serial execution.
 ///
-/// Semantic state events remain live and fallible through `state_target`.
+/// Checkpoint-resolved observations are delivered synchronously after each
+/// sealed state transition and before it is retained.
 /// Step facts are first captured passively into the caller-owned tape, then
 /// delivered as one completed span per payload transaction. Candidate lanes
 /// never receive this caller-owned capture.
 pub const ExecutionCapture = struct {
-    state_target: ?Executor.CaptureStateTarget = null,
+    observations: ?ObservationTarget = null,
     steps: ?StepCapture = null,
 
     pub const StepCapture = struct {
@@ -328,6 +350,36 @@ pub const ExecutionCapture = struct {
         profile: trace.CaptureProfile = .{},
         target: trace.TraceSpanTarget,
     };
+};
+
+/// Synchronous borrowed observation consumer. The callback must copy anything
+/// it retains beyond the call.
+pub const ObservationTarget = struct {
+    ptr: *anyopaque,
+    consume_fn: *const fn (
+        *anyopaque,
+        eth_bal.BlockAccessIndex,
+        state.TrackedState.ObservationsView,
+    ) anyerror!void,
+
+    pub fn init(
+        ptr: *anyopaque,
+        consume_fn: *const fn (
+            *anyopaque,
+            eth_bal.BlockAccessIndex,
+            state.TrackedState.ObservationsView,
+        ) anyerror!void,
+    ) ObservationTarget {
+        return .{ .ptr = ptr, .consume_fn = consume_fn };
+    }
+
+    pub fn consume(
+        self: ObservationTarget,
+        block_access_index: eth_bal.BlockAccessIndex,
+        view: state.TrackedState.ObservationsView,
+    ) !void {
+        try self.consume_fn(self.ptr, block_access_index, view);
+    }
 };
 
 /// Compile-time provenance for one side of a consensus-root comparison.
@@ -418,7 +470,6 @@ pub const ParentHeaderContext = struct {
 
 fn BlockInputType(comptime Transactions: type) type {
     return struct {
-        revision: Revision = .latest,
         config: Config = .base,
         env: Env = .{},
         block_hash_source: ?BlockHashSource = null,
@@ -462,7 +513,6 @@ fn assumeDecodedBlockInput(
     transactions: []const TransactionInput,
 ) AssumeDecodedBlockInput {
     return .{
-        .revision = input.revision,
         .config = input.config,
         .env = input.env,
         .block_hash_source = input.block_hash_source,
@@ -490,7 +540,6 @@ fn resetBalReport(input: AssumeDecodedBlockInput) void {
 
 fn ProduceInputType(comptime Transactions: type) type {
     return struct {
-        revision: Revision = .latest,
         config: Config = .base,
         env: Env = .{},
         block_hash_source: ?BlockHashSource = null,
@@ -669,10 +718,66 @@ comptime {
     }
 }
 
+/// Exact Ethereum block-STF namespace for one named fork.
+///
+/// Header rules use `revision`; execution semantics come from the complete
+/// resolved spec. Custom chains can retain a named header lineage while
+/// replacing execution values/functions through `bind`.
+pub fn Exact(comptime revision: Revision) type {
+    return bind(revision, eth_spec.specAt(revision));
+}
+
+pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
+    const ExactVm = vm.Vm(spec);
+    const BlockInputAlias = BlockInput;
+    const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
+    const ProduceInputAlias = ProduceInput;
+    const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
+    const BalExecutorAlias = BalExecutorType(revision, ExactVm);
+
+    return struct {
+        pub const fork = revision;
+        pub const specification = spec;
+        pub const Vm = ExactVm;
+        pub const BlockInput = BlockInputAlias;
+        pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
+        pub const ProduceInput = ProduceInputAlias;
+        pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
+        pub const BalExecutor = BalExecutorAlias;
+
+        pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
+            return applyExact(revision, ExactVm, allocator, input);
+        }
+
+        pub fn applyAssumeDecoded(
+            allocator: std.mem.Allocator,
+            input: AssumeDecodedBlockInputAlias,
+        ) !Result {
+            return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
+        }
+
+        pub fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
+            return produceExact(revision, ExactVm, allocator, input);
+        }
+
+        pub fn produceAssumeDecoded(
+            allocator: std.mem.Allocator,
+            input: AssumeDecodedProduceInputAlias,
+        ) !ProduceOutcome {
+            return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
+        }
+    };
+}
+
 /// Decode raw transaction envelopes once, then validate one block transition
 /// against payload/header claims. Ownership of `input.state_backend` transfers
 /// to this call and is released on every path, including decode failure.
-pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
+fn applyExact(
+    comptime revision: Revision,
+    comptime Engine: type,
+    allocator: std.mem.Allocator,
+    input: BlockInput,
+) !Result {
     var state_backend = input.state_backend;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -684,7 +789,9 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 
     // Ownership transfers here; `applyAssumeDecoded` releases the backend on
     // both success and error paths.
-    return applyAssumeDecoded(
+    return applyAssumeDecodedExact(
+        revision,
+        Engine,
         allocator,
         assumeDecodedBlockInput(input, state_backend, transactions),
     );
@@ -693,10 +800,23 @@ pub fn apply(allocator: std.mem.Allocator, input: BlockInput) !Result {
 /// Validate values decoded by a trusted adapter. The caller must maintain the
 /// encoded/decoded transaction invariant. Ownership of `input.state_backend`
 /// transfers to this call and is released on every path.
-pub fn applyAssumeDecoded(allocator: std.mem.Allocator, input: AssumeDecodedBlockInput) !Result {
+fn applyAssumeDecodedExact(
+    comptime revision: Revision,
+    comptime Engine: type,
+    allocator: std.mem.Allocator,
+    input: AssumeDecodedBlockInput,
+) !Result {
     resetBalReport(input);
     var no_produced_bal: ?[]u8 = null;
-    const result = try serialFold(allocator, input, .compare, &no_produced_bal, null);
+    const result = try serialFold(
+        revision,
+        Engine,
+        allocator,
+        input,
+        .compare,
+        &no_produced_bal,
+        null,
+    );
     std.debug.assert(no_produced_bal == null);
     return result;
 }
@@ -704,7 +824,12 @@ pub fn applyAssumeDecoded(allocator: std.mem.Allocator, input: AssumeDecodedBloc
 /// Decode raw transaction envelopes once, then build one Amsterdam block.
 /// A rejected candidate never owns BAL bytes. Ownership of
 /// `input.state_backend` transfers to this call, including decode failures.
-pub fn produce(allocator: std.mem.Allocator, input: ProduceInput) !ProduceOutcome {
+fn produceExact(
+    comptime revision: Revision,
+    comptime Engine: type,
+    allocator: std.mem.Allocator,
+    input: ProduceInput,
+) !ProduceOutcome {
     var state_backend = input.state_backend;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -716,8 +841,7 @@ pub fn produce(allocator: std.mem.Allocator, input: ProduceInput) !ProduceOutcom
     };
 
     // Ownership transfers here; `produceAssumeDecoded` releases the backend.
-    return produceAssumeDecoded(allocator, .{
-        .revision = input.revision,
+    return produceAssumeDecodedExact(revision, Engine, allocator, .{
         .config = input.config,
         .env = input.env,
         .block_hash_source = input.block_hash_source,
@@ -736,15 +860,16 @@ pub fn produce(allocator: std.mem.Allocator, input: ProduceInput) !ProduceOutcom
 /// adapter. This skips the encoded/decoded consistency check; callers should
 /// use `produce` for untrusted raw envelopes. Ownership of
 /// `input.state_backend` transfers to this call.
-pub fn produceAssumeDecoded(
+fn produceAssumeDecodedExact(
+    comptime revision: Revision,
+    comptime Engine: type,
     allocator: std.mem.Allocator,
     input: AssumeDecodedProduceInput,
 ) !ProduceOutcome {
     var encoded_block_access_list: ?[]u8 = null;
     errdefer if (encoded_block_access_list) |encoded| allocator.free(encoded);
 
-    const result = try serialFold(allocator, .{
-        .revision = input.revision,
+    const result = try serialFold(revision, Engine, allocator, .{
         .config = input.config,
         .env = input.env,
         .block_hash_source = input.block_hash_source,
@@ -778,14 +903,37 @@ pub fn produceAssumeDecoded(
 
 const FoldMode = enum { compare, produce };
 
+const ObservationCollector = struct {
+    builder: ?*tracked_state_projector.BlockBuilder,
+    target: ?ObservationTarget,
+    block_access_index: eth_bal.BlockAccessIndex = 0,
+
+    pub fn observe(
+        self: *ObservationCollector,
+        pending: state.TrackedState.PendingView,
+    ) !void {
+        const observations = pending.observations();
+        if (self.builder) |builder| {
+            try builder.append(observations, self.block_access_index);
+        }
+        if (self.target) |target| {
+            try target.consume(self.block_access_index, observations);
+        }
+    }
+};
+
 /// Shared authoritative serial fold for validation and block production.
 fn serialFold(
+    comptime revision: Revision,
+    comptime Engine: type,
     allocator: std.mem.Allocator,
     input: AssumeDecodedBlockInput,
     comptime mode: FoldMode,
     produced_bal: *?[]u8,
     parallel_execution: ?bal_differential.ParallelExecution,
 ) !Result {
+    const DifferentialRunner = BalDifferentialRunner(revision, Engine);
+
     var state_backend = input.state_backend;
     defer state_backend.deinit();
 
@@ -796,18 +944,18 @@ fn serialFold(
         std.debug.assert(input.header_hash_claim == null);
         std.debug.assert(input.bal_differential == null);
         std.debug.assert(parallel_execution == null);
-        if (!input.revision.isImpl(.amsterdam)) return .{ .status = .invalid_block_body };
+        if (!revision.isImpl(.amsterdam)) return .{ .status = .invalid_block_body };
     }
-    if (!blockBodyValid(input)) return .{ .status = .invalid_block_body };
-    if (parentHeaderStatus(input)) |status| return .{ .status = status };
-    if (!blockContextValid(input)) return .{ .status = .header_surface_mismatch };
+    if (!blockBodyValid(revision, input)) return .{ .status = .invalid_block_body };
+    if (parentHeaderStatus(revision, input)) |status| return .{ .status = status };
+    if (!blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
     var block_access_list_mismatch = false;
     const record_block_access_list = mode == .produce or input.block_access_list != null or
         input.header_claims.block_access_list_hash != null or
-        input.revision.isImpl(.amsterdam);
+        revision.isImpl(.amsterdam);
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
     var claimed_block_access_list: ?eth_bal.Decoded = null;
@@ -857,9 +1005,9 @@ fn serialFold(
 
     var claim_view: ?ClaimView = null;
     defer if (claim_view) |*view| view.deinit(allocator);
-    var differential_runner: ?BalDifferentialRunner = null;
+    var differential_runner: ?DifferentialRunner = null;
     defer if (differential_runner) |*runner| runner.deinit();
-    var differential_candidate: ?BalDifferentialRunner.Artifacts = null;
+    var differential_candidate: ?DifferentialRunner.Artifacts = null;
     defer if (differential_candidate) |*candidate| candidate.deinit(allocator);
     if (input.bal_differential) |report| {
         if (claimed_block_access_list) |*claim| {
@@ -869,9 +1017,8 @@ fn serialFold(
                 break :blk null;
             };
             if (claim_view) |*view| {
-                differential_runner = BalDifferentialRunner.init(
+                differential_runner = DifferentialRunner.init(
                     allocator,
-                    input.revision,
                     input.config,
                     input.env,
                     lifecycleTxContext(input.env),
@@ -892,7 +1039,6 @@ fn serialFold(
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
     var executor = Engine.Executor.init(allocator, .{
-        .revision = input.revision,
         .state_reader = state_backend.reader(),
         .prepared_code_backend = input.prepared_code_backend,
         .block_hash_source = input.block_hash_source,
@@ -900,60 +1046,61 @@ fn serialFold(
     });
     defer executor.deinit();
 
-    var recorder = BalRecorder.init(allocator);
-    defer recorder.deinit();
-    const runtime_state_target = if (input.capture) |capture| capture.state_target else null;
-    const capture_steps = if (input.capture) |capture| capture.steps != null else false;
-    var state_fanout = Executor.capture_context.StateFanout{
-        .first = if (record_block_access_list) recorder.stateTarget() else null,
+    var observation_builder = tracked_state_projector.BlockBuilder.init(allocator);
+    defer observation_builder.deinit();
+    var observation_collector = ObservationCollector{
+        .builder = if (record_block_access_list) &observation_builder else null,
+        .target = if (input.capture) |capture| capture.observations else null,
     };
-    const captures_state = record_block_access_list or runtime_state_target != null;
-    const capture_enabled = captures_state or capture_steps;
+    const observe_state = record_block_access_list or observation_collector.target != null;
+    const capture_steps = if (input.capture) |capture| capture.steps != null else false;
     var capture_context = Executor.CaptureContext.init(
         allocator,
         null,
-        if (captures_state) state_fanout.target() else null,
     );
     defer capture_context.deinit();
     var capture_open = false;
-    if (capture_enabled) {
-        if (record_block_access_list) recorder.setBlockAccessIndex(0);
-        executor.setCaptureContext(&capture_context);
+    if (capture_steps) {
         try capture_context.begin();
         capture_open = true;
     }
-    defer if (capture_enabled) executor.setCaptureContext(null);
     defer if (capture_open) capture_context.abort() catch {};
 
-    var block = try BlockExecution.init(
+    var block = try Engine.BlockExecution.init(
         &executor,
         input.env,
     );
     defer block.discardIfUnfinished();
     if (input.block_header) |header| {
-        Executor.system_contracts.applyBeforeBlock(
-            block.policy(),
-            &executor,
-            lifecycleTxContext(input.env),
-            .{
-                .number = input.env.number,
-                .timestamp = input.env.timestamp,
-                .parent_hash = header.parent_hash,
-                .parent_beacon_block_root = header.parent_beacon_block_root,
-            },
-        ) catch |err| switch (err) {
+        observation_collector.block_access_index = 0;
+        const context: Executor.system_contracts.BeforeBlockContext = .{
+            .number = input.env.number,
+            .timestamp = input.env.timestamp,
+            .parent_hash = header.parent_hash,
+            .parent_beacon_block_root = header.parent_beacon_block_root,
+        };
+        const before_result = if (observe_state)
+            Executor.system_contracts.applyBeforeBlockObserved(
+                &executor,
+                lifecycleTxContext(input.env),
+                context,
+                &observation_collector,
+            )
+        else
+            Executor.system_contracts.applyBeforeBlock(
+                &executor,
+                lifecycleTxContext(input.env),
+                context,
+            );
+        before_result catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             error.SystemCallFailed => return .{ .status = .system_contract_failed },
             else => return err,
         };
     }
     if (differential_runner) |*runner| {
-        runner.verifyBeforeBlock(input.block_header, block.policy());
+        runner.verifyBeforeBlock(input.block_header);
     }
-
-    // Runtime compatibility state events and replayed steps are payload-only;
-    // BAL remains active across the complete block transition.
-    state_fanout.second = runtime_state_target;
 
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     defer {
@@ -964,7 +1111,7 @@ fn serialFold(
     defer deposit_request_data.deinit(allocator);
     var block_logs_bloom = empty_logs_bloom;
     var blob_gas_used: u64 = 0;
-    const blob_gas_limit = try blockBlobGasLimit(input.revision, input.env.blob_schedule);
+    const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_schedule);
 
     for (input.transactions, 0..) |entry, tx_index| {
         if (capture_steps) try capture_context.beginTrace(.{
@@ -974,10 +1121,9 @@ fn serialFold(
         var step_capture_open = capture_steps;
         defer if (step_capture_open) capture_context.abortTrace() catch {};
 
-        if (record_block_access_list) {
-            recorder.setBlockAccessIndex(try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index)));
-        }
-        const tx_blob_gas_used = try transactionBlobGasUsed(input.revision, input.env.blob_schedule, entry.tx);
+        observation_collector.block_access_index =
+            try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index));
+        const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, input.env.blob_schedule, entry.tx);
         const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
         if (next_blob_gas_used > blob_gas_limit) {
             const progress = block.progress();
@@ -988,7 +1134,6 @@ fn serialFold(
                     .tx_index = tx_index,
                     .progress_before = progress,
                     .blob_gas_used_before = blob_gas_used,
-                    .block_policy = block.policy(),
                 });
             };
             return .{
@@ -1005,7 +1150,19 @@ fn serialFold(
             if (runner.active) block.progress() else null
         else
             null;
-        const tx_result = transactPayload(&block, input.env, entry.tx) catch |err| switch (err) {
+        const tx_result = transactPayload(
+            Engine,
+            &block,
+            input.env,
+            entry.tx,
+            if (capture_steps)
+                .{ .steps = &capture_context }
+            else if (observe_state)
+                .observations
+            else
+                .normal,
+            &observation_collector,
+        ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
             error.BlockGasExceeded => {
                 const progress = block.progress();
@@ -1016,7 +1173,6 @@ fn serialFold(
                         .tx_index = tx_index,
                         .progress_before = progress_before.?,
                         .blob_gas_used_before = blob_gas_used,
-                        .block_policy = block.policy(),
                     });
                 };
                 return .{
@@ -1041,7 +1197,6 @@ fn serialFold(
                         .tx_index = tx_index,
                         .progress_before = progress_before.?,
                         .blob_gas_used_before = blob_gas_used,
-                        .block_policy = block.policy(),
                     });
                 };
                 return .{
@@ -1064,12 +1219,11 @@ fn serialFold(
                 .progress_after = progress_after,
                 .result = &included.result,
                 .logs = receipt.logs,
-                .block_policy = block.policy(),
                 .blob_gas_used_after = next_blob_gas_used,
             });
         };
         mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
-        if (input.revision.isImpl(.prague)) {
+        if (revision.isImpl(.prague)) {
             eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
                 error.InvalidRequest => {
                     const progress = block.progress();
@@ -1089,21 +1243,38 @@ fn serialFold(
         const encoded_receipt = try encodeReceipt(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
-        Executor.system_contracts.applyAfterTransaction(
-            block.policy(),
-            &executor,
-            lifecycleTxContext(input.env),
-            .{
-                .number = input.env.number,
-                .timestamp = input.env.timestamp,
-                .transaction_index = progress_after.tx_count - 1,
-                .status = receipt.status,
-                .gas_used = receipt.gas_used,
-                .cumulative_gas_used = progress_after.gas_used,
-                .cumulative_block_gas = progress_after.block_gas.total,
-                .cumulative_state_gas = progress_after.block_gas.state,
-            },
-        ) catch |err| switch (err) {
+        const after_context: Executor.system_contracts.AfterTransactionContext = .{
+            .number = input.env.number,
+            .timestamp = input.env.timestamp,
+            .transaction_index = progress_after.tx_count - 1,
+            .status = receipt.status,
+            .gas_used = receipt.gas_used,
+            .cumulative_gas_used = progress_after.gas_used,
+            .cumulative_block_gas = progress_after.block_gas.total,
+            .cumulative_state_gas = progress_after.block_gas.state,
+        };
+        const after_result = if (capture_steps)
+            Executor.system_contracts.applyAfterTransactionCaptured(
+                &executor,
+                lifecycleTxContext(input.env),
+                after_context,
+                &capture_context,
+                &observation_collector,
+            )
+        else if (observe_state)
+            Executor.system_contracts.applyAfterTransactionObserved(
+                &executor,
+                lifecycleTxContext(input.env),
+                after_context,
+                &observation_collector,
+            )
+        else
+            Executor.system_contracts.applyAfterTransaction(
+                &executor,
+                lifecycleTxContext(input.env),
+                after_context,
+            );
+        after_result catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
             error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
             else => return err,
@@ -1123,9 +1294,7 @@ fn serialFold(
     }
     if (differential_runner) |*runner| try runner.finish();
 
-    state_fanout.second = null;
-
-    const effective_parent_blob_gas = if (input.revision.isImpl(.cancun))
+    const effective_parent_blob_gas = if (revision.isImpl(.cancun))
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
     else
         input.parent_blob_gas;
@@ -1133,33 +1302,40 @@ fn serialFold(
         if (input.env.blob_schedule) |schedule|
             transaction.calcExcessBlobGasForSchedule(schedule, parent_blob_gas) orelse return error.BlobGasOverflow
         else
-            calcProtocolExcessBlobGas(input.revision, parent_blob_gas) orelse return error.BlobGasOverflow
+            calcProtocolExcessBlobGas(Engine, parent_blob_gas) orelse return error.BlobGasOverflow
     else
         null;
 
-    if (record_block_access_list) {
-        recorder.setBlockAccessIndex(try eth_bal.postExecutionSystemIndex(block_access_transaction_count));
-        for (input.withdrawals) |withdrawal| {
-            capture_context.accountAccess(.{ .address = withdrawal.address }) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return err,
-            };
-        }
-    }
-
-    applyWithdrawals(&executor, input.withdrawals) catch |err| switch (err) {
+    observation_collector.block_access_index =
+        try eth_bal.postExecutionSystemIndex(block_access_transaction_count);
+    const withdrawals_result = if (observe_state)
+        applyWithdrawals(
+            &executor,
+            lifecycleTxContext(input.env),
+            input.withdrawals,
+            &observation_collector,
+        )
+    else
+        applyWithdrawalsNormal(
+            &executor,
+            lifecycleTxContext(input.env),
+            input.withdrawals,
+        );
+    withdrawals_result catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         else => return err,
     };
 
-    const derived_requests = deriveRequests(
+    const derived_requests_result = deriveRequestsMode(
         allocator,
         &executor,
-        block.policy(),
         input.env,
         block.progress(),
         deposit_request_data.items,
-    ) catch |err| switch (err) {
+        observe_state,
+        &observation_collector,
+    );
+    const derived_requests = derived_requests_result catch |err| switch (err) {
         error.InvalidWitness => return .{ .status = .invalid_witness },
         error.SystemCallFailed => return .{ .status = .system_contract_failed },
         else => return err,
@@ -1170,12 +1346,12 @@ fn serialFold(
         else => return err,
     };
 
-    if (capture_enabled) {
+    if (capture_steps) {
         _ = try capture_context.finish();
         capture_open = false;
     }
     if (record_block_access_list) {
-        observed_block_access_list = recorder.toOwnedBlockAccessList(allocator) catch |err| switch (err) {
+        observed_block_access_list = observation_builder.finish() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return err,
         };
@@ -1203,20 +1379,18 @@ fn serialFold(
         }
     }
     if (differential_runner) |*runner| {
-        differential_candidate = runner.finishCandidate(input.withdrawals, block.policy());
+        differential_candidate = runner.finishCandidate(input.withdrawals);
     }
 
     const block_result = try block.finish();
-
-    var changeset = try executor.changeset();
-    defer changeset.deinit(allocator);
+    const changes = executor.acceptedChanges();
 
     var result = Result{
         .status = .valid,
         .gas_used = block_result.gas_used,
         .block_gas_used = block_result.block_gas.total,
         .block_state_gas_used = block_result.block_gas.state,
-        .state_root = state_backend.stateRootAfterChangeset(allocator, &changeset) catch |err| switch (err) {
+        .state_root = state_backend.stateRootAfterChanges(allocator, changes) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,
         },
@@ -1232,34 +1406,26 @@ fn serialFold(
 
     if (differential_candidate) |*candidate| {
         const report = input.bal_differential.?;
-        if (!candidate_state.changesetsEqual(&candidate.changeset, &changeset)) {
+        if (!try candidate.state.matchesChanges(
+            state_backend.reader(),
+            executor.acceptedChanges(),
+        )) {
             report.status = .candidate_artifact_mismatch;
             report.tx_index = input.transactions.len;
         } else {
-            const candidate_state_root = state_backend.stateRootAfterChangeset(
-                allocator,
-                &candidate.changeset,
-            ) catch |err| blk: {
-                report.status = .diagnostic_failure;
-                report.tx_index = input.transactions.len;
-                report.diagnostic_error = err;
-                break :blk null;
-            };
-            if (candidate_state_root) |root| {
-                const candidate_matches = candidateArtifactsEqual(
-                    candidate,
-                    result,
-                    root,
-                    encoded_receipts.items,
-                    derived_requests,
-                    observed_block_access_list_encoded.?,
-                );
-                report.status = if (candidate_matches)
-                    .candidate_matched
-                else
-                    .candidate_artifact_mismatch;
-                if (!candidate_matches) report.tx_index = input.transactions.len;
-            }
+            const candidate_matches = candidateArtifactsEqual(
+                candidate,
+                result,
+                result.state_root,
+                encoded_receipts.items,
+                derived_requests,
+                observed_block_access_list_encoded.?,
+            );
+            report.status = if (candidate_matches)
+                .candidate_matched
+            else
+                .candidate_artifact_mismatch;
+            if (!candidate_matches) report.tx_index = input.transactions.len;
         }
         if (report.status == .candidate_matched and !block_access_list_mismatch) {
             report.status = .matched;
@@ -1268,7 +1434,7 @@ fn serialFold(
 
     var block_hash_mismatch = false;
     if (input.header_hash_claim) |claim| {
-        result.block_hash = reconstructHeaderHash(allocator, input, result, claim) catch |err| switch (err) {
+        result.block_hash = reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
             error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidHeaderReconstruction => return .{ .status = .header_surface_mismatch },
             else => return err,
         };
@@ -1305,7 +1471,7 @@ fn serialFold(
         if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
     }
     if (result.status == .valid) {
-        try state_backend.commit(&changeset);
+        try state_backend.commit(changes);
         if (mode == .produce) {
             produced_bal.* = observed_block_access_list_encoded.?;
             observed_block_access_list_encoded = null;
@@ -1315,7 +1481,7 @@ fn serialFold(
 }
 
 fn candidateArtifactsEqual(
-    candidate: *const BalDifferentialRunner.Artifacts,
+    candidate: anytype,
     canonical: Result,
     candidate_state_root: [32]u8,
     canonical_receipts: []const []const u8,
@@ -1344,13 +1510,14 @@ fn byteSlicesEqual(lhs: []const []const u8, rhs: []const []const u8) bool {
 }
 
 test "candidate artifact equality checks every nonzero field" {
+    const DifferentialRunner = BalDifferentialRunner(.amsterdam, vm.Vm(eth_spec.amsterdam));
     var receipt = [_]u8{ 0x01, 0x02 };
     var request = [_]u8{ 0x03, 0x04 };
     var encoded_bal = [_]u8{ 0xc1, 0x80 };
     const receipts = [_][]const u8{&receipt};
     const requests = [_][]const u8{&request};
-    var candidate = BalDifferentialRunner.Artifacts{
-        .changeset = state.Changeset.init(),
+    var candidate = DifferentialRunner.Artifacts{
+        .state = candidate_transition.CandidateState.init(),
         .gas_used = 1,
         .block_gas_used = 2,
         .block_state_gas_used = 3,
@@ -1419,26 +1586,33 @@ test "candidate artifact equality checks every nonzero field" {
     try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &.{ 0xc1, 0x80 }));
 }
 
-/// Keep a definition-owned before-transaction batch in the same rollback
+/// Keep a spec-owned before-transaction batch in the same rollback
 /// domain as the payload transaction. Ethereum currently emits no such calls,
 /// but the family STF preserves the hook's atomic contract for future forks.
+const PayloadCapture = union(enum) {
+    normal,
+    observations,
+    steps: *Executor.CaptureContext,
+};
+
 fn transactPayload(
-    block: *BlockExecution,
+    comptime Engine: type,
+    block: *Engine.BlockExecution,
     env: Env,
     tx_value: Engine.Transaction,
-) !BlockExecution.Outcome {
+    capture: PayloadCapture,
+    observer: anytype,
+) !Engine.BlockExecution.Outcome {
     const progress = block.progress();
     const PayloadPrelude = struct {
-        block_policy: *const Engine.BlockPolicy,
         env: Env,
         transaction_index: u64,
 
         pub fn run(
             self: *@This(),
-            prelude: Engine.PreludeContext,
-        ) Engine.PreludeContext.Error!void {
+            prelude: Engine.BlockExecution.PreludeContext,
+        ) Engine.BlockExecution.PreludeContext.Error!void {
             try Executor.system_contracts.applyBeforeTransactionPrelude(
-                self.block_policy,
                 prelude,
                 lifecycleTxContext(self.env),
                 .{
@@ -1450,20 +1624,32 @@ fn transactPayload(
         }
     };
     var prelude = PayloadPrelude{
-        .block_policy = block.policy(),
         .env = env,
         .transaction_index = progress.tx_count,
     };
-    return block.transactWithPrelude(
-        tx_value,
-        Engine.Prelude.init(&prelude),
-    );
+    return switch (capture) {
+        .normal => block.transactWithPrelude(
+            tx_value,
+            Engine.BlockExecution.Prelude.init(&prelude),
+        ),
+        .observations => block.transactWithPreludeObserved(
+            tx_value,
+            Engine.BlockExecution.Prelude.init(&prelude),
+            observer,
+        ),
+        .steps => |context| block.transactWithPreludeCaptured(
+            tx_value,
+            Engine.BlockExecution.Prelude.init(&prelude),
+            context,
+            observer,
+        ),
+    };
 }
 
-fn blockBodyValid(input: AssumeDecodedBlockInput) bool {
-    if (!input.revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
-    if (!input.revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
-    if (!input.revision.isImpl(.cancun)) {
+fn blockBodyValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
+    if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
+    if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
+    if (!revision.isImpl(.cancun)) {
         if (input.parent_blob_gas != null or
             input.header_claims.blob_gas_used != null or
             input.header_claims.excess_blob_gas != null)
@@ -1477,8 +1663,8 @@ fn blockBodyValid(input: AssumeDecodedBlockInput) bool {
             if (claim.parent_beacon_block_root != null) return false;
         }
     }
-    if (!input.revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
-    if (!input.revision.isImpl(.amsterdam) and
+    if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
+    if (!revision.isImpl(.amsterdam) and
         (input.block_access_list != null or input.header_claims.block_access_list_hash != null))
     {
         return false;
@@ -1487,12 +1673,13 @@ fn blockBodyValid(input: AssumeDecodedBlockInput) bool {
 }
 
 fn reconstructHeaderHash(
+    comptime revision: Revision,
     allocator: std.mem.Allocator,
     input: AssumeDecodedBlockInput,
     result: Result,
     claim: HeaderHashClaim,
 ) ![32]u8 {
-    if (!input.revision.isImpl(.merge)) return error.InvalidHeaderReconstruction;
+    if (!revision.isImpl(.merge)) return error.InvalidHeaderReconstruction;
     if (input.block_header) |block_header| {
         if (block_header.number != input.env.number or block_header.timestamp != input.env.timestamp) {
             return error.InvalidHeaderReconstruction;
@@ -1505,7 +1692,7 @@ fn reconstructHeaderHash(
         }
     }
 
-    const excess_blob_gas: ?u64 = if (input.revision.isImpl(.cancun))
+    const excess_blob_gas: ?u64 = if (revision.isImpl(.cancun))
         std.math.cast(u64, result.excess_blob_gas orelse return error.InvalidHeaderReconstruction) orelse
             return error.InvalidHeaderReconstruction
     else
@@ -1523,16 +1710,16 @@ fn reconstructHeaderHash(
         .timestamp = input.env.timestamp,
         .extra_data = claim.extra_data,
         .prev_randao = uint256.toBytes32(input.env.prev_randao),
-        .base_fee_per_gas = if (input.revision.isImpl(.london)) input.env.base_fee else null,
-        .withdrawals_root = if (input.revision.isImpl(.shanghai)) result.withdrawals_root else null,
-        .blob_gas_used = if (input.revision.isImpl(.cancun)) result.blob_gas_used else null,
+        .base_fee_per_gas = if (revision.isImpl(.london)) input.env.base_fee else null,
+        .withdrawals_root = if (revision.isImpl(.shanghai)) result.withdrawals_root else null,
+        .blob_gas_used = if (revision.isImpl(.cancun)) result.blob_gas_used else null,
         .excess_blob_gas = excess_blob_gas,
-        .parent_beacon_block_root = if (input.revision.isImpl(.cancun)) claim.parent_beacon_block_root else null,
-        .requests_hash = if (input.revision.isImpl(.prague)) result.requests_hash else null,
-        .block_access_list_hash = if (input.revision.isImpl(.amsterdam)) result.block_access_list_hash else null,
-        .slot_number = if (input.revision.isImpl(.amsterdam)) input.env.slot_number else null,
+        .parent_beacon_block_root = if (revision.isImpl(.cancun)) claim.parent_beacon_block_root else null,
+        .requests_hash = if (revision.isImpl(.prague)) result.requests_hash else null,
+        .block_access_list_hash = if (revision.isImpl(.amsterdam)) result.block_access_list_hash else null,
+        .slot_number = if (revision.isImpl(.amsterdam)) input.env.slot_number else null,
     };
-    return try header.hash(allocator, input.revision);
+    return try header.hash(allocator, revision);
 }
 
 fn optionalHashEqual(lhs: ?[32]u8, rhs: ?[32]u8) bool {
@@ -1577,8 +1764,8 @@ fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transacti
     if (gas_limit != 0) try eth_bal.validateGasLimit(block_access_list, gas_limit);
 }
 
-fn parentHeaderStatus(input: AssumeDecodedBlockInput) ?Status {
-    if (!input.revision.isImpl(.merge) or input.env.number == 0) return null;
+fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
+    if (!revision.isImpl(.merge) or input.env.number == 0) return null;
 
     const parent = input.parent_header orelse return .parent_header_mismatch;
     const current = input.block_header orelse return .parent_header_mismatch;
@@ -1629,17 +1816,17 @@ fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
     return parent.base_fee_per_gas - base_fee_delta;
 }
 
-fn blockContextValid(input: AssumeDecodedBlockInput) bool {
+fn blockContextValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
     if (input.block_header) |header| {
         if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
     }
     if (input.env.number == 0) return true;
 
-    if (input.revision.isImpl(.cancun)) {
+    if (revision.isImpl(.cancun)) {
         const header = input.block_header orelse return false;
         if (header.parent_beacon_block_root == null) return false;
     }
-    if (input.revision.isImpl(.prague)) {
+    if (revision.isImpl(.prague)) {
         const header = input.block_header orelse return false;
         if (header.parent_hash == null) return false;
     }
@@ -1670,23 +1857,72 @@ fn decodeRawTransactions(
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-fn applyWithdrawals(executor: *Engine.Executor, withdrawals: []const Withdrawal) !void {
+fn applyWithdrawals(
+    executor: anytype,
+    tx_context: Host.TxContext,
+    withdrawals: []const Withdrawal,
+    observer: anytype,
+) !void {
+    if (withdrawals.len == 0) return;
+    try executor.beginObservedStateTransition(tx_context);
+    errdefer executor.closeTransaction();
     for (withdrawals) |withdrawal| {
+        try executor.observeAccountAccess(withdrawal.address);
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
         executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
             error.BalanceOverflow => return error.WithdrawalBalanceOverflow,
             else => return err,
         };
     }
+    try executor.commitTransactionObserved(observer);
+}
+
+fn applyWithdrawalsNormal(
+    executor: anytype,
+    tx_context: Host.TxContext,
+    withdrawals: []const Withdrawal,
+) !void {
+    if (withdrawals.len == 0) return;
+    try executor.beginStateTransition(tx_context);
+    errdefer executor.closeTransaction();
+    for (withdrawals) |withdrawal| {
+        const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch
+            return error.WithdrawalBalanceOverflow;
+        executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
+            error.BalanceOverflow => return error.WithdrawalBalanceOverflow,
+            else => return err,
+        };
+    }
+    try executor.commitTransaction();
 }
 
 fn deriveRequests(
     allocator: std.mem.Allocator,
-    executor: *Engine.Executor,
-    block_policy: *const Engine.BlockPolicy,
+    executor: anytype,
     env: Env,
     progress: vm.BlockResult,
     deposit_request_data: []const u8,
+    observer: anytype,
+) ![]const []const u8 {
+    return deriveRequestsMode(
+        allocator,
+        executor,
+        env,
+        progress,
+        deposit_request_data,
+        true,
+        observer,
+    );
+}
+
+fn deriveRequestsMode(
+    allocator: std.mem.Allocator,
+    executor: anytype,
+    env: Env,
+    progress: vm.BlockResult,
+    deposit_request_data: []const u8,
+    observe: bool,
+    observer: anytype,
 ) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -1702,13 +1938,21 @@ fn deriveRequests(
         deposit_request_owned = false;
     }
 
-    const block_end_requests = try deriveFinalizeRequests(
-        allocator,
-        executor,
-        block_policy,
-        env,
-        progress,
-    );
+    const block_end_requests = if (observe)
+        try deriveFinalizeRequests(
+            allocator,
+            executor,
+            env,
+            progress,
+            observer,
+        )
+    else
+        try deriveFinalizeRequestsNormal(
+            allocator,
+            executor,
+            env,
+            progress,
+        );
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
     try requests.appendSlice(allocator, block_end_requests);
@@ -1720,13 +1964,34 @@ fn deriveRequests(
 
 fn deriveFinalizeRequests(
     allocator: std.mem.Allocator,
-    executor: *Engine.Executor,
-    block_policy: *const Engine.BlockPolicy,
+    executor: anytype,
+    env: Env,
+    progress: vm.BlockResult,
+    observer: anytype,
+) ![]const []const u8 {
+    return Executor.system_contracts.applyFinalizeBlockObserved(
+        executor,
+        lifecycleTxContext(env),
+        allocator,
+        .{
+            .number = env.number,
+            .timestamp = env.timestamp,
+            .transaction_count = progress.tx_count,
+            .gas_used = progress.gas_used,
+            .block_gas = progress.block_gas.total,
+            .state_gas = progress.block_gas.state,
+        },
+        observer,
+    );
+}
+
+fn deriveFinalizeRequestsNormal(
+    allocator: std.mem.Allocator,
+    executor: anytype,
     env: Env,
     progress: vm.BlockResult,
 ) ![]const []const u8 {
     return Executor.system_contracts.applyFinalizeBlock(
-        block_policy,
         executor,
         lifecycleTxContext(env),
         allocator,
@@ -1746,22 +2011,31 @@ fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void
     allocator.free(requests);
 }
 
-fn transactionBlobGasUsed(revision: Revision, blob_schedule: ?transaction.BlobSchedule, tx: Engine.Transaction) !u64 {
+fn transactionBlobGasUsed(
+    comptime revision: Revision,
+    comptime Engine: type,
+    blob_schedule: ?transaction.BlobSchedule,
+    tx: transaction.Transaction,
+) !u64 {
     if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;
-    const schedule = blob_schedule orelse eth_transaction.Transaction.blobSchedule(revision) orelse return error.BlobGasOverflow;
+    const schedule = blob_schedule orelse Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
     const gas_per_blob = schedule.gas_per_blob;
     return std.math.mul(u64, blob_count, gas_per_blob) catch error.BlobGasOverflow;
 }
 
-fn blockBlobGasLimit(revision: Revision, blob_schedule: ?transaction.BlobSchedule) !u64 {
+fn blockBlobGasLimit(
+    comptime revision: Revision,
+    comptime Engine: type,
+    blob_schedule: ?transaction.BlobSchedule,
+) !u64 {
     if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse eth_transaction.Transaction.blobSchedule(revision) orelse return error.BlobGasOverflow;
+    const schedule = blob_schedule orelse Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
     return std.math.mul(u64, schedule.max, schedule.gas_per_blob) catch error.BlobGasOverflow;
 }
 
-fn calcProtocolExcessBlobGas(revision: Revision, input: ParentBlobGas) ?u256 {
-    const schedule = Engine.transaction_policy.transaction.blobSchedule(revision) orelse return 0;
+fn calcProtocolExcessBlobGas(comptime Engine: type, input: ParentBlobGas) ?u256 {
+    const schedule = Engine.specification.transaction.blob_schedule orelse return 0;
     return transaction.calcExcessBlobGasForSchedule(schedule, input);
 }
 
@@ -1790,12 +2064,23 @@ const ReceiptPayload = struct {
     });
 };
 
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: @TypeOf(@as(Engine.Transaction, undefined).kind), receipt: TxReceiptView) ![]u8 {
+pub fn encodeReceipt(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: TxReceiptView) ![]u8 {
+    var owned_logs: ?[]Log = null;
+    defer if (owned_logs) |logs| allocator.free(logs);
+    const logs: []const Log = switch (receipt.logs) {
+        .flat => |flat| flat,
+        .arena => blk: {
+            const materialized = try allocator.alloc(Log, receipt.logs.len());
+            owned_logs = materialized;
+            for (materialized, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
+            break :blk materialized;
+        },
+    };
     const payload: ReceiptPayload = .{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
         .logs_bloom = logsBloom(receipt.logs),
-        .logs = receipt.logs,
+        .logs = logs,
     };
     const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
     const type_id = transactionType(kind);
@@ -1818,7 +2103,7 @@ fn receiptStatus(status: TxStatus) u8 {
     };
 }
 
-fn transactionType(kind: @TypeOf(@as(Engine.Transaction, undefined).kind)) ?u8 {
+fn transactionType(kind: transaction.TxKind) ?u8 {
     return switch (kind) {
         .legacy => null,
         .access_list => 0x01,
@@ -1828,9 +2113,10 @@ fn transactionType(kind: @TypeOf(@as(Engine.Transaction, undefined).kind)) ?u8 {
     };
 }
 
-fn logsBloom(logs: []const Log) [256]u8 {
+fn logsBloom(logs: state.TrackedState.LogView) [256]u8 {
     var bloom = [_]u8{0} ** 256;
-    for (logs) |event_log| {
+    for (0..logs.len()) |index| {
+        const event_log = logs.get(index);
         addBloomEntry(&bloom, &event_log.address);
         for (event_log.topics) |topic| {
             const encoded_topic = uint256.toBytes32(topic);
@@ -1928,8 +2214,7 @@ test "BlockSTF validates a single witnessed transaction" {
     const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const first_result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -1950,10 +2235,10 @@ test "BlockSTF validates a single witnessed transaction" {
     const encoded_receipt = try encodeReceipt(scratch, .legacy, .{
         .status = .success,
         .cumulative_gas_used = first_result.gas_used,
-        .logs = &.{receipt_log},
+        .logs = .fromSlice(&.{receipt_log}),
     });
     const expected_receipts_root = try trie.receiptRoot(scratch, &.{encoded_receipt});
-    const expected_logs_bloom = logsBloom(&.{receipt_log});
+    const expected_logs_bloom = logsBloom(.fromSlice(&.{receipt_log}));
     try std.testing.expectEqualSlices(u8, &expected_receipts_root, &first_result.receipts_root);
     try std.testing.expectEqualSlices(u8, &expected_logs_bloom, &first_result.logs_bloom);
 
@@ -1962,8 +2247,8 @@ test "BlockSTF validates a single witnessed transaction" {
         step_ends: usize = 0,
         storage_writes: usize = 0,
 
-        fn stateTarget(self: *@This()) Executor.CaptureStateTarget {
-            return Executor.CaptureStateTarget.init(self, &.{ .state_write = stateWrite });
+        fn observationTarget(self: *@This()) ObservationTarget {
+            return ObservationTarget.init(self, observe);
         }
 
         fn traceTarget(self: *@This()) trace.TraceSpanTarget {
@@ -1980,22 +2265,30 @@ test "BlockSTF validates a single witnessed transaction" {
             };
         }
 
-        fn stateWrite(ptr: *anyopaque, event: trace.StateWrite) !void {
+        fn observe(
+            ptr: *anyopaque,
+            _: eth_bal.BlockAccessIndex,
+            observations: state.TrackedState.ObservationsView,
+        ) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            if (event == .storage) self.storage_writes += 1;
+            var index: u32 = 0;
+            while (index < observations.storage.len()) : (index += 1) {
+                if (observations.storage.at(index).effect.written) {
+                    self.storage_writes += 1;
+                }
+            }
         }
     };
     var trace_recorder = RuntimeTraceRecorder{};
     var trace_tape = trace.TraceTape.initGrowable(scratch);
     defer trace_tape.deinit();
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .capture = .{
-            .state_target = trace_recorder.stateTarget(),
+            .observations = trace_recorder.observationTarget(),
             .steps = .{
                 .tape = &trace_tape,
                 .profile = .{ .stack = .omitted },
@@ -2021,8 +2314,7 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
     try std.testing.expect(trace_recorder.storage_writes > 0);
 
-    const gas_mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -2035,8 +2327,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.gas_used_mismatch, gas_mismatch.status);
 
-    const block_gas_mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const block_gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -2049,8 +2340,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.block_gas_used_mismatch, block_gas_mismatch.status);
 
-    const logs_bloom_mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const logs_bloom_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -2119,8 +2409,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     };
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try applyAssumeDecoded(scratch, .{
-        .revision = .merge,
+    const first_result = try Exact(.merge).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2132,8 +2421,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .merge,
+    const result = try Exact(.merge).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2165,8 +2453,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
         .encoded = "tx0",
     }};
 
-    const mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2178,8 +2465,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
 
-    const invalid = try applyAssumeDecoded(scratch, .{
-        .revision = .frontier,
+    const invalid = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
         .transactions = &tx_input,
@@ -2223,7 +2509,7 @@ test "BlockSTF validates withdrawals root" {
     };
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
-    const result = try applyAssumeDecoded(scratch, .{
+    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -2238,7 +2524,7 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
-    const mismatch = try applyAssumeDecoded(scratch, .{
+    const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -2292,8 +2578,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
     const parent_hash = [_]u8{0x11} ** 32;
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .cancun,
+    const result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .number = 1, .timestamp = timestamp, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
@@ -2318,8 +2603,7 @@ test "BlockSTF applies Cancun block-start system contract" {
 }
 
 test "BlockSTF rejects missing or inconsistent parent context" {
-    const missing = try applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .cancun,
+    const missing = try Exact(.cancun).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2 },
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2328,8 +2612,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
     const parent_hash = [_]u8{0x11} ** 32;
-    const inconsistent = try applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .cancun,
+    const inconsistent = try Exact(.cancun).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
@@ -2355,7 +2638,6 @@ test "BlockSTF rejects missing or inconsistent parent context" {
 test "BlockSTF validates parent-derived header rules before execution" {
     const parent_hash = [_]u8{0x11} ** 32;
     var input = AssumeDecodedBlockInput{
-        .revision = .merge,
         .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
         .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
         .parent_header = .{
@@ -2370,30 +2652,30 @@ test "BlockSTF validates parent-derived header rules before execution" {
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     };
-    try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(input));
+    try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(.merge, input));
 
     input.block_header.?.parent_hash = [_]u8{0x22} ** 32;
-    try std.testing.expectEqual(Status.parent_hash_mismatch, parentHeaderStatus(input).?);
+    try std.testing.expectEqual(Status.parent_hash_mismatch, parentHeaderStatus(.merge, input).?);
     input.block_header.?.parent_hash = parent_hash;
 
     input.env.number = 9;
     input.block_header.?.number = 9;
-    try std.testing.expectEqual(Status.block_number_mismatch, parentHeaderStatus(input).?);
+    try std.testing.expectEqual(Status.block_number_mismatch, parentHeaderStatus(.merge, input).?);
     input.env.number = 8;
     input.block_header.?.number = 8;
 
     input.env.timestamp = 10;
     input.block_header.?.timestamp = 10;
-    try std.testing.expectEqual(Status.timestamp_mismatch, parentHeaderStatus(input).?);
+    try std.testing.expectEqual(Status.timestamp_mismatch, parentHeaderStatus(.merge, input).?);
     input.env.timestamp = 11;
     input.block_header.?.timestamp = 11;
 
     input.env.gas_limit = 10_000_000 + 10_000_000 / gas_limit_adjustment_factor;
-    try std.testing.expectEqual(Status.gas_limit_mismatch, parentHeaderStatus(input).?);
+    try std.testing.expectEqual(Status.gas_limit_mismatch, parentHeaderStatus(.merge, input).?);
     input.env.gas_limit = 10_000_000;
 
     input.env.base_fee = 8;
-    try std.testing.expectEqual(Status.base_fee_mismatch, parentHeaderStatus(input).?);
+    try std.testing.expectEqual(Status.base_fee_mismatch, parentHeaderStatus(.merge, input).?);
 }
 
 test "BlockSTF derives EIP-1559 base fee from parent usage" {
@@ -2417,7 +2699,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try applyAssumeDecoded(scratch, .{
+    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -2442,7 +2724,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
         const claimed_requests = [_][]const u8{claimed_request};
         const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
 
-        const mismatch = try applyAssumeDecoded(scratch, .{
+        const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
             .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
             .transactions = &.{},
             .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -2461,7 +2743,7 @@ test "Amsterdam finalize calls include builder request predeploys" {
         .block_gas = 0,
         .state_gas = 0,
     };
-    const calls = eth_system.Block.finalizeBlock(.amsterdam, context);
+    const calls = eth_spec.amsterdam.block.finalizeBlock(context);
 
     try std.testing.expectEqual(@as(usize, 4), calls.len);
     try std.testing.expectEqualSlices(u8, &eth_system.withdrawal_request_predeploy_address, &calls.items[0].call.recipient);
@@ -2488,7 +2770,6 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
 
     const zero_hash = [_]u8{0} ** 32;
     const input = AssumeDecodedBlockInput{
-        .revision = .amsterdam,
         .env = .{
             .number = 0,
             .slot_number = 0,
@@ -2512,13 +2793,13 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
         },
     };
 
-    const mismatch = try applyAssumeDecoded(scratch, input);
+    const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, input);
     try std.testing.expectEqual(Status.block_hash_mismatch, mismatch.status);
     try std.testing.expect(!std.mem.eql(u8, &zero_hash, &mismatch.block_hash));
 
     var valid_input = input;
     valid_input.header_hash_claim.?.block_hash = mismatch.block_hash;
-    const valid = try applyAssumeDecoded(scratch, valid_input);
+    const valid = try Exact(.amsterdam).applyAssumeDecoded(scratch, valid_input);
     try std.testing.expectEqual(Status.valid, valid.status);
     try std.testing.expectEqualSlices(u8, &mismatch.block_hash, &valid.block_hash);
 }
@@ -2530,7 +2811,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
-    const valid = try applyAssumeDecoded(scratch, .{
+    const valid = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -2542,7 +2823,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
-    const artifact_mismatch = try applyAssumeDecoded(scratch, .{
+    const artifact_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
@@ -2550,7 +2831,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
-    const hash_mismatch = try applyAssumeDecoded(scratch, .{
+    const hash_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -2559,7 +2840,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
-    const malformed_claim = try applyAssumeDecoded(scratch, .{
+    const malformed_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
@@ -2567,7 +2848,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.invalid_block_access_list, malformed_claim.status);
 
-    const oversized_claim = try applyAssumeDecoded(scratch, .{
+    const oversized_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -2593,7 +2874,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     const claimed_accounts = [_]eth_bal.AccountChanges{.{ .address = withdrawal.address }};
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try applyAssumeDecoded(scratch, .{
+    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -2619,7 +2900,7 @@ test "BlockSTF validates blob gas header fields" {
         @as(u256, 0x01) << 248,
         (@as(u256, 0x01) << 248) | 1,
     };
-    const expected_blob_gas_used: u64 = 2 * eth_transaction.Transaction.blobSchedule(.prague).?.gas_per_blob;
+    const expected_blob_gas_used: u64 = 2 * eth_spec.prague.transaction.blob_schedule.?.gas_per_blob;
     const starting_balance: u256 = 1_000_000;
 
     const account_key = trie.hashedAddressKey(sender);
@@ -2653,14 +2934,13 @@ test "BlockSTF validates blob gas header fields" {
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const expected_excess_blob_gas = calcProtocolExcessBlobGas(.prague, parent_blob_gas).?;
-    var custom_blob_schedule = eth_transaction.Transaction.blobSchedule(.prague).?;
+    const expected_excess_blob_gas = calcProtocolExcessBlobGas(vm.Vm(eth_spec.prague), parent_blob_gas).?;
+    var custom_blob_schedule = eth_spec.prague.transaction.blob_schedule.?;
     custom_blob_schedule.target = 10;
     custom_blob_schedule.max = 12;
     const expected_custom_excess_blob_gas = transaction.calcExcessBlobGasForSchedule(custom_blob_schedule, parent_blob_gas).?;
 
-    const first_result = try applyAssumeDecoded(scratch, .{
-        .revision = .prague,
+    const first_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2675,8 +2955,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(expected_blob_gas_used, first_result.blob_gas_used);
     try std.testing.expectEqual(expected_excess_blob_gas, first_result.excess_blob_gas.?);
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .prague,
+    const result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2693,8 +2972,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.valid, result.status);
 
-    const custom_schedule_result = try applyAssumeDecoded(scratch, .{
-        .revision = .prague,
+    const custom_schedule_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_blob_schedule },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2712,8 +2990,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(Status.valid, custom_schedule_result.status);
     try std.testing.expect(expected_custom_excess_blob_gas != expected_excess_blob_gas);
 
-    const blob_gas_mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .prague,
+    const blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2727,8 +3004,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.blob_gas_used_mismatch, blob_gas_mismatch.status);
 
-    const excess_blob_gas_mismatch = try applyAssumeDecoded(scratch, .{
-        .revision = .prague,
+    const excess_blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -2814,8 +3090,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
         .encoded = "oversized-blobtx",
     }};
 
-    const oversized_result = try applyAssumeDecoded(scratch, .{
-        .revision = .cancun,
+    const oversized_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
@@ -2825,8 +3100,7 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(@as(?usize, 0), oversized_result.tx_index);
     try std.testing.expectEqual(@as(u64, 0), oversized_result.blob_gas_used);
 
-    const pre_cancun_result = try applyAssumeDecoded(scratch, .{
-        .revision = .shanghai,
+    const pre_cancun_result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
@@ -2835,10 +3109,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(Status.transaction_rejected, pre_cancun_result.status);
     try std.testing.expectEqual(@as(?usize, 0), pre_cancun_result.tx_index);
 
-    var custom_schedule = eth_transaction.Transaction.blobSchedule(.cancun).?;
+    var custom_schedule = eth_spec.cancun.transaction.blob_schedule.?;
     custom_schedule.max = 1;
-    const custom_schedule_result = try applyAssumeDecoded(scratch, .{
-        .revision = .cancun,
+    const custom_schedule_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_schedule },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = transactions[0..1],
@@ -2847,15 +3120,14 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, custom_schedule_result.status);
     try std.testing.expectEqual(@as(?usize, 0), custom_schedule_result.tx_index);
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .cancun,
+    const result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 42_000, .blob_base_fee = 1 },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &transactions,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
 
-    const schedule = eth_transaction.Transaction.blobSchedule(.cancun).?;
+    const schedule = eth_spec.cancun.transaction.blob_schedule.?;
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, result.status);
     try std.testing.expectEqual(@as(?usize, 1), result.tx_index);
     try std.testing.expectEqual(schedule.max * schedule.gas_per_blob, result.blob_gas_used);
@@ -2880,8 +3152,7 @@ test "BlockSTF applies withdrawals to state balances" {
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
     const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
-    const result = try applyAssumeDecoded(scratch, .{
-        .revision = .shanghai,
+    const result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -2902,8 +3173,7 @@ test "BlockSTF applies withdrawals to state balances" {
         .amount = withdrawals[0].amount + 1,
     }};
     const mutated_withdrawals_root = try trie.withdrawalsRoot(scratch, &mutated_withdrawals);
-    const mutated = try applyAssumeDecoded(scratch, .{
-        .revision = .shanghai,
+    const mutated = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
         .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &mutated_withdrawals,
@@ -2926,8 +3196,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     };
     const roots = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash);
 
-    const pre_shanghai = try applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .merge,
+    const pre_shanghai = try Exact(.merge).applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &.{withdrawal},
@@ -2935,8 +3204,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_shanghai.status);
 
-    const pre_cancun = try applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .shanghai,
+    const pre_cancun = try Exact(.shanghai).applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
@@ -2948,8 +3216,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_cancun.status);
 
-    const pre_amsterdam = try applyAssumeDecoded(std.testing.allocator, .{
-        .revision = .prague,
+    const pre_amsterdam = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{},
@@ -2994,7 +3261,7 @@ test "stateless receipt encoder includes logs and bloom" {
     const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .revert,
         .cumulative_gas_used = 30_000,
-        .logs = &.{event_log},
+        .logs = .fromSlice(&.{event_log}),
     });
     defer counted.allocator().free(encoded);
 
@@ -3032,22 +3299,22 @@ test "stateless receipt schema enforces the EVM log topic limit" {
     const accepted_topics = [_]u256{ 1, 2, 3, 4 };
     const accepted = try encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = &.{.{
+        .logs = .fromSlice(&.{.{
             .address = address.addr(0x3000),
             .topics = &accepted_topics,
             .data = &.{},
-        }},
+        }}),
     });
     defer std.testing.allocator.free(accepted);
 
     const rejected_topics = [_]u256{ 1, 2, 3, 4, 5 };
     try std.testing.expectError(error.ListLimitExceeded, encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = &.{.{
+        .logs = .fromSlice(&.{.{
             .address = address.addr(0x3000),
             .topics = &rejected_topics,
             .data = &.{},
-        }},
+        }}),
     }));
 }
 
@@ -3063,7 +3330,7 @@ test "stateless receipt typed decode cleans nested allocation failures" {
             const payload: ReceiptPayload = .{
                 .status = 1,
                 .cumulative_gas_used = 21_000,
-                .logs_bloom = logsBloom(&logs),
+                .logs_bloom = logsBloom(.fromSlice(&logs)),
                 .logs = &logs,
             };
             var out: [512]u8 = undefined;

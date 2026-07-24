@@ -3,7 +3,7 @@ const evmz = @import("evmz");
 
 const transaction = evmz.transaction;
 const transaction_envelope = evmz.transaction.envelope;
-const ValidationError = evmz.Evm.TransactionProtocol.Tx.ValidationError;
+const ValidationError = evmz.eth.transaction_validation.ValidationError;
 
 pub fn eestExceptionName(error_value: ValidationError) []const u8 {
     return switch (error_value) {
