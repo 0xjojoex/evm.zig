@@ -132,7 +132,7 @@ fn expectOwnedBorrowedEquivalent(case: Case) !void {
     var borrowed_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &borrowed_host,
         .msg = &borrowed_msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer borrowed_frame.deinit();
 
@@ -220,7 +220,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         try frame.frame.stack.push(case.below);
@@ -271,7 +271,7 @@ test "prepared tail dispatch executes promoted transient storage, mcopy, and exp
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
@@ -312,7 +312,7 @@ fn expectPreparedStatus(
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -335,7 +335,7 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
     var frame = try Byzantium.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     try frame.frame.stack.push(1);
@@ -380,7 +380,7 @@ test "prepared tail dispatch reads frame-local values" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -421,7 +421,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -449,7 +449,7 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     try frame.frame.replaceReturnData(&.{ 1, 2 });
@@ -485,7 +485,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         try frame.frame.memory.expandToFit(0, output.len);
@@ -516,7 +516,7 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
         var frame = try Homestead.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = &bytecode,
+            .bytecode = bytecode.view(),
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
@@ -547,7 +547,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -569,7 +569,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var static_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &static_host,
         .msg = &static_msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer static_frame.deinit();
     var static_interpreter = static_frame.interpreter();

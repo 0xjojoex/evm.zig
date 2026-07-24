@@ -42,7 +42,7 @@ pub fn bind(comptime Executor: type) type {
 
         const ChildCall = struct {
             checkpoint_state: ScopeCheckpoint,
-            bytecode: *const Bytecode,
+            bytecode: Bytecode.View,
         };
 
         const StartedCreate = union(enum) {
@@ -132,7 +132,6 @@ pub fn bind(comptime Executor: type) type {
             }
 
             fn prepare(self: *CallRuntime) !void {
-                // TODO: reivew
                 if (self.frame_base != 0) return error.ActiveRuntimeFrames;
                 try self.prepareNested();
             }
@@ -148,7 +147,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: *const Bytecode) !void {
+            fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: Bytecode.View) !void {
                 var frame = try acquireBytecodeFrame(
                     self.executor,
                     self.executor.allocator,
@@ -167,7 +166,7 @@ pub fn bind(comptime Executor: type) type {
                 self: *CallRuntime,
                 msg: Host.Message,
                 checkpoint_state: ScopeCheckpoint,
-                bytecode: *const Bytecode,
+                bytecode: Bytecode.View,
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
                 var frame = try acquireBytecodeFrame(
@@ -264,7 +263,7 @@ pub fn bind(comptime Executor: type) type {
                             depth,
                             context.currentFrame(),
                         )
-                    else if (runtime_frame.frame.callFrame().bytecode.needs_action_loop)
+                    else if (runtime_frame.frame.callFrame().needs_action_loop)
                         try executeInterpreterUntilAction(self.executor, &interpreter, depth)
                     else
                         .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
@@ -980,7 +979,7 @@ pub fn bind(comptime Executor: type) type {
         pub fn executePreparedCallMessage(
             self: *Executor,
             message: Host.Message,
-            bytecode: *const Bytecode,
+            bytecode: Bytecode.View,
         ) !Host.Result {
             var runtime = CallRuntime.init(self);
             defer runtime.deinit();
@@ -1081,7 +1080,7 @@ pub fn bind(comptime Executor: type) type {
         }
 
         pub fn prepareBytecodeAlloc(self: *const Executor, allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-            return Bytecode.prepare(allocator, code, self.config);
+            return Bytecode.prepare(allocator, code, self.config.jumpdest_strategy);
         }
 
         pub const ResolvedCode = struct {
@@ -1093,11 +1092,11 @@ pub fn bind(comptime Executor: type) type {
         /// Resolve canonical code first, then consult the executor-owned derived
         /// cache. Address-based callers materialize through tracked state for witness
         /// validation and code-read tracing; CALL paths can reuse that traced view.
-        pub fn resolveExecutionCode(self: *Executor, address: Address) !*const Bytecode {
+        pub fn resolveExecutionCode(self: *Executor, address: Address) !Bytecode.View {
             return resolveExecutionCodeView(self, try self.state.getCodeView(address));
         }
 
-        pub fn resolveExecutionCodeView(self: *Executor, code: State.CodeView) !*const Bytecode {
+        pub fn resolveExecutionCodeView(self: *Executor, code: State.CodeView) !Bytecode.View {
             const execution = if (self.prepared_code_execution) |*active|
                 active
             else
@@ -1169,7 +1168,7 @@ pub fn bind(comptime Executor: type) type {
             frame_allocator: std.mem.Allocator,
             host_iface: *Host,
             msg: *const Host.Message,
-            bytecode: *const Bytecode,
+            bytecode: Bytecode.View,
         ) !FrameLease {
             return try self.frame_store.acquire(self.allocator, frame_allocator, .{
                 .host = host_iface,
@@ -1843,7 +1842,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
 
     var outer = runtime.CallRuntime.init(&executor);
     try outer.prepare();
-    try outer.pushRootCall(root_message, &bytecode);
+    try outer.pushRootCall(root_message, bytecode.view());
     try std.testing.expectEqual(@as(usize, 1), executor.runtime_frames.items.len);
 
     var nested_probe = runtime.CallRuntime.init(&executor);

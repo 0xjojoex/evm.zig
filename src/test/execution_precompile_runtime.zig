@@ -75,6 +75,48 @@ const ReentrantRuntime = struct {
     }
 };
 
+const ReentrantOutputRuntime = struct {
+    saw_borrowed_output: bool = false,
+
+    fn service(self: *ReentrantOutputRuntime) execution.PrecompileRuntime {
+        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
+    }
+
+    fn execute(ptr: *anyopaque, call: execution.PrecompileCall) !evmz.precompile.Result {
+        const self: *ReentrantOutputRuntime = @ptrCast(@alignCast(ptr));
+        self.saw_borrowed_output = self.saw_borrowed_output or call.output_buffer != null;
+
+        const output = if (call.output_buffer) |buffer| blk: {
+            if (buffer.len < 1) return error.OutputBufferTooSmall;
+            break :blk buffer[0..1];
+        } else try call.allocator.alloc(u8, 1);
+        const outer = call.message.input_data.len == 0;
+        output[0] = if (outer) 0xaa else 0xbb;
+
+        if (outer) {
+            const nested = (try call.host.call(.{
+                .depth = call.message.depth + 1,
+                .kind = .call,
+                .gas = call.message.gas,
+                .gas_reservoir = call.message.gas_reservoir,
+                .recipient = call.message.recipient,
+                .sender = call.message.recipient,
+                .input_data = &.{0x01},
+                .value = 0,
+                .code_address = call.message.code_address,
+            })).expectCall();
+            try std.testing.expectEqualSlices(u8, &.{0xbb}, nested.output_data);
+        }
+
+        return .{
+            .status = .success,
+            .output_data = output,
+            .gas_left = call.message.gas,
+            .output_owned = call.output_buffer == null,
+        };
+    }
+};
+
 const StatefulPrecompile = struct {
     const target = evmz.addr(0x1234);
 
@@ -163,6 +205,23 @@ test "Executor reset preserves and replaces the precompile runtime" {
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
+}
+
+test "runtime precompile output survives synchronous host reentry" {
+    const sender = evmz.addr(0xaaaa);
+    var runtime = ReentrantOutputRuntime{};
+    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
+        .precompile_runtime = runtime.service(),
+    });
+    defer executor.deinit();
+
+    const result = (try executor.runStandaloneRequest(
+        request(sender, StatefulPrecompile.target, &.{}),
+        .{},
+    )).expectCall();
+
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+    try std.testing.expect(!runtime.saw_borrowed_output);
 }
 
 test "reentrant precompile call preserves parent stack across arena growth" {

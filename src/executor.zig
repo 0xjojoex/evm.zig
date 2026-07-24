@@ -118,7 +118,7 @@ const InitOptions = struct {
 /// control bytecode preprocessing explicitly; otherwise prefer `executeCall` or
 /// `runStandalone`.
 pub const PreparedCallTransaction = struct {
-    bytecode: *const Bytecode,
+    bytecode: Bytecode.View,
     sender: Address,
     recipient: Address,
     input: []const u8 = &.{},
@@ -673,7 +673,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 self.prepared_code_execution = prepared_code.Execution.init(
                     self.prepared_code_scratch.allocator(),
                     self.prepared_code_backend,
-                    self.preparedCodeKey(),
+                    self.config.jumpdest_strategy,
                 );
             }
             self.prepared_code_execution_depth = std.math.add(
@@ -691,10 +691,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.prepared_code_execution.?.deinit();
             self.prepared_code_execution = null;
             self.prepared_code_scratch.reset();
-        }
-
-        pub fn preparedCodeKey(self: *const Self) prepared_code.PreparationKey {
-            return .{ .config = self.config };
         }
 
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
@@ -1694,15 +1690,6 @@ const Osaka = evmz.Vm(evmz.eth.osaka);
 const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
 const testTxContext = evmz.t.defaultTxContext;
 
-test "executor init options retain code analysis config" {
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{
-        .config = .advanced,
-    });
-    defer executor.deinit();
-
-    try std.testing.expectEqual(evmz.ExecutionConfig.Preprocessing.full, executor.config.preprocessing);
-}
-
 test "executor prepareBytecode honors jumpdest strategy config" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{
         .config = .{ .jumpdest_strategy = .simd_bitmask },
@@ -1734,7 +1721,7 @@ test "executor executes prepared bytecode call transaction" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 100_000,
@@ -1745,15 +1732,15 @@ test "executor executes prepared bytecode call transaction" {
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
-test "normal call transactions retain caller-owned prepared code" {
+test "parent prepared view survives child admission" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const target = evmz.addr(0xbeef);
     const tx_context = testTxContext(sender, 100_000);
     const contract_code = evmz.t.bytecode(.{
-        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
-        .PUSH2, 0xbe,   0xef,   .GAS,   .CALL,
-        .STOP,
+        .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0,
+        .PUSH2, 0xbe,    0xef,   .GAS,   .CALL,
+        .PUSH0, .SSTORE, .STOP,
     });
     const target_code = evmz.t.bytecode(.{
         .PUSH1, 0x2a,
@@ -1786,6 +1773,7 @@ test "normal call transactions retain caller-owned prepared code" {
 
     try std.testing.expectEqual(Interpreter.Status.success, first.status);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(target, 0));
 
     try executor.beginTransaction(tx_context, sender, contract);
@@ -1861,7 +1849,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     try executor.state.seedAccount(contract, contract_account);
 
     const code_view = try executor.state.getCodeView(contract);
-    _ = try pool.getOrPrepare(executor.preparedCodeKey(), code_view.code_hash, code_view.bytes);
+    _ = try pool.getOrPrepare(code_view.code_hash, code_view.bytes, executor.config.jumpdest_strategy);
 
     var recorder = CacheInvalidatingTrace{ .pool = &pool };
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -1893,7 +1881,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
-test "reset retains caller backend and isolates preparation configurations" {
+test "reset retains caller backend and prepared artifacts" {
     const code = evmz.t.bytecode(.{.STOP});
     const code_hash = evmz.crypto.keccak256(&code);
 
@@ -1905,20 +1893,20 @@ test "reset retains caller backend and isolates preparation configurations" {
     });
     defer executor.deinit();
 
-    const prepared = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
+    const prepared = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
     try executor.reset(.{
         .config = .base,
         .prepared_code_backend = pool.backend(),
     });
-    try std.testing.expectEqual(prepared, pool.get(executor.preparedCodeKey(), code_hash).?);
+    try std.testing.expectEqual(prepared.bytes.ptr, pool.get(code_hash).?.bytes.ptr);
 
     try executor.reset(.{
-        .config = .advanced,
+        .config = .{ .jumpdest_strategy = .simd_bitmask },
         .prepared_code_backend = pool.backend(),
     });
-    const advanced = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
-    try std.testing.expect(advanced != prepared);
-    try std.testing.expectEqual(@as(usize, 2), pool.count());
+    const reset_prepared = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    try std.testing.expectEqual(prepared.bytes.ptr, reset_prepared.bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "prepared execution follows current code hash without owning public code reads" {
@@ -1950,7 +1938,7 @@ test "prepared execution follows current code hash without owning public code re
 
     try executor.state.setCode(contract, &replacement_code);
     const replacement_execution = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
-    try std.testing.expect(replacement_execution != original_prepared);
+    try std.testing.expect(replacement_execution.bytes.ptr != original_prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
     const public_replacement = try executor.getCode(contract);
     try std.testing.expectEqualSlices(u8, &replacement_code, public_replacement);
@@ -2008,8 +1996,8 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
     });
     defer executor.deinit();
 
-    _ = try pool.getOrPrepare(executor.preparedCodeKey(), code_hash, &code);
-    try std.testing.expect(pool.get(executor.preparedCodeKey(), code_hash) != null);
+    _ = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    try std.testing.expect(pool.get(code_hash) != null);
     try std.testing.expectError(
         error.InvalidWitness,
         call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, target),
@@ -2055,7 +2043,7 @@ test "executor BLOCKHASH reads configured block hash source" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 100_000,
@@ -2510,7 +2498,7 @@ fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
 
     try executor.beginTransaction(testTxContext(sender, 100_000), sender, parent);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = parent,
         .gas = 100_000,
@@ -2558,7 +2546,7 @@ test "recursive call bomb unwinds with iterative call runtime" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 979_000,
@@ -2606,7 +2594,7 @@ test "iterative call runtime preserves precompile output" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 90_000,
@@ -2682,7 +2670,7 @@ fn expectLegacyPrecompileCall(
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 90_000,
@@ -2727,7 +2715,7 @@ test "prepared call transaction calls to empty account succeed" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 90_000,
@@ -2774,7 +2762,7 @@ test "iterative CALLCODE writes target code in caller storage" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 120_000,
@@ -2823,7 +2811,7 @@ test "iterative DELEGATECALL preserves parent call value" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 120_000,
@@ -2873,7 +2861,7 @@ test "iterative STATICCALL failure resumes parent with zero result" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 120_000,
@@ -2915,7 +2903,7 @@ test "prepared call transaction create opcodes deploy code" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 300_000,
@@ -2955,7 +2943,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
 
     try executor.beginTransaction(tx_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 100_000,
@@ -3005,7 +2993,7 @@ test "captured runtime records nested call and create frames without generic ste
     errdefer capture.abort() catch {};
     try executor.beginCapturedTransaction(tx_context, sender, contract, &capture);
     const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .sender = sender,
         .recipient = contract,
         .gas = 300_000,

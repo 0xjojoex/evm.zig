@@ -1,7 +1,8 @@
 const std = @import("std");
-const Metadata = @import("Metadata.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
+
+const BitSet = std.DynamicBitSetUnmanaged;
 
 pub const lanes = 16;
 
@@ -81,35 +82,35 @@ pub fn scanFallible(
     }
 }
 
-pub fn markJumpDests(map: *Metadata.BitSet, bytes: []const u8) void {
-    scan(*Metadata.BitSet, map, bytes, scatterJumpDests);
+pub fn markJumpDests(map: *BitSet, bytes: []const u8) void {
+    scan(*BitSet, map, bytes, scatterJumpDests);
 }
 
-pub fn markJumpDestsScalar(map: *Metadata.BitSet, bytes: []const u8) void {
-    scanScalar(*Metadata.BitSet, map, bytes, scatterJumpDests);
+pub fn markJumpDestsScalar(map: *BitSet, bytes: []const u8) void {
+    scanScalar(*BitSet, map, bytes, scatterJumpDests);
 }
 
-fn scatterJumpDests(map: *Metadata.BitSet, base: usize, masks: BoundaryMasks) void {
+fn scatterJumpDests(map: *BitSet, base: usize, masks: BoundaryMasks) void {
     orMask(map, base, masks.jumpdest);
 }
 
-pub fn orMask(bitset: *Metadata.BitSet, base: usize, mask: u64) void {
+pub fn orMask(bitset: *BitSet, base: usize, mask: u64) void {
     if (mask == 0) return;
 
-    const MaskInt = Metadata.BitSet.MaskInt;
+    const MaskInt = BitSet.MaskInt;
     const word_bits = @bitSizeOf(MaskInt);
     const first_word = base / word_bits;
-    const offset: Metadata.BitSet.ShiftInt = @truncate(base);
+    const offset: BitSet.ShiftInt = @truncate(base);
 
     bitset.masks[first_word] |= @as(MaskInt, @intCast(mask)) << offset;
     if (offset != 0 and first_word + 1 < numMasks(bitset.bit_length)) {
-        const right_shift: Metadata.BitSet.ShiftInt = @intCast(word_bits - @as(usize, offset));
+        const right_shift: BitSet.ShiftInt = @intCast(word_bits - @as(usize, offset));
         bitset.masks[first_word + 1] |= @as(MaskInt, @intCast(mask >> right_shift));
     }
 }
 
 fn numMasks(bit_length: usize) usize {
-    const MaskInt = Metadata.BitSet.MaskInt;
+    const MaskInt = BitSet.MaskInt;
     return (bit_length + (@bitSizeOf(MaskInt) - 1)) / @bitSizeOf(MaskInt);
 }
 
@@ -219,7 +220,7 @@ test "raw SIMD masks match scalar mask bit positions" {
 
 test "scanner marks jumpdests while ignoring PUSH payload noise" {
     const bytecode = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
-    var map = try Metadata.BitSet.initEmpty(std.testing.allocator, bytecode.len);
+    var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
 
     markJumpDests(&map, &bytecode);
@@ -235,7 +236,7 @@ test "scanner carries PUSH payload across chunks" {
     bytecode[1] = Opcode.JUMPDEST.toByte();
     bytecode[31] = Opcode.JUMPDEST.toByte();
     bytecode[33] = Opcode.JUMPDEST.toByte();
-    var map = try Metadata.BitSet.initEmpty(std.testing.allocator, bytecode.len);
+    var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
 
     markJumpDests(&map, &bytecode);

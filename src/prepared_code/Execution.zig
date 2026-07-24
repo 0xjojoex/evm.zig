@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const Backend = @import("Backend.zig");
-const PreparationKey = Backend.PreparationKey;
 const Bytecode = @import("../code/Bytecode.zig");
+const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
 
 const Execution = @This();
 
@@ -13,23 +13,23 @@ pub const ResolvePolicy = struct {
 };
 
 backend: ?Backend,
-key: PreparationKey,
+strategy: JumpDestStrategy,
 scratch_allocator: std.mem.Allocator,
-transient_entries: std.AutoHashMap([32]u8, *const Bytecode),
-owned_entries: std.ArrayList(*Bytecode),
+transient_entries: std.AutoHashMap([32]u8, Bytecode.View),
+owned_entries: std.ArrayList(Bytecode),
 
 /// Backend startup failure disables only the optimization for this execution.
-pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend, key: PreparationKey) Execution {
+pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend, strategy: JumpDestStrategy) Execution {
     const active_backend = if (maybe_backend) |backend| active: {
-        backend.beginExecution(key) catch break :active null;
+        backend.beginExecution() catch break :active null;
         break :active backend;
     } else null;
 
     return .{
         .backend = active_backend,
-        .key = key,
+        .strategy = strategy,
         .scratch_allocator = scratch_allocator,
-        .transient_entries = std.AutoHashMap([32]u8, *const Bytecode).init(scratch_allocator),
+        .transient_entries = std.AutoHashMap([32]u8, Bytecode.View).init(scratch_allocator),
         .owned_entries = .empty,
     };
 }
@@ -40,9 +40,7 @@ pub fn deinit(self: *Execution) void {
     var index = self.owned_entries.items.len;
     while (index > 0) {
         index -= 1;
-        const bytecode = self.owned_entries.items[index];
-        bytecode.deinit(self.scratch_allocator);
-        self.scratch_allocator.destroy(bytecode);
+        self.owned_entries.items[index].deinit(self.scratch_allocator);
     }
     self.owned_entries.deinit(self.scratch_allocator);
     self.* = undefined;
@@ -58,17 +56,17 @@ pub fn resolve(
     code_hash: [32]u8,
     raw_code: []const u8,
     policy: ResolvePolicy,
-) !*const Bytecode {
-    if (raw_code.len == 0) return &Bytecode.empty;
+) !Bytecode.View {
+    if (raw_code.len == 0) return .empty;
     if (self.transient_entries.get(code_hash)) |bytecode| return bytecode;
 
     if (self.backend) |backend| {
-        if (backend.lookup(self.key, code_hash) catch null) |bytecode| return bytecode;
+        if (backend.lookup(code_hash) catch null) |bytecode| return bytecode;
     }
 
     if (policy.admit) {
         if (self.backend) |backend| {
-            const admitted = backend.admit(self.key, code_hash, raw_code) catch |err| switch (err) {
+            const admitted = backend.admit(code_hash, raw_code, self.strategy) catch |err| switch (err) {
                 error.CodeHashMismatch => return err,
                 else => null,
             };
@@ -83,27 +81,20 @@ pub fn resolve(
 
 /// Prepare ephemeral executable bytes, such as CREATE initcode, for this
 /// top-level execution without consulting or admitting them to the backend.
-pub fn prepareTransient(self: *Execution, raw_code: []const u8) !*const Bytecode {
-    if (raw_code.len == 0) return &Bytecode.empty;
+pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
+    if (raw_code.len == 0) return .empty;
 
-    const bytecode = self.scratch_allocator.create(Bytecode) catch
-        return error.PreparedCodeCapacityExceeded;
-    var initialized = false;
-    errdefer {
-        if (initialized) bytecode.deinit(self.scratch_allocator);
-        self.scratch_allocator.destroy(bytecode);
-    }
-    bytecode.* = Bytecode.prepare(
+    var bytecode = Bytecode.prepare(
         self.scratch_allocator,
         raw_code,
-        self.key.config,
+        self.strategy,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.PreparedCodeCapacityExceeded,
     };
-    initialized = true;
+    errdefer bytecode.deinit(self.scratch_allocator);
     self.owned_entries.append(self.scratch_allocator, bytecode) catch
         return error.PreparedCodeCapacityExceeded;
-    return bytecode;
+    return self.owned_entries.items[self.owned_entries.items.len - 1].view();
 }
 
 test "backend failure falls back to one transient artifact" {
@@ -117,9 +108,8 @@ test "backend failure falls back to one transient artifact" {
             } };
         }
 
-        fn beginExecution(ptr: *anyopaque, key: PreparationKey) !void {
+        fn beginExecution(ptr: *anyopaque) !void {
             _ = ptr;
-            _ = key;
             return error.BackendUnavailable;
         }
 
@@ -128,41 +118,36 @@ test "backend failure falls back to one transient artifact" {
             unreachable;
         }
 
-        fn lookup(ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8) !?*const Bytecode {
+        fn lookup(ptr: *anyopaque, code_hash: [32]u8) !?Bytecode.View {
             _ = ptr;
-            _ = key;
             _ = code_hash;
             unreachable;
         }
 
-        fn admit(ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8, raw_code: []const u8) !?*const Bytecode {
+        fn admit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) !?Bytecode.View {
             _ = ptr;
-            _ = key;
             _ = code_hash;
             _ = raw_code;
+            _ = strategy;
             unreachable;
         }
     };
 
     var failing = FailingBackend{};
-    var execution = Execution.init(std.testing.allocator, failing.backend(), .{
-        .config = .base,
-    });
+    var execution = Execution.init(std.testing.allocator, failing.backend(), .scalar_bitmask);
     defer execution.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const code_hash = @import("../crypto.zig").keccak256(&raw_code);
     const first = try execution.resolve(code_hash, &raw_code, .{});
     const second = try execution.resolve(code_hash, &raw_code, .{});
-    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(first.bytes.ptr, second.bytes.ptr);
 }
 
 test "bounded preparation reports capacity exhaustion without raw fallback" {
     var storage: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var execution = Execution.init(fixed.allocator(), null, .{
-        .config = .base,
-    });
+    var execution = Execution.init(fixed.allocator(), null, .scalar_bitmask);
     defer execution.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };

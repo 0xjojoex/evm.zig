@@ -1,11 +1,11 @@
 //! Immutable, execution-ready bytecode artifact.
 //!
 //! Construction owns and pads the source bytes, classifies the action loop,
-//! and eagerly completes jumpdest analysis. Execution receives only
-//! `*const Bytecode`; mutation is limited to owner-side construction/teardown.
+//! and eagerly completes jumpdest analysis. Execution receives a borrowed
+//! `View`; mutation is limited to owner-side construction/teardown.
 
 const std = @import("std");
-const ExecutionConfig = @import("../ExecutionConfig.zig");
+const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
 const JumpDestMap = @import("JumpDestMap.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
@@ -14,6 +14,21 @@ const Bytecode = @This();
 
 pub const zero_padding_len = 33;
 const empty_read_bytes = [_]u8{0} ** zero_padding_len;
+
+/// Non-owning execution view. `bytes` is the semantic code and is backed by
+/// `zero_padding_len` readable zero bytes. The prepared-code owner must keep
+/// both code and jumpdest storage alive through every use.
+pub const View = struct {
+    bytes: []const u8,
+    jumpdest_masks: [*]const usize,
+    needs_action_loop: bool,
+
+    pub const empty = View{
+        .bytes = empty_read_bytes[0..0],
+        .jumpdest_masks = JumpDestMap.prepared_empty.bits.masks,
+        .needs_action_loop = false,
+    };
+};
 
 /// Owned source bytes followed by a zero-filled readable tail.
 ///
@@ -56,25 +71,29 @@ pub const empty = Bytecode{
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
-    return prepare(allocator, bytes, .base);
+    return prepare(allocator, bytes, .scalar_bitmask);
 }
 
-pub fn initWithConfig(allocator: std.mem.Allocator, bytes: []const u8, config: ExecutionConfig) !Bytecode {
-    return prepare(allocator, bytes, config);
-}
-
-pub fn prepare(allocator: std.mem.Allocator, bytes: []const u8, config: ExecutionConfig) !Bytecode {
+pub fn prepare(allocator: std.mem.Allocator, bytes: []const u8, strategy: JumpDestStrategy) !Bytecode {
     const padded = try ZeroPaddedCode.init(allocator, bytes);
     var self = Bytecode{
         .bytes = padded.bytes,
         .read_bytes = padded.read_bytes,
-        .jumpdests = JumpDestMap.initWithStrategy(config.jumpDestStrategy()),
+        .jumpdests = JumpDestMap.initWithStrategy(strategy),
         .needs_action_loop = needsActionLoop(padded.bytes),
     };
     errdefer self.deinit(allocator);
     try self.jumpdests.analyze(allocator, self.bytes);
 
     return self;
+}
+
+pub fn view(self: *const Bytecode) View {
+    return .{
+        .bytes = self.bytes,
+        .jumpdest_masks = self.jumpdests.bits.masks,
+        .needs_action_loop = self.needs_action_loop,
+    };
 }
 
 pub fn needsActionLoop(code: []const u8) bool {
@@ -140,10 +159,10 @@ test "bytecode caches action-loop classification while ignoring push data" {
 
 test "bytecode can opt into SIMD jumpdest map" {
     const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
-    var bytecode = try Bytecode.initWithConfig(std.testing.allocator, &raw, .{ .jumpdest_strategy = .simd_bitmask });
+    var bytecode = try Bytecode.prepare(std.testing.allocator, &raw, .simd_bitmask);
     defer bytecode.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(ExecutionConfig.JumpDestStrategy.simd_bitmask, bytecode.jumpdests.strategy);
+    try std.testing.expectEqual(JumpDestStrategy.simd_bitmask, bytecode.jumpdests.strategy);
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expect(bytecode.isValidJumpDest(2));
 }
@@ -159,6 +178,9 @@ test "bytecode keeps semantic bytes separate from padded read bytes" {
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** Bytecode.zero_padding_len), bytecode.read_bytes[raw.len..]);
     try std.testing.expect(bytecode.bytes.ptr != raw[0..].ptr);
     try std.testing.expectEqual(bytecode.bytes.ptr, bytecode.read_bytes.ptr);
+    const borrowed = bytecode.view();
+    try std.testing.expectEqual(raw.len, borrowed.bytes.len);
+    try std.testing.expectEqual(bytecode.bytes.ptr, borrowed.bytes.ptr);
 }
 
 test "zero-padded code owns semantic bytes and readable tail" {

@@ -190,7 +190,6 @@ pub const Context = struct {
     /// Fix the live-frame sidecar capacity before captured execution starts so
     /// synchronous host reentry cannot relocate an active TraceCapture.
     pub fn reserveFrameCapacity(self: *Context, capacity: usize) !void {
-        // TODO: review
         if (self.frame_captures.items.len != 0) return error.ActiveCaptureFrames;
         if (self.allocator) |allocator| {
             try self.frame_captures.ensureTotalCapacityPrecise(allocator, capacity);

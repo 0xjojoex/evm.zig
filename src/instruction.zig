@@ -171,7 +171,7 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var intpr = frame.interpreter();

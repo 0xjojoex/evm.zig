@@ -248,7 +248,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -282,7 +282,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -318,7 +318,7 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -344,7 +344,7 @@ test "prepared SSTORE rejects static context before host access" {
     var frame = try Osaka.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -377,7 +377,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();

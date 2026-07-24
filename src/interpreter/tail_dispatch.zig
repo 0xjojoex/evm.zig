@@ -93,8 +93,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         const Context = struct {
             frame: *CallFrame,
             code_base: [*]const u8,
-            // Jumpdest state flattened from frame.bytecode so JUMP/JUMPI avoid
-            // the ctx -> frame -> bytecode -> bits pointer chase per jump.
+            // Jumpdest state copied from the prepared view so JUMP/JUMPI avoid
+            // an extra pointer chase per jump.
             code_len: usize,
             jumpdest_masks: [*]const JumpDestMaskInt,
             stack_base: [*]u256,
@@ -348,13 +348,12 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         }
 
         fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
-            std.debug.assert(frame.bytecode.jumpdests.analyzed);
             const stack_base = frame.stack.base;
             var ctx = Context{
                 .frame = frame,
                 .code_base = code_base,
                 .code_len = frame.code.len,
-                .jumpdest_masks = frame.bytecode.jumpdests.bits.masks,
+                .jumpdest_masks = frame.jumpdest_masks,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
             };
@@ -393,13 +392,12 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             }
 
             const code_base = read_bytes.ptr;
-            std.debug.assert(frame.bytecode.jumpdests.analyzed);
             const stack_base = frame.stack.base;
             var ctx = Context{
                 .frame = frame,
                 .code_base = code_base,
                 .code_len = frame.code.len,
-                .jumpdest_masks = frame.bytecode.jumpdests.bits.masks,
+                .jumpdest_masks = frame.jumpdest_masks,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
                 .capture = capture,

@@ -116,7 +116,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
 
             const start_ns = try common.monotonicNowNs();
             const call_options = Executor.PreparedCallTransaction{
-                .bytecode = &self.bytecode,
+                .bytecode = self.bytecode.view(),
                 .sender = common.caller_address,
                 .recipient = common.contract_address,
                 .input = call_data,
@@ -705,7 +705,7 @@ fn timeRuntimeCallForVm(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();

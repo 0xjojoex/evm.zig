@@ -173,7 +173,7 @@ pub const RunResult = union(enum) {
 pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
-    bytecode: *const Bytecode,
+    bytecode: Bytecode.View,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
     io: ?*frame_io.Slot = null,
@@ -271,7 +271,7 @@ pub fn Interpreter(comptime spec: Spec) type {
                 try tail_dispatch.Dispatch(spec, .{ .traced = true }).executeTraced(
                     frame_capture,
                     self.call_frame,
-                    self.call_frame.bytecode.read_bytes,
+                    self.call_frame.readBytes(),
                 );
             }
 
@@ -287,7 +287,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.status == .running) {
-                try TailDispatch.execute(frame, frame.bytecode.read_bytes);
+                try TailDispatch.execute(frame, frame.readBytes());
             }
 
             if (frame.status == .running) {
@@ -326,7 +326,8 @@ pub const CallFrame = struct {
     return_data: []u8 = &.{},
     io: *frame_io.Slot = undefined,
     output_range: Memory.Range = .{},
-    bytecode: *const Bytecode = &Bytecode.empty,
+    jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
+    needs_action_loop: bool = false,
     pending_action: ?Action = null,
 
     pub fn init(
@@ -360,8 +361,9 @@ pub const CallFrame = struct {
         self.io.clearFrame();
         self.return_data = self.io.return_data.slice();
         self.output_range = .{};
-        self.bytecode = options.bytecode;
+        self.jumpdest_masks = options.bytecode.jumpdest_masks;
         self.status = if (code.len == 0) .success else .running;
+        self.needs_action_loop = options.bytecode.needs_action_loop;
         self.pending_action = null;
     }
 
@@ -507,7 +509,15 @@ pub const CallFrame = struct {
     }
 
     pub fn isValidJumpDest(self: *CallFrame, target: usize) !bool {
-        return self.bytecode.isValidJumpDest(target);
+        if (target >= self.code.len) return false;
+        if (self.code[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+        const mask_bits = @bitSizeOf(usize);
+        return self.jumpdest_masks[target / mask_bits] &
+            (@as(usize, 1) << @intCast(target % mask_bits)) != 0;
+    }
+
+    pub fn readBytes(self: *const CallFrame) []const u8 {
+        return self.code.ptr[0 .. self.code.len + Bytecode.zero_padding_len];
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
@@ -632,7 +642,7 @@ test "call frame can execute with externally supplied stack storage" {
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .io = &io_storage,
     }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
     defer frame.deinit();
@@ -677,7 +687,7 @@ test "call frame can execute with externally supplied memory storage" {
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .io = &io_storage,
     }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
     defer frame.deinit();
@@ -858,7 +868,7 @@ test "captured tail memory exhaustion remains a resource error" {
     try frame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
         .io = &io_storage,
         .memory_allocator = no_growth_allocator,
         .memory_retain_capacity = true,
@@ -1130,7 +1140,7 @@ pub const OwnedInit = struct {
     /// Convenience byte input. The owned frame prepares it before execution.
     code: ?[]const u8 = null,
     /// Borrow an already prepared artifact instead of owning a temporary one.
-    bytecode: ?*const Bytecode = null,
+    bytecode: ?Bytecode.View = null,
     config: ExecutionConfig = .base,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
@@ -1145,28 +1155,21 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
         allocator: std.mem.Allocator,
         slot: *CallFrameSlot,
         frame: *CallFrame,
-        owned_bytecode: ?*Bytecode,
+        owned_bytecode: ?Bytecode,
 
         pub fn init(allocator: std.mem.Allocator, options: OwnedInit) !Self {
             if (options.code != null and options.bytecode != null) {
                 return error.AmbiguousBytecodeInput;
             }
 
-            var owned_bytecode: ?*Bytecode = null;
-            errdefer if (owned_bytecode) |bytecode| {
-                bytecode.deinit(allocator);
-                allocator.destroy(bytecode);
-            };
+            var owned_bytecode: ?Bytecode = null;
+            errdefer if (owned_bytecode) |*bytecode| bytecode.deinit(allocator);
             const bytecode = options.bytecode orelse prepared: {
                 const code = options.code orelse &.{};
-                if (code.len == 0) break :prepared &Bytecode.empty;
-                const prepared = try allocator.create(Bytecode);
-                prepared.* = Bytecode.prepare(allocator, code, options.config) catch |err| {
-                    allocator.destroy(prepared);
-                    return err;
-                };
+                if (code.len == 0) break :prepared Bytecode.View.empty;
+                const prepared = try Bytecode.prepare(allocator, code, options.config.jumpdest_strategy);
                 owned_bytecode = prepared;
-                break :prepared prepared;
+                break :prepared prepared.view();
             };
 
             const slot = try allocator.create(CallFrameSlot);
@@ -1189,10 +1192,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
         pub fn deinit(self: *Self) void {
             self.slot.deinit();
             self.allocator.destroy(self.slot);
-            if (self.owned_bytecode) |bytecode| {
-                bytecode.deinit(self.allocator);
-                self.allocator.destroy(bytecode);
-            }
+            if (self.owned_bytecode) |*bytecode| bytecode.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -1240,14 +1240,13 @@ test "interpreter can execute prepared bytecode jumpdest map" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expectEqual(&bytecode, interpreter.call_frame.bytecode);
     try std.testing.expect(bytecode.jumpdests.analyzed);
 }
 
@@ -1273,7 +1272,7 @@ test "prepared bytecode preserves truncated push semantics" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -1306,7 +1305,7 @@ test "prepared bytecode keeps CODESIZE semantic length" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &bytecode,
+        .bytecode = bytecode.view(),
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();

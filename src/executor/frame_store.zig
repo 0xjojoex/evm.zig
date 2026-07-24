@@ -344,7 +344,7 @@ test "frame store rebinds active rows after growth" {
     var first = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer first.deinit();
     try first.callFrame().stack.push(11);
@@ -365,7 +365,7 @@ test "frame store rebinds active rows after growth" {
     var second = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     try second.callFrame().stack.push(44);
 
@@ -387,7 +387,7 @@ test "frame store rebinds active rows after growth" {
     var sibling = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer sibling.deinit();
     try std.testing.expectEqual(sibling_base, sibling.callFrame().stack.base_word);
@@ -411,7 +411,7 @@ test "stack arena growth failure leaves the parent row usable" {
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer root.deinit();
     for (0..600) |word| try root.callFrame().stack.push(@intCast(word));
@@ -425,7 +425,7 @@ test "stack arena growth failure leaves the parent row usable" {
         .{
             .host = &host,
             .msg = &child_msg,
-            .bytecode = &evmz.Bytecode.empty,
+            .bytecode = evmz.Bytecode.View.empty,
         },
     ));
 
@@ -455,7 +455,7 @@ test "stable metadata capacity prevents active frame relocation" {
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer root.deinit();
     const root_ptr = root.callFrame();
@@ -468,7 +468,7 @@ test "stable metadata capacity prevents active frame relocation" {
     var child = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &child_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     try std.testing.expect(root.callFrame() == root_ptr);
     try std.testing.expectEqual(@as(usize, 2), store.memoryRowCapacity());
@@ -478,7 +478,7 @@ test "stable metadata capacity prevents active frame relocation" {
     var sibling = try store.acquire(no_growth_allocator, no_growth_allocator, .{
         .host = &host,
         .msg = &child_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer sibling.deinit();
     try std.testing.expect(root.callFrame() == root_ptr);
@@ -503,7 +503,7 @@ test "packed stack arena advances by suspended live words" {
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer root.deinit();
     for (0..1000) |word| try root.callFrame().stack.push(@intCast(word));
@@ -513,7 +513,7 @@ test "packed stack arena advances by suspended live words" {
     var child = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &child_msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
     defer child.deinit();
 
@@ -542,7 +542,7 @@ test "frame store owns parent returndata and resolves output from frame memory" 
     var lease = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = &evmz.Bytecode.empty,
+        .bytecode = evmz.Bytecode.View.empty,
     });
 
     try lease.callFrame().replaceReturnData("abc");

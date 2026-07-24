@@ -1,8 +1,9 @@
 //! Default in-memory implementation of the prepared-code backend.
 //!
-//! Entries are allocated separately from the map so live pointers remain
-//! stable while the map grows. Multiple preparation keys can coexist, allowing
-//! one caller-owned pool to survive VM reset and configuration changes.
+//! The map owns prepared bytecode and returns non-owning views. Moving map
+//! entries does not move their separately allocated code or jumpdest storage.
+//! Prepared artifacts are keyed only by code hash; the builder strategy does
+//! not change the resulting artifact.
 //!
 //! This is an explicitly growable, single-execution-lane convenience preset
 //! for tests, demos, and simple embeddings. It is not synchronized and has no
@@ -11,27 +12,22 @@
 
 const std = @import("std");
 const Backend = @import("Backend.zig");
-const PreparationKey = Backend.PreparationKey;
 const Bytecode = @import("../code/Bytecode.zig");
+const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
 const crypto = @import("../crypto.zig");
 
 const InMemoryPreparedPool = @This();
-const CacheKey = [34]u8;
-
-const Entry = struct {
-    bytecode: Bytecode,
-};
 
 allocator: std.mem.Allocator,
-entries: std.AutoHashMap(CacheKey, *Entry),
+entries: std.AutoHashMap([32]u8, Bytecode),
 active_executions: usize = 0,
-/// Sum of semantic bytecode lengths, excluding padding and metadata.
+/// Sum of semantic bytecode lengths, excluding padding and jumpdest maps.
 retained_code_bytes: usize = 0,
 
 pub fn init(allocator: std.mem.Allocator) InMemoryPreparedPool {
     return .{
         .allocator = allocator,
-        .entries = std.AutoHashMap(CacheKey, *Entry).init(allocator),
+        .entries = std.AutoHashMap([32]u8, Bytecode).init(allocator),
     };
 }
 
@@ -60,18 +56,18 @@ pub fn hasActiveExecution(self: *const InMemoryPreparedPool) bool {
     return self.active_executions != 0;
 }
 
-pub fn get(self: *InMemoryPreparedPool, key: PreparationKey, code_hash: [32]u8) ?*const Bytecode {
-    const entry = self.entries.get(cacheKey(key, code_hash)) orelse return null;
-    return &entry.bytecode;
+pub fn get(self: *InMemoryPreparedPool, code_hash: [32]u8) ?Bytecode.View {
+    const bytecode = self.entries.getPtr(code_hash) orelse return null;
+    return bytecode.view();
 }
 
 pub fn getOrPrepare(
     self: *InMemoryPreparedPool,
-    key: PreparationKey,
     expected_hash: [32]u8,
     raw_code: []const u8,
-) !*const Bytecode {
-    if (self.get(key, expected_hash)) |prepared| return prepared;
+    strategy: JumpDestStrategy,
+) !Bytecode.View {
+    if (self.get(expected_hash)) |prepared| return prepared;
 
     const actual_hash = crypto.keccak256(raw_code);
     if (!std.mem.eql(u8, &actual_hash, &expected_hash)) return error.CodeHashMismatch;
@@ -81,16 +77,12 @@ pub fn getOrPrepare(
         raw_code.len,
     ) catch return error.OutOfMemory;
 
-    const entry = try self.allocator.create(Entry);
-    errdefer self.allocator.destroy(entry);
-    entry.* = .{
-        .bytecode = try Bytecode.prepare(self.allocator, raw_code, key.config),
-    };
-    errdefer entry.bytecode.deinit(self.allocator);
-
-    try self.entries.putNoClobber(cacheKey(key, expected_hash), entry);
+    var bytecode = try Bytecode.prepare(self.allocator, raw_code, strategy);
+    errdefer bytecode.deinit(self.allocator);
+    const view = bytecode.view();
+    try self.entries.putNoClobber(expected_hash, bytecode);
     self.retained_code_bytes = new_retained_code_bytes;
-    return &entry.bytecode;
+    return view;
 }
 
 pub fn count(self: *const InMemoryPreparedPool) usize {
@@ -108,21 +100,11 @@ pub fn clearRetainingCapacity(self: *InMemoryPreparedPool) !void {
 
 fn clearEntriesRetainingCapacity(self: *InMemoryPreparedPool) void {
     var values = self.entries.valueIterator();
-    while (values.next()) |entry_ptr| {
-        const entry = entry_ptr.*;
-        entry.bytecode.deinit(self.allocator);
-        self.allocator.destroy(entry);
+    while (values.next()) |bytecode| {
+        bytecode.deinit(self.allocator);
     }
     self.entries.clearRetainingCapacity();
     self.retained_code_bytes = 0;
-}
-
-fn cacheKey(key: PreparationKey, code_hash: [32]u8) CacheKey {
-    var result: CacheKey = undefined;
-    result[0] = @intFromEnum(key.config.preprocessing);
-    result[1] = @intFromEnum(key.config.jumpdest_strategy);
-    @memcpy(result[2..], &code_hash);
-    return result;
 }
 
 const backend_vtable = Backend.VTable{
@@ -132,8 +114,7 @@ const backend_vtable = Backend.VTable{
     .admit = backendAdmit,
 };
 
-fn backendBeginExecution(ptr: *anyopaque, key: PreparationKey) !void {
-    _ = key;
+fn backendBeginExecution(ptr: *anyopaque) !void {
     const self: *InMemoryPreparedPool = @ptrCast(@alignCast(ptr));
     self.beginExecution();
 }
@@ -143,17 +124,15 @@ fn backendEndExecution(ptr: *anyopaque) void {
     self.endExecution();
 }
 
-fn backendLookup(ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8) !?*const Bytecode {
+fn backendLookup(ptr: *anyopaque, code_hash: [32]u8) !?Bytecode.View {
     const self: *InMemoryPreparedPool = @ptrCast(@alignCast(ptr));
-    return self.get(key, code_hash);
+    return self.get(code_hash);
 }
 
-fn backendAdmit(ptr: *anyopaque, key: PreparationKey, code_hash: [32]u8, raw_code: []const u8) !?*const Bytecode {
+fn backendAdmit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) !?Bytecode.View {
     const self: *InMemoryPreparedPool = @ptrCast(@alignCast(ptr));
-    return try self.getOrPrepare(key, code_hash, raw_code);
+    return try self.getOrPrepare(code_hash, raw_code, strategy);
 }
-
-const base_key = PreparationKey{ .config = .base };
 
 test "wrong hash rejects admission atomically" {
     var pool = InMemoryPreparedPool.init(std.testing.allocator);
@@ -161,7 +140,7 @@ test "wrong hash rejects admission atomically" {
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const wrong_hash = [_]u8{0xff} ** 32;
-    try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(base_key, wrong_hash, &raw_code));
+    try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(wrong_hash, &raw_code, .scalar_bitmask));
     try std.testing.expectEqual(@as(usize, 0), pool.count());
     try std.testing.expectEqual(@as(usize, 0), pool.retainedCodeBytes());
 }
@@ -173,51 +152,46 @@ test "prepared bytecode owns source bytes" {
     var raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const original = raw_code;
     const code_hash = crypto.keccak256(&raw_code);
-    const prepared = try pool.getOrPrepare(base_key, code_hash, &raw_code);
+    const prepared = try pool.getOrPrepare(code_hash, &raw_code, .scalar_bitmask);
 
     try std.testing.expect(prepared.bytes.ptr != raw_code[0..].ptr);
     @memset(&raw_code, 0xff);
     try std.testing.expectEqualSlices(u8, &original, prepared.bytes);
-    try std.testing.expectEqual(prepared, try pool.getOrPrepare(base_key, code_hash, &raw_code));
+    const cached = try pool.getOrPrepare(code_hash, &raw_code, .simd_bitmask);
+    try std.testing.expectEqual(prepared.bytes.ptr, cached.bytes.ptr);
 }
 
-test "prepared pointers remain stable while map grows" {
+test "prepared views remain valid while map grows" {
     var pool = InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
 
     const anchor_code = [_]u8{ 0x60, 0x01, 0x5b, 0x00 };
     const anchor_hash = crypto.keccak256(&anchor_code);
-    const anchor = try pool.getOrPrepare(base_key, anchor_hash, &anchor_code);
+    const anchor = try pool.getOrPrepare(anchor_hash, &anchor_code, .scalar_bitmask);
 
     for (0..256) |index| {
         var code: [9]u8 = undefined;
         std.mem.writeInt(u64, code[0..8], @intCast(index), .big);
         code[8] = 0x00;
-        _ = try pool.getOrPrepare(base_key, crypto.keccak256(&code), &code);
+        _ = try pool.getOrPrepare(crypto.keccak256(&code), &code, .scalar_bitmask);
     }
 
     try std.testing.expectEqual(@as(usize, 257), pool.count());
-    try std.testing.expectEqual(anchor, pool.get(base_key, anchor_hash).?);
+    try std.testing.expectEqual(anchor.bytes.ptr, pool.get(anchor_hash).?.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &anchor_code, anchor.bytes);
 }
 
-test "preparation keys isolate retained configurations" {
+test "preparation strategies share retained artifacts" {
     var pool = InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
 
     const code = [_]u8{ 0x5b, 0x00 };
     const code_hash = crypto.keccak256(&code);
-    const scalar = try pool.getOrPrepare(.{
-        .config = .base,
-    }, code_hash, &code);
-    const simd = try pool.getOrPrepare(.{
-        .config = .{ .jumpdest_strategy = .simd_bitmask },
-    }, code_hash, &code);
+    const scalar = try pool.getOrPrepare(code_hash, &code, .scalar_bitmask);
+    const simd = try pool.getOrPrepare(code_hash, &code, .simd_bitmask);
 
-    try std.testing.expect(scalar != simd);
-    try std.testing.expect(scalar.jumpdests.analyzed);
-    try std.testing.expectEqual(@import("../ExecutionConfig.zig").JumpDestStrategy.scalar_bitmask, scalar.jumpdests.strategy);
-    try std.testing.expectEqual(@import("../ExecutionConfig.zig").JumpDestStrategy.simd_bitmask, simd.jumpdests.strategy);
+    try std.testing.expectEqual(scalar.bytes.ptr, simd.bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "active execution rejects invalidation" {
@@ -225,7 +199,7 @@ test "active execution rejects invalidation" {
     defer pool.deinit();
 
     const code = [_]u8{0x00};
-    _ = try pool.getOrPrepare(base_key, crypto.keccak256(&code), &code);
+    _ = try pool.getOrPrepare(crypto.keccak256(&code), &code, .scalar_bitmask);
     pool.beginExecution();
     try std.testing.expectError(error.ActivePreparedCodeExecution, pool.clearRetainingCapacity());
     pool.endExecution();

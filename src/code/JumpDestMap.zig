@@ -1,13 +1,12 @@
 const std = @import("std");
 const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
-const Metadata = @import("Metadata.zig");
 const scanner = @import("scanner.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
 
 const JumpDestMap = @This();
 
-bits: Metadata.BitSet,
+bits: std.DynamicBitSetUnmanaged,
 analyzed: bool,
 strategy: JumpDestStrategy,
 
@@ -68,7 +67,7 @@ fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []c
         return;
     }
 
-    self.bits = try Metadata.BitSet.initEmpty(allocator, bytes.len);
+    self.bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, bytes.len);
 
     switch (self.strategy) {
         .legacy => self.markValidJumpdestBytesLinear(bytes),
@@ -199,14 +198,14 @@ test "configured jumpdest maps carry PUSH payload across chunks" {
 
 fn expectStrategyMatchesLinear(bytes: []const u8, strategy: JumpDestStrategy) !void {
     var linear = JumpDestMap{
-        .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
+        .bits = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
         .strategy = .legacy,
     };
     defer linear.deinit(std.testing.allocator);
 
     var configured = JumpDestMap{
-        .bits = try Metadata.BitSet.initEmpty(std.testing.allocator, bytes.len),
+        .bits = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len),
         .analyzed = true,
         .strategy = strategy,
     };

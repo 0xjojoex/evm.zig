@@ -31,7 +31,9 @@ pub const PrecompileRuntime = struct {
     };
 
     pub fn execute(self: PrecompileRuntime, call: PrecompileCall) !precompile.Result {
-        return self.vtable.execute(self.ptr, call);
+        var invocation = call;
+        invocation.output_buffer = null;
+        return self.vtable.execute(self.ptr, invocation);
     }
 };
 
@@ -45,8 +47,9 @@ pub const PrecompileCall = struct {
 
     /// Delegate this spec-owned entry to the supplied family runtime.
     ///
-    /// Owned output must come from `allocator`. Non-owned nonempty output must
-    /// alias a prefix of `output_buffer`; the executor validates that contract.
+    /// Runtime output is allocated from the invocation-scoped `allocator` and
+    /// copied into executor-owned result storage before that scope ends. The
+    /// runtime never borrows the executor's shared output buffer.
     pub fn executeRuntime(self: PrecompileCall) PrecompileOutcome {
         const runtime = self.runtime orelse return .{ .service_error = error.MissingPrecompileRuntime };
         var delegated = self;
