@@ -4,6 +4,7 @@ const std = @import("std");
 const evmz = @import("./evm.zig");
 
 const Host = evmz.Host;
+const ExecutionContext = evmz.execution.ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
 
@@ -80,8 +81,8 @@ pub const MockHost = struct {
     alloc: std.mem.Allocator,
     store: std.AutoHashMap(u256, u256),
     logs: std.ArrayList(Host.Log),
-    tx_context: Host.TxContext,
-    tx_context_reads: u64,
+    execution_context: ExecutionContext,
+    execution_context_reads: u64,
     original_store: std.AutoHashMap(u256, u256),
     code: std.AutoHashMap(Address, []u8),
     local_account: std.AutoHashMap(Address, Host.Account),
@@ -92,10 +93,10 @@ pub const MockHost = struct {
     storage_stores: u64,
     block_hash_reads: u64,
     last_block_hash_number: ?u256,
-    tx_context_error: ?anyerror,
+    execution_context_error: ?anyerror,
     call_error: ?anyerror,
 
-    pub fn init(alloc: std.mem.Allocator, tx_context: ?Host.TxContext) Self {
+    pub fn init(alloc: std.mem.Allocator, execution_context: ?ExecutionContext) Self {
         return Self{
             .alloc = alloc,
             .store = std.AutoHashMap(u256, u256).init(alloc),
@@ -104,27 +105,18 @@ pub const MockHost = struct {
             .local_account = std.AutoHashMap(Address, Host.Account).init(alloc),
             .removed_account = std.AutoHashMap(Address, bool).init(alloc),
             .code = std.AutoHashMap(Address, []u8).init(alloc),
-            .tx_context_reads = 0,
+            .execution_context_reads = 0,
             .storage_reads = 0,
             .access_storage_reads = 0,
             .storage_loads = 0,
             .storage_stores = 0,
             .block_hash_reads = 0,
             .last_block_hash_number = null,
-            .tx_context_error = null,
+            .execution_context_error = null,
             .call_error = null,
-            .tx_context = if (tx_context) |ctx| ctx else Host.TxContext{
-                .base_fee = 0,
-                .gas_limit = 0,
-                .gas_price = 0,
-                .coinbase = addr(0),
-                .origin = addr(0),
-                .blob_base_fee = 0,
-                .blob_hashes = &.{},
-                .chain_id = 0,
-                .number = 0,
-                .prev_randao = 0,
-                .timestamp = 0,
+            .execution_context = if (execution_context) |ctx| ctx else ExecutionContext{
+                .chain = .{ .chain_id = 0 },
+                .transaction = .{ .origin = addr(0) },
             },
         };
     }
@@ -255,15 +247,6 @@ pub const MockHost = struct {
         return 0;
     }
 
-    fn putCode(self: Self, address: Address, code: []u8) !void {
-        try self.code.put(address, code);
-    }
-
-    fn putAccount(ptr: *anyopaque, address: Address, account: Host.Account) !void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        try self.local_account.put(address, account);
-    }
-
     fn getBalance(ptr: *anyopaque, address: Address) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
@@ -359,11 +342,11 @@ pub const MockHost = struct {
         return null;
     }
 
-    fn getTxContext(ptr: *anyopaque) !Host.TxContext {
+    fn getExecutionContext(ptr: *anyopaque) !ExecutionContext {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        if (self.tx_context_error) |err| return err;
-        self.tx_context_reads += 1;
-        return self.tx_context;
+        if (self.execution_context_error) |err| return err;
+        self.execution_context_reads += 1;
+        return self.execution_context;
     }
 
     fn accountExists(ptr: *anyopaque, address: Address) !bool {
@@ -423,7 +406,7 @@ pub const MockHost = struct {
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
             .accessAccount = accessAccount,
-            .getTxContext = getTxContext,
+            .getExecutionContext = getExecutionContext,
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
@@ -442,19 +425,105 @@ pub fn defaultMessage() Host.Message {
     };
 }
 
-pub fn defaultTxContext(origin: Address, gas_limit: u64) Host.TxContext {
+pub fn defaultExecutionContext(origin: Address, gas_limit: u64) ExecutionContext {
     return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = origin,
-        .coinbase = addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = gas_limit,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
+        .chain = .{ .chain_id = 1 },
+        .block = .{ .gas_limit = gas_limit },
+        .transaction = .{ .origin = origin },
+    };
+}
+
+pub const MemoryAccountSeed = struct {
+    nonce: u64 = 0,
+    balance: u256 = 0,
+    code: []const u8 = &.{},
+};
+
+pub fn seedExecutorAccount(executor: anytype, address: Address, seed: MemoryAccountSeed) !void {
+    var account = evmz.state.MemoryAccount.init(executor.allocator);
+    account.nonce = seed.nonce;
+    account.balance = seed.balance;
+    if (seed.code.len != 0) {
+        account.setCode(seed.code) catch |err| {
+            account.deinit();
+            return err;
+        };
+    }
+    return executor.state.seedAccount(address, account);
+}
+
+pub fn seedStoreAccount(store: anytype, address: Address, seed: MemoryAccountSeed) !void {
+    var account = try store.getOrCreateAccount(address);
+    account.nonce = seed.nonce;
+    account.balance = seed.balance;
+    if (seed.code.len != 0) try account.setCode(seed.code);
+}
+
+pub fn expectExecutedLease(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
+    return switch (outcome) {
+        .executed => |executed| executed,
+        .rejected => error.UnexpectedRejection,
+    };
+}
+
+pub fn testAuthorization(signer: Address, target: Address) evmz.transaction.AuthorizationTuple {
+    return .{
+        .chain_id = 0,
+        .target = target,
+        .signer = signer,
+        .nonce = 0,
+        .y_parity = 0,
+        .legacy_v = null,
+        .r = 1,
+        .s = 1,
+    };
+}
+
+pub fn CaptureFixture(comptime ExecutorType: type) type {
+    return struct {
+        const Self = @This();
+
+        executor: *ExecutorType = undefined,
+        context: evmz.executor.CaptureContext = undefined,
+        open: bool = false,
+        bound: bool = false,
+
+        pub fn init(
+            self: *Self,
+            executor: *ExecutorType,
+            state_target: ?evmz.executor.CaptureStateTarget,
+        ) !void {
+            self.* = .{
+                .executor = executor,
+                .context = evmz.executor.CaptureContext.init(executor.allocator, null, state_target),
+            };
+            executor.setCaptureContext(&self.context);
+            self.bound = true;
+            errdefer {
+                executor.setCaptureContext(null);
+                self.bound = false;
+                self.context.deinit();
+            }
+            try self.context.begin();
+            self.open = true;
+        }
+
+        pub fn finish(self: *Self) !void {
+            _ = try self.context.finish();
+            self.open = false;
+            self.executor.setCaptureContext(null);
+            self.bound = false;
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.open) {
+                self.context.abort() catch |err| @panic(@errorName(err));
+                self.open = false;
+            }
+            if (self.bound) self.executor.setCaptureContext(null);
+            self.context.deinit();
+            self.* = undefined;
+        }
     };
 }
 
@@ -539,7 +608,7 @@ test "mock host persists storage writes" {
     try expectBytecodeStackTopByRevision(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
 }
 
-test "environment opcodes delegate every tx context access to host" {
+test "ORIGIN and GASPRICE each read transaction context from the host" {
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
@@ -556,13 +625,13 @@ test "environment opcodes delegate every tx context access to host" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
 
-    try std.testing.expectEqual(@as(u64, 2), mock_host.tx_context_reads);
+    try std.testing.expectEqual(@as(u64, 2), mock_host.execution_context_reads);
 }
 
 test "host read errors propagate out of bytecode execution" {
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
-    mock_host.tx_context_error = error.DatabaseUnavailable;
+    mock_host.execution_context_error = error.DatabaseUnavailable;
     var host = mock_host.host();
     const msg = defaultMessage();
     const code = bytecode(.{.ORIGIN});
@@ -593,18 +662,12 @@ test "host action errors propagate out of CALL execution" {
 
 test "SLOTNUM pushes the transaction context slot number" {
     var mock_host = MockHost.init(std.testing.allocator, .{
-        .base_fee = 0,
-        .gas_limit = 0,
-        .gas_price = 0,
-        .coinbase = addr(0),
-        .origin = addr(0),
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-        .chain_id = 0,
-        .number = 1000,
-        .slot_number = 0x123456789abcdef0,
-        .prev_randao = 0,
-        .timestamp = 0,
+        .chain = .{ .chain_id = 0 },
+        .block = .{
+            .number = 1000,
+            .slot_number = 0x123456789abcdef0,
+        },
+        .transaction = .{ .origin = addr(0) },
     });
     defer mock_host.deinit();
     var host = mock_host.host();
@@ -614,22 +677,14 @@ test "SLOTNUM pushes the transaction context slot number" {
     const result = try runBytecodeWithHost(&host, &msg, &code, .amsterdam);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
-    try std.testing.expectEqual(@as(u64, 1), mock_host.tx_context_reads);
+    try std.testing.expectEqual(@as(u64, 1), mock_host.execution_context_reads);
 }
 
 fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
     var mock_host = MockHost.init(std.testing.allocator, .{
-        .base_fee = 0,
-        .gas_limit = 0,
-        .gas_price = 0,
-        .coinbase = addr(0),
-        .origin = addr(0),
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-        .chain_id = 0,
-        .number = 1000,
-        .prev_randao = 0,
-        .timestamp = 0,
+        .chain = .{ .chain_id = 0 },
+        .block = .{ .number = 1000 },
+        .transaction = .{ .origin = addr(0) },
     });
     defer mock_host.deinit();
     var host = mock_host.host();

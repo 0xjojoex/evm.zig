@@ -21,11 +21,3 @@ pub fn initAssumeSafe(value: Reader) ConcurrentReader {
 pub fn reader(self: ConcurrentReader) Reader {
     return self.value;
 }
-
-test "concurrent reader preserves the wrapped interface" {
-    const wrapped = Reader.empty();
-    const concurrent = ConcurrentReader.initAssumeSafe(wrapped);
-
-    try @import("std").testing.expectEqual(wrapped.ptr, concurrent.reader().ptr);
-    try @import("std").testing.expectEqual(wrapped.vtable, concurrent.reader().vtable);
-}

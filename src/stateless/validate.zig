@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const Config = @import("../ExecutionConfig.zig");
+const Config = @import("../code/Config.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const eth_spec = @import("../eth/spec.zig");
 const Vm = @import("../vm.zig");

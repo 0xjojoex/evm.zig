@@ -650,10 +650,3 @@ test "SSZ conformance accepts canonical values and rejects malformed values" {
         runFixed(u16, &.{0x34}, .{ .valid = false, .root = null }),
     );
 }
-
-test "SSZ conformance decodes raw Snappy fixture blocks" {
-    const compressed = [_]u8{ 1, 0, 1 };
-    const serialized = try snappy.decodeWithMax(std.testing.allocator, &compressed, 1);
-    defer std.testing.allocator.free(serialized);
-    try std.testing.expectEqualSlices(u8, &.{1}, serialized);
-}

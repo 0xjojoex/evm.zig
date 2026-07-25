@@ -331,6 +331,15 @@ test "settlement costs cap gas refund by fork" {
     try std.testing.expectEqual(@as(u64, 52), costs.gas.refunded);
     try std.testing.expectEqual(@as(u256, 260), costs.payer_refund);
     try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
+
+    const pre_london = try runtime(exactEthereum(eth.berlin)).defaultCosts(settlement, .{
+        .gas_left = 40,
+        .gas_refund = 100,
+        .gas_reservoir = 0,
+        .state_gas_spent = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 30), pre_london.gas.used);
+    try std.testing.expectEqual(@as(u64, 70), pre_london.gas.refunded);
 }
 
 test "settlement costs use runtime gas accounting policy" {

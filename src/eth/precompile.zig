@@ -136,30 +136,3 @@ test "precompile activation extends exact configs" {
     try std.testing.expect(Prague.resolve(Entry.p256verify.toAddress()) == null);
     try std.testing.expectEqual(Entry.p256verify, Osaka.resolve(Entry.p256verify.toAddress()).?);
 }
-
-test "precompile execution applies Ethereum activation before catalog execution" {
-    const Frontier = Exact(frontier_config);
-    const Byzantium = Exact(byzantium_config);
-    try std.testing.expectEqual(null, Frontier.resolve(Entry.modexp.toAddress()));
-
-    var mock_host = @import("../t.zig").MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const message: @import("../Host.zig").Message = .{
-        .depth = 0,
-        .kind = .call,
-        .gas = 0,
-        .sender = address.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
-    const outcome = try Byzantium.execute(.modexp, .{
-        .allocator = std.testing.allocator,
-        .host = &host,
-        .message = &message,
-    });
-    const result = outcome.result;
-    try std.testing.expectEqual(precompile.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-    try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
-}

@@ -1,4 +1,3 @@
-const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const Host = @import("../Host.zig");

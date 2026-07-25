@@ -86,7 +86,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 300_000),
+        evmz.t.defaultExecutionContext(sender, 300_000),
         .{ .call = .{ .sender = sender, .recipient = root, .input = &root_input } },
         .legacy(300_000),
         &capture.context,
@@ -126,7 +126,7 @@ test "call capture closes an immediate insufficient-balance call" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
         &capture.context,
@@ -158,7 +158,7 @@ test "root insufficient-balance capture preserves unspent gas" {
         errdefer capture.context.abort() catch {};
 
         const result = (try executor.runStandaloneCaptured(
-            evmz.t.defaultTxContext(sender, gas),
+            evmz.t.defaultExecutionContext(sender, gas),
             .{ .call = .{
                 .sender = sender,
                 .recipient = recipient,
@@ -193,7 +193,7 @@ test "call capture retains immediate depth-limit cause" {
     errdefer capture.context.abort() catch {};
 
     try executor.beginCapturedTransaction(
-        evmz.t.defaultTxContext(sender, 20_000),
+        evmz.t.defaultExecutionContext(sender, 20_000),
         sender,
         child,
         &capture.context,
@@ -240,7 +240,7 @@ test "call capture retains opcode-local CALL depth attempt" {
     errdefer capture.context.abort() catch {};
 
     try executor.beginCapturedTransaction(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         sender,
         root,
         &capture.context,
@@ -342,7 +342,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         errdefer capture.context.abort() catch {};
 
         try executor.beginCapturedTransaction(
-            evmz.t.defaultTxContext(sender, 200_000),
+            evmz.t.defaultExecutionContext(sender, 200_000),
             sender,
             root,
             &capture.context,
@@ -401,7 +401,7 @@ test "call capture distinguishes CREATE collision from rollback" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
         &capture.context,
@@ -442,7 +442,7 @@ test "call capture retains invalid deployed code and local rollback" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
         &capture.context,
@@ -478,7 +478,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 100),
+        evmz.t.defaultExecutionContext(sender, 100),
         .{ .create = .{
             .sender = sender,
             .recipient = target,
@@ -540,7 +540,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
         errdefer capture.context.abort() catch {};
 
         const result = (try executor.runStandaloneCaptured(
-            evmz.t.defaultTxContext(sender, 200_000),
+            evmz.t.defaultExecutionContext(sender, 200_000),
             .{ .call = .{ .sender = sender, .recipient = root } },
             .legacy(200_000),
             &capture.context,
@@ -577,7 +577,7 @@ test "call capture retains pinned write-protection category" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
         &capture.context,
@@ -608,7 +608,7 @@ test "call capture records SELFDESTRUCT as a semantic child" {
     errdefer capture.context.abort() catch {};
 
     _ = try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 100_000),
+        evmz.t.defaultExecutionContext(sender, 100_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(100_000),
         &capture.context,
@@ -646,7 +646,7 @@ test "root CREATE capture closes after runtime-code finalization" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, 200_000),
+        evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .create = .{
             .sender = sender,
             .recipient = created,

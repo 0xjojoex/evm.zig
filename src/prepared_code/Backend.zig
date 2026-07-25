@@ -10,7 +10,7 @@
 //! An implementation shared by concurrent VMs must synchronize its own state.
 
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
+const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 
 const Backend = @This();
 

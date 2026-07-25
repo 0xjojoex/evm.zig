@@ -150,13 +150,6 @@ pub fn copy(self: *Memory, dest: usize, src: usize, size: usize) void {
     }
 }
 
-/// Expand the memory if needed, return the *gas cost* of the expansion.
-pub fn expand(self: *Memory, offset: usize, byte_size: usize) !i64 {
-    const expansion = try self.expansionFor(offset, byte_size);
-    try self.expandPrepared(expansion);
-    return expansion.cost;
-}
-
 pub fn expansionFor(self: *const Memory, offset: usize, byte_size: usize) error{OutOfMemory}!Expansion {
     const next_size = try nextSize(offset, byte_size);
     const cost = if (self.len() < next_size)
@@ -164,10 +157,6 @@ pub fn expansionFor(self: *const Memory, offset: usize, byte_size: usize) error{
     else
         0;
     return .{ .cost = cost, .next_size = next_size };
-}
-
-pub fn expansionCost(self: *const Memory, offset: usize, byte_size: usize) error{OutOfMemory}!i64 {
-    return (try self.expansionFor(offset, byte_size)).cost;
 }
 
 pub fn expandToFit(self: *Memory, offset: usize, byte_size: usize) !void {
@@ -212,7 +201,7 @@ test Memory {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 64);
+    try memory.expandToFit(0, 64);
     memory.write(0, 0xff);
 
     const value0 = memory.read(0);
@@ -242,9 +231,9 @@ test "bounded memory reuses reserved capacity and rejects growth" {
 
     {
         var memory = Memory.initRetainingCapacity(&storage, no_growth_allocator);
-        _ = try memory.expand(0, 64);
+        try memory.expandToFit(0, 64);
         try std.testing.expectEqual(@as(usize, 64), memory.len());
-        try std.testing.expectError(error.OutOfMemory, memory.expand(64, 32));
+        try std.testing.expectError(error.OutOfMemory, memory.expandToFit(64, 32));
         memory.deinitRetainingCapacity();
     }
 
@@ -254,7 +243,7 @@ test "bounded memory reuses reserved capacity and rejects growth" {
     {
         var memory = Memory.initRetainingCapacity(&storage, std.testing.allocator);
         defer memory.deinit();
-        _ = try memory.expand(32, 32);
+        try memory.expandToFit(32, 32);
         try std.testing.expectEqual(@as(usize, 64), memory.len());
         try std.testing.expectEqual(@as(usize, 64), storage.capacity);
     }
@@ -265,7 +254,7 @@ test "memory writes overwrite without shifting bytes" {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 32);
+    try memory.expandToFit(0, 32);
     try std.testing.expectEqual(@as(usize, 32), memory.len());
 
     memory.write(0, 0xff);
@@ -282,7 +271,7 @@ test "memory byte slice writes overwrite without shifting bytes" {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 32);
+    try memory.expandToFit(0, 32);
     memory.writeBytes(0, &.{ 0xaa, 0xbb, 0xcc });
     try std.testing.expectEqual(@as(usize, 32), memory.len());
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xcc }, memory.readBytes(0, 3));
@@ -306,7 +295,7 @@ test "memory byte writes use low byte of word" {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 1);
+    try memory.expandToFit(0, 1);
     memory.write8(0, 0x1234);
     try std.testing.expectEqual(@as(u8, 0x34), memory.readBytes(0, 1)[0]);
 }
@@ -316,7 +305,7 @@ test "padded memory byte writes only zero missing source bytes" {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 32);
+    try memory.expandToFit(0, 32);
     @memset(memory.readBytes(0, 32), 0xff);
 
     memory.writePaddedBytes(0, 4, &.{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee });
@@ -332,7 +321,7 @@ test "memory copy is overlap safe" {
     var memory = Memory.init(&storage, std.testing.allocator);
     defer memory.deinit();
 
-    _ = try memory.expand(0, 32);
+    try memory.expandToFit(0, 32);
     memory.writeBytes(0, &.{ 0xaa, 0xbb, 0xcc, 0xdd });
     memory.copy(2, 0, 4);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xaa, 0xbb, 0xcc, 0xdd }, memory.readBytes(0, 6));

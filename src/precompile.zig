@@ -793,30 +793,6 @@ fn executeEthereumPrecompileForTest(
     }, config);
 }
 
-test "Ethereum precompile activation follows exact configs" {
-    const eth_precompile = @import("eth/precompile.zig");
-    const Frontier = Exact(eth_precompile.frontier_config);
-    const Byzantium = Exact(eth_precompile.byzantium_config);
-    const Istanbul = Exact(eth_precompile.istanbul_config);
-    const Berlin = Exact(eth_precompile.berlin_config);
-    const Cancun = Exact(eth_precompile.cancun_config);
-    const Prague = Exact(eth_precompile.prague_config);
-    const Osaka = Exact(eth_precompile.osaka_config);
-
-    try std.testing.expectEqual(Contract.ecrecover, Frontier.resolve(Contract.ecrecover.toAddress()).?);
-    try std.testing.expect(Frontier.resolve(Contract.modexp.toAddress()) == null);
-    try std.testing.expectEqual(Contract.modexp, Byzantium.resolve(Contract.modexp.toAddress()).?);
-    try std.testing.expect(Byzantium.resolve(Contract.blake2f.toAddress()) == null);
-    try std.testing.expectEqual(Contract.blake2f, Istanbul.resolve(Contract.blake2f.toAddress()).?);
-    try std.testing.expect(Berlin.resolve(Contract.kzg_point_evaluation.toAddress()) == null);
-    try std.testing.expectEqual(Contract.kzg_point_evaluation, Cancun.resolve(Contract.kzg_point_evaluation.toAddress()).?);
-    try std.testing.expect(Cancun.resolve(Contract.bls12_g1add.toAddress()) == null);
-    try std.testing.expectEqual(Contract.bls12_g1add, Prague.resolve(Contract.bls12_g1add.toAddress()).?);
-    try std.testing.expect(Prague.resolve(address.addr(0x12)) == null);
-    try std.testing.expect(Prague.resolve(Contract.p256verify.toAddress()) == null);
-    try std.testing.expectEqual(Contract.p256verify, Osaka.resolve(Contract.p256verify.toAddress()).?);
-}
-
 test "Ethereum precompile activation gates catalog execution" {
     try std.testing.expectEqual(null, try executeEthereumPrecompileForTest(std.testing.allocator, .frontier, Contract.modexp.toAddress(), &.{}, 0));
 

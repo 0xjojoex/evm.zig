@@ -342,14 +342,6 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             self.len = 0;
         }
 
-        pub fn debugOccupiedSlots(self: Self) usize {
-            var occupied: usize = 0;
-            for (self.index) |slot| {
-                if (slot != empty_slot) occupied += 1;
-            }
-            return occupied;
-        }
-
         fn realloc(self: *Self, expected_count: Index) !void {
             const entry_capacity = expected_count;
             const slot_count = try slotCountForCapacity(entry_capacity);
@@ -480,16 +472,14 @@ test "sparse hash map clears only live slots" {
     try map.ensureTotalCapacity(1024);
     try map.put(1, {});
     try map.put(2, {});
-    try std.testing.expectEqual(@as(usize, 2), map.debugOccupiedSlots());
 
     map.clearRetainingCapacity();
     try std.testing.expectEqual(@as(u32, 0), map.count());
-    try std.testing.expectEqual(@as(usize, 0), map.debugOccupiedSlots());
     try std.testing.expect(!map.contains(1));
+    try std.testing.expect(!map.contains(2));
 
     try map.put(3, {});
     try std.testing.expect(map.contains(3));
-    try std.testing.expectEqual(@as(usize, 1), map.debugOccupiedSlots());
 }
 
 test "sparse hash map implicit growth is amortized" {

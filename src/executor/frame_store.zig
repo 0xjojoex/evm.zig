@@ -10,16 +10,8 @@ const Memory = @import("../Memory.zig");
 const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");
 const evmz = @import("../evm.zig");
-const Address = @import("../address.zig").Address;
 
 const FrameStore = @This();
-
-pub const row_bytes =
-    @sizeOf(Interpreter.CallFrame) +
-    @sizeOf(Host.Message) +
-    @sizeOf(Stack.Storage) +
-    @sizeOf(Memory.Storage) +
-    @sizeOf(frame_io.Slot);
 
 frames: std.ArrayList(Interpreter.CallFrame) = .empty,
 messages: std.ArrayList(Host.Message) = .empty,
@@ -113,16 +105,8 @@ pub fn frame(self: *FrameStore, index: usize) *Interpreter.CallFrame {
     return &self.frames.items[index];
 }
 
-pub fn activeRowCount(self: *const FrameStore) usize {
-    return self.frames.items.len;
-}
-
 pub fn maxRowCount(self: *const FrameStore) usize {
     return self.max_rows;
-}
-
-pub fn rowCapacity(self: *const FrameStore) usize {
-    return self.frames.capacity;
 }
 
 /// Addressable words for the active LIFO frame set, including the active
@@ -143,14 +127,6 @@ pub fn maxStackBase(self: *const FrameStore) usize {
 /// Peak addressable arena window, including active-frame headroom.
 pub fn maxStackWordCount(self: *const FrameStore) usize {
     return self.max_stack_words;
-}
-
-pub fn ioRowCapacity(self: *const FrameStore) usize {
-    return self.ios.items.len;
-}
-
-pub fn memoryRowCapacity(self: *const FrameStore) usize {
-    return self.memories.items.len;
 }
 
 fn appendRow(self: *FrameStore, allocator: std.mem.Allocator) !usize {
@@ -332,15 +308,8 @@ test "frame store rebinds active rows after growth" {
     try store.ios.ensureTotalCapacityPrecise(std.testing.allocator, 1);
 
     var host: Host = undefined;
-    const first_msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var first_msg = evmz.t.defaultMessage();
+    first_msg.gas = 100;
     var first = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &first_msg,
@@ -353,15 +322,9 @@ test "frame store rebinds active rows after growth" {
     try first.callFrame().memory.expandToFit(0, 32);
     first.callFrame().memory.writeBytes(0, "abc");
 
-    const second_msg = Host.Message{
-        .depth = 1,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var second_msg = evmz.t.defaultMessage();
+    second_msg.depth = 1;
+    second_msg.gas = 100;
     var second = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &second_msg,
@@ -399,15 +362,8 @@ test "stack arena growth failure leaves the parent row usable" {
     defer store.deinit(std.testing.allocator);
 
     var host: Host = undefined;
-    const root_msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var root_msg = evmz.t.defaultMessage();
+    root_msg.gas = 100;
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
@@ -429,7 +385,7 @@ test "stack arena growth failure leaves the parent row usable" {
         },
     ));
 
-    try std.testing.expectEqual(@as(usize, 1), store.activeRowCount());
+    try std.testing.expectEqual(@as(usize, 1), store.frames.items.len);
     try std.testing.expectEqual(@as(usize, Stack.capacity), store.activeStackWordCount());
     try std.testing.expectEqual(@as(u16, 600), root.callFrame().stack.len);
     try std.testing.expectEqual(@as(u256, 0), root.callFrame().stack.asSlice()[0]);
@@ -439,19 +395,12 @@ test "stack arena growth failure leaves the parent row usable" {
 test "stable metadata capacity prevents active frame relocation" {
     var store: FrameStore = .{ .stable_metadata_capacity = 2 };
     defer store.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), store.memoryRowCapacity());
-    try std.testing.expectEqual(@as(usize, 0), store.ioRowCapacity());
+    try std.testing.expectEqual(@as(usize, 0), store.memories.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.ios.items.len);
 
     var host: Host = undefined;
-    const root_msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var root_msg = evmz.t.defaultMessage();
+    root_msg.gas = 100;
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
@@ -459,9 +408,9 @@ test "stable metadata capacity prevents active frame relocation" {
     });
     defer root.deinit();
     const root_ptr = root.callFrame();
-    try std.testing.expectEqual(@as(usize, 2), store.rowCapacity());
-    try std.testing.expectEqual(@as(usize, 1), store.memoryRowCapacity());
-    try std.testing.expectEqual(@as(usize, 1), store.ioRowCapacity());
+    try std.testing.expectEqual(@as(usize, 2), store.frames.capacity);
+    try std.testing.expectEqual(@as(usize, 1), store.memories.items.len);
+    try std.testing.expectEqual(@as(usize, 1), store.ios.items.len);
 
     var child_msg = root_msg;
     child_msg.depth = 1;
@@ -471,8 +420,8 @@ test "stable metadata capacity prevents active frame relocation" {
         .bytecode = evmz.Bytecode.View.empty,
     });
     try std.testing.expect(root.callFrame() == root_ptr);
-    try std.testing.expectEqual(@as(usize, 2), store.memoryRowCapacity());
-    try std.testing.expectEqual(@as(usize, 2), store.ioRowCapacity());
+    try std.testing.expectEqual(@as(usize, 2), store.memories.items.len);
+    try std.testing.expectEqual(@as(usize, 2), store.ios.items.len);
 
     child.deinit();
     var sibling = try store.acquire(no_growth_allocator, no_growth_allocator, .{
@@ -482,8 +431,8 @@ test "stable metadata capacity prevents active frame relocation" {
     });
     defer sibling.deinit();
     try std.testing.expect(root.callFrame() == root_ptr);
-    try std.testing.expectEqual(@as(usize, 2), store.memoryRowCapacity());
-    try std.testing.expectEqual(@as(usize, 2), store.ioRowCapacity());
+    try std.testing.expectEqual(@as(usize, 2), store.memories.items.len);
+    try std.testing.expectEqual(@as(usize, 2), store.ios.items.len);
 }
 
 test "packed stack arena advances by suspended live words" {
@@ -491,15 +440,8 @@ test "packed stack arena advances by suspended live words" {
     defer store.deinit(std.testing.allocator);
 
     var host: Host = undefined;
-    const root_msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var root_msg = evmz.t.defaultMessage();
+    root_msg.gas = 100;
     var root = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &root_msg,
@@ -530,15 +472,8 @@ test "frame store owns parent returndata and resolves output from frame memory" 
     defer store.deinit(std.testing.allocator);
 
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = std.mem.zeroes(Address),
-        .sender = std.mem.zeroes(Address),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
     var lease = try store.acquire(std.testing.allocator, std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -551,12 +486,12 @@ test "frame store owns parent returndata and resolves output from frame memory" 
     try lease.callFrame().replaceReturnData("abcd");
     try std.testing.expectEqualSlices(u8, "abcd", lease.callFrame().return_data);
 
-    _ = try lease.callFrame().memory.expand(0, 32);
+    try lease.callFrame().memory.expandToFit(0, 32);
     lease.callFrame().memory.writeBytes(0, "xyz");
     lease.callFrame().setOutputRange(0, 3);
     try std.testing.expectEqualSlices(u8, "xyz", lease.callFrame().getResult().output_data);
 
-    _ = try lease.callFrame().memory.expand(4096, 1);
+    try lease.callFrame().memory.expandToFit(4096, 1);
     try std.testing.expectEqualSlices(u8, "xyz", lease.callFrame().getResult().output_data);
 
     lease.deinit();

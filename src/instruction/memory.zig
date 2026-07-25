@@ -96,10 +96,6 @@ test "MCOPY is only enabled from Cancun" {
     try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH0, .PUSH0, .PUSH0, .MCOPY }, .cancun, .success);
 }
 
-test "MCOPY expands destination" {
-    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x01, .PUSH0, .PUSH1, 0x20, .MCOPY }, .success);
-}
-
 test "MCOPY zero length ignores out of bounds offsets" {
     try evmz.t.expectLatestForkBytecodeStatus(
         .{

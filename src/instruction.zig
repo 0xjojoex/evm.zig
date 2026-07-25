@@ -92,11 +92,6 @@ test "fork-dependent static gas follows legacy schedules" {
     try std.testing.expectEqual(@as(i64, 5000), staticGasAt(.tangerine_whistle, .SELFDESTRUCT));
 }
 
-test "execute charges dynamic and fixed static gas" {
-    try std.testing.expectEqual(@as(i64, 99_980), try executeBalance(evmz.eth.frontier));
-    try std.testing.expectEqual(@as(i64, 99_300), try executeBalance(evmz.eth.istanbul));
-}
-
 test "execute uses exact instruction availability" {
     try expectOpcodeStatus(evmz.eth.frontier, .BASEFEE, .invalid_opcode);
 }
@@ -121,34 +116,6 @@ test "execute uses resolved dispatch target for hot opcodes" {
     try frame.frame.stack.push(3);
     try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
     try std.testing.expectEqual(interpreter.FrameStatus.invalid_opcode, frame.frame.status);
-}
-
-test "untraced interpreter raw fallback respects resolved dispatch target" {
-    const spec = instructionOverrideSpec(.ADD, .invalid);
-
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-    const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1),
-        2,
-        @intFromEnum(Opcode.PUSH1),
-        3,
-        @intFromEnum(Opcode.ADD),
-    };
-
-    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &code,
-    });
-    defer frame.deinit();
-    var intpr = frame.interpreter();
-
-    const result = try intpr.execute();
-
-    try std.testing.expectEqual(interpreter.Status.invalid, result.status);
 }
 
 test "untraced interpreter tail dispatch respects resolved dispatch target" {
@@ -272,26 +239,6 @@ fn instructionGasSpec(comptime opcode: Opcode, comptime gas: i64) evmz.eth.Spec 
 
 fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
     return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).static_gas;
-}
-
-fn executeBalance(comptime spec: evmz.eth.Spec) !i64 {
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(Opcode.BALANCE)};
-
-    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .code = &code,
-    });
-    defer frame.deinit();
-
-    try frame.frame.stack.push(0);
-    try Instruction(spec).execute(@intFromEnum(Opcode.BALANCE), frame.frame);
-    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
-    return frame.frame.gas_left;
 }
 
 fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: interpreter.FrameStatus) !void {

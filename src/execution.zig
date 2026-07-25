@@ -8,6 +8,7 @@
 const std = @import("std");
 
 const Address = @import("./address.zig").Address;
+const execution_context = @import("./execution/context.zig");
 
 const precompile_runtime = @import("./execution/precompile_runtime.zig");
 
@@ -15,6 +16,7 @@ pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
 pub const PrecompileCall = precompile_runtime.PrecompileCall;
 pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
 pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
+pub const resources = @import("./execution/resources.zig");
 
 // TODO: more status code
 pub const Status = enum(u8) {
@@ -222,51 +224,12 @@ pub const Message = union(enum) {
             .create => |create| create.value,
         };
     }
-
-    pub fn isCreate(self: Message) bool {
-        return switch (self) {
-            .call => false,
-            .create => true,
-        };
-    }
 };
 
-/// Chain-lifetime values resolved for EVM execution.
-pub const ChainEnvironment = struct {
-    /// Required: a default would silently choose one family's chain identity.
-    chain_id: u256,
-};
-
-/// Block-lifetime values resolved for EVM execution.
-pub const BlockEnvironment = struct {
-    coinbase: Address = std.mem.zeroes(Address),
-    number: u64 = 0,
-    slot_number: u64 = 0,
-    timestamp: u64 = 0,
-    /// Opcode-visible block gas limit, not the message execution budget.
-    gas_limit: u64 = 0,
-    difficulty_or_prev_randao: u256 = 0,
-    base_fee: u256 = 0,
-    blob_base_fee: u256 = 0,
-};
-
-/// Transaction-lifetime values resolved for EVM execution.
-pub const TransactionEnvironment = struct {
-    origin: Address,
-    gas_price: u256 = 0,
-    blob_hashes: []const u256 = &.{},
-};
-
-/// Resolved opcode-visible environment for one EVM call tree.
-pub const ExecutionContext = struct {
-    pub const Chain = ChainEnvironment;
-    pub const Block = BlockEnvironment;
-    pub const Transaction = TransactionEnvironment;
-
-    chain: ChainEnvironment,
-    block: BlockEnvironment = .{},
-    transaction: TransactionEnvironment,
-};
+pub const ChainEnvironment = execution_context.ChainEnvironment;
+pub const BlockEnvironment = execution_context.BlockEnvironment;
+pub const TransactionEnvironment = execution_context.TransactionEnvironment;
+pub const ExecutionContext = execution_context.ExecutionContext;
 
 /// A storage slot that is already warm when root execution starts.
 pub const WarmStorageSlot = struct {
@@ -340,7 +303,6 @@ test "message identity is independent from gas and preserves create2 salt" {
         .create2_salt = 9,
     });
 
-    try std.testing.expect(message.isCreate());
     try std.testing.expectEqual(sender, message.sender());
     try std.testing.expectEqualSlices(u8, &.{0x42}, message.input());
     try std.testing.expectEqual(@as(u256, 7), message.value());
@@ -352,30 +314,4 @@ test "create message construction requires a family-resolved recipient" {
     try std.testing.expectError(error.MissingCreateRecipient, Message.init(.{
         .sender = [_]u8{0x11} ** 20,
     }));
-}
-
-test "concrete request literals expose call and warm-set fields" {
-    const sender = [_]u8{0x11} ** 20;
-    const recipient = [_]u8{0x22} ** 20;
-    const request: EvmExecutionRequest = .{
-        .context = .{
-            .chain = .{ .chain_id = 1 },
-            .block = .{ .coinbase = recipient },
-            .transaction = .{ .origin = sender },
-        },
-        .message = .{ .call = .{
-            .sender = sender,
-            .recipient = recipient,
-        } },
-        .gas = .legacy(100_000),
-    };
-    const scope: ExecutionScopeInit = .{ .initial_warm_set = .{
-        .accounts = &.{recipient},
-        .storage_slots = &.{.{ .address = recipient, .key = 7 }},
-    } };
-
-    try std.testing.expectEqual(@as(u256, 1), request.context.chain.chain_id);
-    try std.testing.expectEqual(@as(u64, 100_000), request.gas.regular_left);
-    try std.testing.expectEqual(@as(usize, 1), scope.initial_warm_set.accounts.len);
-    try std.testing.expectEqual(@as(usize, 1), scope.initial_warm_set.storage_slots.len);
 }

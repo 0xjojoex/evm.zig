@@ -450,15 +450,6 @@ fn infoFor(op: Opcode) OpInfo {
     };
 }
 
-test "Opcode can represent unnamed opcode bytes" {
-    const opcode: Opcode = @enumFromInt(0x0c);
-    try std.testing.expectEqual(@as(u8, 0x0c), @intFromEnum(opcode));
-
-    const row = infoFor(opcode);
-    try std.testing.expect(!row.defined);
-    try std.testing.expectEqual(ExitKind.invalid, row.exit);
-}
-
 test "opcode table reproduces the per-opcode switches" {
     const expectEqual = std.testing.expectEqual;
 

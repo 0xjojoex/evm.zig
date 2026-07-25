@@ -3,9 +3,8 @@ const evmz = @import("../evm.zig");
 const block_program = @import("../block_program.zig");
 
 const Address = evmz.Address;
-const Host = evmz.Host;
+const ExecutionContext = evmz.execution.ExecutionContext;
 const Interpreter = evmz.interpreter;
-const context_adapter = @import("context.zig");
 
 const IgnorePending = struct {
     pub fn observe(_: IgnorePending, _: evmz.state.TrackedState.PendingView) !void {}
@@ -25,19 +24,19 @@ const SystemCallMode = union(enum) {
 /// Applies before-block system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
 /// - EIP-2935 stores the previous block hash from Prague onward.
-pub fn applyBeforeBlock(executor: anytype, tx_context: Host.TxContext, context: BeforeBlockContext) !void {
+pub fn applyBeforeBlock(executor: anytype, execution_context: ExecutionContext, context: BeforeBlockContext) !void {
     const calls = @TypeOf(executor.*).specification.block.beforeBlock(context);
-    try applySystemCalls(executor, tx_context, &calls, .normal, IgnorePending{});
+    try applySystemCalls(executor, execution_context, &calls, .normal, IgnorePending{});
 }
 
 pub fn applyBeforeBlockObserved(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     context: BeforeBlockContext,
     observer: anytype,
 ) !void {
     const calls = @TypeOf(executor.*).specification.block.beforeBlock(context);
-    try applySystemCalls(executor, tx_context, &calls, .observed, observer);
+    try applySystemCalls(executor, execution_context, &calls, .observed, observer);
 }
 
 /// Execute a before-transaction batch inside the transaction program's outer
@@ -45,14 +44,14 @@ pub fn applyBeforeBlockObserved(
 /// later hook/payload/inclusion failure discards the complete attempt.
 pub fn applyBeforeTransactionPrelude(
     prelude: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     context: BeforeTransactionContext,
 ) @TypeOf(prelude).Error!void {
     const calls = @TypeOf(prelude).specification.block.beforeTransaction(context);
     for (calls.slice()) |*call| {
         try callSystemContractInPrelude(
             prelude,
-            tx_context,
+            execution_context,
             call.sender,
             call.recipient,
             call.input.slice(),
@@ -63,41 +62,41 @@ pub fn applyBeforeTransactionPrelude(
     }
 }
 
-pub fn applyAfterTransaction(executor: anytype, tx_context: Host.TxContext, context: AfterTransactionContext) !void {
+pub fn applyAfterTransaction(executor: anytype, execution_context: ExecutionContext, context: AfterTransactionContext) !void {
     const calls = @TypeOf(executor.*).specification.block.afterTransaction(context);
-    try applySystemCalls(executor, tx_context, &calls, .normal, IgnorePending{});
+    try applySystemCalls(executor, execution_context, &calls, .normal, IgnorePending{});
 }
 
 pub fn applyAfterTransactionObserved(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     context: AfterTransactionContext,
     observer: anytype,
 ) !void {
     const calls = @TypeOf(executor.*).specification.block.afterTransaction(context);
-    try applySystemCalls(executor, tx_context, &calls, .observed, observer);
+    try applySystemCalls(executor, execution_context, &calls, .observed, observer);
 }
 
 pub fn applyAfterTransactionCaptured(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     context: AfterTransactionContext,
     capture: *evmz.executor.CaptureContext,
     observer: anytype,
 ) !void {
     const calls = @TypeOf(executor.*).specification.block.afterTransaction(context);
-    try applySystemCalls(executor, tx_context, &calls, .{ .captured = capture }, observer);
+    try applySystemCalls(executor, execution_context, &calls, .{ .captured = capture }, observer);
 }
 
 pub fn applyFinalizeBlock(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
     context: FinalizeBlockContext,
 ) ![]const []const u8 {
     return applyFinalizeBlockMode(
         executor,
-        tx_context,
+        execution_context,
         allocator,
         context,
         .normal,
@@ -107,14 +106,14 @@ pub fn applyFinalizeBlock(
 
 pub fn applyFinalizeBlockObserved(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
     context: FinalizeBlockContext,
     observer: anytype,
 ) ![]const []const u8 {
     return applyFinalizeBlockMode(
         executor,
-        tx_context,
+        execution_context,
         allocator,
         context,
         .observed,
@@ -124,7 +123,7 @@ pub fn applyFinalizeBlockObserved(
 
 fn applyFinalizeBlockMode(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
     context: FinalizeBlockContext,
     mode: SystemCallMode,
@@ -148,7 +147,7 @@ fn applyFinalizeBlockMode(
         const call = &finalize_call.call;
         const request = try callRequestSystemContract(
             executor,
-            tx_context,
+            execution_context,
             allocator,
             call.sender,
             call.recipient,
@@ -173,7 +172,7 @@ fn applyFinalizeBlockMode(
 
 fn applySystemCalls(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     calls: *const block_program.BlockSystemCalls,
     mode: SystemCallMode,
     observer: anytype,
@@ -187,7 +186,7 @@ fn applySystemCalls(
     for (calls.slice()) |*call| {
         try callSystemContract(
             executor,
-            tx_context,
+            execution_context,
             call.sender,
             call.recipient,
             call.input.slice(),
@@ -202,7 +201,7 @@ fn applySystemCalls(
 
 fn callSystemContract(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     sender: Address,
     recipient: Address,
     input: []const u8,
@@ -216,14 +215,14 @@ fn callSystemContract(
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
         .observed => try executor.executeSystemCallObserved(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
@@ -231,7 +230,7 @@ fn callSystemContract(
             observer,
         ),
         .captured => |capture| try executor.executeSystemCallCaptured(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
@@ -245,7 +244,7 @@ fn callSystemContract(
 
 fn callSystemContractInPrelude(
     prelude: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     sender: Address,
     recipient: Address,
     input: []const u8,
@@ -257,7 +256,7 @@ fn callSystemContractInPrelude(
     if (!has_code and require_code) return error.SystemCallFailed;
 
     const result = try prelude.executeRequest(.{
-        .context = context_adapter.fromHost(tx_context),
+        .context = execution_context,
         .message = .{ .call = .{
             .sender = sender,
             .recipient = recipient,
@@ -273,7 +272,7 @@ fn callSystemContractInPrelude(
 
 fn callRequestSystemContract(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
     sender: Address,
     recipient: Address,
@@ -289,14 +288,14 @@ fn callRequestSystemContract(
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
         .observed => try executor.executeSystemCallObserved(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
@@ -304,7 +303,7 @@ fn callRequestSystemContract(
             observer,
         ),
         .captured => |capture| try executor.executeSystemCallCaptured(
-            tx_context,
+            execution_context,
             sender,
             recipient,
             input,
@@ -353,7 +352,7 @@ test "before block calls Prague and Cancun system contracts" {
     var beacon_root = [_]u8{0} ** 32;
     beacon_root[31] = 0xbb;
 
-    const tx_context = testTxContext();
+    const execution_context = testExecutionContext();
     const calls = Prague.specification.block.beforeBlock(.{
         .number = 1,
         .timestamp = 12,
@@ -375,7 +374,7 @@ test "before block calls Prague and Cancun system contracts" {
         try std.testing.expectEqual(ethereum.system_call_state_gas, call.state_gas);
     }
 
-    try applyBeforeBlock(&executor, tx_context, .{
+    try applyBeforeBlock(&executor, execution_context, .{
         .number = 1,
         .timestamp = 12,
         .parent_hash = parent_hash,
@@ -387,7 +386,7 @@ test "before block calls Prague and Cancun system contracts" {
     try std.testing.expectEqual(@as(u256, 0xbb), try executor.getStorage(ethereum.beacon_roots_address, 8191 + 12));
 
     try std.testing.expectEqual(Interpreter.Status.success, (try executor.executeSystemCall(
-        tx_context,
+        execution_context,
         ethereum.system_address,
         evmz.addr(0x1234),
         &parent_hash,
@@ -427,7 +426,7 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
     });
     try executor.state.seedAccount(ReservoirBlock.recipient, recipient_account);
 
-    try applyBeforeBlock(&executor, testTxContext(), .{
+    try applyBeforeBlock(&executor, testExecutionContext(), .{
         .number = 1,
         .timestamp = 12,
     });
@@ -472,7 +471,7 @@ test "finalize block copies successful system contract output into typed request
     try request_account.setCode(&request_code);
     try executor.state.seedAccount(RequestBlock.recipient, request_account);
 
-    const requests = try applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
+    const requests = try applyFinalizeBlock(&executor, testExecutionContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,
@@ -514,7 +513,7 @@ test "finalize block rejects missing required system contract code" {
     var executor = RequiredVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&executor, testTxContext(), std.testing.allocator, .{
+    try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&executor, testExecutionContext(), std.testing.allocator, .{
         .number = 1,
         .timestamp = 12,
         .transaction_count = 0,
@@ -524,18 +523,10 @@ test "finalize block rejects missing required system contract code" {
     }));
 }
 
-fn testTxContext() Host.TxContext {
+fn testExecutionContext() ExecutionContext {
     return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = evmz.addr(0),
-        .coinbase = evmz.addr(0),
-        .number = 1,
-        .timestamp = 12,
-        .gas_limit = 0,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
+        .chain = .{ .chain_id = 1 },
+        .block = .{ .number = 1, .timestamp = 12 },
+        .transaction = .{ .origin = evmz.addr(0) },
     };
 }

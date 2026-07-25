@@ -8,6 +8,7 @@ const std = @import("std");
 const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 const Interpreter = @import("./Interpreter.zig");
+pub const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
 const TerminalCause = @import("./execution.zig").TerminalCause;
@@ -243,21 +244,6 @@ pub const CallKind = enum(u8) {
     }
 };
 
-pub const TxContext = struct {
-    chain_id: u256,
-    gas_price: u256,
-    origin: Address,
-    coinbase: Address,
-    number: u64,
-    slot_number: u64 = 0,
-    timestamp: u64,
-    gas_limit: u64,
-    prev_randao: u256,
-    base_fee: u256,
-    blob_base_fee: u256,
-    blob_hashes: []const u256,
-};
-
 /// EVM log payload. `topics` and `data` are borrowed by the host callback;
 /// implementations that retain logs must copy them.
 pub const Log = struct {
@@ -279,7 +265,7 @@ pub const VTable = struct {
     copyCode: *const fn (ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) anyerror!usize,
     emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
-    getTxContext: *const fn (ptr: *anyopaque) anyerror!TxContext,
+    getExecutionContext: *const fn (ptr: *anyopaque) anyerror!ExecutionContext,
     accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?AccessStatus,
@@ -301,8 +287,8 @@ vtable: *const VTable,
 pub fn accountExists(self: *Self, address: Address) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
-pub fn getTxContext(self: *Self) !TxContext {
-    return self.vtable.getTxContext(self.ptr);
+pub fn getExecutionContext(self: *Self) !ExecutionContext {
+    return self.vtable.getExecutionContext(self.ptr);
 }
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);

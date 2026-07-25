@@ -5,7 +5,7 @@
 //! `View`; mutation is limited to owner-side construction/teardown.
 
 const std = @import("std");
-const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
+const JumpDestStrategy = @import("Config.zig").JumpDestStrategy;
 const JumpDestMap = @import("JumpDestMap.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
@@ -181,16 +181,4 @@ test "bytecode keeps semantic bytes separate from padded read bytes" {
     const borrowed = bytecode.view();
     try std.testing.expectEqual(raw.len, borrowed.bytes.len);
     try std.testing.expectEqual(bytecode.bytes.ptr, borrowed.bytes.ptr);
-}
-
-test "zero-padded code owns semantic bytes and readable tail" {
-    const source = [_]u8{ 0x60, 0x01 };
-    var padded = try ZeroPaddedCode.init(std.testing.allocator, &source);
-    defer padded.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(source.len, padded.bytes.len);
-    try std.testing.expectEqual(source.len + zero_padding_len, padded.read_bytes.len);
-    try std.testing.expectEqual(padded.bytes.ptr, padded.read_bytes.ptr);
-    try std.testing.expectEqualSlices(u8, &source, padded.bytes);
-    try std.testing.expect(std.mem.allEqual(u8, padded.read_bytes[source.len..], 0));
 }

@@ -6,7 +6,7 @@
 //! owners still verify the values they return, and execution must remain
 //! correct when preparation is absent or incomplete.
 
-const Address = @import("./address.zig").Address;
+const Address = @import("../address.zig").Address;
 
 /// One canonical storage path that execution may read.
 pub const StorageSlot = struct {
@@ -49,32 +49,3 @@ pub const Preparer = struct {
         return self.vtable.prepare(self.ptr, plan);
     }
 };
-
-test "execution resource preparer receives a borrowed source-independent plan" {
-    const address = @import("./address.zig");
-    const Probe = struct {
-        account: Address = [_]u8{0} ** 20,
-        slot: StorageSlot = .{ .address = [_]u8{0} ** 20, .key = 0 },
-
-        fn prepare(ptr: *anyopaque, plan: Plan) !void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.account = plan.state.accounts[0];
-            self.slot = plan.state.storage_slots[0];
-        }
-    };
-
-    var probe = Probe{};
-    const preparer = Preparer{ .ptr = &probe, .vtable = &.{
-        .prepare = Probe.prepare,
-    } };
-    try preparer.prepare(.{ .state = .{
-        .accounts = &.{address.addr(1)},
-        .storage_slots = &.{.{ .address = address.addr(2), .key = 3 }},
-    } });
-
-    try @import("std").testing.expectEqual(address.addr(1), probe.account);
-    try @import("std").testing.expectEqualDeep(
-        StorageSlot{ .address = address.addr(2), .key = 3 },
-        probe.slot,
-    );
-}

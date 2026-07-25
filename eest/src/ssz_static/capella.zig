@@ -5,7 +5,6 @@
 const ssz = @import("ssz");
 const phase0_types = @import("phase0.zig");
 const altair_types = @import("altair.zig");
-const bellatrix_types = @import("bellatrix.zig");
 
 pub const BLSToExecutionChange = struct {
     validator_index: u64,

@@ -59,18 +59,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("wrote public={x} output_bytes={} format={s} path={s}\n", .{ public, output.len, @tagName(options.public_format), output_path });
 }
 
-test "raw stateless input produces ERE public values" {
-    const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
-    defer std.testing.allocator.free(input);
-
-    const public = try evmz.stateless.ere.validateStatelessPublicValues(std.testing.allocator, input);
-    const expected_output = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
-    defer std.testing.allocator.free(expected_output);
-    const expected_public = evmz.stateless.ere.outputPublicValues(expected_output);
-
-    try std.testing.expectEqualSlices(u8, &expected_public, &public);
-}
-
 fn printUsage() void {
     std.debug.print(
         \\usage: zig build zkevm-ere -- [--public-format raw|zisk] [--expected-public PATH] <stateless-input.bin> <public-output.bin>

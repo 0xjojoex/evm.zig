@@ -399,15 +399,6 @@ pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
     return null;
 }
 
-pub fn parseBenchmarkFork(name: []const u8) ?evmz.eth.Revision {
-    if (std.ascii.eqlIgnoreCase(name, "Shanghai")) return .shanghai;
-    if (std.ascii.eqlIgnoreCase(name, "Cancun")) return .cancun;
-    if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
-    if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
-    if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
-    return null;
-}
-
 fn hexDigit(char: u8) !u8 {
     return switch (char) {
         '0'...'9' => char - '0',
@@ -421,6 +412,4 @@ test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
-    try std.testing.expectEqual(evmz.eth.Revision.osaka, parseBenchmarkFork("Osaka"));
-    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseBenchmarkFork("Amsterdam"));
 }

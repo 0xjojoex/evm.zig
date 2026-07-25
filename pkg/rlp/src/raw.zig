@@ -64,20 +64,6 @@ pub const Writer = union(enum) {
         };
     }
 
-    pub fn reset(self: *Writer) void {
-        switch (self.*) {
-            .allocating => |*allocating| allocating.out.clearRetainingCapacity(),
-            .borrowed => |*fixed_buffer| fixed_buffer.len = 0,
-        }
-    }
-
-    pub fn remaining(self: Writer) usize {
-        return switch (self) {
-            .allocating => std.math.maxInt(usize),
-            .borrowed => |fixed_buffer| fixed_buffer.buffer.len - fixed_buffer.len,
-        };
-    }
-
     /// Reserve uninitialized output for a package codec.
     pub fn reserve(self: *Writer, count: usize) Writer.Error![]u8 {
         return switch (self.*) {

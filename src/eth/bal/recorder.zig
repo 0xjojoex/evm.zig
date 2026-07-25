@@ -755,10 +755,6 @@ fn deinitObservationAccount(allocator: Allocator, account: observation.AccountOb
     allocator.free(@constCast(account.lifecycle));
 }
 
-fn u256LessThan(_: void, lhs: u256, rhs: u256) bool {
-    return lhs < rhs;
-}
-
 test "BAL recorder owns and coalesces code changes per block access index" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();

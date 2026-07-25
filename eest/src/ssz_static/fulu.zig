@@ -5,7 +5,6 @@
 const ssz = @import("ssz");
 const phase0_types = @import("phase0.zig");
 const altair_types = @import("altair.zig");
-const bellatrix_types = @import("bellatrix.zig");
 const capella_types = @import("capella.zig");
 const deneb_types = @import("deneb.zig");
 const electra_types = @import("electra.zig");

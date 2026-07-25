@@ -5,7 +5,7 @@ const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
 const Spec = @import("./spec.zig").Spec;
-const ExecutionConfig = @import("./ExecutionConfig.zig");
+const ExecutionConfig = @import("./code/Config.zig");
 const evmz = @import("./evm.zig");
 const Stack = @import("./Stack.zig");
 const frame_io = @import("./frame_io.zig");
@@ -85,11 +85,6 @@ pub const Result = struct {
 
     pub fn terminalCause(self: Result) TerminalCause {
         return self.cause orelse terminalCauseForStatus(self.status);
-    }
-
-    pub fn refillIntrinsicStateGas(self: *Result, amount: i64) void {
-        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, amount) catch std.math.maxInt(i64);
-        self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, amount) catch std.math.minInt(i64);
     }
 
     pub fn trackStateGas(self: *Result, gas: i64) void {
@@ -622,15 +617,8 @@ test "call frame can execute with externally supplied stack storage" {
         @intFromEnum(Opcode.STOP),
     };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
@@ -667,15 +655,8 @@ test "call frame can execute with externally supplied memory storage" {
         @intFromEnum(Opcode.STOP),
     };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
@@ -713,15 +694,9 @@ pub fn traceFrameOutcome(status: Status) trace.TraceFrameOutcome {
 test "interpreter trace cursor records step start and end" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.POP) };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 7,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.depth = 7;
+    msg.gas = 100;
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -779,15 +754,8 @@ test "interpreter trace cursor records step start and end" {
 test "interpreter captured tail table records a replay span" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
@@ -845,15 +813,8 @@ test "captured tail memory exhaustion remains a resource error" {
         },
     };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
 
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -897,15 +858,8 @@ test "captured tail memory exhaustion remains a resource error" {
 test "interpreter captured tail table records optional memory writes" {
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .STOP });
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -961,15 +915,8 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
     defer tape.deinit();
     for (cases) |case| {
         var host: Host = undefined;
-        const msg = Host.Message{
-            .depth = 0,
-            .kind = .call,
-            .gas = case.gas,
-            .recipient = evmz.addr(0),
-            .sender = evmz.addr(0),
-            .input_data = &.{},
-            .value = 0,
-        };
+        var msg = evmz.t.defaultMessage();
+        msg.gas = case.gas;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
@@ -997,15 +944,8 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
 test "interpreter capture replays minimal EIP-3155 JSONL" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
     var host: Host = undefined;
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -1216,101 +1156,4 @@ comptime {
     std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
     std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));
     std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
-}
-
-test "interpreter can execute prepared bytecode jumpdest map" {
-    const t = @import("./t.zig");
-    const raw = t.bytecode(.{ .PUSH1, 0x04, .JUMP, .STOP, .JUMPDEST });
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
-    defer bytecode.deinit(std.testing.allocator);
-
-    var mock_host = t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100_000,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
-
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-    try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expect(bytecode.jumpdests.analyzed);
-}
-
-test "prepared bytecode preserves truncated push semantics" {
-    const t = @import("./t.zig");
-    const raw = t.bytecode(.{ .PUSH32, 0x01 });
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
-    defer bytecode.deinit(std.testing.allocator);
-
-    var mock_host = t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100_000,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
-
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-    try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expectEqual(@as(usize, raw.len), interpreter.call_frame.code.len);
-    try std.testing.expectEqual(@as(u256, 1) << 248, interpreter.call_frame.stack.peek().?);
-}
-
-test "prepared bytecode keeps CODESIZE semantic length" {
-    const t = @import("./t.zig");
-    const raw = t.bytecode(.{.CODESIZE});
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
-    defer bytecode.deinit(std.testing.allocator);
-
-    var mock_host = t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .kind = .call,
-        .gas = 100_000,
-        .recipient = evmz.addr(0),
-        .sender = evmz.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
-
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-    try std.testing.expectEqual(Status.success, result.status);
-    try std.testing.expectEqual(@as(u256, raw.len), interpreter.call_frame.stack.peek().?);
 }

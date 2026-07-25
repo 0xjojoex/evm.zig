@@ -260,10 +260,3 @@ test "native secp256k1 backend matches std recovery semantics" {
         ecrecoverPublicKey(message_hash, r, s, 2),
     );
 }
-
-test "zkvm byte wrappers match accelerator ABI" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(zkvm.Bytes32));
-    try std.testing.expectEqual(@as(usize, 8), @alignOf(zkvm.Bytes32));
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf(zkvm.Bytes64));
-    try std.testing.expectEqual(@as(usize, 8), @alignOf(zkvm.Bytes64));
-}

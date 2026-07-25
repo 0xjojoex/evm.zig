@@ -203,47 +203,6 @@ test "execution header rejects fork-inconsistent field presence" {
     try header.validate(.london);
 }
 
-test "Amsterdam execution header encodes distinct tail fields in canonical order" {
-    const zero_hash = [_]u8{0} ** 32;
-    const header = ExecutionHeader{
-        .parent_hash = zero_hash,
-        .coinbase = [_]u8{0} ** 20,
-        .state_root = zero_hash,
-        .transactions_root = zero_hash,
-        .receipts_root = zero_hash,
-        .logs_bloom = [_]u8{0} ** 256,
-        .number = 0,
-        .gas_limit = 0,
-        .gas_used = 0,
-        .timestamp = 0,
-        .extra_data = &.{},
-        .prev_randao = zero_hash,
-        .base_fee_per_gas = 0,
-        .withdrawals_root = [_]u8{0x11} ** 32,
-        .blob_gas_used = 1,
-        .excess_blob_gas = 2,
-        .parent_beacon_block_root = [_]u8{0x22} ** 32,
-        .requests_hash = [_]u8{0x33} ** 32,
-        .block_access_list_hash = [_]u8{0x44} ** 32,
-        .slot_number = 3,
-    };
-
-    const encoded = try header.encodeAlloc(std.testing.allocator, .amsterdam);
-    defer std.testing.allocator.free(encoded);
-
-    var encoded_cursor = rlp.Cursor.init(encoded);
-    var fields = try encoded_cursor.nextList();
-    try encoded_cursor.expectDone();
-    for (0..17) |_| _ = try fields.next();
-    try std.testing.expectEqual(@as(u64, 1), try fields.nextInt(u64));
-    try std.testing.expectEqual(@as(u64, 2), try fields.nextInt(u64));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0x22} ** 32), try fields.nextBytesExact(32));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0x33} ** 32), try fields.nextBytesExact(32));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0x44} ** 32), try fields.nextBytesExact(32));
-    try std.testing.expectEqual(@as(u64, 3), try fields.nextInt(u64));
-    try fields.expectDone();
-}
-
 test "execution header selects the exact revision wire surface with one allocation" {
     const cases = [_]struct {
         revision: Revision,

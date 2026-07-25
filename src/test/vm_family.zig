@@ -13,7 +13,7 @@ const expectRejected = support.expectRejected;
 test "Env execution context derives opcode-visible gas limit from the environment" {
     const origin = addr(0xaaaa);
     const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };
-    const context = env.executionContext(origin, 7, &.{});
+    const context = env.executionContext(origin, 7, env.gas_limit, &.{});
 
     try std.testing.expectEqual(@as(u256, 10), context.chain.chain_id);
     try std.testing.expectEqual(@as(u64, 30_000_000), context.block.gas_limit);
@@ -60,8 +60,7 @@ test "Spec.extend creates a distinct exact VM from static values" {
 
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var sender_account = try memory.getOrCreateAccount(addr(0xaaaa));
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, addr(0xaaaa), .{ .balance = 10_000_000 });
 
     var executor = Strict.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),

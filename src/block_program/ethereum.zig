@@ -32,7 +32,7 @@ pub fn bind(
         ) TransactionRuntime.PreludeContext.Error!void {
             try executor.system_contracts.applyBeforeTransactionPrelude(
                 prelude,
-                self.env.txContext(address.addr(0), 0, self.env.gas_limit, &.{}),
+                self.env.executionContext(address.addr(0), 0, self.env.gas_limit, &.{}),
                 .{
                     .number = self.env.number,
                     .timestamp = self.env.timestamp,

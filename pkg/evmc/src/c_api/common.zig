@@ -85,20 +85,24 @@ pub fn toEvmcBlobHashes(blob_hashes: []const u256, scratch: []evmc.evmc_bytes32)
     return out;
 }
 
-pub fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context, blob_hashes: []u256) !evmz.Host.TxContext {
-    return evmz.Host.TxContext{
-        .base_fee = fromEvmcBytes32(tx_context.block_base_fee),
-        .blob_base_fee = fromEvmcBytes32(tx_context.blob_base_fee),
-        .blob_hashes = try fromEvmcBlobHashes(tx_context, blob_hashes),
-        .chain_id = fromEvmcBytes32(tx_context.chain_id),
-        .coinbase = fromEvmcAddress(tx_context.block_coinbase),
-        .gas_limit = try castNonNegative(u64, tx_context.block_gas_limit),
-        .gas_price = fromEvmcBytes32(tx_context.tx_gas_price),
-        .number = try castNonNegative(u64, tx_context.block_number),
-        .slot_number = @intCast(tx_context.block_slot_number),
-        .origin = fromEvmcAddress(tx_context.tx_origin),
-        .prev_randao = fromEvmcBytes32(tx_context.block_prev_randao),
-        .timestamp = try castNonNegative(u64, tx_context.block_timestamp),
+pub fn fromEvmcTxContext(tx_context: evmc.evmc_tx_context, blob_hashes: []u256) !evmz.execution.ExecutionContext {
+    return .{
+        .chain = .{ .chain_id = fromEvmcBytes32(tx_context.chain_id) },
+        .block = .{
+            .base_fee = fromEvmcBytes32(tx_context.block_base_fee),
+            .blob_base_fee = fromEvmcBytes32(tx_context.blob_base_fee),
+            .coinbase = fromEvmcAddress(tx_context.block_coinbase),
+            .gas_limit = try castNonNegative(u64, tx_context.block_gas_limit),
+            .number = try castNonNegative(u64, tx_context.block_number),
+            .slot_number = @intCast(tx_context.block_slot_number),
+            .difficulty_or_prev_randao = fromEvmcBytes32(tx_context.block_prev_randao),
+            .timestamp = try castNonNegative(u64, tx_context.block_timestamp),
+        },
+        .transaction = .{
+            .blob_hashes = try fromEvmcBlobHashes(tx_context, blob_hashes),
+            .gas_price = fromEvmcBytes32(tx_context.tx_gas_price),
+            .origin = fromEvmcAddress(tx_context.tx_origin),
+        },
     };
 }
 

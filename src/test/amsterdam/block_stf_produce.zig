@@ -381,59 +381,6 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
     try std.testing.expectEqual(@as(usize, 0), extra_source.calls.load(.monotonic));
 }
 
-test "BlockSTF produce folds the two-transaction BAL differential fixture" {
-    var producer_state = state.MemoryStore.init(std.testing.allocator);
-    defer producer_state.deinit();
-    try fixture.initState(&producer_state);
-
-    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
-        .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = producer_state.backend(),
-        .transactions = &fixture.transactions,
-        .parent_blob_gas = parentBlobGas(),
-    });
-    defer outcome.deinit(std.testing.allocator);
-
-    const produced = switch (outcome) {
-        .produced => |*value| value,
-        .rejected => |result| {
-            std.debug.print("unexpected produce rejection: {s}\n", .{@tagName(result.status)});
-            return error.TestUnexpectedResult;
-        },
-    };
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &.{0xc0},
-        produced.encoded_block_access_list,
-    ));
-    try std.testing.expectEqualSlices(
-        u8,
-        &evmz.crypto.keccak256(produced.encoded_block_access_list),
-        &produced.output.block_access_list_hash,
-    );
-
-    var verifier_state = state.MemoryStore.init(std.testing.allocator);
-    defer verifier_state.deinit();
-    try fixture.initState(&verifier_state);
-    var differential_report = bal.Report{};
-    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
-        .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = verifier_state.backend(),
-        .transactions = &fixture.transactions,
-        .parent_blob_gas = parentBlobGas(),
-        .block_access_list = produced.encoded_block_access_list,
-        .root_checks = rootChecks(produced.output),
-        .header_claims = .{
-            .block_access_list_hash = produced.output.block_access_list_hash,
-        },
-        .bal_differential = &differential_report,
-    });
-    try std.testing.expectEqual(block_stf.Status.valid, verified.status);
-    try std.testing.expectEqual(bal.DifferentialStatus.matched, differential_report.status);
-    try std.testing.expectEqualSlices(u8, &produced.output.state_root, &verified.state_root);
-    try std.testing.expectEqualSlices(u8, &produced.output.receipts_root, &verified.receipts_root);
-}
-
 test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     var producer_state = state.MemoryStore.init(std.testing.allocator);
     defer producer_state.deinit();

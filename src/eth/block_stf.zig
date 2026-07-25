@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const Config = @import("../ExecutionConfig.zig");
+const Config = @import("../code/Config.zig");
 const Executor = @import("../executor.zig");
 const Host = @import("../Host.zig");
 const address = @import("../address.zig");
@@ -20,7 +20,8 @@ const tracked_state_projector = @import("bal/tracked_state_projector.zig");
 const ClaimView = @import("bal/ClaimView.zig");
 const bal_witness = @import("bal/witness.zig");
 const candidate_transition = @import("bal/candidate_transition.zig");
-const execution_resources = @import("../execution_resources.zig");
+const execution = @import("../execution.zig");
+const execution_resources = @import("../execution/resources.zig");
 const eth_header = @import("header.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
@@ -75,11 +76,11 @@ fn BalDifferentialOperations(
 
         pub fn applyCandidateWithdrawals(
             executor: *Engine.Executor,
-            tx_context: Host.TxContext,
+            execution_context: execution.ExecutionContext,
             withdrawals: []const @import("Withdrawal.zig"),
             observer: anytype,
         ) !void {
-            try applyWithdrawals(executor, tx_context, withdrawals, observer);
+            try applyWithdrawals(executor, execution_context, withdrawals, observer);
         }
 
         pub fn deriveCandidateRequests(
@@ -682,8 +683,8 @@ pub const empty_logs_bloom = [_]u8{0} ** 256;
 pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
 
-fn lifecycleTxContext(env: Env) Host.TxContext {
-    return env.txContext(address.addr(0), 0, env.gas_limit, &.{});
+fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
+    return env.executionContext(address.addr(0), 0, env.gas_limit, &.{});
 }
 
 const RootField = enum {
@@ -1021,7 +1022,7 @@ fn serialFold(
                     allocator,
                     input.config,
                     input.env,
-                    lifecycleTxContext(input.env),
+                    lifecycleExecutionContext(input.env),
                     state_backend.reader(),
                     input.prepared_code_backend,
                     input.block_hash_source,
@@ -1082,14 +1083,14 @@ fn serialFold(
         const before_result = if (observe_state)
             Executor.system_contracts.applyBeforeBlockObserved(
                 &executor,
-                lifecycleTxContext(input.env),
+                lifecycleExecutionContext(input.env),
                 context,
                 &observation_collector,
             )
         else
             Executor.system_contracts.applyBeforeBlock(
                 &executor,
-                lifecycleTxContext(input.env),
+                lifecycleExecutionContext(input.env),
                 context,
             );
         before_result catch |err| switch (err) {
@@ -1256,7 +1257,7 @@ fn serialFold(
         const after_result = if (capture_steps)
             Executor.system_contracts.applyAfterTransactionCaptured(
                 &executor,
-                lifecycleTxContext(input.env),
+                lifecycleExecutionContext(input.env),
                 after_context,
                 &capture_context,
                 &observation_collector,
@@ -1264,14 +1265,14 @@ fn serialFold(
         else if (observe_state)
             Executor.system_contracts.applyAfterTransactionObserved(
                 &executor,
-                lifecycleTxContext(input.env),
+                lifecycleExecutionContext(input.env),
                 after_context,
                 &observation_collector,
             )
         else
             Executor.system_contracts.applyAfterTransaction(
                 &executor,
-                lifecycleTxContext(input.env),
+                lifecycleExecutionContext(input.env),
                 after_context,
             );
         after_result catch |err| switch (err) {
@@ -1311,14 +1312,14 @@ fn serialFold(
     const withdrawals_result = if (observe_state)
         applyWithdrawals(
             &executor,
-            lifecycleTxContext(input.env),
+            lifecycleExecutionContext(input.env),
             input.withdrawals,
             &observation_collector,
         )
     else
         applyWithdrawalsNormal(
             &executor,
-            lifecycleTxContext(input.env),
+            lifecycleExecutionContext(input.env),
             input.withdrawals,
         );
     withdrawals_result catch |err| switch (err) {
@@ -1614,7 +1615,7 @@ fn transactPayload(
         ) Engine.BlockExecution.PreludeContext.Error!void {
             try Executor.system_contracts.applyBeforeTransactionPrelude(
                 prelude,
-                lifecycleTxContext(self.env),
+                lifecycleExecutionContext(self.env),
                 .{
                     .number = self.env.number,
                     .timestamp = self.env.timestamp,
@@ -1859,12 +1860,12 @@ const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
 fn applyWithdrawals(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: execution.ExecutionContext,
     withdrawals: []const Withdrawal,
     observer: anytype,
 ) !void {
     if (withdrawals.len == 0) return;
-    try executor.beginObservedStateTransition(tx_context);
+    try executor.beginObservedStateTransition(execution_context);
     errdefer executor.closeTransaction();
     for (withdrawals) |withdrawal| {
         try executor.observeAccountAccess(withdrawal.address);
@@ -1879,11 +1880,11 @@ fn applyWithdrawals(
 
 fn applyWithdrawalsNormal(
     executor: anytype,
-    tx_context: Host.TxContext,
+    execution_context: execution.ExecutionContext,
     withdrawals: []const Withdrawal,
 ) !void {
     if (withdrawals.len == 0) return;
-    try executor.beginStateTransition(tx_context);
+    try executor.beginStateTransition(execution_context);
     errdefer executor.closeTransaction();
     for (withdrawals) |withdrawal| {
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch
@@ -1971,7 +1972,7 @@ fn deriveFinalizeRequests(
 ) ![]const []const u8 {
     return Executor.system_contracts.applyFinalizeBlockObserved(
         executor,
-        lifecycleTxContext(env),
+        lifecycleExecutionContext(env),
         allocator,
         .{
             .number = env.number,
@@ -1993,7 +1994,7 @@ fn deriveFinalizeRequestsNormal(
 ) ![]const []const u8 {
     return Executor.system_contracts.applyFinalizeBlock(
         executor,
-        lifecycleTxContext(env),
+        lifecycleExecutionContext(env),
         allocator,
         .{
             .number = env.number,
@@ -2536,6 +2537,48 @@ test "BlockSTF validates withdrawals root" {
         ),
     });
     try std.testing.expectEqual(Status.withdrawals_root_mismatch, mismatch.status);
+}
+
+test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const recipient_a = address.addr(0x7777);
+    const recipient_b = address.addr(0x8888);
+    const withdrawals = [_]Withdrawal{
+        .{ .index = 0, .validator_index = 1, .address = recipient_a, .amount = 0 },
+        .{ .index = 1, .validator_index = 2, .address = recipient_a, .amount = 3 },
+        .{ .index = 2, .validator_index = 3, .address = recipient_b, .amount = 0 },
+    };
+
+    const credited_balance = 3 * withdrawal_gwei_in_wei;
+    const account_key = trie.hashedAddressKey(recipient_a);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = credited_balance });
+    const expected_state_root = try trie.root(scratch, &.{.{ .key = &account_key, .value = account_value }});
+    const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
+    const balance_changes = [_]eth_bal.BalanceChange{.{
+        .block_access_index = 1,
+        .post_balance = credited_balance,
+    }};
+    const claim = try eth_bal.encodeAlloc(scratch, &.{
+        .{ .address = recipient_a, .balance_changes = &balance_changes },
+        .{ .address = recipient_b },
+    });
+
+    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .transactions = &.{},
+        .withdrawals = &withdrawals,
+        .block_access_list = claim,
+        .root_checks = testRootChecksWithWithdrawals(
+            expected_state_root,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
+            expected_withdrawals_root,
+        ),
+    });
+    try std.testing.expectEqual(Status.valid, result.status);
 }
 
 test "BlockSTF applies Cancun block-start system contract" {

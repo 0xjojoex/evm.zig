@@ -1,5 +1,5 @@
 const std = @import("std");
-const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
+const JumpDestStrategy = @import("Config.zig").JumpDestStrategy;
 const scanner = @import("scanner.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");

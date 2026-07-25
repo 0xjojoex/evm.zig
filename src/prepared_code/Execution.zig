@@ -3,7 +3,7 @@
 const std = @import("std");
 const Backend = @import("Backend.zig");
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
+const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 
 const Execution = @This();
 

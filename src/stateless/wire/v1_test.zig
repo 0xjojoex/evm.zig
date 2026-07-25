@@ -316,7 +316,7 @@ test "stateless wire v1 returns failure result for malformed guest input" {
     }
 }
 
-test "stateless wire v1 fork values match tests-zkevm v0.5" {
+test "stateless wire v1 protocol fork numeric ids remain stable" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(13));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(20));
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(24));

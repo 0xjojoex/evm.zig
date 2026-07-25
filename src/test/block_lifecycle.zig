@@ -203,8 +203,7 @@ test "Sequential exposes spec-owned lifecycle phases with derived facts" {
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     // CALLDATALOAD(0), store it at slot 0, then return the same word.
     inline for (&.{
@@ -213,8 +212,7 @@ test "Sequential exposes spec-owned lifecycle phases with derived facts" {
         LifecycleBlock.after_transaction_address,
         LifecycleBlock.finalize_block_address,
     }) |address| {
-        var account = try memory.getOrCreateAccount(address);
-        try account.setCode(&lifecycle_code);
+        try evmz.t.seedStoreAccount(&memory, address, .{ .code = &lifecycle_code });
     }
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
@@ -267,8 +265,7 @@ test "Sequential does not run before-transaction hooks for rejected transactions
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -299,8 +296,7 @@ test "Sequential failing before-transaction prelude discards the opened attempt"
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -324,8 +320,7 @@ test "Sequential empty before-transaction prelude stays in one observed transiti
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     EmptyBeforeTransactionBlock.invocations.store(0, .monotonic);
     var observations = ObservationCounter{};
@@ -357,10 +352,8 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
-    var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
-    try hook_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, LifecycleBlock.before_transaction_address, .{ .code = &lifecycle_code });
 
     const Observer = struct {
         address: Address,
@@ -414,12 +407,9 @@ test "Sequential block rejection restores before-transaction hook and payload wr
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
-    var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
-    try hook_account.setCode(&lifecycle_code);
-    var payload_account = try memory.getOrCreateAccount(payload);
-    try payload_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, LifecycleBlock.before_transaction_address, .{ .code = &lifecycle_code });
+    try evmz.t.seedStoreAccount(&memory, payload, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -456,12 +446,9 @@ test "Sequential discard restores included hook and payload without allocating" 
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
-    var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
-    try hook_account.setCode(&lifecycle_code);
-    var payload_account = try memory.getOrCreateAccount(payload);
-    try payload_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, LifecycleBlock.before_transaction_address, .{ .code = &lifecycle_code });
+    try evmz.t.seedStoreAccount(&memory, payload, .{ .code = &lifecycle_code });
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = LifecycleVm.Executor.init(failing_allocator.allocator(), .{
@@ -504,8 +491,7 @@ test "Sequential restores a system call when outer commit observation fails" {
     const recipient = evmz.addr(0x2201);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var recipient_account = try memory.getOrCreateAccount(recipient);
-    try recipient_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, recipient, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -540,10 +526,8 @@ test "Sequential restores included transaction progress when outer observation f
     const recipient = evmz.addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
-    var hook_account = try memory.getOrCreateAccount(LifecycleBlock.before_transaction_address);
-    try hook_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, LifecycleBlock.before_transaction_address, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -575,8 +559,7 @@ test "Sequential restores included transaction progress when outer observation f
 test "block lifecycle hook batches restore earlier calls when a later call fails" {
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var recipient = try memory.getOrCreateAccount(AtomicLifecycleBlock.recipient);
-    try recipient.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, AtomicLifecycleBlock.recipient, .{ .code = &lifecycle_code });
 
     var executor = AtomicLifecycleVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -596,10 +579,8 @@ test "Sequential finish flushes the final included transaction after hook" {
     const sender = evmz.addr(0xaaaa);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
-    var hook_account = try memory.getOrCreateAccount(FinishLifecycleBlock.recipient);
-    try hook_account.setCode(&lifecycle_code);
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, FinishLifecycleBlock.recipient, .{ .code = &lifecycle_code });
 
     var executor = FinishLifecycleVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
@@ -627,8 +608,7 @@ test "Sequential next transaction stops when the previous after hook fails" {
     const recipient = evmz.addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
-    var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 10_000_000;
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingAfterTransactionVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),

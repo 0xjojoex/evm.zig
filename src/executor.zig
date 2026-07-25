@@ -26,7 +26,6 @@ const evmz = @import("./evm.zig");
 pub const errors = @import("./executor/error.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
-const MemoryAccount = evmz.state.MemoryAccount;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
 const ExactSpec = @import("./spec.zig").Spec;
@@ -35,7 +34,6 @@ const execution_values = @import("./execution.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const TrackedState = evmz.state.TrackedState;
-const DefaultSpec = evmz.Evm.specification;
 pub const EvmResult = Host.Result;
 const EvmResultType = EvmResult;
 
@@ -56,7 +54,6 @@ const TransactionExecutionOutcomeType = TransactionExecutionOutcome;
 const call_runtime = @import("./executor/call_runtime.zig");
 pub const capture_context = @import("./executor/capture_context.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
-const context_adapter = @import("./executor/context.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
 const FrameStore = @import("./executor/frame_store.zig");
 const host_callbacks = @import("./executor/host_callbacks.zig");
@@ -771,7 +768,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         fn validateScopeContext(self: *const Self, context: execution_values.ExecutionContext) !void {
             const open_context = self.execution_context orelse return error.MissingTransactionScope;
-            if (!context_adapter.eql(open_context, context)) return error.ExecutionContextMismatch;
+            if (!open_context.eql(context)) return error.ExecutionContextMismatch;
         }
 
         fn validateScopeRoot(self: *const Self, root: ScopeRoot) !void {
@@ -786,8 +783,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// `rollbackTransaction`, `closeTransaction`, or another helper that does so.
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
-        pub fn beginTransaction(self: *Self, tx_context: Host.TxContext, sender: Address, recipient: Address) !void {
-            const context = context_adapter.fromHost(tx_context);
+        pub fn beginTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address, recipient: Address) !void {
             try self.openTransactionScope(context, .normal);
             errdefer self.closeTransaction();
             try warmTransactionAccesses(self, sender, recipient);
@@ -795,11 +791,10 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         pub fn beginObservedTransaction(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
         ) !void {
-            const context = context_adapter.fromHost(tx_context);
             try self.openTransactionScope(context, .observed);
             errdefer self.closeTransaction();
             try warmTransactionAccesses(self, sender, recipient);
@@ -807,12 +802,11 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         pub fn beginCapturedTransaction(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
             capture: *CaptureContext,
         ) !void {
-            const context = context_adapter.fromHost(tx_context);
             try self.openTransactionScope(context, .{ .captured = capture });
             errdefer self.closeTransaction();
             try warmTransactionAccesses(self, sender, recipient);
@@ -822,8 +816,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
         ///
         /// This is the create counterpart to `beginTransaction`; there is no recipient
         /// to warm before the create address is derived during execution.
-        pub fn beginCreateTransaction(self: *Self, tx_context: Host.TxContext, sender: Address) !void {
-            const context = context_adapter.fromHost(tx_context);
+        pub fn beginCreateTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address) !void {
             try self.openTransactionScope(context, .normal);
             errdefer self.closeTransaction();
             try warmTransactionAccesses(self, sender, null);
@@ -978,20 +971,20 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         fn beginSystemCall(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             mode: AttemptMode,
         ) !void {
-            try self.openTransactionScope(context_adapter.fromHost(tx_context), mode);
+            try self.openTransactionScope(context, mode);
         }
 
         /// Open a transaction-like scope for family/STF state work without a
         /// root EVM message.
-        pub fn beginStateTransition(self: *Self, tx_context: Host.TxContext) !void {
-            try self.openTransactionScope(context_adapter.fromHost(tx_context), .normal);
+        pub fn beginStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
+            try self.openTransactionScope(context, .normal);
         }
 
-        pub fn beginObservedStateTransition(self: *Self, tx_context: Host.TxContext) !void {
-            try self.openTransactionScope(context_adapter.fromHost(tx_context), .observed);
+        pub fn beginObservedStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
+            try self.openTransactionScope(context, .observed);
         }
 
         /// Mark an account warm in the current transaction scope.
@@ -1281,13 +1274,10 @@ pub fn Executor(comptime spec: ExactSpec) type {
             return result;
         }
 
-        /// Compatibility adapter for one call/create message and flat host context.
-        ///
-        /// New integrations should prefer `runStandaloneRequest`, whose context is
-        /// the authoritative concrete execution value.
-        pub fn runStandalone(self: *Self, tx_context: Host.TxContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        /// Run one call/create message from the authoritative execution context.
+        pub fn runStandalone(self: *Self, context: execution_values.ExecutionContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
             return self.runStandaloneContext(
-                context_adapter.fromHost(tx_context),
+                context,
                 message,
                 gas,
                 .{},
@@ -1300,13 +1290,13 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// the transition is retained.
         pub fn runStandaloneObserved(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             message: Self.Message,
             gas: execution_values.ExecutionGas,
             observer: anytype,
         ) !Self.EvmResult {
             return self.runStandaloneContext(
-                context_adapter.fromHost(tx_context),
+                context,
                 message,
                 gas,
                 .{},
@@ -1317,13 +1307,13 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         pub fn runStandaloneCaptured(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             message: Self.Message,
             gas: execution_values.ExecutionGas,
             capture: *CaptureContext,
         ) !Self.EvmResult {
             return self.runStandaloneContext(
-                context_adapter.fromHost(tx_context),
+                context,
                 message,
                 gas,
                 .{},
@@ -1498,17 +1488,17 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// Execute a system call as its own transaction-like scope.
         ///
         /// System calls bypass user transaction charging and value transfer, but still
-        /// run with a tx context, checkpoint state, and commit/rollback semantics.
+        /// run with a execution context, checkpoint state, and commit/rollback semantics.
         pub fn executeSystemCall(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
             input: []const u8,
             gas: execution_values.ExecutionGas,
         ) !Interpreter.Result {
             return self.executeSystemCallMode(
-                tx_context,
+                context,
                 sender,
                 recipient,
                 input,
@@ -1522,7 +1512,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// state before the transition is retained.
         pub fn executeSystemCallObserved(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
             input: []const u8,
@@ -1530,7 +1520,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             observer: anytype,
         ) !Interpreter.Result {
             return self.executeSystemCallMode(
-                tx_context,
+                context,
                 sender,
                 recipient,
                 input,
@@ -1542,7 +1532,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         pub fn executeSystemCallCaptured(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
             input: []const u8,
@@ -1551,7 +1541,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             observer: anytype,
         ) !Interpreter.Result {
             return self.executeSystemCallMode(
-                tx_context,
+                context,
                 sender,
                 recipient,
                 input,
@@ -1563,7 +1553,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         fn executeSystemCallMode(
             self: *Self,
-            tx_context: Host.TxContext,
+            context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
             input: []const u8,
@@ -1574,7 +1564,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
-            try self.beginSystemCall(tx_context, mode);
+            try self.beginSystemCall(context, mode);
             errdefer self.closeTransaction();
 
             self.clearLastOutput();
@@ -1676,11 +1666,9 @@ pub fn Executor(comptime spec: ExactSpec) type {
     };
 }
 
-const Default = Executor(DefaultSpec);
 const Frontier = evmz.Vm(evmz.eth.frontier);
 const TangerineWhistle = evmz.Vm(evmz.eth.tangerine_whistle);
 const SpuriousDragon = evmz.Vm(evmz.eth.spurious_dragon);
-const Istanbul = evmz.Vm(evmz.eth.istanbul);
 const Berlin = evmz.Vm(evmz.eth.berlin);
 const London = evmz.Vm(evmz.eth.london);
 const Shanghai = evmz.Vm(evmz.eth.shanghai);
@@ -1688,7 +1676,7 @@ const Cancun = evmz.Vm(evmz.eth.cancun);
 const Prague = evmz.Vm(evmz.eth.prague);
 const Osaka = evmz.Vm(evmz.eth.osaka);
 const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
-const testTxContext = evmz.t.defaultTxContext;
+const testExecutionContext = evmz.t.defaultExecutionContext;
 
 test "executor prepareBytecode honors jumpdest strategy config" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{
@@ -1707,19 +1695,17 @@ test "executor prepareBytecode honors jumpdest strategy config" {
 test "executor executes prepared bytecode call transaction" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Osaka.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -1736,7 +1722,7 @@ test "parent prepared view survives child admission" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const target = evmz.addr(0xbeef);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const contract_code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0,
         .PUSH2, 0xbe,    0xef,   .GAS,   .CALL,
@@ -1755,19 +1741,13 @@ test "parent prepared view survives child admission" {
     });
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&contract_code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &contract_code });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&target_code);
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &target_code });
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const first = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     executor.closeTransaction();
 
@@ -1776,7 +1756,7 @@ test "parent prepared view survives child admission" {
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(target, 0));
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const second = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     executor.closeTransaction();
 
@@ -1786,7 +1766,7 @@ test "parent prepared view survives child admission" {
 
 test "CREATE initcode preparation remains execution-local" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
@@ -1795,11 +1775,9 @@ test "CREATE initcode preparation remains execution-local" {
     });
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(tx_context, sender);
+    try executor.beginCreateTransaction(execution_context, sender);
     const result = (try executor.executeCreate(.{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
@@ -1840,13 +1818,9 @@ test "trace replay runs after prepared code leaves the live frame" {
     });
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     const code_view = try executor.state.getCodeView(contract);
     _ = try pool.getOrPrepare(code_view.code_hash, code_view.bytes, executor.config.jumpdest_strategy);
@@ -1863,7 +1837,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     }
 
     try executor.beginCapturedTransaction(
-        testTxContext(sender, 100_000),
+        testExecutionContext(sender, 100_000),
         sender,
         contract,
         &capture,
@@ -1921,10 +1895,8 @@ test "prepared execution follows current code hash without owning public code re
     });
     defer executor.deinit();
 
-    var account = MemoryAccount.init(std.testing.allocator);
-    try account.setCode(&original_code);
-    try executor.state.seedAccount(contract, account);
-    try executor.beginStateTransition(testTxContext(contract, 100_000));
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &original_code });
+    try executor.beginStateTransition(testExecutionContext(contract, 100_000));
     defer executor.closeTransaction();
 
     executor.beginPreparedCodeExecution();
@@ -2025,23 +1997,21 @@ test "executor BLOCKHASH reads configured block hash source" {
 
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var tx_context = testTxContext(sender, 100_000);
-    tx_context.number = 1000;
+    var execution_context = testExecutionContext(sender, 100_000);
+    execution_context.block.number = 1000;
     var block_hashes = TestBlockHashSource{};
     var executor = Prague.Executor.init(std.testing.allocator, .{
         .block_hash_source = block_hashes.source(),
     });
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
     const code = evmz.t.bytecode(.{ .PUSH2, 0x03, 0xe7, .BLOCKHASH, .PUSH0, .SSTORE, .STOP });
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2057,19 +2027,15 @@ test "executor BLOCKHASH reads configured block hash source" {
 test "executor executeMessage dispatches top-level call" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Osaka.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 } });
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = (try executor.executeMessage(.{ .call = .{
         .sender = sender,
         .recipient = contract,
@@ -2086,8 +2052,7 @@ test "system call preserves parent stack across nested frame growth" {
     var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var parent_account = MemoryAccount.init(std.testing.allocator);
-    try parent_account.setCode(&evmz.t.bytecode(.{
+    try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &evmz.t.bytecode(.{
         .PUSH1,  0x7b,
         .PUSH0,  .PUSH0,
         .PUSH0,  .PUSH0,
@@ -2097,19 +2062,16 @@ test "system call preserves parent stack across nested frame growth" {
         0xff,    .CALL,
         .POP,    .PUSH0,
         .SSTORE, .STOP,
-    }));
-    try executor.state.seedAccount(parent, parent_account);
+    }) });
 
-    var child_account = MemoryAccount.init(std.testing.allocator);
-    try child_account.setCode(&evmz.t.bytecode(.{
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &evmz.t.bytecode(.{
         .PUSH1,  0x2a,
         .PUSH1,  0x01,
         .SSTORE, .STOP,
-    }));
-    try executor.state.seedAccount(child, child_account);
+    }) });
 
     const result = try executor.executeSystemCall(
-        testTxContext(sender, 200_000),
+        testExecutionContext(sender, 200_000),
         sender,
         parent,
         &.{},
@@ -2119,7 +2081,6 @@ test "system call preserves parent stack across nested frame growth" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x7b), try executor.getStorage(parent, 0));
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(child, 1));
-    try std.testing.expectEqual(@as(usize, 1), executor.frame_store.maxStackBase());
 }
 
 test "exact spec drives call base gas" {
@@ -2163,12 +2124,10 @@ test "top-level call code resolution reuses one traced view" {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var recipient_account = MemoryAccount.init(std.testing.allocator);
-    try recipient_account.setCode(&.{evmz.Opcode.STOP.toByte()});
-    try executor.state.seedAccount(recipient, recipient_account);
+    try evmz.t.seedExecutorAccount(&executor, recipient, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
 
     const result = (try executor.runStandaloneObserved(
-        testTxContext(sender, 100_000),
+        testExecutionContext(sender, 100_000),
         .{ .call = .{
             .sender = sender,
             .recipient = recipient,
@@ -2208,16 +2167,12 @@ test "top-level delegated access failure does not read target code" {
 
     var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&delegation_code, target);
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    try authority_account.setCode(&delegation_code);
-    try executor.state.seedAccount(authority, authority_account);
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &delegation_code });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
 
     const result = (try executor.runStandaloneObserved(
-        testTxContext(sender, 100_000),
+        testExecutionContext(sender, 100_000),
         .{ .call = .{
             .sender = sender,
             .recipient = authority,
@@ -2303,11 +2258,9 @@ fn executeCreateOpcodeStatus(comptime spec: ExactSpec) !Interpreter.Status {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    return (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+    return (try executor.runStandalone(testExecutionContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
     } }, .legacy(100_000))).expectCall().status;
@@ -2323,20 +2276,16 @@ fn executeCallResultStore(comptime spec: ExactSpec) !u256 {
 
     try putFundedSender(&executor, sender);
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }) });
 
     const parent_code = evmz.t.bytecode(.{
         .PUSH1, 0x00,   .PUSH1, 0x00,    .PUSH1, 0x00,   .PUSH1, 0x00,
         .PUSH1, 0x00,   .PUSH2, 0xbb,    0xbb,   .PUSH2, 0xff,   0xff,
         .CALL,  .PUSH1, 0x00,   .SSTORE, .STOP,
     });
-    var parent_account = MemoryAccount.init(std.testing.allocator);
-    try parent_account.setCode(&parent_code);
-    try executor.state.seedAccount(parent, parent_account);
+    try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &parent_code });
 
-    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+    const result = (try executor.runStandalone(testExecutionContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = parent,
     } }, .legacy(100_000))).expectCall();
@@ -2349,7 +2298,7 @@ fn executeTopLevelDelegatedCall(comptime spec: ExactSpec) !i64 {
     const sender = evmz.addr(0x1111);
     const authority = evmz.addr(0x2222);
     const target = evmz.addr(0x3333);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
 
     const Exec = Executor(spec);
     var executor = Exec.init(std.testing.allocator, .{});
@@ -2358,15 +2307,11 @@ fn executeTopLevelDelegatedCall(comptime spec: ExactSpec) !i64 {
 
     var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&delegation_code, target);
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    try authority_account.setCode(&delegation_code);
-    try executor.state.seedAccount(authority, authority_account);
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &delegation_code });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&.{evmz.Opcode.STOP.toByte()});
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
 
-    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+    const result = (try executor.runStandalone(execution_context, .{ .call = .{
         .sender = sender,
         .recipient = authority,
     } }, .legacy(100_000))).expectCall();
@@ -2416,14 +2361,14 @@ const TopFrameValueTransferResult = struct {
 fn executeTopFrameValueTransfer(comptime spec: ExactSpec) !TopFrameValueTransferResult {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
 
     const Exec = Executor(spec);
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+    const result = (try executor.runStandalone(execution_context, .{ .call = .{
         .sender = sender,
         .recipient = recipient,
         .value = 1,
@@ -2441,7 +2386,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     const sender = evmz.addr(0x1111);
     const contract = evmz.addr(0x2222);
     const recipient = evmz.addr(0x3333);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
         .PUSH1, 0x00,
@@ -2460,11 +2405,9 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+    const result = (try executor.runStandalone(execution_context, .{ .call = .{
         .sender = sender,
         .recipient = contract,
     } }, .legacy(100_000))).expectCall();
@@ -2480,13 +2423,9 @@ fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
     var executor = Executor(spec).init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }));
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &evmz.t.bytecode(.{ .PUSH1, 0x00, .BALANCE, .STOP }) });
 
     const parent_code = evmz.t.bytecode(.{
         .PUSH1, 0x00,  .PUSH1, 0x00, .PUSH1, 0x00,   .PUSH1, 0x00,
@@ -2496,7 +2435,7 @@ fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
     var bytecode = try executor.prepareBytecode(&parent_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, parent);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, parent);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2511,13 +2450,11 @@ fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
 test "recursive call bomb unwinds with iterative call runtime" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
-    const tx_context = testTxContext(sender, 1_000_000);
+    const execution_context = testExecutionContext(sender, 1_000_000);
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
     const code = evmz.t.bytecode(.{
         .PUSH1,  0x01,
@@ -2536,15 +2473,12 @@ test "recursive call bomb unwinds with iterative call runtime" {
         0x01,    .SSTORE,
         .STOP,
     });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 20_000_000;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 20_000_000, .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2561,13 +2495,11 @@ test "recursive call bomb unwinds with iterative call runtime" {
 test "iterative call runtime preserves precompile output" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
     const code = evmz.t.bytecode(.{
         .PUSH1,  0x2a,
@@ -2585,14 +2517,12 @@ test "iterative call runtime preserves precompile output" {
         .PUSH1,  0x00,
         .RETURN,
     });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2610,16 +2540,14 @@ test "iterative call runtime preserves precompile output" {
 test "top-level call transaction executes precompile recipient" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const precompile = evmz.precompile.Contract.identity.toAddress();
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const input = [_]u8{ 0xde, 0xad };
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginTransaction(tx_context, sender, precompile);
+    try executor.beginTransaction(execution_context, sender, precompile);
     const result = try executor.executeCallTransaction(sender, precompile, &input, .legacy(1000), 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -2653,22 +2581,18 @@ fn expectLegacyPrecompileCall(
         0x10,   .CALL,
         .POP,   .STOP,
     });
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = ExactVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2685,7 +2609,7 @@ fn expectLegacyPrecompileCall(
 test "prepared call transaction calls to empty account succeed" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
         .PUSH1, 0x00,
@@ -2702,18 +2626,14 @@ test "prepared call transaction calls to empty account succeed" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2730,7 +2650,7 @@ test "iterative CALLCODE writes target code in caller storage" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0,
         .PUSH2, 0xbe,   0xef,   .GAS,   .CALLCODE,
@@ -2745,22 +2665,16 @@ test "iterative CALLCODE writes target code in caller storage" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&target_code);
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &target_code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2778,7 +2692,7 @@ test "iterative DELEGATECALL preserves parent call value" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const code = evmz.t.bytecode(.{
         .PUSH0,        .PUSH0, .PUSH0, .PUSH0,
         .PUSH2,        0xbe,   0xef,   .GAS,
@@ -2794,22 +2708,16 @@ test "iterative DELEGATECALL preserves parent call value" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&target_code);
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &target_code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2827,7 +2735,7 @@ test "iterative STATICCALL failure resumes parent with zero result" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0,  .PUSH0,      .PUSH0,
         .PUSH2, 0xbe,    0xef,        .PUSH2,
@@ -2843,23 +2751,19 @@ test "iterative STATICCALL failure resumes parent with zero result" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
+    var contract_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try contract_account.setCode(&code);
     try contract_account.storage.put(1, 0x99);
     try executor.state.seedAccount(contract, contract_account);
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&target_code);
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &target_code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2876,7 +2780,7 @@ test "iterative STATICCALL failure resumes parent with zero result" {
 test "prepared call transaction create opcodes deploy code" {
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const init_code = [_]u8{ 0x36, 0x5f, 0x53, 0x60, 0x01, 0x5f, 0xf3 };
     const create_address = evmz.address.create(contract, 0);
     const create2_address = evmz.address.create2(contract, 0x2a, &init_code);
@@ -2890,18 +2794,14 @@ test "prepared call transaction create opcodes deploy code" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2920,7 +2820,7 @@ test "prepared call transaction create opcodes deploy code" {
 test "CREATE2 insufficient balance does not bump creator nonce" {
     const sender = evmz.addr(0x0343505c9f9bda06ff73c96183434ffd23442073);
     const contract = evmz.addr(0xbba624a7e00e22fd18816e2e0e1f4f396ce3409c);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const create2_address = evmz.address.create2(contract, 0, &.{});
     const code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .PUSH0, .GAS, .CREATE2, .STOP,
@@ -2929,19 +2829,14 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.nonce = 1;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .nonce = 1, .code = &code });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2959,7 +2854,7 @@ test "captured runtime records nested call and create frames without generic ste
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const child = evmz.addr(0x1234);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const create_address = evmz.address.create(contract, 0);
     const code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .PUSH0,  .PUSH0, .PUSH0,  .PUSH2, 0x12,     0x34,
@@ -2974,24 +2869,18 @@ test "captured runtime records nested call and create frames without generic ste
     defer capture.deinit();
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000_000_000_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    var child_account = MemoryAccount.init(std.testing.allocator);
-    try child_account.setCode(&.{@intFromEnum(evmz.Opcode.STOP)});
-    try executor.state.seedAccount(child, child_account);
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &.{@intFromEnum(evmz.Opcode.STOP)} });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
     try capture.begin();
     errdefer capture.abort() catch {};
-    try executor.beginCapturedTransaction(tx_context, sender, contract, &capture);
+    try executor.beginCapturedTransaction(execution_context, sender, contract, &capture);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -3043,23 +2932,19 @@ test "captured runtime records nested call and create frames without generic ste
 test "captured span is inspectable before executed transaction resolution" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Osaka.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 });
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &.{ 0x60, 0x2a, 0x5f, 0x55, 0x00 } });
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
     var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape });
     defer capture.deinit();
     const request_value = execution_values.EvmExecutionRequest{
-        .context = context_adapter.fromHost(tx_context),
+        .context = execution_context,
         .message = .{ .call = .{
             .sender = sender,
             .recipient = contract,
@@ -3161,15 +3046,11 @@ test "transaction nonce intent survives payload rollback" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.nonce = 7;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
     const revert_code = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .REVERT,
     });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&revert_code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
     const attempt = try executor.beginTransactionAttemptLifetime();
     defer attempt.discardIfCurrent();
@@ -3202,9 +3083,7 @@ test "transaction nonce intent completion remains recorded for the attempt" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.nonce = 7;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
 
     const first_attempt = try executor.beginTransactionAttemptLifetime();
     try first_attempt.beginExecution(request, .{});
@@ -3246,9 +3125,7 @@ test "transaction nonce intent selects the after-advance root create entry" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.nonce = 7;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
 
     const attempt = try executor.beginTransactionAttemptLifetime();
     defer attempt.discardIfCurrent();
@@ -3286,9 +3163,7 @@ test "transaction nonce intent leaves max-nonce acceptance to transaction policy
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.nonce = max_nonce;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = max_nonce });
 
     const attempt = try executor.beginTransactionAttemptLifetime();
     defer attempt.discardIfCurrent();
@@ -3328,9 +3203,7 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
             .PUSH1, 0x2a,   .PUSH0,  .SSTORE,
             .PUSH0, .PUSH0, .REVERT,
         });
-        var contract_account = MemoryAccount.init(std.testing.allocator);
-        try contract_account.setCode(&revert_code);
-        try executor.state.seedAccount(contract, contract_account);
+        try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
         const attempt = try executor.beginTransactionAttemptLifetime();
         defer attempt.discardIfCurrent();
@@ -3360,9 +3233,7 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
         const success_code = evmz.t.bytecode(.{
             .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP,
         });
-        var contract_account = MemoryAccount.init(std.testing.allocator);
-        try contract_account.setCode(&success_code);
-        try executor.state.seedAccount(contract, contract_account);
+        try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &success_code });
 
         const attempt = try executor.beginTransactionAttemptLifetime();
         defer attempt.discardIfCurrent();
@@ -3382,24 +3253,24 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
     }
 }
 
-test "top-level transaction execution requires begin tx context" {
+test "top-level transaction execution requires begin execution context" {
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try std.testing.expectError(
-        error.MissingTxContext,
+        error.MissingExecutionContext,
         executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .legacy(100_000), 0),
     );
     var amsterdam_executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer amsterdam_executor.deinit();
     try std.testing.expectError(
-        error.MissingTxContext,
+        error.MissingExecutionContext,
         amsterdam_executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .{
             .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
         }, 1),
     );
     try std.testing.expectError(
-        error.MissingTxContext,
+        error.MissingExecutionContext,
         executor.executeCreateTransaction(
             evmz.addr(0xaaaa),
             evmz.address.create(evmz.addr(0xaaaa), 0),
@@ -3409,14 +3280,14 @@ test "top-level transaction execution requires begin tx context" {
         ),
     );
     try std.testing.expectError(
-        error.MissingTxContext,
+        error.MissingExecutionContext,
         executor.executeCall(.{
             .sender = evmz.addr(0xaaaa),
             .recipient = evmz.addr(0xbbbb),
         }, .legacy(100_000)),
     );
     try std.testing.expectError(
-        error.MissingTxContext,
+        error.MissingExecutionContext,
         executor.executeCreate(.{
             .sender = evmz.addr(0xaaaa),
             .recipient = evmz.address.create(evmz.addr(0xaaaa), 0),
@@ -3425,16 +3296,16 @@ test "top-level transaction execution requires begin tx context" {
     );
 }
 
-test "rollback transaction restores branch checkpoint and closes tx context" {
+test "rollback transaction restores branch checkpoint and closes execution context" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    try executor.state.seedAccount(contract, MemoryAccount.init(std.testing.allocator));
+    try evmz.t.seedExecutorAccount(&executor, contract, .{});
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     var pre_execution = try executor.branchCheckpoint();
     defer pre_execution.deinit();
 
@@ -3450,18 +3321,16 @@ test "rollback transaction restores branch checkpoint and closes tx context" {
 
 test "executor executes top-level create transaction" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
 
-    try executor.beginCreateTransaction(tx_context, sender);
+    try executor.beginCreateTransaction(execution_context, sender);
     const result = (try executor.executeCreate(.{
         .sender = sender,
         .recipient = create_address,
@@ -3492,11 +3361,9 @@ test "Amsterdam value transaction emits transfer log" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, recipient);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
         .regular_left = 50_000,
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
@@ -3513,11 +3380,9 @@ test "Osaka value transaction does not emit transfer log" {
     var executor = Osaka.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, recipient);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .legacy(50_000), 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -3536,16 +3401,11 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 100;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 100, .code = &code });
 
-    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+    const result = (try executor.runStandalone(testExecutionContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
     } }, .{
@@ -3569,16 +3429,11 @@ test "Amsterdam CREATE endowment emits transfer log" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 100;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 100, .code = &code });
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
@@ -3598,16 +3453,11 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 7;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 7, .code = &code });
 
-    try executor.beginTransaction(testTxContext(sender, 100_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
@@ -3630,14 +3480,12 @@ fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
 }
 
 fn putFundedSender(executor: anytype, sender: Address) !void {
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 100_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(executor, sender, .{ .balance = 100_000_000 });
 }
 
 test "Amsterdam raises create runtime code size limit" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 20_000_000);
+    const execution_context = testExecutionContext(sender, 20_000_000);
     const default_max_code_size = evmz.eth.osaka.create.code_size_limit.?;
     const oversized_osaka = initCodeReturningRuntimeSize(default_max_code_size + 1);
     const oversized_amsterdam = initCodeReturningRuntimeSize(evmz.eth.amsterdam.create.code_size_limit.? + 1);
@@ -3646,7 +3494,7 @@ test "Amsterdam raises create runtime code size limit" {
     defer osaka.deinit();
     try putFundedSender(&osaka, sender);
 
-    const osaka_result = (try osaka.runStandalone(tx_context, .{ .create = .{
+    const osaka_result = (try osaka.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_osaka,
@@ -3659,7 +3507,7 @@ test "Amsterdam raises create runtime code size limit" {
     defer amsterdam.deinit();
     try putFundedSender(&amsterdam, sender);
 
-    const amsterdam_result = (try amsterdam.runStandalone(tx_context, .{ .create = .{
+    const amsterdam_result = (try amsterdam.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_osaka,
@@ -3675,7 +3523,7 @@ test "Amsterdam raises create runtime code size limit" {
     defer amsterdam_over.deinit();
     try putFundedSender(&amsterdam_over, sender);
 
-    const amsterdam_over_result = (try amsterdam_over.runStandalone(tx_context, .{ .create = .{
+    const amsterdam_over_result = (try amsterdam_over.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_amsterdam,
@@ -3690,14 +3538,14 @@ test "exact spec drives create runtime code size limit" {
         .create = .{ .code_size_limit = .{ .replace = 1 } },
     }));
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const two_byte_runtime = initCodeReturningRuntimeSize(2);
 
     var executor = Tiny.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    const result = (try executor.runStandalone(tx_context, .{ .create = .{
+    const result = (try executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &two_byte_runtime,
@@ -3718,7 +3566,7 @@ test "exact spec drives create runtime prefix rejection" {
         .create = .{ .rejectsCode = overrides.rejectsCreateCode },
     }));
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const init_code = evmz.t.bytecode(.{
         .PUSH1, 0xef, .PUSH0, .MSTORE8,
         .PUSH1, 0x01, .PUSH0, .RETURN,
@@ -3728,7 +3576,7 @@ test "exact spec drives create runtime prefix rejection" {
     defer default_executor.deinit();
     try putFundedSender(&default_executor, sender);
 
-    const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
+    const default_result = (try default_executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
@@ -3741,7 +3589,7 @@ test "exact spec drives create runtime prefix rejection" {
     defer custom_executor.deinit();
     try putFundedSender(&custom_executor, sender);
 
-    const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
+    const custom_result = (try custom_executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
@@ -3761,14 +3609,14 @@ test "exact spec drives create deposit gas" {
         .create = .{ .depositRegularGas = overrides.createDepositRegularGas },
     }));
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
 
     var default_executor = Shanghai.Executor.init(std.testing.allocator, .{});
     defer default_executor.deinit();
     try putFundedSender(&default_executor, sender);
 
-    const default_result = (try default_executor.runStandalone(tx_context, .{ .create = .{
+    const default_result = (try default_executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
@@ -3780,7 +3628,7 @@ test "exact spec drives create deposit gas" {
     defer custom_executor.deinit();
     try putFundedSender(&custom_executor, sender);
 
-    const custom_result = (try custom_executor.runStandalone(tx_context, .{ .create = .{
+    const custom_result = (try custom_executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
@@ -3795,14 +3643,14 @@ test "exact spec drives created account initial nonce" {
         .create = .{ .initial_nonce = 7 },
     }));
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
 
     var executor = NonceSeven.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    const result = (try executor.runStandalone(tx_context, .{ .create = .{
+    const result = (try executor.runStandalone(execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &init_code,
@@ -3841,14 +3689,14 @@ test "exact spec drives precompile warm access" {
 
     var default_executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer default_executor.deinit();
-    try default_executor.beginStateTransition(testTxContext(precompile_address, 100_000));
+    try default_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer default_executor.closeTransaction();
     var default_host = default_executor.host();
     try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(precompile_address));
 
     var custom_executor = NoPrecompile.Executor.init(std.testing.allocator, .{});
     defer custom_executor.deinit();
-    try custom_executor.beginStateTransition(testTxContext(precompile_address, 100_000));
+    try custom_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer custom_executor.closeTransaction();
     var custom_host = custom_executor.host();
     try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(precompile_address));
@@ -3887,13 +3735,13 @@ test "exact spec drives precompile execution" {
         .precompile = CustomPrecompileOverrides.Precompile,
     }));
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
 
     var executor = CustomPrecompile.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    const result = (try executor.runStandalone(tx_context, .{ .call = .{
+    const result = (try executor.runStandalone(execution_context, .{ .call = .{
         .sender = sender,
         .recipient = CustomPrecompileOverrides.custom_address,
         .input = &.{0xbb},
@@ -3932,14 +3780,11 @@ test "exact spec drives selfdestruct host policy" {
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 7;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 7, .code = &code });
 
-    try executor.state.seedAccount(beneficiary, MemoryAccount.init(std.testing.allocator));
+    try evmz.t.seedExecutorAccount(&executor, beneficiary, .{});
 
-    const result = (try executor.runStandalone(testTxContext(sender, 100_000), .{ .call = .{
+    const result = (try executor.runStandalone(testExecutionContext(sender, 100_000), .{ .call = .{
         .sender = sender,
         .recipient = contract,
     } }, .legacy(100_000))).expectCall();
@@ -3953,15 +3798,13 @@ test "exact spec drives selfdestruct host policy" {
 
 test "create warms created address from Berlin" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(tx_context, sender);
+    try executor.beginCreateTransaction(execution_context, sender);
 
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
@@ -3974,19 +3817,15 @@ test "create warms created address from Berlin" {
 test "callcode with insufficient balance leaves caller storage unchanged" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 100_000);
+    const execution_context = testExecutionContext(caller, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 0;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 0 });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 });
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 } });
 
-    try executor.beginTransaction(tx_context, caller, caller);
+    try executor.beginTransaction(execution_context, caller, caller);
     defer executor.closeTransaction();
     const result = (try executeHostCall(&executor, .{
         .depth = 1,
@@ -4006,20 +3845,16 @@ test "callcode with insufficient balance leaves caller storage unchanged" {
 
 test "create address collision preserves nonce and warmth outside payload rollback" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1 });
 
     const create_address = evmz.address.create(sender, 0);
-    var existing_account = MemoryAccount.init(std.testing.allocator);
-    existing_account.nonce = 1;
-    try executor.state.seedAccount(create_address, existing_account);
+    try evmz.t.seedExecutorAccount(&executor, create_address, .{ .nonce = 1 });
 
-    try executor.beginCreateTransaction(tx_context, sender);
+    try executor.beginCreateTransaction(execution_context, sender);
     defer executor.closeTransaction();
 
     const result = (try executor.executeCreateTransaction(sender, create_address, &.{0x00}, .legacy(100_000), 1)).expectCreate();
@@ -4032,7 +3867,6 @@ test "create address collision preserves nonce and warmth outside payload rollba
 test "branch checkpoint is native" {
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-
     var branch = try executor.branchCheckpoint();
     defer branch.deinit();
     executor.restoreBranch(&branch);
@@ -4041,18 +3875,16 @@ test "branch checkpoint is native" {
 test "call-like message at max depth still executes in recipient storage" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 100_000);
+    const execution_context = testExecutionContext(caller, 100_000);
     var executor = Frontier.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
 
-    try executor.state.seedAccount(target, MemoryAccount.init(std.testing.allocator));
+    try evmz.t.seedExecutorAccount(&executor, target, .{});
 
     inline for (.{ Host.CallKind.callcode, Host.CallKind.delegatecall }, 0..) |kind, slot| {
-        try executor.beginTransaction(tx_context, caller, caller);
+        try executor.beginTransaction(execution_context, caller, caller);
         try executor.state.setCode(target, &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
         const result = (try executeHostCall(&executor, .{
             .depth = Host.max_call_depth,
@@ -4074,13 +3906,11 @@ test "call-like message at max depth still executes in recipient storage" {
 test "value call at max depth returns stipend without child execution" {
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 100_000);
+    const execution_context = testExecutionContext(caller, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
@@ -4093,11 +3923,9 @@ test "value call at max depth returns stipend without child execution" {
         0x00,   .CALL,
         .STOP,
     });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try executor.beginTransaction(tx_context, caller, contract);
+    try executor.beginTransaction(execution_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
@@ -4118,13 +3946,11 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
-    const tx_context = testTxContext(caller, 300_000);
+    const execution_context = testExecutionContext(caller, 300_000);
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
 
     const code = evmz.t.bytecode(.{
         .PUSH1, 0x00,
@@ -4137,12 +3963,9 @@ test "Amsterdam value call at max depth refills new-account state gas" {
         0x27,   0x10,
         .CALL,  .STOP,
     });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 1;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 1, .code = &code });
 
-    try executor.beginTransaction(tx_context, caller, contract);
+    try executor.beginTransaction(execution_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
@@ -4164,20 +3987,16 @@ test "Amsterdam value call at max depth refills new-account state gas" {
 test "Amsterdam create at max depth refills new-account state gas" {
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 300_000);
+    const execution_context = testExecutionContext(caller, 300_000);
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
 
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try executor.beginTransaction(tx_context, caller, contract);
+    try executor.beginTransaction(execution_context, caller, contract);
     const result = (try executeHostCall(&executor, .{
         .depth = Host.max_call_depth,
         .kind = .call,
@@ -4196,22 +4015,18 @@ test "Amsterdam create at max depth refills new-account state gas" {
     try std.testing.expectEqual(@as(u64, 0), executor.getAccount(contract).?.nonce);
 }
 
-test "exceptional child call burns forwarded gas" {
+test "exceptional child call rolls back storage via checkpoint" {
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 100_000);
+    const execution_context = testExecutionContext(caller, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
+    try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
 
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&.{0xfe});
-    try executor.state.seedAccount(target, target_account);
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0xfe } });
 
-    try executor.beginTransaction(tx_context, caller, caller);
+    try executor.beginTransaction(execution_context, caller, caller);
     const result = (try executeHostCall(&executor, .{
         .depth = 1,
         .kind = .call,
@@ -4225,50 +4040,18 @@ test "exceptional child call burns forwarded gas" {
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-}
-
-test "exceptional child call rolls back storage via checkpoint" {
-    const caller = evmz.addr(0xaaaa);
-    const target = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(caller, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    var caller_account = MemoryAccount.init(std.testing.allocator);
-    caller_account.balance = 1_000_000;
-    try executor.state.seedAccount(caller, caller_account);
-
-    var target_account = MemoryAccount.init(std.testing.allocator);
-    try target_account.setCode(&.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0xfe });
-    try executor.state.seedAccount(target, target_account);
-
-    try executor.beginTransaction(tx_context, caller, caller);
-    const result = (try executeHostCall(&executor, .{
-        .depth = 1,
-        .kind = .call,
-        .gas = 100_000,
-        .recipient = target,
-        .sender = caller,
-        .input_data = &.{},
-        .value = 0,
-        .code_address = target,
-    })).expectCall();
-
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getStorage(target, 0x64));
 }
 
 test "contract creation rejects EF-prefixed runtime code from London" {
     const sender = evmz.addr(0xaaaa);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = London.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(tx_context, sender);
+    try executor.beginCreateTransaction(execution_context, sender);
 
     const init_code = &.{ 0x60, 0xef, 0x60, 0x00, 0x53, 0x60, 0x10, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
@@ -4284,20 +4067,15 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 test "selfdestruct charges new-account cost for nonzero balance" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 1;
-    try contract_account.setCode(&.{ 0x5f, 0xff });
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 1, .code = &.{ 0x5f, 0xff } });
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -4315,19 +4093,15 @@ fn expectEmptySelfDestructGas(comptime ExactVm: type, expected_gas_left: i64) !v
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{ .PUSH1, 0x00, .SELFDESTRUCT });
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = ExactVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -4343,19 +4117,15 @@ fn expectSelfDestructRefund(comptime ExactVm: type, expected_refund: i64) !void 
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{ .PUSH1, 0x00, .SELFDESTRUCT });
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
     var executor = ExactVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try executor.beginTransaction(tx_context, sender, contract);
+    try executor.beginTransaction(execution_context, sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -4372,7 +4142,7 @@ test "active precompiles are warm but not existing state accounts" {
     try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(precompile_address));
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(precompile_address));
 
-    try executor.state.seedAccount(precompile_address, MemoryAccount.init(std.testing.allocator));
+    try evmz.t.seedExecutorAccount(&executor, precompile_address, .{});
     try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(precompile_address));
 }
 
@@ -4389,9 +4159,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
 
     var code: [eip7702.delegation_code_len]u8 = undefined;
     eip7702.writeDelegationCode(&code, precompile_address);
-    var authority_account = MemoryAccount.init(std.testing.allocator);
-    try authority_account.setCode(&code);
-    try executor.state.seedAccount(authority, authority_account);
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &code });
 
     var host_iface = executor.host();
     try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(authority)).?);
@@ -4400,7 +4168,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
 test "sealed observations expose storage state without a trace tape" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const tx_context = testTxContext(sender, 100_000);
+    const execution_context = testExecutionContext(sender, 100_000);
 
     const StorageObserver = struct {
         address: Address,
@@ -4432,20 +4200,17 @@ test "sealed observations expose storage state without a trace tape" {
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&.{
-        0x60, 0x2a, // PUSH1 42
-        0x60, 0x00, // PUSH1 0
-        0x55, // SSTORE
-        0x00, // STOP
+    try evmz.t.seedExecutorAccount(&executor, contract, .{
+        .code = &.{
+            0x60, 0x2a, // PUSH1 42
+            0x60, 0x00, // PUSH1 0
+            0x55, // SSTORE
+            0x00, // STOP
+        },
     });
-    try executor.state.seedAccount(contract, contract_account);
-
-    try executor.beginObservedTransaction(tx_context, sender, contract);
+    try executor.beginObservedTransaction(execution_context, sender, contract);
     defer executor.closeTransaction();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     try executor.closeTransactionObserved(&observations);

@@ -1,4 +1,3 @@
-const std = @import("std");
 const guest_options = @import("guest_options");
 
 pub const Error = error{

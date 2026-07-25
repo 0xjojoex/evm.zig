@@ -18,27 +18,3 @@ pub const VTable = struct {
 pub fn commit(self: Committer, changes: ChangesView) !void {
     return self.vtable.commit(self.ptr, changes);
 }
-
-test "committer delegates commit" {
-    const std = @import("std");
-    const addr = @import("../address.zig").addr;
-    var state = TrackedState.init(std.testing.allocator);
-    defer state.deinit();
-    const attempt = state.beginTransaction();
-    try state.setBalance(addr(1), 1);
-    state.seal(attempt);
-    state.retain(attempt);
-
-    var count: u32 = 0;
-    const writer = Committer{ .ptr = &count, .vtable = &.{
-        .commit = struct {
-            fn commit(ptr: *anyopaque, changes: ChangesView) !void {
-                const result: *u32 = @ptrCast(@alignCast(ptr));
-                result.* = changes.accounts.len();
-            }
-        }.commit,
-    } };
-
-    try writer.commit(state.acceptedView().changes());
-    try std.testing.expectEqual(@as(u32, 1), count);
-}

@@ -21,12 +21,12 @@ pub const MockHostContext = struct {
     fn createWithAllocator(allocator: std.mem.Allocator, tx_context: ?evmc.evmc_tx_context) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
-        const native_tx_context = if (tx_context) |ctx|
+        const native_execution_context = if (tx_context) |ctx|
             try common.fromEvmcTxContext(ctx, &self.blob_hashes)
         else
             null;
         self.allocator = allocator;
-        self.mock_host = t.MockHost.init(allocator, native_tx_context);
+        self.mock_host = t.MockHost.init(allocator, native_execution_context);
         self.host = self.mock_host.host();
         self.host_context = host2c.HostContext{
             .ptr = self,

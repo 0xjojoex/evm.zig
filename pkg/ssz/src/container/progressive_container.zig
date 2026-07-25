@@ -2,7 +2,6 @@ const std = @import("std");
 const ssz = @import("../lib.zig");
 const codec = @import("../codec.zig");
 const container = @import("typed_container.zig");
-const Error = @import("../error.zig").Error;
 
 /// Return the codec for an SSZ `ProgressiveContainer(active_fields)`.
 ///

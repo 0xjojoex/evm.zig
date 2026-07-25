@@ -616,11 +616,6 @@ fn optionalU256(tx: *const std.json.ObjectMap, key: []const u8) !?u256 {
     return try parseU256FromValue(value);
 }
 
-fn optionalU64(tx: *const std.json.ObjectMap, key: []const u8) !?u64 {
-    const value = tx.get(key) orelse return null;
-    return try parseU64FromValue(value);
-}
-
 fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
     if (tx.get("authorizationList") != null) return .set_code;
     if (tx.get("blobVersionedHashes") != null or tx.get("maxFeePerBlobGas") != null) return .blob;

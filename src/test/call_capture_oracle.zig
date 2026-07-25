@@ -118,7 +118,7 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
     errdefer capture.context.abort() catch {};
 
     const result = (try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, gas),
+        evmz.t.defaultExecutionContext(sender, gas),
         .{ .call = .{ .sender = sender, .recipient = recursive } },
         .legacy(gas),
         &capture.context,
@@ -203,7 +203,7 @@ fn runCase(comptime case: cases.Case) !void {
     errdefer capture.context.abort() catch {};
 
     _ = try executor.runStandaloneCaptured(
-        evmz.t.defaultTxContext(sender, case.gas),
+        evmz.t.defaultExecutionContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
             .recipient = recipient,

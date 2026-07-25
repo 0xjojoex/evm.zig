@@ -182,7 +182,7 @@ fn appendDefaultDirectOps(allocator: std.mem.Allocator, ops: *std.ArrayList(Oper
         .host_code_size,
         .host_code_hash,
         .host_copy_code,
-        .host_tx_context,
+        .host_execution_context,
         .host_call,
         .host_log,
     };

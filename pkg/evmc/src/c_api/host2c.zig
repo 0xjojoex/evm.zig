@@ -218,29 +218,29 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
     }
     const host_context = HostContext.fromContext(context).?;
     const host = host_context.host;
-    const tx_context = host.getTxContext() catch {
-        log.warn("getTxContext failed", .{});
+    const execution_context = host.getExecutionContext() catch {
+        log.warn("getExecutionContext failed", .{});
         return std.mem.zeroes(evmc.evmc_tx_context);
     };
-    const blob_hashes = common.toEvmcBlobHashes(tx_context.blob_hashes, &host_context.blob_hashes) catch {
-        log.warn("getTxContext blob hash conversion failed", .{});
+    const blob_hashes = common.toEvmcBlobHashes(execution_context.transaction.blob_hashes, &host_context.blob_hashes) catch {
+        log.warn("getExecutionContext blob hash conversion failed", .{});
         return std.mem.zeroes(evmc.evmc_tx_context);
     };
 
     return evmc.evmc_tx_context{
-        .block_base_fee = toEvmcBytes32(tx_context.base_fee),
-        .block_coinbase = toEvmcAddress(tx_context.coinbase),
-        .block_gas_limit = @intCast(tx_context.gas_limit),
-        .block_number = @intCast(tx_context.number),
-        .block_prev_randao = toEvmcBytes32(tx_context.prev_randao),
-        .block_timestamp = @intCast(tx_context.timestamp),
-        .chain_id = toEvmcBytes32(tx_context.chain_id),
-        .tx_gas_price = toEvmcBytes32(tx_context.gas_price),
-        .tx_origin = toEvmcAddress(tx_context.origin),
-        .blob_base_fee = toEvmcBytes32(tx_context.blob_base_fee),
+        .block_base_fee = toEvmcBytes32(execution_context.block.base_fee),
+        .block_coinbase = toEvmcAddress(execution_context.block.coinbase),
+        .block_gas_limit = @intCast(execution_context.block.gas_limit),
+        .block_number = @intCast(execution_context.block.number),
+        .block_prev_randao = toEvmcBytes32(execution_context.block.difficulty_or_prev_randao),
+        .block_timestamp = @intCast(execution_context.block.timestamp),
+        .chain_id = toEvmcBytes32(execution_context.chain.chain_id),
+        .tx_gas_price = toEvmcBytes32(execution_context.transaction.gas_price),
+        .tx_origin = toEvmcAddress(execution_context.transaction.origin),
+        .blob_base_fee = toEvmcBytes32(execution_context.block.blob_base_fee),
         .blob_hashes = if (blob_hashes.len == 0) null else blob_hashes.ptr,
         .blob_hashes_count = blob_hashes.len,
-        .block_slot_number = tx_context.slot_number,
+        .block_slot_number = execution_context.block.slot_number,
     };
 }
 

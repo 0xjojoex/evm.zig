@@ -124,13 +124,9 @@ test "raw writer rolls fixed output back after capacity failure" {
     try std.testing.expectEqual(@as(usize, 0), writer.written().len);
 }
 
-test "raw writer ownership, reset, remaining, and list prefix stay compatible" {
+test "raw writer ownership and list prefixes distinguish borrowed output" {
     var writer = rlp.Writer.alloc(std.testing.allocator);
     defer writer.deinit();
-    try std.testing.expectEqual(std.math.maxInt(usize), writer.remaining());
-    try writer.bytes("dog");
-    writer.reset();
-    try std.testing.expectEqual(@as(usize, 0), writer.written().len);
     try writer.bytes("cat");
     const owned = try writer.toOwnedSlice();
     defer std.testing.allocator.free(owned);
@@ -144,7 +140,6 @@ test "raw writer ownership, reset, remaining, and list prefix stay compatible" {
     var fixed_buffer: [4]u8 = undefined;
     var fixed = rlp.Writer.fixed(&fixed_buffer);
     try std.testing.expectError(error.BorrowedWriter, fixed.toOwnedSlice());
-    try std.testing.expectEqual(@as(usize, 4), fixed.remaining());
 }
 
 test "value-first list emitter reuses flat struct fields and appends runtime fields" {

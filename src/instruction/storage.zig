@@ -231,15 +231,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .sender = evmz.addr(0),
-        .gas = 100_000,
-        .kind = Host.CallKind.call,
-        .recipient = evmz.addr(0),
-        .value = 0,
-        .input_data = &.{},
-    };
+    const msg = evmz.t.defaultMessage();
     const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
@@ -264,16 +256,8 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .sender = evmz.addr(0),
-        .gas = 100_000,
-        .gas_reservoir = @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas),
-        .kind = Host.CallKind.call,
-        .recipient = evmz.addr(0),
-        .value = 0,
-        .input_data = &.{},
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas_reservoir = @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas);
     const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
@@ -301,15 +285,8 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .sender = evmz.addr(0),
-        .gas = 3 + 3 + 2_500,
-        .kind = Host.CallKind.call,
-        .recipient = evmz.addr(0),
-        .value = 0,
-        .input_data = &.{},
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 3 + 3 + 2_500;
     const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
@@ -360,15 +337,8 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
-    const msg = Host.Message{
-        .depth = 0,
-        .sender = evmz.addr(0),
-        .gas = 3 + instruction.cold_sload_cost - 1,
-        .kind = Host.CallKind.call,
-        .recipient = evmz.addr(0),
-        .value = 0,
-        .input_data = &.{},
-    };
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 3 + instruction.cold_sload_cost - 1;
     const code = &.{ 0x60, 0x00, 0x54 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);

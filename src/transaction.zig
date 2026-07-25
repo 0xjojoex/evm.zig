@@ -62,63 +62,6 @@ pub const TransactOutcome = program_mod.TransactOutcome;
 pub const GasRuntime = gas_mod.Runtime;
 pub const SettlementRuntime = settlement_mod.Runtime;
 
-test "transaction scope composes with the canonical execution message" {
-    const addr = @import("./address.zig").addr;
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    const auth_target = addr(0xcccc);
-    const storage_keys = [_]u256{ 1, 2 };
-    const access_list = [_]AccessListEntry{.{
-        .address = recipient,
-        .storage_keys = &storage_keys,
-    }};
-    const authorization_list = [_]AuthorizationTuple{.{
-        .chain_id = 1,
-        .target = auth_target,
-        .signer = sender,
-        .nonce = 7,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
-    const message = @import("./execution.zig").Message{ .call = .{
-        .sender = sender,
-        .recipient = recipient,
-        .input = &.{0x42},
-        .value = 3,
-    } };
-    const scope = TransactionScope{
-        .context = .{
-            .chain = .{ .chain_id = 1 },
-            .block = .{ .coinbase = recipient },
-            .transaction = .{ .origin = sender },
-        },
-        .access_list = &access_list,
-        .authorization_list = &authorization_list,
-        .authorization_count = authorization_list.len,
-    };
-
-    try std.testing.expect(!message.isCreate());
-    try std.testing.expectEqualSlices(u8, &sender, &message.sender());
-    try std.testing.expectEqualSlices(u8, &.{0x42}, message.input());
-    try std.testing.expectEqual(@as(u256, 3), message.value());
-    try std.testing.expectEqual(@as(usize, 1), scope.access_list.len);
-    try std.testing.expectEqual(@as(usize, 1), scope.authorization_list.len);
-    try std.testing.expectEqual(@as(usize, 1), scope.authorizationCount());
-
-    const request = executionRequest(scope.context, message, .{
-        .regular_left = 79_000,
-        .reservoir = 3,
-    });
-    try std.testing.expectEqualDeep(scope.context, request.context);
-    const call = request.message.call;
-    try std.testing.expectEqual(sender, call.sender);
-    try std.testing.expectEqual(recipient, call.recipient);
-    try std.testing.expectEqual(@as(u64, 79_000), request.gas.regular_left);
-    try std.testing.expectEqual(@as(u64, 3), request.gas.reservoir);
-}
-
 test {
     std.testing.refAllDecls(@This());
 }

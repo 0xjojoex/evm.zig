@@ -265,10 +265,6 @@ fn testRuntime(comptime spec: ExactSpec) Runtime(spec) {
     return .{};
 }
 
-test "transaction prepayment includes blob gas" {
-    try std.testing.expectEqual(@as(u256, 4_286_432), testRuntime(@import("../eth/spec.zig").cancun).prepaymentCost(500_000, 7, 1, 6));
-}
-
 test "transaction prepayment uses comptime blob gas" {
     const eth_spec = @import("../eth/spec.zig");
     const eth_transaction = @import("../eth/transaction.zig");

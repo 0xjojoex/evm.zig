@@ -19,7 +19,7 @@ pub const Operation = enum {
     host_code_size,
     host_code_hash,
     host_copy_code,
-    host_tx_context,
+    host_execution_context,
     host_call,
     host_log,
     bytecode_sload,
@@ -121,7 +121,7 @@ pub fn run(allocator: std.mem.Allocator, options: RunOptions) !Measurement {
         .host_code_size,
         .host_code_hash,
         .host_copy_code,
-        .host_tx_context,
+        .host_execution_context,
         .host_call,
         .host_log,
         => try runDirectHostOp(allocator, options.op, options.boundary, options.iterations),
@@ -169,7 +169,7 @@ fn printUsage() void {
         \\  host-code-size          direct Zig Host.getCodeSize loop
         \\  host-code-hash          direct Zig Host.getCodeHash loop
         \\  host-copy-code          direct Zig Host.copyCode loop
-        \\  host-tx-context         direct Zig Host.getTxContext loop
+        \\  host-execution-context         direct Zig Host.getExecutionContext loop
         \\  host-call               direct Zig Host.call loop
         \\  host-log                direct Zig Host.emitLog loop
         \\  bytecode-sload          interpreter loop with repeated SLOAD
@@ -226,7 +226,7 @@ fn runZigHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize) 
             .host_code_size => std.mem.doNotOptimizeAway(try host.getCodeSize(common.contract_address)),
             .host_code_hash => std.mem.doNotOptimizeAway(try host.getCodeHash(common.contract_address)),
             .host_copy_code => std.mem.doNotOptimizeAway(try host.copyCode(common.contract_address, 0, &code_buffer)),
-            .host_tx_context => std.mem.doNotOptimizeAway(try host.getTxContext()),
+            .host_execution_context => std.mem.doNotOptimizeAway(try host.getExecutionContext()),
             .host_call => {
                 msg.gas = common.max_gas - @as(i64, @intCast(i & 0xff));
                 std.mem.doNotOptimizeAway(try host.call(msg));
@@ -291,7 +291,7 @@ fn runEvmcHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize)
             .host_code_size => std.mem.doNotOptimizeAway(interface.get_code_size.?(context, &address)),
             .host_code_hash => std.mem.doNotOptimizeAway(interface.get_code_hash.?(context, &address)),
             .host_copy_code => std.mem.doNotOptimizeAway(interface.copy_code.?(context, &address, 0, &code_buffer, code_buffer.len)),
-            .host_tx_context => std.mem.doNotOptimizeAway(interface.get_tx_context.?(context)),
+            .host_execution_context => std.mem.doNotOptimizeAway(interface.get_tx_context.?(context)),
             .host_call => {
                 msg.gas = common.max_gas - @as(i64, @intCast(i & 0xff));
                 var result = interface.call.?(context, &msg);

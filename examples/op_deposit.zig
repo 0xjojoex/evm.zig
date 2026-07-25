@@ -258,7 +258,12 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
                 .execution_gas = execution_gas,
                 // Deposits execute at gas price zero and carry no blob hashes.
                 .request = evmz.transaction.executionRequest(
-                    context.input().env.executionContext(tx.from, 0, &.{}),
+                    context.input().env.executionContext(
+                        tx.from,
+                        0,
+                        context.input().env.gas_limit,
+                        &.{},
+                    ),
                     message,
                     execution_gas orelse evmz.execution.ExecutionGas.none,
                 ),
@@ -732,33 +737,6 @@ test "Ethereum rejection remains tagged through the OP transaction program" {
 
     try std.testing.expectEqual(Canyon.Evm.Rejection.nonce_too_high, result.rejected.ethereum);
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
-}
-
-test "OP transaction program composes a derived Ethereum family and deposit" {
-    try std.testing.expect(evmz.Transaction == evmz.Evm.Transaction);
-    try std.testing.expect(Canyon.Evm.Transaction == evmz.Evm.Transaction);
-    try std.testing.expect(!@hasDecl(evmz, "DepositTransaction"));
-    try std.testing.expect(Canyon.Vm.Transaction == OpTransaction);
-    try std.testing.expect(Canyon.Vm.Output == OpOutput);
-    try std.testing.expect(Canyon.Vm.Rejection == OpRejection);
-    try std.testing.expect(Canyon.Vm.TransactInput == OpInput);
-    try std.testing.expect(Canyon.Vm.Executor == Canyon.Evm.Executor);
-    try std.testing.expect(Canyon.Vm.Executor != evmz.Evm.Executor);
-    try std.testing.expect(Canyon.Block.TransactionRuntime == Canyon.Vm);
-    try std.testing.expect(Canyon.Block.Executor == Canyon.Evm.Executor);
-    try std.testing.expect(Canyon.Block.Transaction == OpTransaction);
-    try std.testing.expect(Canyon.Block.Output == OpOutput);
-    try std.testing.expect(Canyon.Block.Included == OpIncludedTransaction);
-    try std.testing.expectEqual(OpRevision.canyon, Canyon.op_revision);
-    try std.testing.expectEqual(OpRevision.delta, Delta.op_revision);
-    try std.testing.expectEqual(OpRevision.ecotone, Ecotone.op_revision);
-    try std.testing.expectEqual(OpRevision.fjord, Fjord.op_revision);
-    try std.testing.expect(Canyon.specification.precompile == canyon_spec.precompile);
-    try std.testing.expect(Ecotone.specification.precompile == ecotone_spec.precompile);
-    try std.testing.expect(Fjord.specification.precompile == FjordPrecompile);
-    try std.testing.expect(!@hasField(Canyon.Evm.Executor.Init, "revision"));
-    try std.testing.expect(!@hasField(Ecotone.Evm.Executor.Init, "revision"));
-    try std.testing.expect(Canyon.Vm.Error != anyerror);
 }
 
 test "OP block execution normalizes and folds Ethereum and deposit transactions" {

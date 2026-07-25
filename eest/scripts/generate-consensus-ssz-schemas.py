@@ -398,6 +398,13 @@ def emit_fork_module(
     shapes: dict[tuple[Any, ...], Shape],
 ) -> str:
     ordered = ordered_shapes_for_fork(fork, shapes)
+    referenced_forks = {
+        shape_for(dependency, shapes).declaration_fork
+        for shape in ordered
+        for field_type in shape.value.fields().values()
+        for dependency in direct_container_dependencies(field_type)
+        if shape_for(dependency, shapes).declaration_fork != fork
+    }
     lines = [
         f"//! Generated from consensus-specs {version} resolved pyspec.",
         f"//! Unique named schema shapes first required at {fork}.",
@@ -406,7 +413,8 @@ def emit_fork_module(
         'const ssz = @import("ssz");',
     ]
     for previous in FORKS[: FORKS.index(fork)]:
-        lines.append(f'const {previous}_types = @import("{previous}.zig");')
+        if previous in referenced_forks:
+            lines.append(f'const {previous}_types = @import("{previous}.zig");')
     lines.append("")
     for shape in ordered:
         lines.extend(emit_container(shape, shapes, fork))

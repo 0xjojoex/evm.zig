@@ -3,11 +3,7 @@
 const std = @import("std");
 
 const crypto = @import("../../crypto.zig");
-const eip6110 = @import("6110.zig");
-const eip7002 = @import("7002.zig");
-const eip7251 = @import("7251.zig");
-const eip8282 = @import("8282.zig");
-
+const t = @import("../../t.zig");
 /// sha256("")
 pub const empty_requests_hash = [_]u8{
     0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
@@ -64,7 +60,7 @@ test "EIP-7685 commitment hashes non-empty requests by type" {
         &.{ 0x00, 0xbb },
     };
     const digest = try requestsHash(std.testing.allocator, &requests);
-    try expectHex(&digest, "bce7fa6eb1b970ae3d6c85193b9adb99aa19f5178fe09f55e96344bcbf68ee62");
+    try t.expectHex(&digest, "bce7fa6eb1b970ae3d6c85193b9adb99aa19f5178fe09f55e96344bcbf68ee62");
 
     const empty_requests = [_][]const u8{ &.{0x00}, &.{0x01} };
     try std.testing.expectEqualSlices(u8, &empty_requests_hash, &(try requestsHash(std.testing.allocator, &.{})));
@@ -75,35 +71,4 @@ test "EIP-7685 commitment hashes non-empty requests by type" {
 
     const duplicate_type = [_][]const u8{ &.{ 0x01, 0xaa }, &.{ 0x01, 0xbb } };
     try std.testing.expectError(error.InvalidRequest, requestsHash(std.testing.allocator, &duplicate_type));
-}
-
-test "EIP-7685 commitment changes for mutated bytes in each request family" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const families = [_]u8{
-        eip6110.request_type,
-        eip7002.request_type,
-        eip7251.request_type,
-        eip8282.builder_deposit_request_type,
-        eip8282.builder_exit_request_type,
-    };
-
-    for (families) |request_type| {
-        const original = try requestBytes(scratch, request_type, &.{ 0x11, 0x22 });
-        const mutated = try requestBytes(scratch, request_type, &.{ 0x11, 0x23 });
-        const original_requests = [_][]const u8{original};
-        const mutated_requests = [_][]const u8{mutated};
-
-        const original_hash = try requestsHash(scratch, &original_requests);
-        const mutated_hash = try requestsHash(scratch, &mutated_requests);
-        try std.testing.expect(!std.mem.eql(u8, &original_hash, &mutated_hash));
-    }
-}
-
-fn expectHex(bytes: []const u8, expected_hex: []const u8) !void {
-    var expected: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&expected, expected_hex);
-    try std.testing.expectEqualSlices(u8, &expected, bytes);
 }

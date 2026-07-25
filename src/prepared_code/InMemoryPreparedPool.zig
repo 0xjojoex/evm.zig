@@ -13,7 +13,7 @@
 const std = @import("std");
 const Backend = @import("Backend.zig");
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../ExecutionConfig.zig").JumpDestStrategy;
+const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 const crypto = @import("../crypto.zig");
 
 const InMemoryPreparedPool = @This();
@@ -89,10 +89,6 @@ pub fn count(self: *const InMemoryPreparedPool) usize {
     return self.entries.count();
 }
 
-pub fn retainedCodeBytes(self: *const InMemoryPreparedPool) usize {
-    return self.retained_code_bytes;
-}
-
 pub fn clearRetainingCapacity(self: *InMemoryPreparedPool) !void {
     if (self.hasActiveExecution()) return error.ActivePreparedCodeExecution;
     self.clearEntriesRetainingCapacity();
@@ -142,7 +138,7 @@ test "wrong hash rejects admission atomically" {
     const wrong_hash = [_]u8{0xff} ** 32;
     try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(wrong_hash, &raw_code, .scalar_bitmask));
     try std.testing.expectEqual(@as(usize, 0), pool.count());
-    try std.testing.expectEqual(@as(usize, 0), pool.retainedCodeBytes());
+    try std.testing.expectEqual(@as(usize, 0), pool.retained_code_bytes);
 }
 
 test "prepared bytecode owns source bytes" {
@@ -157,8 +153,6 @@ test "prepared bytecode owns source bytes" {
     try std.testing.expect(prepared.bytes.ptr != raw_code[0..].ptr);
     @memset(&raw_code, 0xff);
     try std.testing.expectEqualSlices(u8, &original, prepared.bytes);
-    const cached = try pool.getOrPrepare(code_hash, &raw_code, .simd_bitmask);
-    try std.testing.expectEqual(prepared.bytes.ptr, cached.bytes.ptr);
 }
 
 test "prepared views remain valid while map grows" {

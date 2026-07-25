@@ -13,7 +13,7 @@ const address = @import("../../address.zig");
 const bal = @import("model.zig");
 const bal_view = @import("ClaimView.zig");
 const crypto = @import("../../crypto.zig");
-const execution_resources = @import("../../execution_resources.zig");
+const execution_resources = @import("../../execution/resources.zig");
 const state = @import("../../state.zig");
 
 const Allocator = std.mem.Allocator;

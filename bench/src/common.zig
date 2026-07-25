@@ -45,7 +45,7 @@ pub const HostCounters = struct {
     storage_store: u64 = 0,
     log: u64 = 0,
     block_hash: u64 = 0,
-    tx_context: u64 = 0,
+    execution_context: u64 = 0,
     access_account: u64 = 0,
     access_storage: u64 = 0,
     access_delegated_account: u64 = 0,
@@ -81,25 +81,17 @@ pub const CountingHost = struct {
     profile: HostProfile,
     storage: std.AutoHashMap(StorageKey, StorageSlot),
     counters: HostCounters = .{},
-    tx_context: Host.TxContext,
+    execution_context: evmz.execution.ExecutionContext,
 
     pub fn init(allocator: std.mem.Allocator, profile: HostProfile) CountingHost {
         return .{
             .allocator = allocator,
             .profile = profile,
             .storage = std.AutoHashMap(StorageKey, StorageSlot).init(allocator),
-            .tx_context = .{
-                .chain_id = 1,
-                .gas_price = 0,
-                .origin = caller_address,
-                .coinbase = evmz.addr(0),
-                .number = 0,
-                .timestamp = 0,
-                .gas_limit = @intCast(max_gas),
-                .prev_randao = 0,
-                .base_fee = 0,
-                .blob_base_fee = 0,
-                .blob_hashes = &.{},
+            .execution_context = .{
+                .chain = .{ .chain_id = 1 },
+                .block = .{ .gas_limit = @intCast(max_gas) },
+                .transaction = .{ .origin = caller_address },
             },
         };
     }
@@ -134,7 +126,7 @@ pub const CountingHost = struct {
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
             .accessAccount = accessAccount,
-            .getTxContext = getTxContext,
+            .getExecutionContext = getExecutionContext,
             .call = call,
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
@@ -260,10 +252,10 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn getTxContext(ptr: *anyopaque) !Host.TxContext {
+    noinline fn getExecutionContext(ptr: *anyopaque) !evmz.execution.ExecutionContext {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        self.counters.tx_context += 1;
-        return self.tx_context;
+        self.counters.execution_context += 1;
+        return self.execution_context;
     }
 
     noinline fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {

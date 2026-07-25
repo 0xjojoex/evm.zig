@@ -25,7 +25,6 @@ pub const amsterdam_call_value_cost = eip8037.call_value_cost;
 pub const amsterdam_code_deposit_word_cost = eip8037.code_deposit_word_cost;
 pub const amsterdam_regular_per_auth_base_cost = eip8037.regular_per_auth_base_cost;
 pub const amsterdam_auth_base_state_gas = eip8037.auth_base_state_gas;
-pub const amsterdam_authorization_state_gas = eip8037.authorization_state_gas;
 pub const access_list_address_gas: u64 = 2_400;
 pub const access_list_storage_key_gas: u64 = 1_900;
 pub const amsterdam_access_list_address_gas = eip8037.access_list_address_gas;

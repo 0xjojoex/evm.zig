@@ -30,7 +30,7 @@ pub fn bind(comptime Executor: type) type {
                 .accessDelegatedAccount = Callbacks().accessDelegatedAccount,
                 .accessAccount = Callbacks().accessAccount,
                 .observeAccountAccess = observeAccountAccess,
-                .getTxContext = call_runtime.getTxContext,
+                .getExecutionContext = call_runtime.getExecutionContext,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
             } };

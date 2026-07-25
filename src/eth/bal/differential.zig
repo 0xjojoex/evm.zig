@@ -11,7 +11,7 @@
 
 const std = @import("std");
 
-const Config = @import("../../ExecutionConfig.zig");
+const Config = @import("../../code/Config.zig");
 const Executor = @import("../../executor.zig");
 const Host = @import("../../Host.zig");
 const bal = @import("model.zig");
@@ -21,6 +21,7 @@ const batch_scheduler = @import("../../io/batch_scheduler.zig");
 const lane_batch = @import("lane_batch.zig");
 const candidate_transition = @import("candidate_transition.zig");
 const tracked_state_projector = @import("tracked_state_projector.zig");
+const execution_values = @import("../../execution.zig");
 const prepared_code = @import("../../prepared_code.zig");
 const BalClaimReader = @import("../../state/BalClaimReader.zig");
 const Reader = @import("../../state/Reader.zig");
@@ -128,7 +129,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         allocator: std.mem.Allocator,
         config: Config,
         env: vm.Env,
-        lifecycle_tx_context: Host.TxContext,
+        lifecycle_execution_context: execution_values.ExecutionContext,
         base_reader: Reader,
         prepared_code_backend: ?prepared_code.Backend,
         block_hash_source: ?vm.BlockHashSource,
@@ -235,7 +236,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             allocator: std.mem.Allocator,
             config: Config,
             env: vm.Env,
-            lifecycle_tx_context: Host.TxContext,
+            lifecycle_execution_context: execution_values.ExecutionContext,
             base_reader: Reader,
             prepared_code_backend: ?prepared_code.Backend,
             block_hash_source: ?vm.BlockHashSource,
@@ -247,7 +248,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .allocator = allocator,
                 .config = config,
                 .env = env,
-                .lifecycle_tx_context = lifecycle_tx_context,
+                .lifecycle_execution_context = lifecycle_execution_context,
                 .base_reader = base_reader,
                 .prepared_code_backend = prepared_code_backend,
                 .block_hash_source = block_hash_source,
@@ -326,7 +327,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             if (header) |context| {
                 try Executor.system_contracts.applyBeforeBlockObserved(
                     &execution.executor,
-                    self.lifecycle_tx_context,
+                    self.lifecycle_execution_context,
                     context,
                     &observation_collector,
                 );
@@ -917,7 +918,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             };
             Operations.applyCandidateWithdrawals(
                 &execution.executor,
-                self.lifecycle_tx_context,
+                self.lifecycle_execution_context,
                 withdrawals,
                 &observation_collector,
             ) catch |err|

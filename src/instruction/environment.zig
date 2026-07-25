@@ -114,60 +114,60 @@ pub fn caller(frame: *CallFrame) !void {
 }
 
 pub fn origin(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(evmz.address.toU256(tx_context.origin));
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(evmz.address.toU256(execution_context.transaction.origin));
 }
 
 pub fn gasprice(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.gas_price);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.transaction.gas_price);
 }
 
 pub fn basefee(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.base_fee);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.base_fee);
 }
 
 pub fn coinbase(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(evmz.address.toU256(tx_context.coinbase));
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(evmz.address.toU256(execution_context.block.coinbase));
 }
 
 pub fn timestamp(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.timestamp);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.timestamp);
 }
 
 pub fn number(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.number);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.number);
 }
 
 pub fn slotnum(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.slot_number);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.slot_number);
 }
 
 pub fn prevrandao(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.prev_randao);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.difficulty_or_prev_randao);
 }
 
 pub fn gaslimit(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.gas_limit);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.gas_limit);
 }
 
 pub fn chainid(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.chain_id);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.chain.chain_id);
 }
 
 pub fn blockhash(frame: *CallFrame) !void {
     const block_number: u256 = try frame.stack.pop();
 
-    const tx_context = try frame.host.getTxContext();
-    const current_number: u256 = tx_context.number;
+    const execution_context = try frame.host.getExecutionContext();
+    const current_number: u256 = execution_context.block.number;
     const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
 
     if (block_number < current_number and block_number >= oldest_hashable) {
@@ -357,23 +357,23 @@ pub fn returndatacopy(frame: *CallFrame) !void {
 
 pub fn blobhash(frame: *CallFrame) !void {
     const index_word = try frame.stack.pop();
-    const tx_context = try frame.host.getTxContext();
+    const execution_context = try frame.host.getExecutionContext();
     const index = std.math.cast(usize, index_word) orelse {
         @branchHint(.unlikely);
         frame.stack.pushUnchecked(0);
         return;
     };
 
-    if (index >= tx_context.blob_hashes.len) {
+    if (index >= execution_context.transaction.blob_hashes.len) {
         frame.stack.pushUnchecked(0);
         return;
     }
-    frame.stack.pushUnchecked(tx_context.blob_hashes[index]);
+    frame.stack.pushUnchecked(execution_context.transaction.blob_hashes[index]);
 }
 
 pub fn blobbasefee(frame: *CallFrame) !void {
-    const tx_context = try frame.host.getTxContext();
-    try frame.stack.push(tx_context.blob_base_fee);
+    const execution_context = try frame.host.getExecutionContext();
+    try frame.stack.push(execution_context.block.blob_base_fee);
 }
 
 test "CALLDATALOAD with oversized source offset returns zero" {

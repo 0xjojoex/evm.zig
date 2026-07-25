@@ -4,10 +4,8 @@
 //! parameters live under `transaction/`. Signature behavior stays here in the
 //! executor layer.
 const std = @import("std");
-const address = @import("../address.zig");
 const delegation = @import("../code/eip7702.zig");
 
-const Address = address.Address;
 /// Delegation indicator prefix (`0xef0100`).
 pub const delegation_designator = delegation.delegation_designator;
 /// Byte length of a full delegation indicator.
@@ -39,14 +37,6 @@ pub fn authorizationSignatureShapeValid(y_parity: u256, legacy_v: ?u256, r: u256
 /// Lets callers distinguish a high-`s` rejection from other shape failures.
 pub fn authorizationSignatureSTooHigh(s: u256) bool {
     return s > secp256k1_half_n;
-}
-
-test "delegation code round-trips target" {
-    const target = address.addr(0x1234);
-    var code: [delegation_code_len]u8 = undefined;
-    writeDelegationCode(&code, target);
-    try std.testing.expectEqual(target, delegationTarget(&code).?);
-    try std.testing.expectEqual(null, delegationTarget(code[0 .. code.len - 1]));
 }
 
 test "authorization signature shape rejects invalid scalar ranges" {

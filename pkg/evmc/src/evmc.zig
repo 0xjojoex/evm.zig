@@ -269,7 +269,7 @@ const ToHost = struct {
                 .copyCode = copyCode,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
-                .getTxContext = getTxContext,
+                .getExecutionContext = getExecutionContext,
                 .accessAccount = accessAccount,
                 .accessStorage = accessStorage,
                 .accessDelegatedAccount = accessDelegatedAccount,
@@ -380,7 +380,7 @@ const ToHost = struct {
         return fromEvmcBytes32(self.host_interfcace.*.get_block_hash.?(self.context, @intCast(number)));
     }
 
-    fn getTxContext(ptr: *anyopaque) !evmz.Host.TxContext {
+    fn getExecutionContext(ptr: *anyopaque) !evmz.execution.ExecutionContext {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const context = self.host_interfcace.*.get_tx_context.?(self.context);
         return common.fromEvmcTxContext(context, &self.blob_hashes);

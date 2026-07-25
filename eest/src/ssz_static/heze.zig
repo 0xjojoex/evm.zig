@@ -5,11 +5,8 @@
 const ssz = @import("ssz");
 const phase0_types = @import("phase0.zig");
 const altair_types = @import("altair.zig");
-const bellatrix_types = @import("bellatrix.zig");
 const capella_types = @import("capella.zig");
-const deneb_types = @import("deneb.zig");
 const electra_types = @import("electra.zig");
-const fulu_types = @import("fulu.zig");
 const gloas_types = @import("gloas.zig");
 
 pub const ExecutionPayloadBidHeze = struct {

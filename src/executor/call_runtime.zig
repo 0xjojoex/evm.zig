@@ -11,8 +11,8 @@ const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
 const runtime_frames = @import("./runtime_frames.zig");
 const ExecutionGas = @import("../execution.zig").ExecutionGas;
+const ExecutionContext = @import("../execution.zig").ExecutionContext;
 const call_scratch_storage = @import("./call_scratch.zig");
-const context_adapter = @import("./context.zig");
 const CaptureContext = executor_module.CaptureContext;
 
 pub fn bind(comptime Executor: type) type {
@@ -731,7 +731,7 @@ pub fn bind(comptime Executor: type) type {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
-            _ = try currentTxContext(self);
+            _ = try currentExecutionContext(self);
             var execution_gas = gas;
             const top_frame_state_gas = try chargeTopFrameValueTransferStateGas(self, sender, recipient, value, &execution_gas);
             if (top_frame_state_gas.out_of_gas) {
@@ -891,7 +891,7 @@ pub fn bind(comptime Executor: type) type {
             value: u256,
         ) !Interpreter.Result {
             self.clearLastOutput();
-            _ = try currentTxContext(self);
+            _ = try currentExecutionContext(self);
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
                     .status = .invalid,
@@ -936,7 +936,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentTxContext(self);
+            _ = try currentExecutionContext(self);
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .status = .invalid,
@@ -1015,7 +1015,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentTxContext(self);
+            _ = try currentExecutionContext(self);
             var execution_gas = gas;
             const top_frame_state_gas = try chargeTopFrameCreateStateGas(self, options, &execution_gas);
             if (top_frame_state_gas.out_of_gas) {
@@ -1065,7 +1065,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentTxContext(self);
+            _ = try currentExecutionContext(self);
             try self.traceAccountAccess(options.recipient);
             return executeCreateMessage(self, .{
                 .depth = 0,
@@ -1153,14 +1153,13 @@ pub fn bind(comptime Executor: type) type {
             return interpreter.executeCapturedUntilAction(capture);
         }
 
-        pub fn currentTxContext(self: *const Executor) !Host.TxContext {
-            const context = self.execution_context orelse return error.MissingTxContext;
-            return context_adapter.toHost(context);
+        pub fn currentExecutionContext(self: *const Executor) !ExecutionContext {
+            return self.execution_context orelse error.MissingExecutionContext;
         }
 
-        pub fn getTxContext(ptr: *anyopaque) !Host.TxContext {
+        pub fn getExecutionContext(ptr: *anyopaque) !ExecutionContext {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return currentTxContext(self);
+            return currentExecutionContext(self);
         }
 
         fn acquireBytecodeFrame(
@@ -1809,19 +1808,12 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     try capture.begin();
     errdefer capture.abort() catch {};
 
-    try executor.beginCapturedTransaction(.{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = evmz.addr(0x1111),
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 100_000,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
-    }, evmz.addr(0x1111), evmz.addr(0x2222), &capture);
+    try executor.beginCapturedTransaction(
+        evmz.t.defaultExecutionContext(evmz.addr(0x1111), 100_000),
+        evmz.addr(0x1111),
+        evmz.addr(0x2222),
+        &capture,
+    );
     defer executor.closeTransaction();
 
     executor.beginPreparedCodeExecution();

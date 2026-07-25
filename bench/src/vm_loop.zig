@@ -109,7 +109,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             var baseline = try self.baseline.?.clone();
             defer baseline.deinit();
             self.executor.restoreBranch(&baseline);
-            try self.executor.beginTransaction(executorTxContext(gas_limit), common.caller_address, common.contract_address);
+            try self.executor.beginTransaction(executorExecutionContext(gas_limit), common.caller_address, common.contract_address);
 
             var pre_execution = try self.executor.branchCheckpoint();
             defer pre_execution.deinit();
@@ -455,19 +455,11 @@ fn measureScopeName(options: ResolvedOptions) []const u8 {
     };
 }
 
-fn executorTxContext(gas_limit: u64) Host.TxContext {
+fn executorExecutionContext(gas_limit: u64) evmz.execution.ExecutionContext {
     return .{
-        .chain_id = 1,
-        .gas_price = 0,
-        .origin = common.caller_address,
-        .coinbase = evmz.addr(0),
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = gas_limit,
-        .prev_randao = 0,
-        .base_fee = 0,
-        .blob_base_fee = 0,
-        .blob_hashes = &.{},
+        .chain = .{ .chain_id = 1 },
+        .block = .{ .gas_limit = gas_limit },
+        .transaction = .{ .origin = common.caller_address },
     };
 }
 

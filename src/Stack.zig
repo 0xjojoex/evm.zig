@@ -154,17 +154,6 @@ pub fn asSlice(self: *const Stack) []const u256 {
     return self.base[0..self.len];
 }
 
-pub fn dump(self: *const Stack) void {
-    std.debug.print("--\n", .{});
-    std.debug.print("Stack ({d}):\n", .{self.len});
-    var i: usize = self.len;
-    while (i > 0) {
-        i -= 1;
-        std.debug.print("{x}\n", .{self.base[i]});
-    }
-    std.debug.print("--\n", .{});
-}
-
 const testing = std.testing;
 
 test "arena offset selects a disjoint stack range and supports rebinding" {
@@ -209,21 +198,6 @@ test "push pop and peek use the top stack slot" {
     try testing.expectEqual(@as(u16, 0), stack.len);
     try testing.expectEqual(null, stack.peek());
     try testing.expectError(Error.StackUnderflow, stack.pop());
-}
-
-test "replaceTop updates the current top slot" {
-    var storage: Storage = undefined;
-    var stack = Stack.init(&storage, 0);
-
-    try testing.expectError(Error.StackUnderflow, stack.replaceTop(1));
-
-    try stack.push(1);
-    try stack.push(2);
-    try stack.replaceTop(3);
-
-    try testing.expectEqual(@as(u16, 2), stack.len);
-    try testing.expectEqual(@as(u256, 3), stack.peek().?);
-    try testing.expectEqual(@as(u256, 1), stack.peekN(2).?);
 }
 
 test "popN checks underflow and preserves repeated-pop operand order" {

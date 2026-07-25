@@ -5,8 +5,6 @@ const evmz = @import("../evm.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const std = @import("std");
 
-const addr = evmz.addr;
-
 const CallFrame = Interpreter.CallFrame;
 
 fn wordToGas(word: u256) i64 {

@@ -13,12 +13,10 @@ const ethereum_block_program = @import("./block_program/ethereum.zig");
 const ethereum_transition = @import("./transaction/transition.zig");
 const transaction_validation = @import("./transaction/validation.zig");
 const executor_module = @import("./executor.zig");
-const executor_context = @import("./executor/context.zig");
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter_module = @import("./Interpreter.zig");
 const instruction_module = @import("./instruction.zig");
-const opcode_info = @import("./opcode.zig");
 const state_module = @import("./state.zig");
 const transaction = @import("./transaction.zig");
 const transaction_program = @import("./transaction/program.zig");
@@ -47,37 +45,25 @@ pub const Env = struct {
     // TODO: consider removing it in favor of policy
     blob_schedule: ?transaction.BlobSchedule = null,
 
-    pub fn txContext(
+    pub fn executionContext(
         self: Env,
         origin: Address,
         gas_price: u256,
         gas_limit: u64,
         blob_hashes: []const u256,
-    ) Host.TxContext {
-        return .{
+    ) execution.ExecutionContext {
+        return transaction.executionContext(.{
             .chain_id = self.chain_id,
-            .gas_price = gas_price,
-            .origin = origin,
             .coinbase = self.coinbase,
             .number = self.number,
             .slot_number = self.slot_number,
             .timestamp = self.timestamp,
-            .gas_limit = gas_limit,
+            .gas_limit = self.gas_limit,
             .prev_randao = self.prev_randao,
             .base_fee = self.base_fee,
             .blob_base_fee = self.blob_base_fee,
-            .blob_hashes = blob_hashes,
-        };
-    }
-
-    /// Project environment values into one concrete engine request context.
-    pub fn executionContext(
-        self: Env,
-        origin: Address,
-        gas_price: u256,
-        blob_hashes: []const u256,
-    ) execution.ExecutionContext {
-        return executor_context.fromHost(self.txContext(origin, gas_price, self.gas_limit, blob_hashes));
+            .blob_schedule = self.blob_schedule,
+        }, origin, gas_price, gas_limit, blob_hashes);
     }
 };
 
@@ -366,7 +352,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 if (self.block.executorPtr().hasCurrentTransaction()) return error.ExecutedTransactionActive;
                 try executor_module.system_contracts.applyBeforeBlock(
                     self.block.executorPtr(),
-                    self.lifecycleTxContext(),
+                    self.lifecycleExecutionContext(),
                     .{
                         .number = self.block.environment.number,
                         .timestamp = self.block.environment.timestamp,
@@ -463,7 +449,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 const progress_value = self.block.progress();
                 try executor_module.system_contracts.applyAfterTransaction(
                     self.block.executorPtr(),
-                    self.lifecycleTxContext(),
+                    self.lifecycleExecutionContext(),
                     .{
                         .number = self.block.environment.number,
                         .timestamp = self.block.environment.timestamp,
@@ -486,7 +472,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 const progress_value = self.block.progress();
                 const outputs = try executor_module.system_contracts.applyFinalizeBlock(
                     self.block.executorPtr(),
-                    self.lifecycleTxContext(),
+                    self.lifecycleExecutionContext(),
                     allocator,
                     .{
                         .number = self.block.environment.number,
@@ -565,8 +551,8 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 try self.block.claim.requireFor(self.block.executorPtr());
             }
 
-            fn lifecycleTxContext(self: *const @This()) Host.TxContext {
-                return self.block.environment.txContext(addr(0), 0, self.block.environment.gas_limit, &.{});
+            fn lifecycleExecutionContext(self: *const @This()) execution.ExecutionContext {
+                return self.block.environment.executionContext(addr(0), 0, self.block.environment.gas_limit, &.{});
             }
         };
 
@@ -579,7 +565,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             if (env.gas_limit != 0 and call.gas > env.gas_limit) return error.GasAllowanceExceeded;
             const context_gas_limit = if (env.gas_limit == 0) call.gas else env.gas_limit;
             const result = try executor.executeSystemCallObserved(
-                env.txContext(call.sender, 0, context_gas_limit, &.{}),
+                env.executionContext(call.sender, 0, context_gas_limit, &.{}),
                 call.sender,
                 call.recipient,
                 call.input,

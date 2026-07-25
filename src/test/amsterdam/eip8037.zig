@@ -73,37 +73,24 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     const recipient = evmz.addr(0xbbbb);
     const authority = evmz.addr(0xcccc);
     const target = evmz.addr(0xdddd);
-    var tx_context = testTxContext(sender, 300_000);
-    tx_context.gas_price = 1;
+    var execution_context = testExecutionContext(sender, 300_000);
+    execution_context.transaction.gas_price = 1;
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, authority, .{});
 
-    const authority_account = MemoryAccount.init(std.testing.allocator);
-    try executor.state.seedAccount(authority, authority_account);
-
-    const authorization_list = [_]transaction.AuthorizationTuple{.{
-        .chain_id = 0,
-        .target = target,
-        .signer = authority,
-        .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
-    }};
+    const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try expectExecuted(try vm.transact(.{
-        .env = .{ .gas_limit = 300_000, .coinbase = tx_context.coinbase },
+    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+        .env = .{ .gas_limit = 300_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .kind = .set_code,
             .sender = sender,
             .to = recipient,
             .gas_limit = 300_000,
-            .max_fee_per_gas = tx_context.gas_price,
+            .max_fee_per_gas = execution_context.transaction.gas_price,
             .max_priority_fee_per_gas = 0,
             .authorization_list = &authorization_list,
         },
@@ -122,20 +109,11 @@ test "Amsterdam CREATE collision with alive target skips state charge before chi
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .nonce = 1, .code = &code });
+    try evmz.t.seedExecutorAccount(&executor, create_address, .{ .nonce = 1 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.nonce = 1;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
-
-    var create_account = MemoryAccount.init(std.testing.allocator);
-    create_account.nonce = 1;
-    try executor.state.seedAccount(create_address, create_account);
-
-    try executor.beginTransaction(testTxContext(sender, 300_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -155,20 +133,11 @@ test "Amsterdam CREATE to pre-existing account leaves state reservoir available"
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .nonce = 1, .code = &code });
+    try evmz.t.seedExecutorAccount(&executor, create_address, .{ .balance = 1 });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.nonce = 1;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
-
-    var create_account = MemoryAccount.init(std.testing.allocator);
-    create_account.balance = 1;
-    try executor.state.seedAccount(create_address, create_account);
-
-    try executor.beginTransaction(testTxContext(sender, 300_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 50_000,
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
@@ -189,15 +158,10 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
-
-    try executor.beginObservedTransaction(testTxContext(sender, 100_000), sender, contract);
+    try executor.beginObservedTransaction(testExecutionContext(sender, 100_000), sender, contract);
     defer executor.closeTransaction();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
@@ -215,9 +179,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
     var target_account = MemoryAccount.init(std.testing.allocator);
     try target_account.storage.put(1, 1);
@@ -228,7 +190,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
         .recipient = create_address,
         .init_code = &.{},
     } };
-    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(sender, 0, &.{});
+    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(sender, 0, 1_000_000, &.{});
     const request = transaction.executionRequest(context, message, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     });
@@ -253,16 +215,10 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 1, .code = &code });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    contract_account.balance = 1;
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
-
-    try executor.beginTransaction(testTxContext(sender, 300_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 100_000,
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
@@ -290,15 +246,10 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 10_000_000;
-    try executor.state.seedAccount(sender, sender_account);
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    var contract_account = MemoryAccount.init(std.testing.allocator);
-    try contract_account.setCode(&code);
-    try executor.state.seedAccount(contract, contract_account);
-
-    try executor.beginTransaction(testTxContext(sender, 5_000_000), sender, contract);
+    try executor.beginTransaction(testExecutionContext(sender, 5_000_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, input, .{
         .regular_left = 5_000_000,
         .reservoir = eth_tx.amsterdam_new_account_state_gas,
@@ -309,7 +260,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(create_address).?.nonce);
 }
 
-const testTxContext = evmz.t.defaultTxContext;
+const testExecutionContext = evmz.t.defaultExecutionContext;
 
 const AccountObservation = struct {
     address: Address,
@@ -331,10 +282,3 @@ const AccountObservation = struct {
         }
     }
 };
-
-fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
-    return switch (outcome) {
-        .executed => |executed| executed,
-        .rejected => error.UnexpectedRejection,
-    };
-}
