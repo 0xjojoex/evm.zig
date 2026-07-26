@@ -7,5 +7,5 @@ test "stateless SSZ smoke payload runs schema-prefixed ABI" {
     try std.testing.expect(proof.output_len > 0);
     try std.testing.expect(proof.payload_root_low != 0);
     try std.testing.expectEqual(@as(u32, 1), proof.chain_id_low);
-    try std.testing.expectEqual(@as(u32, 13), proof.fork);
+    try std.testing.expectEqual(@as(u32, 0x15), proof.fork);
 }

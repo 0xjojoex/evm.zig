@@ -154,8 +154,14 @@ zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fi
 zig build eest-block-stf -- --bal-differential ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/blockchain_tests_sync
 
 scripts/fetch-eest-zkevm-fixtures.sh
+scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
 zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
 ```
+
+The manifest form verifies the same locked archive checksum but extracts only
+the representative files used by the manual ZisK execution-step report. That
+report is diagnostic: it records guest steps and public-output parity without a
+step-regression threshold or any proof-generation work.
 
 `--bal-differential` is a serial diagnostic lane. For each Amsterdam payload
 transaction it compares an isolated `BalClaimReader` execution with the

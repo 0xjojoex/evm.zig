@@ -4,6 +4,7 @@ const std = @import("std");
 
 const ExecutionHeader = @import("../../eth/header.zig").ExecutionHeader;
 const address = @import("../../address.zig");
+const bal = @import("../../eth/bal.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const crypto = @import("../../crypto.zig");
 const trie = @import("../../eth/trie.zig");
@@ -11,70 +12,14 @@ const rlp = @import("rlp");
 const t = @import("../../t.zig");
 const wire = @import("./v1.zig");
 
-const smoke_parent_state_root = t.hexBytes("d7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544");
+const smoke_parent_state_root = trie.empty_root_hash;
+const empty_block_access_list = [_]u8{0xc0};
 
 pub fn smokeInput(allocator: std.mem.Allocator) wire.Error!wire.StatelessInput {
-    const parent_header = try smokeParentHeader(allocator);
-    errdefer allocator.free(parent_header);
-
-    const parent_headers = try allocator.alloc([]const u8, 1);
-    errdefer allocator.free(parent_headers);
-    parent_headers[0] = parent_header;
-    const parent_hash = crypto.keccak256(parent_header);
-
-    return smokeInputWithHeaders(allocator, parent_headers, parent_hash);
+    return amsterdamSmokeInput(allocator, .{});
 }
 
-fn smokeInputWithHeaders(
-    allocator: std.mem.Allocator,
-    parent_headers: []const []const u8,
-    parent_hash: [32]u8,
-) wire.Error!wire.StatelessInput {
-    const block_hash = (ExecutionHeader{
-        .parent_hash = parent_hash,
-        .coinbase = address.addr(0),
-        .state_root = smoke_parent_state_root,
-        .transactions_root = trie.empty_root_hash,
-        .receipts_root = trie.empty_root_hash,
-        .logs_bloom = block_stf.empty_logs_bloom,
-        .number = 1,
-        .gas_limit = 30_000_000,
-        .gas_used = 0,
-        .timestamp = 1,
-        .extra_data = &.{},
-        .prev_randao = [_]u8{0x22} ** 32,
-        .base_fee_per_gas = 0,
-    }).hash(allocator, .merge) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidHeaderWitness,
-    };
-    return .{
-        .new_payload_request = .{ .bellatrix = .{ .execution_payload = .{
-            .parent_hash = parent_hash,
-            .fee_recipient = address.addr(0),
-            .state_root = smoke_parent_state_root,
-            .receipts_root = trie.empty_root_hash,
-            .logs_bloom = block_stf.empty_logs_bloom,
-            .prev_randao = [_]u8{0x22} ** 32,
-            .block_number = 1,
-            .gas_limit = 30_000_000,
-            .gas_used = 0,
-            .timestamp = 1,
-            .base_fee_per_gas = [_]u8{0} ** 32,
-            .block_hash = block_hash,
-        } } },
-        .witness = .{ .headers = parent_headers },
-        .chain_config = .{
-            .chain_id = 1,
-            .active_fork = .{
-                .fork = .paris,
-                .activation = .{ .block_number = 0 },
-            },
-        },
-    };
-}
-
-pub fn pragueSmokeInput(
+pub fn amsterdamSmokeInput(
     allocator: std.mem.Allocator,
     execution_requests: wire.ExecutionRequests,
 ) wire.Error!wire.StatelessInput {
@@ -105,33 +50,39 @@ pub fn pragueSmokeInput(
         .excess_blob_gas = 0,
         .parent_beacon_block_root = [_]u8{0} ** 32,
         .requests_hash = block_stf.empty_requests_hash,
-    }).hash(allocator, .prague) catch |err| switch (err) {
+        .block_access_list_hash = bal.empty_hash,
+        .slot_number = 0,
+    }).hash(allocator, .amsterdam) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidHeaderWitness,
     };
 
     return .{
-        .new_payload_request = .{ .electra_fulu = .{
+        .new_payload_request = .{ .amsterdam = .{
             .execution_payload = .{
-                .v2 = .{
-                    .v1 = .{
-                        .parent_hash = parent_hash,
-                        .fee_recipient = address.addr(0),
-                        .state_root = smoke_parent_state_root,
-                        .receipts_root = trie.empty_root_hash,
-                        .logs_bloom = block_stf.empty_logs_bloom,
-                        .prev_randao = [_]u8{0x22} ** 32,
-                        .block_number = 0,
-                        .gas_limit = 30_000_000,
-                        .gas_used = 0,
-                        .timestamp = 1,
-                        .base_fee_per_gas = [_]u8{0} ** 32,
-                        .block_hash = block_hash,
+                .v3 = .{
+                    .v2 = .{
+                        .v1 = .{
+                            .parent_hash = parent_hash,
+                            .fee_recipient = address.addr(0),
+                            .state_root = smoke_parent_state_root,
+                            .receipts_root = trie.empty_root_hash,
+                            .logs_bloom = block_stf.empty_logs_bloom,
+                            .prev_randao = [_]u8{0x22} ** 32,
+                            .block_number = 0,
+                            .gas_limit = 30_000_000,
+                            .gas_used = 0,
+                            .timestamp = 1,
+                            .base_fee_per_gas = [_]u8{0} ** 32,
+                            .block_hash = block_hash,
+                        },
+                        .withdrawals = &.{},
                     },
-                    .withdrawals = &.{},
+                    .blob_gas_used = 0,
+                    .excess_blob_gas = 0,
                 },
-                .blob_gas_used = 0,
-                .excess_blob_gas = 0,
+                .block_access_list = &empty_block_access_list,
+                .slot_number = 0,
             },
             .parent_beacon_block_root = [_]u8{0} ** 32,
             .execution_requests = execution_requests,
@@ -140,7 +91,6 @@ pub fn pragueSmokeInput(
         .chain_config = .{
             .chain_id = 1,
             .active_fork = .{
-                .fork = .prague,
                 .activation = .{ .block_number = 0 },
             },
         },

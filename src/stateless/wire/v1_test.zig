@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const eth_spec = @import("../../eth/spec.zig");
 const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const smoke = @import("./v1_smoke.zig");
@@ -19,7 +18,8 @@ test "stateless wire v1 smoke validates and returns SSZ output" {
 
     const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
     try std.testing.expect(result.successful_validation);
-    try std.testing.expectEqual(wire.ProtocolFork.paris, result.chain_config.active_fork.fork);
+    try std.testing.expectEqual(@as(u64, 1), result.chain_config.chain_id);
+    try std.testing.expectEqual(@as(u16, 0x1501), wire.schema_id);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -33,7 +33,7 @@ test "stateless wire v1 rejects a mutated payload block hash" {
     const scratch = arena.allocator();
 
     var input = try smoke.smokeInput(scratch);
-    input.new_payload_request.bellatrix.execution_payload.block_hash[0] ^= 1;
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.block_hash[0] ^= 1;
     const input_bytes = try input.encodeSchemaPrefixed(scratch);
     const result = try wire.validateStatelessResultBytes(scratch, input_bytes);
     try std.testing.expectEqual(block_stf.Status.block_hash_mismatch, result.status);
@@ -48,8 +48,8 @@ test "stateless wire v1 normalizes payload words with field-specific byte order"
     var bytes = [_]u8{0} ** 32;
     bytes[0] = 0x01;
     bytes[31] = 0x02;
-    input.new_payload_request.bellatrix.execution_payload.prev_randao = bytes;
-    input.new_payload_request.bellatrix.execution_payload.base_fee_per_gas = bytes;
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.prev_randao = bytes;
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.base_fee_per_gas = bytes;
 
     const normalized = try wire.normalize(scratch, input);
     try std.testing.expectEqual((@as(u256, 0x01) << 248) | 0x02, normalized.block.prev_randao);
@@ -72,34 +72,15 @@ test "stateless wire v1 decodes but does not trust public-key hints" {
     try std.testing.expectEqual(block_stf.Status.valid, result.status);
 }
 
-test "stateless wire v1 normalizes fork blob schedule metadata" {
+test "stateless wire v1 is fixed to Amsterdam semantics" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    var input = try smoke.pragueSmokeInput(scratch, .{});
-    input.chain_config.active_fork.blob_schedule = .{
-        .target = 7,
-        .max = 8,
-        .base_fee_update_fraction = 123_456,
-    };
-
+    const input = try smoke.amsterdamSmokeInput(scratch, .{});
     const normalized = try wire.normalize(scratch, input);
-    const schedule = normalized.blob_schedule.?;
-    try std.testing.expectEqual(@as(u64, 7), schedule.target);
-    try std.testing.expectEqual(@as(u64, 8), schedule.max);
-    try std.testing.expectEqual(@as(u256, 123_456), schedule.base_fee_update_fraction);
-    try std.testing.expectEqual(eth_spec.prague.transaction.blob_schedule.?.gas_per_blob, schedule.gas_per_blob);
-}
-
-test "stateless wire v1 rejects a payload shape from another fork" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    var input = try smoke.smokeInput(scratch);
-    input.chain_config.active_fork.fork = .amsterdam;
-    try std.testing.expectError(error.InvalidPayloadForFork, wire.normalize(scratch, input));
+    try std.testing.expectEqual(.amsterdam, normalized.revision);
+    try std.testing.expect(normalized.blob_schedule == null);
 }
 
 test "stateless wire v1 releases decoded ownership when chain validation fails" {
@@ -123,7 +104,7 @@ test "stateless wire v1 exposes successful decode ownership cleanup" {
     var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
     defer decoded.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(wire.ProtocolFork.paris, decoded.chain_config.active_fork.fork);
+    try std.testing.expectEqual(@as(u64, 1), decoded.chain_config.chain_id);
 }
 
 test "stateless wire v1 rejects unknown schema ids" {
@@ -163,9 +144,9 @@ test "stateless wire v1 rejects oversized withdrawals before allocation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const input = try smoke.pragueSmokeInput(arena.allocator(), .{});
+    const input = try smoke.amsterdamSmokeInput(arena.allocator(), .{});
     var payload = switch (input.new_payload_request) {
-        .electra_fulu => |request| request.execution_payload,
+        .amsterdam => |request| request.execution_payload.v3,
         else => unreachable,
     };
     payload.v2.withdrawals = &.{};
@@ -197,6 +178,14 @@ test "stateless wire v1 rejects oversized execution request families before allo
     const consolidations = try scratch.alloc(wire.ConsolidationRequest, 3);
     @memset(consolidations, std.mem.zeroes(wire.ConsolidationRequest));
     try expectOversizedExecutionRequestsRejected(.{ .consolidations = consolidations });
+
+    const builder_deposits = try scratch.alloc(wire.BuilderDepositRequest, 65);
+    @memset(builder_deposits, std.mem.zeroes(wire.BuilderDepositRequest));
+    try expectOversizedExecutionRequestsRejected(.{ .builder_deposits = builder_deposits });
+
+    const builder_exits = try scratch.alloc(wire.BuilderExitRequest, 17);
+    @memset(builder_exits, std.mem.zeroes(wire.BuilderExitRequest));
+    try expectOversizedExecutionRequestsRejected(.{ .builder_exits = builder_exits });
 }
 
 test "stateless wire v1 bounded fixed struct lists preserve valid bytes" {
@@ -204,22 +193,26 @@ test "stateless wire v1 bounded fixed struct lists preserve valid bytes" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    var input = try smoke.pragueSmokeInput(scratch, .{});
+    var input = try smoke.amsterdamSmokeInput(scratch, .{});
     var request = switch (input.new_payload_request) {
-        .electra_fulu => |value| value,
+        .amsterdam => |value| value,
         else => unreachable,
     };
     const withdrawals = [_]wire.Withdrawal{std.mem.zeroes(wire.Withdrawal)};
     const deposits = [_]wire.DepositRequest{std.mem.zeroes(wire.DepositRequest)};
     const withdrawal_requests = [_]wire.WithdrawalRequest{std.mem.zeroes(wire.WithdrawalRequest)};
     const consolidations = [_]wire.ConsolidationRequest{std.mem.zeroes(wire.ConsolidationRequest)};
-    request.execution_payload.v2.withdrawals = &withdrawals;
+    const builder_deposits = [_]wire.BuilderDepositRequest{std.mem.zeroes(wire.BuilderDepositRequest)};
+    const builder_exits = [_]wire.BuilderExitRequest{std.mem.zeroes(wire.BuilderExitRequest)};
+    request.execution_payload.v3.v2.withdrawals = &withdrawals;
     request.execution_requests = .{
         .deposits = &deposits,
         .withdrawals = &withdrawal_requests,
         .consolidations = &consolidations,
+        .builder_deposits = &builder_deposits,
+        .builder_exits = &builder_exits,
     };
-    input.new_payload_request = .{ .electra_fulu = request };
+    input.new_payload_request = .{ .amsterdam = request };
 
     const encoded = try input.encodeSchemaPrefixed(scratch);
     const decoded = try wire.StatelessInput.decodeSchemaPrefixed(scratch, encoded);
@@ -227,51 +220,18 @@ test "stateless wire v1 bounded fixed struct lists preserve valid bytes" {
     try std.testing.expectEqualSlices(u8, encoded, reencoded);
 }
 
-test "stateless wire v1 decodes fork-specific payload request shapes" {
+test "stateless wire v1 schema owns the Amsterdam payload request shape" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const input = try smoke.pragueSmokeInput(scratch, .{});
-    const request_bytes = try input.new_payload_request.encode(scratch);
-
-    const prague = try wire.NewPayloadRequest.decode(scratch, .prague, request_bytes);
-    switch (prague) {
-        .electra_fulu => {},
-        else => return error.TestUnexpectedResult,
-    }
-
-    const osaka = try wire.NewPayloadRequest.decode(scratch, .osaka, request_bytes);
-    switch (osaka) {
-        .electra_fulu => {},
-        else => return error.TestUnexpectedResult,
-    }
-
-    const electra = switch (input.new_payload_request) {
-        .electra_fulu => |request| request,
-        else => unreachable,
-    };
-    const amsterdam_request = wire.NewPayloadRequest{ .amsterdam = .{
-        .execution_payload = .{
-            .v3 = electra.execution_payload,
-            .block_access_list = &.{},
-            .slot_number = 1,
-        },
-        .versioned_hashes = electra.versioned_hashes,
-        .parent_beacon_block_root = electra.parent_beacon_block_root,
-        .execution_requests = electra.execution_requests,
-    } };
-    const amsterdam_bytes = try amsterdam_request.encode(scratch);
-    const amsterdam = try wire.NewPayloadRequest.decode(scratch, .amsterdam, amsterdam_bytes);
-    switch (amsterdam) {
+    const input = try smoke.amsterdamSmokeInput(scratch, .{});
+    const encoded = try input.encodeSchemaPrefixed(scratch);
+    const decoded = try wire.StatelessInput.decodeSchemaPrefixed(scratch, encoded);
+    switch (decoded.new_payload_request) {
         .amsterdam => {},
         else => return error.TestUnexpectedResult,
     }
-
-    try std.testing.expectError(error.InvalidByteLength, wire.NewPayloadRequest.decode(scratch, .prague, &.{}));
-    try std.testing.expectError(error.UnsupportedFork, wire.NewPayloadRequest.decode(scratch, .bpo1, request_bytes));
-    try std.testing.expectError(error.UnsupportedFork, wire.NewPayloadRequest.decode(scratch, .bpo2, request_bytes));
-    try std.testing.expectError(error.InvalidByteLength, wire.NewPayloadRequest.decode(scratch, .amsterdam, request_bytes));
 }
 
 test "stateless wire v1 rejects request claims not derived by BlockSTF" {
@@ -279,7 +239,7 @@ test "stateless wire v1 rejects request claims not derived by BlockSTF" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const empty_input = try smoke.pragueSmokeInput(scratch, .{});
+    const empty_input = try smoke.amsterdamSmokeInput(scratch, .{});
     const empty_bytes = try empty_input.encodeSchemaPrefixed(scratch);
     const empty_result = try wire.validateStatelessResultBytes(scratch, empty_bytes);
     try std.testing.expectEqual(block_stf.Status.valid, empty_result.status);
@@ -289,7 +249,7 @@ test "stateless wire v1 rejects request claims not derived by BlockSTF" {
         .validator_pubkey = [_]u8{0x11} ** 48,
         .amount = 1,
     }};
-    const claimed_request_input = try smoke.pragueSmokeInput(scratch, .{
+    const claimed_request_input = try smoke.amsterdamSmokeInput(scratch, .{
         .withdrawals = &withdrawal_requests,
     });
     const claimed_request_bytes = try claimed_request_input.encodeSchemaPrefixed(scratch);
@@ -312,37 +272,32 @@ test "stateless wire v1 returns failure result for malformed guest input" {
         try std.testing.expect(!result.successful_validation);
         try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &result.new_payload_request_root);
         try std.testing.expectEqual(@as(u64, 0), result.chain_config.chain_id);
-        try std.testing.expectEqual(wire.ProtocolFork.frontier, result.chain_config.active_fork.fork);
+        try std.testing.expectEqual(@as(?u64, null), result.chain_config.active_fork.activation.block_number);
+        try std.testing.expectEqual(@as(?u64, null), result.chain_config.active_fork.activation.timestamp);
     }
 }
 
-test "stateless wire v1 protocol fork numeric ids remain stable" {
-    try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(13));
-    try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(20));
-    try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(24));
+test "stateless wire v1 protocol fork values match tests-zkevm v0.6.2" {
+    try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(0x0e));
+    try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(0x15));
+    try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(0));
+    try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(0x16));
 }
 
-test "stateless wire v1 ChainConfig owns its enum and optional-list schema" {
+test "stateless wire v1 ChainConfig owns its activation-only schema" {
     const configs = [_]wire.ChainConfig{
         .{
             .chain_id = 1,
             .active_fork = .{
-                .fork = .paris,
                 .activation = .{},
             },
         },
         .{
             .chain_id = 2,
             .active_fork = .{
-                .fork = .amsterdam,
                 .activation = .{
                     .block_number = 42,
                     .timestamp = 1_234,
-                },
-                .blob_schedule = .{
-                    .target = 6,
-                    .max = 9,
-                    .base_fee_update_fraction = 500_771,
                 },
             },
         },
@@ -353,11 +308,6 @@ test "stateless wire v1 ChainConfig owns its enum and optional-list schema" {
         defer std.testing.allocator.free(encoded);
         try std.testing.expectEqualDeep(config, try wire.ChainConfig.Ssz.decode(encoded));
     }
-
-    const encoded = try ssz.encodeAlloc(wire.ChainConfig.Ssz, std.testing.allocator, configs[0]);
-    defer std.testing.allocator.free(encoded);
-    std.mem.writeInt(u64, encoded[12..20], 24, .little);
-    try std.testing.expectError(error.InvalidEnumValue, wire.ChainConfig.Ssz.decode(encoded));
 }
 
 fn expectOversizedExecutionRequestsRejected(requests: wire.ExecutionRequests) !void {
@@ -365,6 +315,8 @@ fn expectOversizedExecutionRequestsRejected(requests: wire.ExecutionRequests) !v
         .deposits = ssz.List(wire.DepositRequest, 8193),
         .withdrawals = ssz.List(wire.WithdrawalRequest, 17),
         .consolidations = ssz.List(wire.ConsolidationRequest, 3),
+        .builder_deposits = ssz.List(wire.BuilderDepositRequest, 65),
+        .builder_exits = ssz.List(wire.BuilderExitRequest, 17),
     });
     const encoded = try ssz.encodeAlloc(TestRequestsSsz, std.testing.allocator, requests);
     defer std.testing.allocator.free(encoded);

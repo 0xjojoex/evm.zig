@@ -1,22 +1,20 @@
-//! Schema `0x0001` wire contract for the stateless zkEVM guest interface.
+//! Amsterdam schema `0x1501` wire contract for the stateless zkEVM guest interface.
 //! Defines the SSZ-encoded `StatelessInput`/`StatelessValidationResult` types
-//! (per tests-zkevm v0.5) and the schema-prefixed validate entry points.
+//! (per tests-zkevm v0.6.2) and the schema-prefixed validate entry points.
 //! The two-byte schema id gates decoding; unknown ids are rejected.
 
 const std = @import("std");
 const ssz = @import("ssz");
 const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
-const eth_spec = @import("../../eth/spec.zig");
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
 const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
-const transaction = @import("../../transaction.zig");
 const uint256 = @import("../../uint256.zig");
 
-pub const schema_id: u16 = 0x0001;
+pub const schema_id: u16 = 0x1501;
 pub const schema_id_size = 2;
 const max_extra_data_bytes = 32;
 const max_withdrawals_per_payload = 16;
@@ -26,6 +24,8 @@ const max_blob_commitments_per_block = 4096;
 const max_deposit_requests_per_payload = 8192;
 const max_withdrawal_requests_per_payload = 16;
 const max_consolidation_requests_per_payload = 2;
+const max_builder_deposit_requests_per_payload = 64;
+const max_builder_exit_requests_per_payload = 16;
 const max_block_access_list_bytes = max_bytes_per_transaction;
 const max_public_keys = 1 << 15;
 const public_key_bytes = 65;
@@ -50,58 +50,57 @@ pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Err
     InactiveForkConfig,
     InvalidForkActivation,
     InvalidPayloadForFork,
-    UnsupportedBlobScheduleOverride,
     ExtraDataTooLong,
 };
 
 pub const ValidationOptions = struct {};
 
 pub const ProtocolFork = enum(u64) {
-    frontier = 0,
-    homestead = 1,
-    dao_fork = 2,
-    tangerine_whistle = 3,
-    spurious_dragon = 4,
-    byzantium = 5,
-    petersburg = 6,
-    istanbul = 7,
-    muir_glacier = 8,
-    berlin = 9,
-    london = 10,
-    arrow_glacier = 11,
-    gray_glacier = 12,
-    paris = 13,
-    shanghai = 14,
-    cancun = 15,
-    prague = 16,
-    osaka = 17,
-    bpo1 = 18,
-    bpo2 = 19,
-    amsterdam = 20,
+    frontier = 0x01,
+    homestead = 0x02,
+    dao_fork = 0x03,
+    tangerine_whistle = 0x04,
+    spurious_dragon = 0x05,
+    byzantium = 0x06,
+    petersburg = 0x07,
+    istanbul = 0x08,
+    muir_glacier = 0x09,
+    berlin = 0x0a,
+    london = 0x0b,
+    arrow_glacier = 0x0c,
+    gray_glacier = 0x0d,
+    paris = 0x0e,
+    shanghai = 0x0f,
+    cancun = 0x10,
+    prague = 0x11,
+    osaka = 0x12,
+    bpo1 = 0x13,
+    bpo2 = 0x14,
+    amsterdam = 0x15,
 
     pub fn fromInt(value: u64) Error!ProtocolFork {
         return switch (value) {
-            0 => .frontier,
-            1 => .homestead,
-            2 => .dao_fork,
-            3 => .tangerine_whistle,
-            4 => .spurious_dragon,
-            5 => .byzantium,
-            6 => .petersburg,
-            7 => .istanbul,
-            8 => .muir_glacier,
-            9 => .berlin,
-            10 => .london,
-            11 => .arrow_glacier,
-            12 => .gray_glacier,
-            13 => .paris,
-            14 => .shanghai,
-            15 => .cancun,
-            16 => .prague,
-            17 => .osaka,
-            18 => .bpo1,
-            19 => .bpo2,
-            20 => .amsterdam,
+            0x01 => .frontier,
+            0x02 => .homestead,
+            0x03 => .dao_fork,
+            0x04 => .tangerine_whistle,
+            0x05 => .spurious_dragon,
+            0x06 => .byzantium,
+            0x07 => .petersburg,
+            0x08 => .istanbul,
+            0x09 => .muir_glacier,
+            0x0a => .berlin,
+            0x0b => .london,
+            0x0c => .arrow_glacier,
+            0x0d => .gray_glacier,
+            0x0e => .paris,
+            0x0f => .shanghai,
+            0x10 => .cancun,
+            0x11 => .prague,
+            0x12 => .osaka,
+            0x13 => .bpo1,
+            0x14 => .bpo2,
+            0x15 => .amsterdam,
             else => error.UnsupportedFork,
         };
     }
@@ -117,20 +116,10 @@ pub const ForkActivation = struct {
     });
 };
 
-pub const BlobSchedule = struct {
-    target: u64,
-    max: u64,
-    base_fee_update_fraction: u64,
-};
-
 pub const ForkConfig = struct {
-    fork: ProtocolFork,
     activation: ForkActivation,
-    blob_schedule: ?BlobSchedule = null,
 
-    pub const Ssz = ssz.Container(@This(), .{
-        .blob_schedule = ssz.OptionalList(BlobSchedule),
-    });
+    pub const Ssz = ssz.Container(@This(), .{});
 };
 
 pub const ChainConfig = struct {
@@ -184,11 +173,15 @@ pub const ExecutionRequests = struct {
     deposits: []const DepositRequest = &.{},
     withdrawals: []const WithdrawalRequest = &.{},
     consolidations: []const ConsolidationRequest = &.{},
+    builder_deposits: []const BuilderDepositRequest = &.{},
+    builder_exits: []const BuilderExitRequest = &.{},
 
     pub const Ssz = ssz.Container(@This(), .{
         .deposits = ssz.List(DepositRequest, max_deposit_requests_per_payload),
         .withdrawals = ssz.List(WithdrawalRequest, max_withdrawal_requests_per_payload),
         .consolidations = ssz.List(ConsolidationRequest, max_consolidation_requests_per_payload),
+        .builder_deposits = ssz.List(BuilderDepositRequest, max_builder_deposit_requests_per_payload),
+        .builder_exits = ssz.List(BuilderExitRequest, max_builder_exit_requests_per_payload),
     });
 
     pub fn encode(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]u8 {
@@ -209,7 +202,11 @@ pub const ExecutionRequests = struct {
     }
 
     fn typedOpaqueRequests(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]const []const u8 {
-        if (self.deposits.len == 0 and self.withdrawals.len == 0 and self.consolidations.len == 0) return &.{};
+        if (self.deposits.len == 0 and
+            self.withdrawals.len == 0 and
+            self.consolidations.len == 0 and
+            self.builder_deposits.len == 0 and
+            self.builder_exits.len == 0) return &.{};
         var out: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (out.items) |request| allocator.free(request);
@@ -218,6 +215,8 @@ pub const ExecutionRequests = struct {
         if (self.deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x00, DepositRequest, self.deposits));
         if (self.withdrawals.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x01, WithdrawalRequest, self.withdrawals));
         if (self.consolidations.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x02, ConsolidationRequest, self.consolidations));
+        if (self.builder_deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x03, BuilderDepositRequest, self.builder_deposits));
+        if (self.builder_exits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x04, BuilderExitRequest, self.builder_exits));
         return out.toOwnedSlice(allocator);
     }
 };
@@ -240,6 +239,18 @@ pub const ConsolidationRequest = struct {
     source_address: address.Address,
     source_pubkey: [48]u8,
     target_pubkey: [48]u8,
+};
+
+pub const BuilderDepositRequest = struct {
+    pubkey: [48]u8,
+    withdrawal_credentials: [32]u8,
+    amount: u64,
+    signature: [96]u8,
+};
+
+pub const BuilderExitRequest = struct {
+    source_address: address.Address,
+    pubkey: [48]u8,
 };
 
 const PayloadView = struct {
@@ -554,22 +565,12 @@ pub const NewPayloadRequestAmsterdam = struct {
     execution_requests: ExecutionRequests = .{},
 
     pub fn encode(self: NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) Error![]u8 {
-        return encodeWire(NewPayloadRequestAmsterdamWire.Ssz, allocator, .{
-            .execution_payload = payloadV4Wire(self.execution_payload),
-            .versioned_hashes = self.versioned_hashes,
-            .parent_beacon_block_root = self.parent_beacon_block_root,
-            .execution_requests = self.execution_requests,
-        });
+        return encodeWire(NewPayloadRequestAmsterdamWire.Ssz, allocator, amsterdamRequestWire(self));
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!NewPayloadRequestAmsterdam {
         const value = try decodeWire(NewPayloadRequestAmsterdamWire.Ssz, allocator, bytes);
-        return .{
-            .execution_payload = payloadV4FromWire(value.execution_payload),
-            .versioned_hashes = value.versioned_hashes,
-            .parent_beacon_block_root = value.parent_beacon_block_root,
-            .execution_requests = value.execution_requests,
-        };
+        return amsterdamRequestFromWire(value);
     }
 
     pub fn deinit(self: *NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) void {
@@ -580,12 +581,7 @@ pub const NewPayloadRequestAmsterdam = struct {
 
     pub fn hashTreeRoot(self: NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) Error![32]u8 {
         _ = allocator;
-        return hashWire(NewPayloadRequestAmsterdamWire.Ssz, .{
-            .execution_payload = payloadV4Wire(self.execution_payload),
-            .versioned_hashes = self.versioned_hashes,
-            .parent_beacon_block_root = self.parent_beacon_block_root,
-            .execution_requests = self.execution_requests,
-        });
+        return hashWire(NewPayloadRequestAmsterdamWire.Ssz, amsterdamRequestWire(self));
     }
 };
 
@@ -679,8 +675,10 @@ pub const StatelessInput = struct {
     public_keys: []const [public_key_bytes]u8 = &.{},
 
     pub fn encode(self: StatelessInput, allocator: std.mem.Allocator) Error![]u8 {
-        const request = try self.new_payload_request.encode(allocator);
-        defer allocator.free(request);
+        const request = switch (self.new_payload_request) {
+            .amsterdam => |value| amsterdamRequestWire(value),
+            else => return error.UnsupportedFork,
+        };
         if (self.public_keys.len > max_public_keys) return error.InvalidListLength;
         return encodeWire(StatelessInputWire.Ssz, allocator, .{
             .new_payload_request = request,
@@ -712,10 +710,8 @@ pub const StatelessInput = struct {
         errdefer if (owns_value) StatelessInputWire.Ssz.deinit(allocator, &value);
 
         const chain_config = value.chain_config;
-        var new_payload_request = try NewPayloadRequest.decode(allocator, chain_config.active_fork.fork, value.new_payload_request);
-        errdefer new_payload_request.deinit(allocator);
+        const new_payload_request = NewPayloadRequest{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) };
         try validateChainConfig(chain_config, new_payload_request);
-        NewPayloadRequestBytesSsz.deinit(allocator, &value.new_payload_request);
         owns_value = false;
         return .{
             .new_payload_request = new_payload_request,
@@ -759,7 +755,6 @@ pub const StatelessValidationResult = struct {
 const WithdrawalsSsz = ssz.List(Withdrawal, max_withdrawals_per_payload);
 const TransactionsSsz = ssz.ListOf(ssz.ByteList(max_bytes_per_transaction), max_transactions_per_payload);
 const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
-const NewPayloadRequestBytesSsz = ssz.ByteList(std.math.maxInt(u32));
 const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
 const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
 
@@ -882,14 +877,31 @@ const NewPayloadRequestAmsterdamWire = struct {
     });
 };
 
+fn amsterdamRequestWire(value: NewPayloadRequestAmsterdam) NewPayloadRequestAmsterdamWire {
+    return .{
+        .execution_payload = payloadV4Wire(value.execution_payload),
+        .versioned_hashes = value.versioned_hashes,
+        .parent_beacon_block_root = value.parent_beacon_block_root,
+        .execution_requests = value.execution_requests,
+    };
+}
+
+fn amsterdamRequestFromWire(value: NewPayloadRequestAmsterdamWire) NewPayloadRequestAmsterdam {
+    return .{
+        .execution_payload = payloadV4FromWire(value.execution_payload),
+        .versioned_hashes = value.versioned_hashes,
+        .parent_beacon_block_root = value.parent_beacon_block_root,
+        .execution_requests = value.execution_requests,
+    };
+}
+
 const StatelessInputWire = struct {
-    new_payload_request: []const u8,
+    new_payload_request: NewPayloadRequestAmsterdamWire,
     witness: ExecutionWitness,
     chain_config: ChainConfig,
     public_keys: []const [public_key_bytes]u8,
 
     pub const Ssz = ssz.Container(@This(), .{
-        .new_payload_request = NewPayloadRequestBytesSsz,
         .public_keys = PublicKeysSsz,
     });
 };
@@ -1079,9 +1091,7 @@ fn defaultChainConfig() ChainConfig {
     return .{
         .chain_id = 0,
         .active_fork = .{
-            .fork = .frontier,
             .activation = .{},
-            .blob_schedule = null,
         },
     };
 }
@@ -1188,23 +1198,18 @@ pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: Statele
 /// callers should use one block-lifetime arena.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
-    const revision = try normalizeRevision(input.chain_config.active_fork.fork);
+    const revision: Revision = .amsterdam;
     const payload = input.new_payload_request.payloadView();
     const withdrawals = try normalizeWithdrawals(allocator, payload.withdrawals);
     const execution_requests = if (input.new_payload_request.executionRequests()) |requests|
         try requests.typedOpaqueRequests(allocator)
     else
         &.{};
-    const blob_schedule = if (input.chain_config.active_fork.blob_schedule) |schedule|
-        try normalizeBlobSchedule(schedule, revision)
-    else
-        null;
-
     _ = input.public_keys;
     return .{
         .revision = revision,
         .chain_id = input.chain_config.chain_id,
-        .blob_schedule = blob_schedule,
+        .blob_schedule = null,
         .block = .{
             .parent_hash = payload.parent_hash,
             .fee_recipient = payload.fee_recipient,
@@ -1237,31 +1242,6 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
     };
 }
 
-fn normalizeRevision(fork: ProtocolFork) Error!Revision {
-    return switch (fork) {
-        .frontier => .frontier,
-        .homestead => .homestead,
-        .dao_fork => .dao_fork,
-        .tangerine_whistle => .tangerine_whistle,
-        .spurious_dragon => .spurious_dragon,
-        .byzantium => .byzantium,
-        .petersburg => .petersburg,
-        .istanbul => .istanbul,
-        .muir_glacier => .muir_glacier,
-        .berlin => .berlin,
-        .london => .london,
-        .arrow_glacier => .arrow_glacier,
-        .gray_glacier => .gray_glacier,
-        .paris => .merge,
-        .shanghai => .shanghai,
-        .cancun => .cancun,
-        .prague => .prague,
-        .osaka => .osaka,
-        .amsterdam => .amsterdam,
-        .bpo1, .bpo2 => error.UnsupportedFork,
-    };
-}
-
 fn validateChainConfig(chain_config: ChainConfig, request: NewPayloadRequest) Error!void {
     const activation = chain_config.active_fork.activation;
     if (activation.block_number == null and activation.timestamp == null) {
@@ -1271,19 +1251,6 @@ fn validateChainConfig(chain_config: ChainConfig, request: NewPayloadRequest) Er
     if (!activationApplies(activation, payload.block_number, payload.timestamp)) {
         return error.InactiveForkConfig;
     }
-    if (!requestMatchesFork(request, chain_config.active_fork.fork)) {
-        return error.InvalidPayloadForFork;
-    }
-}
-
-fn requestMatchesFork(request: NewPayloadRequest, fork: ProtocolFork) bool {
-    return switch (request) {
-        .bellatrix => fork == .paris,
-        .capella => fork == .shanghai,
-        .deneb => fork == .cancun,
-        .electra_fulu => fork == .prague or fork == .osaka,
-        .amsterdam => fork == .amsterdam,
-    };
 }
 
 fn activationApplies(activation: ForkActivation, block_number: u64, timestamp: u64) bool {
@@ -1294,16 +1261,6 @@ fn activationApplies(activation: ForkActivation, block_number: u64, timestamp: u
         if (timestamp < at) return false;
     }
     return true;
-}
-
-fn normalizeBlobSchedule(schedule: BlobSchedule, revision: Revision) Error!transaction.BlobSchedule {
-    var out = switch (revision) {
-        inline else => |exact_revision| eth_spec.specAt(exact_revision).transaction.blob_schedule,
-    } orelse return error.UnsupportedBlobScheduleOverride;
-    out.target = schedule.target;
-    out.max = schedule.max;
-    out.base_fee_update_fraction = schedule.base_fee_update_fraction;
-    return out;
 }
 
 fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const EthWithdrawal {

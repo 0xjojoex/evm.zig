@@ -1,0 +1,277 @@
+# Manual guest-performance lab. It compares two evmz source refs with the same
+# pinned guest toolchain and fixtures; step deltas are reported, while incomplete
+# runs and public-output mismatches fail.
+name: ZisK execution-step A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit or pushed ref
+        required: true
+        default: main
+        type: string
+      candidate_ref:
+        description: Candidate commit or pushed ref (blank uses the selected workflow ref)
+        required: false
+        type: string
+      max_steps:
+        description: Maximum ZisK steps per fixture
+        required: true
+        default: "10000000"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zisk-execution-steps-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    name: tests-zkevm v0.6.2 execution steps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ZISK_VERSION: 1.0.0-alpha
+      ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
+      ZISK_RUST_TOOLCHAIN: zisk-1.0.0
+      ZISK_HOME: ${{ runner.temp }}/zisk-sdk
+      ZISK_SOURCE: ${{ runner.temp }}/zisk-source
+      FIXTURE_MANIFEST: eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
+      FIXTURE_ROOT: ${{ github.workspace }}/.eest/fixtures/tests-zkevm-v0.6.2
+      RESULTS_ROOT: ${{ github.workspace }}/zisk-step-results
+      BASELINE_REF: ${{ inputs.baseline_ref }}
+      CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
+      MAX_STEPS: ${{ inputs.max_steps }}
+
+    steps:
+      - name: Checkout workflow harness
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-riscv64-unknown-elf \
+            build-essential \
+            clang \
+            gcc-riscv64-unknown-elf \
+            jq \
+            libclang-dev \
+            libgmp-dev \
+            libgrpc++-dev \
+            libomp-dev \
+            libopenmpi-dev \
+            libpqxx-dev \
+            libsecp256k1-dev \
+            libsodium-dev \
+            nasm \
+            nlohmann-json3-dev \
+            openmpi-bin \
+            openmpi-common \
+            pkg-config \
+            protobuf-compiler \
+            uuid-dev \
+            xz-utils
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Resolve comparison refs
+        id: refs
+        run: |
+          resolve_commit() {
+            ref="$1"
+            git rev-parse --verify "${ref}^{commit}" 2>/dev/null ||
+              git rev-parse --verify "origin/${ref}^{commit}"
+          }
+          baseline_commit="$(resolve_commit "${BASELINE_REF}")"
+          candidate_commit="$(resolve_commit "${CANDIDATE_REF}")"
+          git worktree add --detach "${RUNNER_TEMP}/evmz-baseline" "${baseline_commit}"
+          git worktree add --detach "${RUNNER_TEMP}/evmz-candidate" "${candidate_commit}"
+          {
+            echo "baseline_commit=${baseline_commit}"
+            echo "candidate_commit=${candidate_commit}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Apply tests-zkevm v0.6.2 compatibility adapter
+        run: |
+          for tree in "${RUNNER_TEMP}/evmz-baseline" "${RUNNER_TEMP}/evmz-candidate"; do
+            install -D -m 0644 src/stateless/wire/v1.zig "${tree}/src/stateless/wire/v1.zig"
+          done
+
+      - name: Restore zkEVM fixture archive
+        uses: actions/cache@v4
+        with:
+          path: .eest/cache
+          key: zisk-steps-tests-zkevm-v0.6.2-${{ hashFiles('eest.lock', 'eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt') }}
+
+      - name: Fetch selected tests-zkevm v0.6.2 fixtures
+        working-directory: eest
+        run: scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
+
+      - name: Install pinned ZisK v1 alpha toolchain
+        run: |
+          curl -fsSL \
+            "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_COMMIT}/ziskup/ziskup" \
+            -o "${RUNNER_TEMP}/ziskup"
+          chmod +x "${RUNNER_TEMP}/ziskup"
+          sudo "${RUNNER_TEMP}/ziskup" \
+            --system \
+            --version "${ZISK_VERSION}" \
+            --prefix "${ZISK_HOME}" \
+            --owner "$(id -un):$(id -gn)" \
+            --cpu \
+            --nokey \
+            --yes \
+            --force
+          PATH="${HOME}/.cargo/bin:${PATH}" \
+            ZISK_HOME="${ZISK_HOME}" \
+            "${ZISK_HOME}/bin/cargo-zisk" toolchain install \
+              --toolchain-version "${ZISK_RUST_TOOLCHAIN}"
+          zisk_sysroot="$(rustup run zisk rustc --print sysroot)"
+          host_cargo="$(rustup which cargo)"
+          test -x "${host_cargo}"
+          test ! -e "${zisk_sysroot}/bin/cargo"
+          ln -s "${host_cargo}" "${zisk_sysroot}/bin/cargo"
+          {
+            "${ZISK_HOME}/bin/cargo-zisk" --version
+            rustup run zisk rustc -vV
+            rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf
+          } | tee zisk-version.txt
+          if rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf \
+            | grep -Eq 'target_feature="(zbb|zbkb|zbs)"'; then
+            echo "error: incompatible ZisK Rust target enables unsupported bit-manipulation extensions" >&2
+            exit 1
+          fi
+          echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
+
+      - name: Prepare pinned ZisK source
+        run: |
+          git init "${ZISK_SOURCE}"
+          git -C "${ZISK_SOURCE}" remote add origin https://github.com/0xPolygonHermez/zisk.git
+          git -C "${ZISK_SOURCE}" fetch --depth 1 origin "${ZISK_COMMIT}"
+          git -C "${ZISK_SOURCE}" checkout --detach FETCH_HEAD
+          test "$(git -C "${ZISK_SOURCE}" rev-parse HEAD)" = "${ZISK_COMMIT}"
+
+      - name: Restore Rust build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            ${{ runner.temp }}/zisk-source/target
+          key: zisk-v1-alpha-rust-1.0-rv64ima-upstream-${{ runner.os }}
+
+      - name: Build pinned ZisK artifacts
+        id: zisk
+        working-directory: ${{ runner.temp }}/zisk-source
+        run: |
+          cargo build --locked --release -p ziskemu
+          PATH="${HOME}/.cargo/bin:${PATH}" \
+            ZISK_HOME="${ZISK_HOME}" \
+            "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
+          provider="$(find target/elf -type f -name libziskos_staticlib.a -print -quit)"
+          test -n "${provider}"
+          {
+            echo "ziskemu=${ZISK_SOURCE}/target/release/ziskemu"
+            echo "provider=${ZISK_SOURCE}/${provider}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build baseline and candidate stateless guests
+        env:
+          ZISKEMU: ${{ steps.zisk.outputs.ziskemu }}
+          PROVIDER: ${{ steps.zisk.outputs.provider }}
+        run: |
+          build_guest() {
+            label="$1"
+            tree="$2"
+            (
+              cd "${tree}"
+              zig build guest-zisk \
+                -Dguest-payload=stateless-ere \
+                -Doptimize=ReleaseFast \
+                "-Dziskos-staticlib=${PROVIDER}" \
+                --prefix "${RUNNER_TEMP}/guest-${label}" \
+                --cache-dir "${RUNNER_TEMP}/zig-cache-${label}" \
+                --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+                --summary all
+            )
+          }
+          build_guest baseline "${RUNNER_TEMP}/evmz-baseline"
+          build_guest candidate "${RUNNER_TEMP}/evmz-candidate"
+          for elf in \
+            "${RUNNER_TEMP}/guest-baseline/guest/zisk/evmz-guest-zisk.elf" \
+            "${RUNNER_TEMP}/guest-candidate/guest/zisk/evmz-guest-zisk.elf"; do
+            if riscv64-unknown-elf-objdump -d "${elf}" \
+              | grep -E '[[:space:]]rev8[[:space:]]' >/dev/null; then
+              echo "error: ZisK v1 alpha guest provider introduced unsupported rev8: ${elf}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run baseline and candidate fixture suites
+        env:
+          ZISKEMU: ${{ steps.zisk.outputs.ziskemu }}
+        run: |
+          fixtures=()
+          while IFS= read -r fixture || [[ -n "${fixture}" ]]; do
+            fixture="${fixture%$'\r'}"
+            [[ -z "${fixture}" || "${fixture}" == \#* ]] && continue
+            fixtures+=("${FIXTURE_ROOT}/${fixture}")
+          done < "${FIXTURE_MANIFEST}"
+
+          run_suite() {
+            label="$1"
+            elf="${RUNNER_TEMP}/guest-${label}/guest/zisk/evmz-guest-zisk.elf"
+            zig build zkevm-ere-bench --summary all -- \
+              --engine zisk \
+              --report-only \
+              --output-folder "${RESULTS_ROOT}/${label}" \
+              --ziskemu "${ZISKEMU}" \
+              --zisk-elf "${elf}" \
+              --zisk-work-dir "${RUNNER_TEMP}/zisk-runs-${label}" \
+              --zisk-max-steps "${MAX_STEPS}" \
+              "${fixtures[@]}"
+          }
+          run_suite baseline
+          run_suite candidate
+
+      - name: Compare execution steps and public outputs
+        id: comparison
+        continue-on-error: true
+        run: |
+          python3 eest/scripts/report-zisk-step-ab.py \
+            --baseline "${RESULTS_ROOT}/baseline" \
+            --candidate "${RESULTS_ROOT}/candidate" \
+            --output zisk-step-report.md \
+            --baseline-ref "${{ steps.refs.outputs.baseline_commit }}" \
+            --candidate-ref "${{ steps.refs.outputs.candidate_commit }}"
+
+      - name: Publish job summary
+        if: always() && hashFiles('zisk-step-report.md') != ''
+        run: cat zisk-step-report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload execution-step report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-execution-steps-${{ steps.refs.outputs.baseline_commit }}-${{ steps.refs.outputs.candidate_commit }}
+          path: |
+            zisk-step-report.md
+            zisk-step-results/**/*.json
+            zisk-version.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Require complete public-output parity
+        if: always()
+        env:
+          COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+        run: test "${COMPARISON_OUTCOME}" = success

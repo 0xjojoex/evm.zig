@@ -22,6 +22,7 @@ pub const Options = struct {
     zisk_elf_path: ?[]const u8 = null,
     zisk_work_dir: []const u8 = "zig-out/zkevm-ere-bench",
     zisk_max_steps: []const u8 = "1000000",
+    report_only: bool = false,
 };
 
 pub const Engine = enum {
@@ -354,10 +355,23 @@ const ExecutionMetrics = union(enum) {
 
 const ExecutionSuccess = struct {
     output_matched: bool,
+    public_values: PublicValuesHex,
     total_num_cycles: u64,
     region_cycles: EmptyObject = .{},
     execution_duration: DurationJson,
     heap: ?HeapMetrics = null,
+};
+
+const PublicValuesHex = struct {
+    chars: [evmz.stateless.ere.public_values_size * 2]u8,
+
+    fn init(bytes: *const evmz.stateless.ere.PublicValues) PublicValuesHex {
+        return .{ .chars = std.fmt.bytesToHex(bytes, .lower) };
+    }
+
+    pub fn jsonStringify(self: PublicValuesHex, jws: anytype) !void {
+        try jws.write(self.chars[0..]);
+    }
 };
 
 const EmptyObject = struct {};
@@ -386,6 +400,7 @@ fn executeNative(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixtu
     const expected_public = evmz.stateless.ere.outputPublicValues(fixture.stateless_output_bytes);
     return .{ .success = .{
         .output_matched = std.mem.eql(u8, &run.public_values, &expected_public),
+        .public_values = .init(&run.public_values),
         .total_num_cycles = 0,
         .execution_duration = durationJson(elapsed_ns),
         .heap = run.heap,
@@ -438,19 +453,23 @@ fn executeZisk(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture
     const elapsed_ns = monotonicNanos(io) - start;
 
     const steps = parseZiskSteps(result.stdout) orelse parseZiskSteps(result.stderr) orelse 0;
-    if (!childTermOk(result.term)) {
+    if (!childTermOk(result.term) or ziskRunErrored(result.stdout) or ziskRunErrored(result.stderr)) {
         const reason = try std.fmt.allocPrint(allocator, "ziskemu exited with {f}: {s}{s}", .{ fmtTerm(result.term), result.stdout, result.stderr });
         return .{ .crashed = .{ .reason = reason } };
     }
 
     const actual = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(1024));
     defer allocator.free(actual);
+    if (actual.len < evmz.stateless.ere.public_values_size) return error.InvalidPublicOutput;
+    var actual_public: evmz.stateless.ere.PublicValues = undefined;
+    @memcpy(&actual_public, actual[0..evmz.stateless.ere.public_values_size]);
     const expected_public = evmz.stateless.ere.outputPublicValues(fixture.stateless_output_bytes);
     const expected = try ere_io.publicValuesBytes(allocator, &expected_public, .zisk);
     defer allocator.free(expected);
 
     return .{ .success = .{
         .output_matched = std.mem.eql(u8, actual, expected),
+        .public_values = .init(&actual_public),
         .total_num_cycles = steps,
         .execution_duration = durationJson(elapsed_ns),
         .heap = heap,
@@ -636,6 +655,15 @@ fn parseZiskSteps(bytes: []const u8) ?u64 {
     return std.fmt.parseInt(u64, bytes[digits_start..cursor], 10) catch null;
 }
 
+fn ziskRunErrored(bytes: []const u8) bool {
+    return std.mem.indexOf(u8, bytes, "finished with error") != null;
+}
+
+test "ZisK error marker overrides a zero process exit" {
+    try std.testing.expect(ziskRunErrored("Emu::run() finished with error at step=42"));
+    try std.testing.expect(!ziskRunErrored("Emu::run() finished at step=42"));
+}
+
 fn childTermOk(term: std.process.Child.Term) bool {
     return switch (term) {
         .exited => |code| code == 0,
@@ -699,7 +727,7 @@ fn rfc3339TimestampAlloc(allocator: std.mem.Allocator, timestamp_nanos: u128) ![
 
 pub fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk] [--output-folder PATH] [--limit N] [--test NAME] [--ziskemu PATH] [--zisk-elf PATH] [path ...]
+        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk] [--output-folder PATH] [--limit N] [--test NAME] [--report-only] [--ziskemu PATH] [--zisk-elf PATH] [path ...]
         \\
         \\Consumes direct EEST zkEVM fixtures with non-empty statelessInputBytes
         \\and emits ERE BenchmarkRun-compatible execution JSON rows. Native

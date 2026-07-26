@@ -43,6 +43,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--zisk-max-steps")) {
             const value = args.next() orelse return error.MissingZiskMaxSteps;
             options.zisk_max_steps = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--report-only")) {
+            options.report_only = true;
         } else {
             try paths.append(allocator, try arena.dupe(u8, arg));
         }
@@ -62,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (paths.items.len > 1) printSummary("total", total, options);
 
-    if (total.failed > 0 or total.benchmarked == 0) std.process.exit(1);
+    if ((!options.report_only and total.failed > 0) or total.benchmarked == 0) std.process.exit(1);
 }
 
 fn parseEngine(value: []const u8) ?bench.Engine {

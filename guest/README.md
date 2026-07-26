@@ -37,3 +37,35 @@ guest-side complement to the host RSS and VM-loop benchmarks in
 [`bench/`](../bench/README.md). A representation optimization should normally
 improve or preserve both surfaces; an explicit product tradeoff should not be
 hidden behind a host-only improvement.
+
+## Pinned stateless fixture report
+
+The manual `ZisK execution-step A/B` workflow compares two source refs on a
+representative stateless suite. Run it from the candidate branch and leave
+`candidate_ref` blank to compare that selected commit against `main`; both refs
+can be overridden with pushed branch names or commit hashes for an archived
+comparison.
+
+The workflow is intentionally an Ubuntu-only, manually dispatched lab because
+it provisions and builds the pinned ZisK toolchain before running the fixture
+suite. 
+
+The workflow's intentional pins are:
+
+- ZisK `v1.0.0-alpha` at `4b9f758fabc4955cac20af837019ccc31b803a46`;
+- ZisK's Rust toolchain release `zisk-1.0.0`;
+- `tests-zkevm@v0.6.2`; and
+- Zig `0.16.0` with ReleaseFast guests.
+
+Both upstream pins have breaking changes relative to the archived runner. The
+workflow applies the same compatibility surface to both refs: the v0.6.2
+Amsterdam SSZ wire adapter and ZisK's matching `zisk-1.0.0` Rust toolchain. 
+The selected corpus is in
+[`../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt`](../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt).
+
+The workflow reports aggregate and per-fixture execution-step deltas. A step
+increase is data, not a failure. Only an incomplete run, emulator crash, or
+baseline/candidate public-output mismatch fails the comparison. Upstream
+expected-output matches are shown separately because existing Amsterdam
+semantic gaps are outside this performance comparison. No proof generation is
+part of this workflow.

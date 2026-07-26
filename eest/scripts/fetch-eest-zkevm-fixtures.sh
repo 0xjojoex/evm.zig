@@ -3,9 +3,10 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/fetch-eest-zkevm-fixtures.sh
+usage: scripts/fetch-eest-zkevm-fixtures.sh [--manifest PATH]
 
 Downloads EEST zkEVM blockchain fixtures into ../.eest/.
+With --manifest, extracts only the archive-relative paths listed in PATH.
 
 Environment overrides:
   EEST_ZKEVM_REPO      default: zkevm_repo from ../eest.lock
@@ -22,12 +23,25 @@ Example:
 USAGE
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+manifest=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --manifest)
+      [[ $# -ge 2 ]] || { printf 'error: --manifest needs a path\n' >&2; exit 2; }
+      manifest="$2"
+      shift 2
+      ;;
+    *)
+      printf 'error: unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 lock_path=""
 lock_prefix=""
@@ -131,7 +145,23 @@ else
 fi
 
 printf 'Extracting to %s\n' "${dest}"
-tar -xzf "${archive}" -C "${dest}"
+if [[ -z "${manifest}" ]]; then
+  tar -xzf "${archive}" -C "${dest}"
+else
+  [[ -f "${manifest}" ]] || { printf 'error: manifest not found: %s\n' "${manifest}" >&2; exit 1; }
+  fixtures=()
+  while IFS= read -r fixture || [[ -n "${fixture}" ]]; do
+    fixture="${fixture%$'\r'}"
+    [[ -z "${fixture}" || "${fixture}" == \#* ]] && continue
+    case "${fixture}" in
+      fixtures/*.json) ;;
+      *) printf 'error: invalid fixture path in manifest: %s\n' "${fixture}" >&2; exit 1 ;;
+    esac
+    fixtures+=("${fixture}")
+  done < "${manifest}"
+  [[ ${#fixtures[@]} -gt 0 ]] || { printf 'error: manifest is empty: %s\n' "${manifest}" >&2; exit 1; }
+  tar -xzf "${archive}" -C "${dest}" "${fixtures[@]}"
+fi
 
 printf 'Done. Try:\n'
 printf '  zig build zkevm -- %s/fixtures/blockchain_tests/<path>.json\n' "${dest}"

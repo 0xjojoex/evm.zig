@@ -84,7 +84,7 @@ pub fn runStatelessSszSmoke(allocator: std.mem.Allocator) !SszSmokeProof {
         .output_len = @intCast(output_bytes.len),
         .payload_root_low = std.mem.readInt(u32, output.new_payload_request_root[28..32], .big),
         .chain_id_low = @truncate(output.chain_config.chain_id),
-        .fork = @intCast(@intFromEnum(output.chain_config.active_fork.fork)),
+        .fork = @intFromEnum(evmz.stateless.wire.v1.ProtocolFork.amsterdam),
     };
 }
 
