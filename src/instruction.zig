@@ -9,6 +9,7 @@ const trace = @import("./trace.zig");
 
 const Interpreter = interpreter.Interpreter;
 const CallFrame = interpreter.CallFrame;
+const Stack = @import("./Stack.zig");
 
 pub const call_value_cost = 9000;
 pub const account_creation_cost = 25000;
@@ -26,10 +27,6 @@ pub const Target = instruction_table.Target;
 pub const Entry = instruction_table.Entry;
 pub const Table = instruction_table.Table;
 pub const Spec = instruction_table.Spec;
-
-pub const Error = error{
-    UnknownOpcode,
-};
 
 pub const arithmetic = @import("./instruction/arithmetic.zig");
 pub const environment = @import("./instruction/environment.zig");
@@ -259,6 +256,53 @@ fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: in
     try std.testing.expectEqual(expected, frame.frame.status);
 }
 
+test "instruction boundary resolves EVM faults without throwing" {
+    const cases = [_]struct {
+        opcode: u8,
+        is_static: bool = false,
+        expected: interpreter.FrameStatus,
+    }{
+        .{ .opcode = @intFromEnum(Opcode.ADD), .expected = .stack_underflow },
+        .{ .opcode = 0x0c, .expected = .invalid_opcode },
+        .{ .opcode = @intFromEnum(Opcode.SSTORE), .is_static = true, .expected = .write_protection },
+    };
+
+    inline for (cases) |case| {
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        msg.is_static = case.is_static;
+        const code = [_]u8{case.opcode};
+
+        var frame = try Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .code = &code,
+        });
+        defer frame.deinit();
+
+        try Instruction(evmz.eth.cancun).execute(case.opcode, frame.frame);
+        try std.testing.expectEqual(case.expected, frame.frame.status);
+    }
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = [_]u8{@intFromEnum(Opcode.PUSH0)};
+    var frame = try Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .code = &code,
+    });
+    defer frame.deinit();
+    for (0..Stack.capacity) |_| frame.frame.stack.pushUnchecked(0);
+
+    try Instruction(evmz.eth.cancun).execute(code[0], frame.frame);
+    try std.testing.expectEqual(interpreter.FrameStatus.stack_overflow, frame.frame.status);
+}
+
 test "static gas helper uses resolved rule gas" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -284,8 +328,7 @@ pub fn staticGas(opcode: Opcode) u16 {
 const UnknownBuiltinHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         _ = Instructions;
-        _ = frame;
-        return error.UnknownOpcode;
+        frame.failWithFrameStatus(.invalid_opcode);
     }
 };
 
@@ -683,16 +726,22 @@ pub fn Instruction(comptime spec: ExactSpec) type {
         }
 
         pub inline fn executeDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
-            return switch (comptime dispatch_entry.dispatchTarget()) {
+            (switch (comptime dispatch_entry.dispatchTarget()) {
                 .invalid => Self.executeInvalidDispatchEntry(dispatch_entry, frame),
                 .builtin => |opcode| builtinHandlerForOpcode(opcode).execute(Self, frame),
                 .custom => |Handler| Self.executeCustomDispatchEntry(Handler, frame),
+            }) catch |err| switch (err) {
+                error.StackOverflow => if (frame.status == .running)
+                    frame.failWithFrameStatus(.stack_overflow),
+                error.StackUnderflow => if (frame.status == .running)
+                    frame.failWithFrameStatus(.stack_underflow),
+                else => return err,
             };
         }
 
         inline fn executeInvalidDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
-            if (comptime !dispatch_entry.defined()) return error.UnknownOpcode;
-            return system.invalid(frame);
+            _ = dispatch_entry;
+            frame.failWithFrameStatus(.invalid_opcode);
         }
 
         inline fn executeCustomDispatchEntry(comptime Handler: type, frame: *CallFrame) anyerror!void {

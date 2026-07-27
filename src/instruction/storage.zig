@@ -49,7 +49,8 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn sstore(frame: *CallFrame) !void {
             if (frame.msg.is_static) {
-                return error.StaticCallViolation;
+                frame.failWithFrameStatus(.write_protection);
+                return;
             }
             const key, const value = try frame.stack.popN(2);
 
@@ -133,7 +134,8 @@ pub fn tload(frame: *CallFrame) !void {
 
 pub fn tstore(frame: *CallFrame) !void {
     if (frame.msg.is_static) {
-        return error.StaticCallViolation;
+        frame.failWithFrameStatus(.write_protection);
+        return;
     }
 
     const key, const value = try frame.stack.popN(2);

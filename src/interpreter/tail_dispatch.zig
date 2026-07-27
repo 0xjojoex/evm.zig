@@ -483,13 +483,6 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             ctx.spill(ip, sp, gas);
             const opcode_byte = (ip - 1)[0];
             executeColdOpcode(opcode_byte, ctx.frame) catch |err| {
-                if (frameStatusForError(err)) |status| {
-                    ctx.refreshStackBase();
-                    if (ctx.frame.status == .running) {
-                        ctx.frame.failWithFrameStatus(status);
-                    }
-                    return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
-                }
                 ctx.err = err;
                 return .thrown;
             };
@@ -1189,18 +1182,6 @@ test "captured memory plans use each opcode's destination operands" {
         builtinMemoryWritePlan(@intFromEnum(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
     );
     try std.testing.expect(builtinMemoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
-}
-
-fn frameStatusForError(err: anyerror) ?Interpreter.FrameStatus {
-    return switch (err) {
-        error.StackOverflow => .stack_overflow,
-        error.StackUnderflow => .stack_underflow,
-        error.StaticCallViolation => .write_protection,
-        error.UnknownOpcode,
-        error.UnsupportedInstruction,
-        => .invalid_opcode,
-        else => null,
-    };
 }
 
 test {

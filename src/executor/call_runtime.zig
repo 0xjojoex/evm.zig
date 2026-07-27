@@ -110,14 +110,21 @@ pub fn bind(comptime Executor: type) type {
             }
         };
 
-        const CallRuntime = struct {
+        /// Iteratively drives a LIFO frame stack for one root message.
+        ///
+        /// `run` is the uninterrupted lane every production entry point uses. The
+        /// declarations marked `pub` below are additionally the control seam for
+        /// `src/debug/session.zig`, which drives the same frames one boundary at a
+        /// time. That module is the seam's only consumer; nothing debugger-shaped
+        /// belongs in this file, and `evm.zig` never re-exports this type.
+        pub const CallRuntime = struct {
             executor: *Executor,
             host_iface: Host,
             frames: *FrameStore,
             frame_base: usize,
             capture_context: ?*CaptureContext,
 
-            fn init(executor: *Executor) CallRuntime {
+            pub fn init(executor: *Executor) CallRuntime {
                 return .{
                     .executor = executor,
                     .host_iface = executor.host(),
@@ -127,13 +134,13 @@ pub fn bind(comptime Executor: type) type {
                 };
             }
 
-            fn deinit(self: *CallRuntime) void {
+            pub fn deinit(self: *CallRuntime) void {
                 while (self.frames.len() > self.frame_base) {
                     self.popFrame();
                 }
             }
 
-            fn prepare(self: *CallRuntime) !void {
+            pub fn prepare(self: *CallRuntime) !void {
                 std.debug.assert(self.frame_base == 0);
                 try self.prepareNested();
             }
@@ -149,7 +156,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: Bytecode.View) !void {
+            pub fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: Bytecode.View) !void {
                 try self.pushFrame(
                     &msg,
                     bytecode,
@@ -233,7 +240,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            fn popFrame(self: *CallRuntime) void {
+            pub fn popFrame(self: *CallRuntime) void {
                 std.debug.assert(self.frames.len() > self.frame_base);
                 if (self.stepCaptureContext()) |context| context.popFrame();
                 self.frames.pop();
@@ -285,7 +292,7 @@ pub fn bind(comptime Executor: type) type {
                 unreachable;
             }
 
-            fn handleAction(self: *CallRuntime, frame_index: usize, action: Interpreter.Action) !void {
+            pub fn handleAction(self: *CallRuntime, frame_index: usize, action: Interpreter.Action) !void {
                 switch (action) {
                     .call => |call_action| {
                         if (try self.startCall(call_action.msg)) |host_result| {
@@ -304,7 +311,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            fn resumeParentAction(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
+            pub fn resumeParentAction(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
                 const action = try self.frames.frame(frame_index).resumePendingAction(result);
                 switch (action) {
                     .call => |call_action| {
@@ -396,7 +403,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
+            pub fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
                 const control = self.frames.control(frame_index).*;
                 const frame_kind = control.kind;
                 const call_capture = control.call_capture;

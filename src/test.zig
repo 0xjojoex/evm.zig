@@ -1,4 +1,7 @@
 test {
+    // Stage 0: the debug lane is reachable for tests but is
+    // deliberately not exported from `evm.zig` or `Vm(spec)` yet.
+    _ = @import("./debug.zig");
     _ = @import("./test/vm_family.zig");
     _ = @import("./test/vm_runtime.zig");
     _ = @import("./test/execution_boundary.zig");

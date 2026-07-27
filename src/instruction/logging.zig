@@ -8,7 +8,8 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
     comptime std.debug.assert(n <= 4);
 
     if (frame.msg.is_static) {
-        return error.StaticCallViolation;
+        frame.failWithFrameStatus(.write_protection);
+        return;
     }
 
     const offset, const size = try frame.stack.popN(2);

@@ -67,7 +67,8 @@ pub fn bind(comptime spec: ExactSpec) type {
             const out_offset_usize = if (out_size_usize == 0) 0 else frame.wordToUsizeOrOog(out_offset) orelse return;
 
             if (frame.msg.is_static and op == Opcode.CALL and value > 0) {
-                return error.StaticCallViolation;
+                frame.failWithFrameStatus(.write_protection);
+                return;
             }
 
             if (!frame.trackGas(spec.call.base_gas - evmz.instruction.Instruction(spec).staticGasForFrame(frame, op))) return;
@@ -165,7 +166,8 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
             if (frame.msg.is_static) {
-                return error.StaticCallViolation;
+                frame.failWithFrameStatus(.write_protection);
+                return;
             }
 
             const value, const offset, const size, const salt = if (is_create2) try frame.stack.popN(4) else blk: {
@@ -295,7 +297,8 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn selfdestruct(frame: *CallFrame) !void {
             if (frame.msg.is_static) {
-                return error.StaticCallViolation;
+                frame.failWithFrameStatus(.write_protection);
+                return;
             }
 
             const address_word = try frame.stack.pop();
