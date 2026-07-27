@@ -202,14 +202,11 @@ const ObservationFold = struct {
             const fact = view.storage.at(storage_index) orelse
                 return error.IncompleteStorageObservation;
             const target = try self.accountFor(fact.address);
-            try target.append(self.allocator, .{
-                .address = fact.address,
-                .storage = &.{.{
-                    .slot = fact.key,
-                    .original = fact.original,
-                    .current = fact.current,
-                    .written = fact.effect.written,
-                }},
+            try target.appendStorage(self.allocator, .{
+                .slot = fact.key,
+                .original = fact.original,
+                .current = fact.current,
+                .written = fact.effect.written,
             });
         }
     }
@@ -267,15 +264,7 @@ const FoldAccount = struct {
         account: observation.AccountObservation,
     ) !void {
         for (account.storage) |slot| {
-            if (try self.storageIndex(slot.slot)) |index| {
-                self.storage.items[index].current = slot.current;
-            } else {
-                const index = self.storage.items.len;
-                try self.storage.append(allocator, slot);
-                errdefer _ = self.storage.pop();
-                if (self.storage_indices.count() != 0)
-                    try self.storage_indices.put(slot.slot, index);
-            }
+            try self.appendStorage(allocator, slot);
         }
         if (account.balance) |balance| {
             if (self.balance) |*current| {
@@ -310,6 +299,22 @@ const FoldAccount = struct {
         if (account.account_reset) self.account_deleted = false;
         if (account.account_deleted) self.account_deleted = true;
         self.storage_wiped = self.storage_wiped or account.storage_wiped;
+    }
+
+    fn appendStorage(
+        self: *FoldAccount,
+        allocator: Allocator,
+        slot: observation.StorageObservation,
+    ) !void {
+        if (try self.storageIndex(slot.slot)) |index| {
+            self.storage.items[index].current = slot.current;
+            return;
+        }
+        const index = self.storage.items.len;
+        try self.storage.append(allocator, slot);
+        errdefer _ = self.storage.pop();
+        if (self.storage_indices.count() != 0)
+            try self.storage_indices.put(slot.slot, index);
     }
 
     fn storageIndex(self: *FoldAccount, slot: u256) !?usize {
