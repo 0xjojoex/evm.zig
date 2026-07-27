@@ -262,17 +262,18 @@ pub fn bind(comptime Executor: type) type {
                     const call_frame = self.frames.frame(index);
                     var interpreter = BoundInterpreter.init(call_frame);
                     const depth = call_frame.msg.depth;
-                    const run_result: Interpreter.RunResult = if (self.stepCaptureContext()) |context|
-                        try executeCapturedInterpreterUntilAction(
-                            self.executor,
-                            &interpreter,
-                            depth,
-                            context.currentFrame(),
-                        )
-                    else if (call_frame.needs_action_loop)
-                        try executeInterpreterUntilAction(self.executor, &interpreter, depth)
-                    else
-                        .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
+                    const previous_depth = self.executor.trace_depth;
+                    self.executor.trace_depth = depth;
+                    const run_result: Interpreter.RunResult = result: {
+                        defer self.executor.trace_depth = previous_depth;
+                        if (self.stepCaptureContext()) |context| {
+                            break :result try interpreter.executeCapturedUntilAction(context.currentFrame());
+                        }
+                        if (call_frame.needs_action_loop) {
+                            break :result try interpreter.executeUntilAction();
+                        }
+                        break :result .{ .finished = try interpreter.execute() };
+                    };
                     switch (run_result) {
                         .action => |action| try self.handleAction(index, action),
                         .finished => |result| {
@@ -981,6 +982,7 @@ pub fn bind(comptime Executor: type) type {
             bytecode: Bytecode.View,
         ) !Host.Result {
             std.debug.assert(self.currentCaptureContext() == null);
+            std.debug.assert(self.prepared_code_execution != null);
             var host_iface = self.host();
             var slot: Interpreter.CallFrameSlot = undefined;
             try slot.init(self.allocator, .{
@@ -991,7 +993,10 @@ pub fn bind(comptime Executor: type) type {
             defer slot.deinit();
 
             var interpreter = slot.interpreter(spec);
-            const result = try executeInterpreter(self, &interpreter, message.depth);
+            const previous_depth = self.trace_depth;
+            self.trace_depth = message.depth;
+            defer self.trace_depth = previous_depth;
+            const result = try interpreter.execute();
             return stabilizeFinalResult(self, Host.Result.fromCall(.{
                 .status = result.status,
                 .cause = result.cause,
@@ -1150,21 +1155,6 @@ pub fn bind(comptime Executor: type) type {
             self.trace_depth = depth;
             defer self.trace_depth = previous_depth;
             return interpreter.executeUntilAction();
-        }
-
-        fn executeCapturedInterpreterUntilAction(
-            self: *Executor,
-            interpreter: *BoundInterpreter,
-            depth: u16,
-            capture: *evmz.trace.TraceCapture,
-        ) !Interpreter.RunResult {
-            self.beginPreparedCodeExecution();
-            defer self.endPreparedCodeExecution();
-
-            const previous_depth = self.trace_depth;
-            self.trace_depth = depth;
-            defer self.trace_depth = previous_depth;
-            return interpreter.executeCapturedUntilAction(capture);
         }
 
         pub fn currentExecutionContext(self: *const Executor) ExecutionContext {
