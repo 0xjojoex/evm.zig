@@ -266,39 +266,11 @@ const FoldAccount = struct {
         for (account.storage) |slot| {
             try self.appendStorage(allocator, slot);
         }
-        if (account.balance) |balance| {
-            if (self.balance) |*current| {
-                current.current = balance.current;
-            } else {
-                self.balance = balance;
-            }
-        }
-        if (account.nonce) |nonce| {
-            if (self.nonce) |*current| {
-                current.current = nonce.current;
-            } else {
-                self.nonce = nonce;
-            }
-        }
-        if (account.code) |code| {
-            const current_code = try allocator.dupe(u8, code.current_code);
-            if (self.code) |*current| {
-                allocator.free(@constCast(current.current_code));
-                current.current_hash = code.current_hash;
-                current.current_code = current_code;
-            } else {
-                self.code = .{
-                    .original_hash = code.original_hash,
-                    .current_hash = code.current_hash,
-                    .current_code = current_code,
-                };
-            }
-        }
+        if (account.balance) |balance| self.appendBalance(balance);
+        if (account.nonce) |nonce| self.appendNonce(nonce);
+        if (account.code) |code| try self.appendCode(allocator, code);
         try self.lifecycle.appendSlice(allocator, account.lifecycle);
-        self.account_reset = self.account_reset or account.account_reset;
-        if (account.account_reset) self.account_deleted = false;
-        if (account.account_deleted) self.account_deleted = true;
-        self.storage_wiped = self.storage_wiped or account.storage_wiped;
+        self.appendFlags(account.account_reset, account.account_deleted, account.storage_wiped);
     }
 
     fn appendStorage(
@@ -337,53 +309,97 @@ const FoldAccount = struct {
         view: State.ObservationsView,
         fact: State.AccountObservationFact,
     ) !void {
-        var projected = observation.AccountObservation{
-            .address = fact.address,
-            .account_reset = accountAbsent(fact.original) and
-                (!accountAbsent(fact.current) or fact.effect.created_contract),
-            .account_deleted = fact.effect.account_deleted,
-            .storage_wiped = fact.effect.storage_wiped,
-        };
-        if (fact.effect.balance_written) {
-            projected.balance = .{
-                .original = accountOrZero(fact.original).balance,
-                .current = accountOrZero(fact.current).balance,
-            };
-        }
-        if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
-            projected.nonce = .{
-                .original = accountOrZero(fact.original).nonce,
-                .current = accountOrZero(fact.current).nonce,
-            };
-        }
-        if (fact.effect.code_written and !fact.effect.storage_wiped) {
+        if (fact.effect.balance_written or
+            (!fact.effect.storage_wiped and
+                (fact.effect.nonce_written or fact.effect.code_written)))
+        {
             const original = accountOrZero(fact.original);
             const current = accountOrZero(fact.current);
-            const code = view.code(current.code_hash) orelse
-                return error.ObservationCodeUnavailable;
-            projected.code = .{
-                .original_hash = original.code_hash,
-                .current_hash = current.code_hash,
-                .current_code = code.bytes,
-            };
+            if (fact.effect.balance_written) {
+                self.appendBalance(.{
+                    .original = original.balance,
+                    .current = current.balance,
+                });
+            }
+            if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
+                self.appendNonce(.{
+                    .original = original.nonce,
+                    .current = current.nonce,
+                });
+            }
+            if (fact.effect.code_written and !fact.effect.storage_wiped) {
+                const code = view.code(current.code_hash) orelse
+                    return error.ObservationCodeUnavailable;
+                try self.appendCode(allocator, .{
+                    .original_hash = original.code_hash,
+                    .current_hash = current.code_hash,
+                    .current_code = code.bytes,
+                });
+            }
         }
 
-        var lifecycle: [3]observation.LifecycleKind = undefined;
-        var lifecycle_len: usize = 0;
-        if (fact.effect.created_contract) {
-            lifecycle[lifecycle_len] = .created_contract;
-            lifecycle_len += 1;
+        const lifecycle_len: usize =
+            @intFromBool(fact.effect.created_contract) +
+            @intFromBool(fact.effect.selfdestruct) +
+            @intFromBool(fact.effect.account_deleted);
+        try self.lifecycle.ensureUnusedCapacity(allocator, lifecycle_len);
+        if (fact.effect.created_contract) self.lifecycle.appendAssumeCapacity(.created_contract);
+        if (fact.effect.selfdestruct) self.lifecycle.appendAssumeCapacity(.selfdestruct);
+        if (fact.effect.account_deleted) self.lifecycle.appendAssumeCapacity(.account_deleted);
+
+        self.appendFlags(
+            accountAbsent(fact.original) and
+                (!accountAbsent(fact.current) or fact.effect.created_contract),
+            fact.effect.account_deleted,
+            fact.effect.storage_wiped,
+        );
+    }
+
+    fn appendBalance(self: *FoldAccount, balance: observation.ValueObservation) void {
+        if (self.balance) |*current| {
+            current.current = balance.current;
+        } else {
+            self.balance = balance;
         }
-        if (fact.effect.selfdestruct) {
-            lifecycle[lifecycle_len] = .selfdestruct;
-            lifecycle_len += 1;
+    }
+
+    fn appendNonce(self: *FoldAccount, nonce: observation.NonceObservation) void {
+        if (self.nonce) |*current| {
+            current.current = nonce.current;
+        } else {
+            self.nonce = nonce;
         }
-        if (fact.effect.account_deleted) {
-            lifecycle[lifecycle_len] = .account_deleted;
-            lifecycle_len += 1;
+    }
+
+    fn appendCode(
+        self: *FoldAccount,
+        allocator: Allocator,
+        code: observation.CodeObservation,
+    ) !void {
+        const current_code = try allocator.dupe(u8, code.current_code);
+        if (self.code) |*current| {
+            allocator.free(@constCast(current.current_code));
+            current.current_hash = code.current_hash;
+            current.current_code = current_code;
+        } else {
+            self.code = .{
+                .original_hash = code.original_hash,
+                .current_hash = code.current_hash,
+                .current_code = current_code,
+            };
         }
-        projected.lifecycle = lifecycle[0..lifecycle_len];
-        try self.append(allocator, projected);
+    }
+
+    fn appendFlags(
+        self: *FoldAccount,
+        account_reset: bool,
+        account_deleted: bool,
+        storage_wiped: bool,
+    ) void {
+        self.account_reset = self.account_reset or account_reset;
+        if (account_reset) self.account_deleted = false;
+        if (account_deleted) self.account_deleted = true;
+        self.storage_wiped = self.storage_wiped or storage_wiped;
     }
 
     fn asObservation(self: *const FoldAccount) observation.AccountObservation {
