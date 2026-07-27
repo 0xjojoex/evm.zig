@@ -79,17 +79,18 @@ pub const Account = struct {
 pub const Update = mpt.Update;
 
 pub const IndexedNodes = mpt.IndexedNodes;
+pub const ProofCache = mpt.LookupCache;
 
 pub const Proof = struct {
     root_hash: [32]u8,
     index: *const mpt.NodeIndex,
+    cache: ?*ProofCache = null,
 
-    pub fn get(self: Proof, key: []const u8) ProofLookupError!?[]const u8 {
-        const result = try mpt.lookup(
-            self.root_hash,
-            self.index,
-            key,
-        );
+    pub fn get(self: Proof, key: []const u8) (Allocator.Error || ProofLookupError)!?[]const u8 {
+        const result = if (self.cache) |cache|
+            try mpt.lookupCached(self.root_hash, self.index, key, cache)
+        else
+            try mpt.lookup(self.root_hash, self.index, key);
         return switch (result) {
             .present => |value| value,
             .absent => null,
@@ -107,6 +108,10 @@ pub fn indexNodes(allocator: Allocator, nodes: []const []const u8) Error!*Indexe
 
 pub fn proof(root_hash: [32]u8, indexed: *const IndexedNodes) Proof {
     return .{ .root_hash = root_hash, .index = indexed.index() };
+}
+
+pub fn cachedProof(root_hash: [32]u8, indexed: *const IndexedNodes, cache: *ProofCache) Proof {
+    return .{ .root_hash = root_hash, .index = indexed.index(), .cache = cache };
 }
 
 pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8) Error![32]u8 {

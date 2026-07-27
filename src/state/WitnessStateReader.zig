@@ -27,6 +27,7 @@ state_root: [32]u8,
 indexed: *trie.IndexedNodes,
 codes: []const Code = &.{},
 accounts: AccountCache = .empty,
+proof_cache: trie.ProofCache,
 
 pub fn init(
     allocator: std.mem.Allocator,
@@ -39,10 +40,12 @@ pub fn init(
         .state_root = state_root,
         .indexed = indexed,
         .codes = codes,
+        .proof_cache = .init(allocator),
     };
 }
 
 pub fn deinit(self: *WitnessStateReader) void {
+    self.proof_cache.deinit();
     self.accounts.deinit(self.allocator);
     self.indexed.deinit();
     self.* = undefined;
@@ -66,14 +69,26 @@ pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
 
 fn loadMptAccount(self: *WitnessStateReader, target: Address) !?trie.Account {
     if (self.accounts.get(target)) |account| return account;
-    const account = try self.loadMptAccountUncached(target);
+    const account = try self.loadMptAccountFrom(target, &self.proof_cache);
     try self.accounts.put(self.allocator, target, account);
     return account;
 }
 
 fn loadMptAccountUncached(self: *const WitnessStateReader, target: Address) Error!?trie.Account {
+    return self.loadMptAccountFrom(target, null);
+}
+
+fn loadMptAccountFrom(
+    self: *const WitnessStateReader,
+    target: Address,
+    cache: ?*trie.ProofCache,
+) !?trie.Account {
     const key = trie.hashedAddressKey(target);
-    const encoded = trie.proof(self.state_root, self.indexed).get(&key) catch return error.InvalidWitness;
+    const lookup = if (cache) |active|
+        trie.cachedProof(self.state_root, self.indexed, active)
+    else
+        trie.proof(self.state_root, self.indexed);
+    const encoded = lookup.get(&key) catch return error.InvalidWitness;
     return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
 }
 
@@ -143,20 +158,29 @@ fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
 fn getStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
     const self = context(ptr);
     const account = try self.loadMptAccount(target) orelse return 0;
-    return self.getStorageFrom(account, key);
+    return self.getStorageFrom(account, key, &self.proof_cache);
 }
 
 fn getStorageUncached(ptr: *anyopaque, target: Address, key: u256) !u256 {
     const self = context(ptr);
     const account = try self.loadMptAccountUncached(target) orelse return 0;
-    return self.getStorageFrom(account, key);
+    return self.getStorageFrom(account, key, null);
 }
 
-fn getStorageFrom(self: *const WitnessStateReader, account: trie.Account, key: u256) !u256 {
+fn getStorageFrom(
+    self: *const WitnessStateReader,
+    account: trie.Account,
+    key: u256,
+    cache: ?*trie.ProofCache,
+) !u256 {
     if (std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash)) return 0;
 
     const storage_key = trie.hashedStorageKey(key);
-    const encoded = trie.proof(account.storage_root, self.indexed).get(&storage_key) catch return error.InvalidWitness;
+    const lookup = if (cache) |active|
+        trie.cachedProof(account.storage_root, self.indexed, active)
+    else
+        trie.proof(account.storage_root, self.indexed);
+    const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
     return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
 }
 

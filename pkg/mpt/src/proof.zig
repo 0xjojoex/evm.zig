@@ -24,6 +24,48 @@ pub const Lookup = union(enum) {
     absent: Absence,
 };
 
+/// Lazily retains decoded authenticated nodes across proof lookups.
+/// Decoded fields borrow from the witness bytes, which must outlive the cache.
+pub const LookupCache = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct {
+        hash: hash.Root,
+        decoded: node.Node,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) LookupCache {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *LookupCache) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn decode(
+        self: *LookupCache,
+        digest: hash.Root,
+        encoded: []const u8,
+        require_branch: bool,
+    ) (std.mem.Allocator.Error || LookupError)!node.Node {
+        for (self.entries.items) |entry| {
+            if (!std.mem.eql(u8, &entry.hash, &digest)) continue;
+            if (require_branch and entry.decoded != .branch) {
+                return error.NonCanonicalNode;
+            }
+            return entry.decoded;
+        }
+        const decoded = try node.decode(encoded, require_branch);
+        try self.entries.append(self.allocator, .{
+            .hash = digest,
+            .decoded = decoded,
+        });
+        return decoded;
+    }
+};
+
 pub const NodeRecord = struct {
     hash: hash.Root,
     encoded: []const u8,
@@ -116,13 +158,37 @@ fn dataFromIndex(index: *const NodeIndex) *const IndexData {
 /// Walk the trie rooted at `root` within `index` to resolve `key`, following
 /// hashed child references through the witness nodes.
 pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupError!Lookup {
+    return lookupWithCache(root, index, key, null) catch |err| switch (err) {
+        error.OutOfMemory => unreachable,
+        else => |lookup_err| return lookup_err,
+    };
+}
+
+pub fn lookupCached(
+    root: hash.Root,
+    index: *const NodeIndex,
+    key: []const u8,
+    cache: *LookupCache,
+) (std.mem.Allocator.Error || LookupError)!Lookup {
+    return lookupWithCache(root, index, key, cache);
+}
+
+fn lookupWithCache(
+    root: hash.Root,
+    index: *const NodeIndex,
+    key: []const u8,
+    cache: ?*LookupCache,
+) (std.mem.Allocator.Error || LookupError)!Lookup {
     if (std.mem.eql(u8, &root, &hash.empty_root)) return .{ .absent = .empty_trie };
     const key_nibbles = std.math.mul(usize, key.len, 2) catch
         return error.ResourceLimitExceeded;
     const step_capacity = std.math.add(usize, key_nibbles, 1) catch
         return error.ResourceLimitExceeded;
 
-    var encoded = find(index, root) orelse return error.MissingNode;
+    var resolved = ResolvedReference{
+        .encoded = find(index, root) orelse return error.MissingNode,
+        .hash = root,
+    };
     var depth: usize = 0;
     var steps: usize = 0;
     var extension_parent = false;
@@ -131,7 +197,13 @@ pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupE
         steps = std.math.add(usize, steps, 1) catch return error.ResourceLimitExceeded;
         if (steps > step_capacity) return error.ResourceLimitExceeded;
 
-        const decoded = try node.decode(encoded, extension_parent);
+        const decoded = if (cache) |active|
+            if (resolved.hash) |digest|
+                try active.decode(digest, resolved.encoded, extension_parent)
+            else
+                try node.decode(resolved.encoded, extension_parent)
+        else
+            try node.decode(resolved.encoded, extension_parent);
         switch (decoded) {
             .leaf => |leaf| {
                 const path = leaf.path;
@@ -145,7 +217,7 @@ pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupE
                 if (!extension.path.matchesKey(key, depth)) {
                     return .{ .absent = .divergent_path };
                 }
-                encoded = try resolveRequiredReference(index, extension.child);
+                resolved = try resolveRequiredReference(index, extension.child);
                 depth += extension.path.len;
                 extension_parent = true;
             },
@@ -159,7 +231,7 @@ pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupE
                 if (depth > nibble.keyNibbleLen(key)) return error.InvalidNode;
 
                 const selected = branch.children[nibble.keyNibbleAt(key, depth)];
-                encoded = (try resolveReference(index, selected)) orelse
+                resolved = (try resolveReference(index, selected)) orelse
                     return .{ .absent = .missing_branch_child };
                 depth += 1;
                 extension_parent = false;
@@ -168,18 +240,23 @@ pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupE
     }
 }
 
-fn resolveRequiredReference(index: *const NodeIndex, reference: node.Reference) LookupError![]const u8 {
+const ResolvedReference = struct {
+    encoded: []const u8,
+    hash: ?hash.Root,
+};
+
+fn resolveRequiredReference(index: *const NodeIndex, reference: node.Reference) LookupError!ResolvedReference {
     return (try resolveReference(index, reference)) orelse return error.InvalidNodeReference;
 }
 
-fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupError!?[]const u8 {
+fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupError!?ResolvedReference {
     return switch (reference) {
         .empty => null,
-        .embedded => |embedded| embedded,
+        .embedded => |embedded| .{ .encoded = embedded, .hash = null },
         .hashed => |digest| {
             const encoded = find(index, digest) orelse return error.MissingNode;
             if (encoded.len < 32) return error.InvalidNodeReference;
-            return encoded;
+            return .{ .encoded = encoded, .hash = digest };
         },
     };
 }
