@@ -107,6 +107,7 @@ const vtable = StateReader.VTable{
     .accountExists = accountExists,
     .loadAccount = loadAccount,
     .loadCode = loadCode,
+    .loadCodeValidatesHash = true,
     .getStorage = getStorage,
     .accountHasStorage = accountHasStorage,
 };
@@ -115,6 +116,7 @@ const concurrent_vtable = StateReader.VTable{
     .accountExists = accountExistsUncached,
     .loadAccount = loadAccountUncached,
     .loadCode = loadCode,
+    .loadCodeValidatesHash = true,
     .getStorage = getStorageUncached,
     .accountHasStorage = accountHasStorageUncached,
 };
