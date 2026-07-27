@@ -973,6 +973,37 @@ pub fn bind(comptime Executor: type) type {
             return runtime.run();
         }
 
+        /// Execute a root call without entering the iterative frame store.
+        /// Nested CALL/CREATE actions promote through `resolveHostCall`.
+        pub fn executePreparedCallMessageDirect(
+            self: *Executor,
+            message: Host.Message,
+            bytecode: Bytecode.View,
+        ) !Host.Result {
+            std.debug.assert(self.currentCaptureContext() == null);
+            var host_iface = self.host();
+            var slot: Interpreter.CallFrameSlot = undefined;
+            try slot.init(self.allocator, .{
+                .host = &host_iface,
+                .msg = &message,
+                .bytecode = bytecode,
+            });
+            defer slot.deinit();
+
+            var interpreter = slot.interpreter(spec);
+            const result = try executeInterpreter(self, &interpreter, message.depth);
+            return stabilizeFinalResult(self, Host.Result.fromCall(.{
+                .status = result.status,
+                .cause = result.cause,
+                .output_data = result.output_data,
+                .gas_left = result.gas_left,
+                .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
+            }));
+        }
+
         pub fn executeCreateTransaction(
             self: *Executor,
             sender: Address,

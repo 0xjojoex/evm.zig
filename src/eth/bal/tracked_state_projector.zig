@@ -104,9 +104,8 @@ pub const BlockBuilder = struct {
         view: State.ObservationsView,
         block_access_index: bal.BlockAccessIndex,
     ) !void {
-        var transition = try materialize(view, self.allocator);
-        defer transition.deinit(self.allocator);
-        try self.appendTransition(transition, block_access_index);
+        const active = try self.activeFold(block_access_index);
+        try active.appendView(view);
     }
 
     pub fn appendTransition(
@@ -114,16 +113,8 @@ pub const BlockBuilder = struct {
         transition: observation.LaneTransition,
         block_access_index: bal.BlockAccessIndex,
     ) !void {
-        std.debug.assert(!self.finished);
-        if (self.active_index) |current| {
-            std.debug.assert(block_access_index >= current);
-            if (block_access_index != current) try self.flush();
-        }
-        if (self.active == null) {
-            self.active = ObservationFold.init(self.allocator);
-            self.active_index = block_access_index;
-        }
-        try self.active.?.append(transition);
+        const active = try self.activeFold(block_access_index);
+        try active.append(transition);
     }
 
     pub fn finish(self: *BlockBuilder) !bal.Decoded {
@@ -148,6 +139,22 @@ pub const BlockBuilder = struct {
         defer shard.deinit(self.allocator);
         try self.shards.append(shard.accounts);
         self.active_index = null;
+    }
+
+    fn activeFold(
+        self: *BlockBuilder,
+        block_access_index: bal.BlockAccessIndex,
+    ) !*ObservationFold {
+        std.debug.assert(!self.finished);
+        if (self.active_index) |current| {
+            std.debug.assert(block_access_index >= current);
+            if (block_access_index != current) try self.flush();
+        }
+        if (self.active == null) {
+            self.active = ObservationFold.init(self.allocator);
+            self.active_index = block_access_index;
+        }
+        return &self.active.?;
     }
 };
 
@@ -177,6 +184,34 @@ const ObservationFold = struct {
         for (transition.accounts) |account| {
             const target = try self.accountFor(account.address);
             try target.append(self.allocator, account);
+        }
+    }
+
+    fn appendView(self: *ObservationFold, view: State.ObservationsView) !void {
+        var account_index: u32 = 0;
+        while (account_index < view.accounts.len()) : (account_index += 1) {
+            const fact = view.accounts.at(account_index);
+            if (!fact.observation.semantic_access and !fact.effect.any()) continue;
+            const target = try self.accountFor(fact.address);
+            try target.appendAccountFact(self.allocator, view, fact);
+        }
+
+        var storage_index: u32 = 0;
+        while (storage_index < view.storage.len()) : (storage_index += 1) {
+            const metadata = view.storage.metadataAt(storage_index);
+            if (!metadata.observation.value_read and !metadata.effect.written) continue;
+            const fact = view.storage.at(storage_index) orelse
+                return error.IncompleteStorageObservation;
+            const target = try self.accountFor(fact.address);
+            try target.append(self.allocator, .{
+                .address = fact.address,
+                .storage = &.{.{
+                    .slot = fact.key,
+                    .original = fact.original,
+                    .current = fact.current,
+                    .written = fact.effect.written,
+                }},
+            });
         }
     }
 
@@ -282,6 +317,61 @@ const FoldAccount = struct {
         if (account.account_reset) self.account_deleted = false;
         if (account.account_deleted) self.account_deleted = true;
         self.storage_wiped = self.storage_wiped or account.storage_wiped;
+    }
+
+    fn appendAccountFact(
+        self: *FoldAccount,
+        allocator: Allocator,
+        view: State.ObservationsView,
+        fact: State.AccountObservationFact,
+    ) !void {
+        var projected = observation.AccountObservation{
+            .address = fact.address,
+            .account_reset = accountAbsent(fact.original) and
+                (!accountAbsent(fact.current) or fact.effect.created_contract),
+            .account_deleted = fact.effect.account_deleted,
+            .storage_wiped = fact.effect.storage_wiped,
+        };
+        if (fact.effect.balance_written) {
+            projected.balance = .{
+                .original = accountOrZero(fact.original).balance,
+                .current = accountOrZero(fact.current).balance,
+            };
+        }
+        if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
+            projected.nonce = .{
+                .original = accountOrZero(fact.original).nonce,
+                .current = accountOrZero(fact.current).nonce,
+            };
+        }
+        if (fact.effect.code_written and !fact.effect.storage_wiped) {
+            const original = accountOrZero(fact.original);
+            const current = accountOrZero(fact.current);
+            const code = view.code(current.code_hash) orelse
+                return error.ObservationCodeUnavailable;
+            projected.code = .{
+                .original_hash = original.code_hash,
+                .current_hash = current.code_hash,
+                .current_code = code.bytes,
+            };
+        }
+
+        var lifecycle: [3]observation.LifecycleKind = undefined;
+        var lifecycle_len: usize = 0;
+        if (fact.effect.created_contract) {
+            lifecycle[lifecycle_len] = .created_contract;
+            lifecycle_len += 1;
+        }
+        if (fact.effect.selfdestruct) {
+            lifecycle[lifecycle_len] = .selfdestruct;
+            lifecycle_len += 1;
+        }
+        if (fact.effect.account_deleted) {
+            lifecycle[lifecycle_len] = .account_deleted;
+            lifecycle_len += 1;
+        }
+        projected.lifecycle = lifecycle[0..lifecycle_len];
+        try self.append(allocator, projected);
     }
 
     fn takeObservation(
@@ -616,6 +706,13 @@ test "tracked observations match recorder after inner rollback" {
     defer delta.deinit(allocator);
     var actual = try delta.toOwnedBlockAccessList(allocator, 1);
     defer actual.deinit(allocator);
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, actual, direct);
+
     var expected = try oracle.toOwnedBlockAccessList(allocator);
     defer expected.deinit(allocator);
     try expectEqualEncoded(allocator, expected, actual);
@@ -697,6 +794,8 @@ test "block builder coalesces transitions at one access index" {
 
     var builder = BlockBuilder.init(allocator);
     defer builder.deinit();
+    var reference_builder = BlockBuilder.init(allocator);
+    defer reference_builder.deinit();
 
     const first = state.beginObservedTransaction();
     state.beginScope();
@@ -704,6 +803,9 @@ test "block builder coalesces transitions at one access index" {
     state.closeScope();
     state.seal(first);
     try builder.append(state.pendingView().observations(), 3);
+    var first_transition = try materialize(state.pendingView().observations(), allocator);
+    defer first_transition.deinit(allocator);
+    try reference_builder.appendTransition(first_transition, 3);
     state.retain(first);
 
     const second = state.beginObservedTransaction();
@@ -712,10 +814,16 @@ test "block builder coalesces transitions at one access index" {
     state.closeScope();
     state.seal(second);
     try builder.append(state.pendingView().observations(), 3);
+    var second_transition = try materialize(state.pendingView().observations(), allocator);
+    defer second_transition.deinit(allocator);
+    try reference_builder.appendTransition(second_transition, 3);
     state.retain(second);
 
     var result = try builder.finish();
     defer result.deinit(allocator);
+    var reference = try reference_builder.finish();
+    defer reference.deinit(allocator);
+    try expectEqualEncoded(allocator, reference, result);
     try std.testing.expectEqual(@as(usize, 1), result.accounts.len);
     try std.testing.expectEqualSlices(u8, &target, &result.accounts[0].address);
     try std.testing.expectEqual(@as(usize, 1), result.accounts[0].balance_changes.len);

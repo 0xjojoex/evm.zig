@@ -15,18 +15,27 @@ const Address = address.Address;
 const WitnessStateReader = @This();
 
 pub const Error = error{InvalidWitness};
+const AccountCache = std.AutoHashMapUnmanaged(Address, ?trie.Account);
 
 pub const Code = struct {
     hash: [32]u8,
     bytes: []const u8,
 };
 
+allocator: std.mem.Allocator,
 state_root: [32]u8,
 indexed: *trie.IndexedNodes,
 codes: []const Code = &.{},
+accounts: AccountCache = .empty,
 
-pub fn init(state_root: [32]u8, indexed: *trie.IndexedNodes, codes: []const Code) WitnessStateReader {
+pub fn init(
+    allocator: std.mem.Allocator,
+    state_root: [32]u8,
+    indexed: *trie.IndexedNodes,
+    codes: []const Code,
+) WitnessStateReader {
     return .{
+        .allocator = allocator,
         .state_root = state_root,
         .indexed = indexed,
         .codes = codes,
@@ -34,6 +43,7 @@ pub fn init(state_root: [32]u8, indexed: *trie.IndexedNodes, codes: []const Code
 }
 
 pub fn deinit(self: *WitnessStateReader) void {
+    self.accounts.deinit(self.allocator);
     self.indexed.deinit();
     self.* = undefined;
 }
@@ -48,10 +58,20 @@ pub fn reader(self: *WitnessStateReader) StateReader {
 /// Share the sealed witness index across overlapping read-only lanes.
 /// The witness and all borrowed node/code bytes must outlive those lanes.
 pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
-    return .initAssumeSafe(self.reader());
+    return .initAssumeSafe(.{
+        .ptr = self,
+        .vtable = &concurrent_vtable,
+    });
 }
 
-fn loadMptAccount(self: *const WitnessStateReader, target: Address) Error!?trie.Account {
+fn loadMptAccount(self: *WitnessStateReader, target: Address) !?trie.Account {
+    if (self.accounts.get(target)) |account| return account;
+    const account = try self.loadMptAccountUncached(target);
+    try self.accounts.put(self.allocator, target, account);
+    return account;
+}
+
+fn loadMptAccountUncached(self: *const WitnessStateReader, target: Address) Error!?trie.Account {
     const key = trie.hashedAddressKey(target);
     const encoded = trie.proof(self.state_root, self.indexed).get(&key) catch return error.InvalidWitness;
     return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
@@ -76,6 +96,14 @@ const vtable = StateReader.VTable{
     .accountHasStorage = accountHasStorage,
 };
 
+const concurrent_vtable = StateReader.VTable{
+    .accountExists = accountExistsUncached,
+    .loadAccount = loadAccountUncached,
+    .loadCode = loadCode,
+    .getStorage = getStorageUncached,
+    .accountHasStorage = accountHasStorageUncached,
+};
+
 fn context(ptr: *anyopaque) *WitnessStateReader {
     return @ptrCast(@alignCast(ptr));
 }
@@ -84,8 +112,21 @@ fn accountExists(ptr: *anyopaque, target: Address) !bool {
     return (try context(ptr).loadMptAccount(target)) != null;
 }
 
+fn accountExistsUncached(ptr: *anyopaque, target: Address) !bool {
+    return (try context(ptr).loadMptAccountUncached(target)) != null;
+}
+
 fn loadAccount(ptr: *anyopaque, target: Address) !?Account {
     const account = try context(ptr).loadMptAccount(target) orelse return null;
+    return accountValue(account);
+}
+
+fn loadAccountUncached(ptr: *anyopaque, target: Address) !?Account {
+    const account = try context(ptr).loadMptAccountUncached(target) orelse return null;
+    return accountValue(account);
+}
+
+fn accountValue(account: trie.Account) Account {
     return .{
         .nonce = account.nonce,
         .balance = account.balance,
@@ -102,6 +143,16 @@ fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
 fn getStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
     const self = context(ptr);
     const account = try self.loadMptAccount(target) orelse return 0;
+    return self.getStorageFrom(account, key);
+}
+
+fn getStorageUncached(ptr: *anyopaque, target: Address, key: u256) !u256 {
+    const self = context(ptr);
+    const account = try self.loadMptAccountUncached(target) orelse return 0;
+    return self.getStorageFrom(account, key);
+}
+
+fn getStorageFrom(self: *const WitnessStateReader, account: trie.Account, key: u256) !u256 {
     if (std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash)) return 0;
 
     const storage_key = trie.hashedStorageKey(key);
@@ -114,6 +165,11 @@ fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
     return !std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash);
 }
 
+fn accountHasStorageUncached(ptr: *anyopaque, target: Address) !bool {
+    const account = try context(ptr).loadMptAccountUncached(target) orelse return false;
+    return !std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash);
+}
+
 fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
     var cursor = rlp.Cursor.init(encoded);
     const value = try cursor.nextInt(u256);
@@ -123,6 +179,7 @@ fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
 
 test "witness state reader returns empty state for empty root" {
     var witness = try initForTest(std.testing.allocator, trie.empty_root_hash, &.{}, &.{});
+    defer witness.deinit();
     const state_reader = witness.reader();
     const target = address.addr(0x1000);
 
@@ -153,6 +210,7 @@ test "witness state reader loads account and code" {
     const codes = [_]Code{.{ .hash = code_hash, .bytes = &code }};
 
     var witness = try initForTest(scratch, state_root, &nodes, &codes);
+    defer witness.deinit();
     const state_reader = witness.reader();
 
     try std.testing.expect(try state_reader.accountExists(target));
@@ -181,10 +239,18 @@ test "witness state reader reads storage through account storage root" {
     const nodes = [_][]const u8{ state_node, storage_node };
 
     var witness = try initForTest(scratch, state_root, &nodes, &.{});
+    defer witness.deinit();
     const state_reader = witness.reader();
     try std.testing.expect(try state_reader.accountHasStorage(target));
     try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 4));
+
+    witness.state_root = [_]u8{0xaa} ** 32;
+    try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
+    try std.testing.expectError(
+        error.InvalidWitness,
+        witness.concurrentReader().reader().getStorage(target, 3),
+    );
 }
 
 test "witness state reader rejects missing witness nodes and code" {
@@ -205,6 +271,7 @@ test "witness state reader rejects missing witness nodes and code" {
     const nodes = [_][]const u8{state_node};
 
     var witness = try initForTest(scratch, state_root, &nodes, &.{});
+    defer witness.deinit();
     const state_reader = witness.reader();
 
     const loaded = (try state_reader.loadAccount(target)).?;
@@ -222,7 +289,7 @@ fn initForTest(
     nodes: []const []const u8,
     codes: []const Code,
 ) !WitnessStateReader {
-    return WitnessStateReader.init(state_root, try trie.indexNodes(allocator, nodes), codes);
+    return WitnessStateReader.init(allocator, state_root, try trie.indexNodes(allocator, nodes), codes);
 }
 
 fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {

@@ -1245,7 +1245,10 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 .code_address = recipient,
             };
 
-            const call_result = (try runtime.executePreparedCallMessage(self, message, bytecode)).expectCall();
+            const call_result = (try switch (mode) {
+                .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
+                .captured => runtime.executePreparedCallMessage(self, message, bytecode),
+            }).expectCall();
             const result = Interpreter.Result{
                 .status = call_result.status,
                 .cause = call_result.cause,
@@ -1613,7 +1616,7 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
     const state_root = evmz.crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
     const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-    var witness = evmz.state.WitnessStateReader.init(state_root, indexed, &.{});
+    var witness = evmz.state.WitnessStateReader.init(scratch, state_root, indexed, &.{});
     defer witness.deinit();
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);

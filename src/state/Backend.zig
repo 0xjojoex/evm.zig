@@ -40,7 +40,7 @@ pub const Backend = union(enum) {
         codes: []const WitnessStateReader.Code,
     ) !Backend {
         const indexed = try trie.indexNodes(allocator, nodes);
-        return .{ .witness = WitnessStateReader.init(state_root, indexed, codes) };
+        return .{ .witness = WitnessStateReader.init(allocator, state_root, indexed, codes) };
     }
 
     pub fn fromExternal(reader_value: Reader, root_provider: RootProvider, committer: ?Committer) Backend {
