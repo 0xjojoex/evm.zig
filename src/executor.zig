@@ -898,6 +898,11 @@ pub fn Executor(comptime spec: ExactSpec) type {
             return self.state.getCode(address);
         }
 
+        /// Test code presence from authenticated account metadata.
+        pub fn accountHasCode(self: *Self, address: Address) !bool {
+            return self.state.accountHasCode(address);
+        }
+
         /// Prepare code according to the executor preprocessing configuration.
         pub fn prepareBytecode(self: *const Self, code: []const u8) !Bytecode {
             return runtime.prepareBytecodeAlloc(self, self.allocator, code);

@@ -143,6 +143,9 @@ fn applyFinalizeBlockMode(
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+
     for (calls.slice()) |*finalize_call| {
         const call = &finalize_call.call;
         const request = try callRequestSystemContract(
@@ -183,6 +186,9 @@ fn applySystemCalls(
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+
     for (calls.slice()) |*call| {
         try callSystemContract(
             executor,
@@ -211,7 +217,7 @@ fn callSystemContract(
     mode: SystemCallMode,
     observer: anytype,
 ) !void {
-    const has_code = (try executor.getCode(recipient)).len != 0;
+    const has_code = try executor.accountHasCode(recipient);
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
@@ -284,7 +290,7 @@ fn callRequestSystemContract(
     mode: SystemCallMode,
     observer: anytype,
 ) !?[]const u8 {
-    const has_code = (try executor.getCode(recipient)).len != 0;
+    const has_code = try executor.accountHasCode(recipient);
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
