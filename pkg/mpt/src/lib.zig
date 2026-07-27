@@ -188,7 +188,8 @@ pub fn Trie(comptime KeccakContext: type) type {
 
         /// Apply `updates` (sorted ascending by key; a null value deletes the
         /// key) to the witness trie rooted at `root_hash` and return the new
-        /// root, materializing hashed children from the index as needed.
+        /// root. Insertions precede deletions; hashed children are materialized
+        /// from the index only when the combined update still needs them.
         pub fn updateSorted(
             self: Self,
             root_hash: Root,

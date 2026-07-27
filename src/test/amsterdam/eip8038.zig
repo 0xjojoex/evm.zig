@@ -87,7 +87,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
 }
 
-test "Amsterdam created contract selfdestruct clears code and keeps account at commit" {
+test "Amsterdam created contract selfdestruct removes empty account at commit" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
@@ -108,9 +108,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     }));
     defer executed.discardIfCurrent();
     try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
-    const account = executor.getAccount(create_address).?;
-    try std.testing.expectEqual(@as(u64, 0), account.nonce);
-    try std.testing.expectEqual(@as(u256, 0), account.balance);
+    try std.testing.expect(executor.getAccount(create_address) == null);
     try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(create_address)).len);
 }
 

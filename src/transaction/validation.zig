@@ -37,6 +37,7 @@ pub const ValidationError = enum {
     sender_not_eoa,
     type_4_empty_authorization_list,
     type_4_tx_contract_creation,
+    invalid_chain_id,
 };
 
 /// Transaction-owned classification of the encoded nonce domain. The raw
@@ -56,6 +57,8 @@ pub fn classifyTransactionNonce(encoded: ?u256) ClassifiedTransactionNonce {
 /// Ethereum transaction facts consumed by the ordered preparation program.
 pub const ValidationInput = struct {
     kind: TxKind = .legacy,
+    chain_id: ?u256 = null,
+    expected_chain_id: u256 = 1,
     is_create: bool = false,
     is_self_transfer: bool = false,
     gas_limit: u64,
@@ -106,6 +109,9 @@ pub fn Runtime(comptime spec: ExactSpec) type {
 
         pub fn validateBeforeAccount(self: Self, input: Input, gas_plan: gas.GasPlan) ?ValidationError {
             if (self.inactiveTransactionKindError(input.kind)) |err| return err;
+            if (input.chain_id) |chain_id| {
+                if (chain_id != input.expected_chain_id) return .invalid_chain_id;
+            }
 
             if (gas_plan.intrinsic_gas == std.math.maxInt(u64)) {
                 return .intrinsic_gas_too_low;
@@ -729,4 +735,20 @@ test "transaction validation rejects oversized initcode" {
         .input = oversized_amsterdam,
         .sender_balance = 10_000_000,
     }).?);
+}
+
+test "signed transaction chain id must match the execution environment" {
+    const Amsterdam = testRuntime(@import("../eth/spec.zig").amsterdam);
+    try std.testing.expectEqual(ValidationError.invalid_chain_id, Amsterdam.validate(.{
+        .chain_id = 2,
+        .expected_chain_id = 1,
+        .gas_limit = 21_000,
+    }).?);
+    try std.testing.expectEqual(@as(?ValidationError, null), Amsterdam.validate(.{
+        .chain_id = 1,
+        .expected_chain_id = 1,
+        .gas_limit = 21_000,
+        .sender_balance = 21_000,
+        .gas_price = 1,
+    }));
 }

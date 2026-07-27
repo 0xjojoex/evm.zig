@@ -1,11 +1,15 @@
 const std = @import("std");
 const evmz = @import("evmz");
 const fixture_common = @import("fixture.zig");
+const stateless_report = @import("stateless_report.zig");
 
 const JsonValue = fixture_common.JsonValue;
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
+const jsonString = fixture_common.jsonString;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
+
+pub const Report = stateless_report.Report;
 
 pub const Options = struct {
     test_filter: ?[]const u8 = null,
@@ -14,6 +18,7 @@ pub const Options = struct {
     trace_mismatch: bool = false,
     classify_failures: bool = false,
     ere_public: bool = false,
+    report: ?*Report = null,
 };
 
 pub const FailReason = enum(u8) {
@@ -83,21 +88,28 @@ fn runFixture(
     options: Options,
     summary: *Summary,
 ) !void {
+    var reporter = Reporter{ .options = options, .source = path, .test_name = test_name };
     const object = asObject(fixture) orelse {
+        try reporter.malformed("expected_fixture_object", null);
         summary.countFail(.malformed_fixture);
         return;
     };
+    reporter.revision = if (object.get("network")) |value| jsonString(value) orelse "unknown" else "unknown";
     const blocks = asArray(object.get("blocks") orelse {
+        try reporter.malformed("missing_blocks", null);
         summary.countFail(.malformed_fixture);
         return;
     }) orelse {
+        try reporter.malformed("expected_blocks_array", null);
         summary.countFail(.malformed_fixture);
         return;
     };
 
     for (blocks.items, 0..) |block_value, block_index| {
         if (options.limit > 0 and summary.fixtures >= options.limit) return;
+        reporter.block = block_index;
         const block = asObject(block_value) orelse {
+            try reporter.malformed("expected_block_object", null);
             summary.countFail(.malformed_fixture);
             continue;
         };
@@ -106,6 +118,7 @@ fn runFixture(
             continue;
         };
         const input_bytes = parseBytesFromValue(allocator, input_value) catch {
+            try reporter.malformed("malformed_stateless_input_bytes", block.get("expectException") == null);
             summary.countFail(.malformed_fixture);
             continue;
         };
@@ -116,6 +129,12 @@ fn runFixture(
         const result = evmz.stateless.ere.runStatelessValidator(allocator, input_bytes) catch |err| {
             if (options.verbose) std.debug.print("  validation error: {s}\n", .{@errorName(err)});
             if (options.classify_failures) printValidationClassification(path, test_name, block_index, expected_success, err);
+            try reporter.add(.{
+                .category = if (err == error.OutOfMemory) .malformed_infrastructure_error else .implementation_mismatch,
+                .validation_status = @errorName(err),
+                .difference = .execution_error,
+                .expected_success = expected_success,
+            });
             summary.countFail(.validation_error);
             continue;
         };
@@ -123,6 +142,12 @@ fn runFixture(
 
         if (block.get("statelessOutputBytes")) |expected_value| {
             const expected_output = parseBytesFromValue(allocator, expected_value) catch {
+                try reporter.add(.{
+                    .category = .fixture_spec_version_skew,
+                    .validation_status = "malformed_stateless_output_bytes",
+                    .difference = .fixture_shape,
+                    .expected_success = expected_success,
+                });
                 summary.countFail(.malformed_fixture);
                 continue;
             };
@@ -131,6 +156,12 @@ fn runFixture(
                 const expected_public = evmz.stateless.ere.outputPublicValues(expected_output);
                 if (!std.mem.eql(u8, &result.public_values, &expected_public)) {
                     if (options.verbose) printPublicMismatch(allocator, input_bytes, result.output, expected_output, result.public_values, expected_public, options.trace_mismatch);
+                    try reporter.add(.{
+                        .category = .implementation_mismatch,
+                        .validation_status = validationStatus(allocator, input_bytes, false),
+                        .difference = .public_values,
+                        .expected_success = expected_success,
+                    });
                     summary.countFail(.public_values_mismatch);
                     continue;
                 }
@@ -138,26 +169,162 @@ fn runFixture(
                 if (!std.mem.eql(u8, result.output, expected_output)) {
                     if (options.verbose) printMismatch(allocator, input_bytes, result.output, expected_output, options.trace_mismatch);
                     if (options.classify_failures) printOutputClassification(allocator, path, test_name, block_index, input_bytes, result.output, expected_output);
+                    try reportOutputMismatch(
+                        allocator,
+                        reporter,
+                        expected_success,
+                        input_bytes,
+                        result.output,
+                        expected_output,
+                    );
                     summary.countFail(.output_mismatch);
                     continue;
                 }
             }
+            const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result.output) catch null;
+            try reporter.add(.{
+                .category = .pass,
+                .validation_status = if (actual) |value| validationStatus(allocator, input_bytes, value.successful_validation) else "valid",
+                .difference = .none,
+                .expected_success = expected_success,
+                .actual_success = if (actual) |value| value.successful_validation else null,
+            });
             summary.passed += 1;
             continue;
         }
 
         const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result.output) catch {
+            try reporter.add(.{
+                .category = .adapter_wire_mismatch,
+                .validation_status = "actual_decode_error",
+                .difference = .result_encoding,
+                .expected_success = expected_success,
+            });
             summary.countFail(.missing_stateless_output);
             continue;
         };
         if (actual.successful_validation and !expected_success) {
+            try reporter.add(.{
+                .category = .implementation_mismatch,
+                .validation_status = "valid",
+                .difference = .successful_validation,
+                .expected_success = expected_success,
+                .actual_success = true,
+            });
             summary.countFail(.unexpected_success);
         } else if (!actual.successful_validation and expected_success) {
+            try reporter.add(.{
+                .category = .implementation_mismatch,
+                .validation_status = validationStatus(allocator, input_bytes, false),
+                .difference = .successful_validation,
+                .expected_success = expected_success,
+                .actual_success = false,
+            });
             summary.countFail(.unexpected_failure);
         } else {
+            try reporter.add(.{
+                .category = .pass,
+                .validation_status = validationStatus(allocator, input_bytes, actual.successful_validation),
+                .difference = .none,
+                .expected_success = expected_success,
+                .actual_success = actual.successful_validation,
+            });
             summary.passed += 1;
         }
     }
+}
+
+/// Per-block report context. Source, test, block, and revision are fixed for a
+/// record, so call sites only name the part that varies.
+const Reporter = struct {
+    options: Options,
+    source: []const u8,
+    test_name: []const u8,
+    revision: []const u8 = "unknown",
+    block: usize = 0,
+
+    const Entry = struct {
+        category: stateless_report.Category,
+        validation_status: []const u8,
+        difference: stateless_report.Difference,
+        expected_success: ?bool = null,
+        actual_success: ?bool = null,
+    };
+
+    fn add(self: Reporter, entry: Entry) !void {
+        const report = self.options.report orelse return;
+        try report.add(.{
+            .source = self.source,
+            .test_name = self.test_name,
+            .block = self.block,
+            .revision = self.revision,
+            .category = entry.category,
+            .validation_status = entry.validation_status,
+            .difference = entry.difference,
+            .expected_success = entry.expected_success,
+            .actual_success = entry.actual_success,
+        });
+    }
+
+    fn malformed(self: Reporter, validation_status: []const u8, expected_success: ?bool) !void {
+        return self.add(.{
+            .category = .malformed_infrastructure_error,
+            .validation_status = validation_status,
+            .difference = .fixture_shape,
+            .expected_success = expected_success,
+        });
+    }
+};
+
+fn validationStatus(allocator: std.mem.Allocator, input: []const u8, successful: bool) []const u8 {
+    if (successful) return "valid";
+    const result = evmz.stateless.wire.validateStatelessResultBytes(allocator, input) catch |err| {
+        return @errorName(err);
+    };
+    return @tagName(result.status);
+}
+
+fn reportOutputMismatch(
+    allocator: std.mem.Allocator,
+    reporter: Reporter,
+    expected_success: bool,
+    input: []const u8,
+    actual: []const u8,
+    expected: []const u8,
+) !void {
+    const actual_result = evmz.stateless.wire.StatelessValidationResult.decode(allocator, actual) catch {
+        return reporter.add(.{
+            .category = .adapter_wire_mismatch,
+            .validation_status = "actual_decode_error",
+            .difference = .result_encoding,
+            .expected_success = expected_success,
+        });
+    };
+    const expected_result = evmz.stateless.wire.StatelessValidationResult.decode(allocator, expected) catch {
+        return reporter.add(.{
+            .category = .fixture_spec_version_skew,
+            .validation_status = "expected_decode_error",
+            .difference = .result_encoding,
+            .expected_success = expected_success,
+            .actual_success = actual_result.successful_validation,
+        });
+    };
+
+    const difference: stateless_report.Difference = if (actual_result.successful_validation != expected_result.successful_validation)
+        .successful_validation
+    else if (!std.mem.eql(u8, &actual_result.new_payload_request_root, &expected_result.new_payload_request_root))
+        .new_payload_request_root
+    else if (!std.meta.eql(actual_result.chain_config, expected_result.chain_config))
+        .chain_config
+    else
+        .result_encoding;
+    try reporter.add(.{
+        .category = if (difference == .successful_validation) .implementation_mismatch else .adapter_wire_mismatch,
+        .validation_status = validationStatus(allocator, input, actual_result.successful_validation),
+        .difference = difference,
+        .expected_success = expected_result.successful_validation,
+        .actual_success = actual_result.successful_validation,
+    });
 }
 
 test "stateless zkevm runner compares canonical SSZ bytes" {
@@ -310,20 +477,40 @@ fn printMismatch(allocator: std.mem.Allocator, input: []const u8, actual: []cons
 }
 
 fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
     var printer = GasTracePrinter{};
     var tape = evmz.trace.TraceTape.initGrowable(allocator);
     defer tape.deinit();
-    _ = evmz.stateless.wire.validateStatelessResultBytesWithCapture(allocator, input, .{
+    var bal_diff_buffer: [64 * 1024]u8 = undefined;
+    var bal_diff_writer: std.Io.Writer = .fixed(&bal_diff_buffer);
+    var bal_report = evmz.eth.block_stf.BalDifferentialReport{
+        .mismatch_writer = &bal_diff_writer,
+    };
+    const decoded = evmz.stateless.wire.StatelessInput.decodeSchemaPrefixed(scratch, input) catch |err| {
+        std.debug.print("    trace decode failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    const normalized = evmz.stateless.wire.v1.normalize(scratch, decoded) catch |err| {
+        std.debug.print("    trace normalize failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    _ = evmz.stateless.validateWithCaptureOptions(scratch, normalized, .{
         .observations = printer.observationTarget(),
         .steps = .{
             .tape = &tape,
             .profile = .{ .stack = .omitted },
             .target = printer.traceTarget(),
         },
-    }) catch |err| {
+    }, .{ .bal_differential = &bal_report }) catch |err| {
         std.debug.print("    trace failed: {s}\n", .{@errorName(err)});
         return;
     };
+    if (bal_diff_writer.end != 0) {
+        std.debug.print("    BAL diff:\n{s}", .{bal_diff_buffer[0..bal_diff_writer.end]});
+    }
 }
 
 const GasTracePrinter = struct {
@@ -362,7 +549,16 @@ const GasTracePrinter = struct {
 
         var storage_index: u32 = 0;
         while (storage_index < observations.storage.len()) : (storage_index += 1) {
-            const fact = observations.storage.at(storage_index);
+            const metadata = observations.storage.metadataAt(storage_index);
+            if (!metadata.observation.value_read and !metadata.effect.written) {
+                std.debug.print(
+                    "    trace storage index={} addr={x} key={x} value=unloaded written=false\n",
+                    .{ block_access_index, metadata.address, metadata.key },
+                );
+                continue;
+            }
+            const fact = observations.storage.at(storage_index) orelse
+                return error.IncompleteStorageObservation;
             std.debug.print(
                 "    trace storage index={} addr={x} key={x} previous={x} value={x} written={}\n",
                 .{

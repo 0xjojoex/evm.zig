@@ -1,12 +1,16 @@
-//! Opt-in differential runner for curated call fixtures.
+//! The evmz CLI: `call-fixture-oracle`, an opt-in differential runner for
+//! curated call fixtures.
 //!
 //! It executes the same message through evmz and a locally supplied Geth
 //! `evm t8n` binary. Successful traces are deleted; mismatches retain inputs,
 //! engine versions, raw trace, and normalized observations under the work root.
+//!
+//! This is the executable's module root, so it sits beside `evm.zig` rather
+//! than under `cli/`: a root cannot import above its own directory.
 
 const std = @import("std");
-const evmz = @import("../evm.zig");
-const cases = @import("../test/call_fixture_cases.zig");
+const evmz = @import("evm.zig");
+const cases = @import("test/call_fixture_cases.zig");
 
 const MemoryAccount = evmz.state.MemoryAccount;
 

@@ -51,6 +51,7 @@ fn ByteListCodec(comptime limit: comptime_int, comptime progressive: bool) type 
 
         pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) (Error || std.mem.Allocator.Error)!Value {
             try validate(bytes);
+            if (bytes.len == 0) return &.{};
             return allocator.dupe(u8, bytes);
         }
 
@@ -81,6 +82,18 @@ test "SSZ ByteList accepts empty and exact-limit values" {
     try std.testing.expectEqual(@as(usize, 0), (try Bytes.encode(&storage, "")).len);
     try std.testing.expectEqualSlices(u8, "1234", try Bytes.encode(&storage, "1234"));
     try std.testing.expectEqual(@as(usize, 0), (try Bytes.decode("")).len);
+}
+
+test "SSZ ByteList decode returns the canonical empty slice" {
+    var no_memory: [0]u8 = .{};
+    var fixed_buffer = std.heap.FixedBufferAllocator.init(&no_memory);
+    const Bytes = ssz.ByteList(4);
+    const canonical: []const u8 = &.{};
+
+    var decoded = try Bytes.decodeAlloc(fixed_buffer.allocator(), "");
+    defer Bytes.deinit(fixed_buffer.allocator(), &decoded);
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+    try std.testing.expectEqual(canonical.ptr, decoded.ptr);
 }
 
 test "SSZ ByteList keeps schema capacity independent from runtime length" {

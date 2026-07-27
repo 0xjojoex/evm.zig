@@ -100,7 +100,7 @@ pub const LaneTransition = struct {
             try storage_reads.ensureTotalCapacity(allocator, observed.storage.len);
 
             for (observed.storage) |slot| {
-                if (slot.original == slot.current) {
+                if (observed.storage_wiped or slot.original == slot.current) {
                     storage_reads.appendAssumeCapacity(slot.slot);
                 } else {
                     const changes = try allocator.alloc(bal.StorageChange, 1);

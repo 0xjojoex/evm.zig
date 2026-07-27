@@ -12,6 +12,8 @@ const input_mod = @import("../input.zig");
 const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
+const transaction_raw = @import("../../transaction/raw.zig");
+const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const schema_id: u16 = 0x1501;
@@ -50,6 +52,7 @@ pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Err
     InactiveForkConfig,
     InvalidForkActivation,
     InvalidPayloadForFork,
+    InvalidPublicKey,
     ExtraDataTooLong,
 };
 
@@ -711,7 +714,6 @@ pub const StatelessInput = struct {
 
         const chain_config = value.chain_config;
         const new_payload_request = NewPayloadRequest{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) };
-        try validateChainConfig(chain_config, new_payload_request);
         owns_value = false;
         return .{
             .new_payload_request = new_payload_request,
@@ -1096,9 +1098,9 @@ fn defaultChainConfig() ChainConfig {
     };
 }
 
-fn failureResult(chain_config: ChainConfig) StatelessValidationResult {
+fn failureResult(chain_config: ChainConfig, request_root: [32]u8) StatelessValidationResult {
     return .{
-        .new_payload_request_root = [_]u8{0} ** 32,
+        .new_payload_request_root = request_root,
         .successful_validation = false,
         .chain_config = chain_config,
     };
@@ -1115,7 +1117,7 @@ pub fn validateStatelessBytesWithOptions(allocator: std.mem.Allocator, bytes: []
 
     const input = StatelessInput.decodeSchemaPrefixed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(defaultChainConfig()).encode(allocator),
+        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(allocator),
     };
     const result = try validateStatelessWithOptions(scratch, input, options);
     return result.encode(allocator);
@@ -1173,12 +1175,12 @@ pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Er
 pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: StatelessInput, options: ValidationOptions) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_config),
+        else => return failureResult(input.chain_config, [_]u8{0} ** 32),
     };
     _ = options;
     const normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_config),
+        else => return failureResult(input.chain_config, request_root),
     };
     const native_result = stateless_validate.validate(allocator, normalized) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1192,20 +1194,28 @@ pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: Statele
 }
 
 /// Converts the immutable v1 wire representation into runtime Ethereum facts.
-/// Compatibility hints such as `public_keys` deliberately do not cross this
-/// boundary; signed transaction recovery remains authoritative.
+/// Supplied public keys are authenticated against each signed payload
+/// transaction before they are discarded from the normalized execution input.
+/// EIP-8025 requires rejecting a key that is not the signer's, including a
+/// well-formed opposite-parity point, so the hint cannot simply be ignored.
+/// Recovery also authenticates the sender used by the decoded transaction, so
+/// execution reuses that prepared value instead of recovering a second time.
 /// Returned slices borrow decoded input or storage owned by `allocator`; guest
 /// callers should use one block-lifetime arena.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
     const revision: Revision = .amsterdam;
     const payload = input.new_payload_request.payloadView();
+    const transactions = try normalizeTransactions(
+        allocator,
+        payload.transactions,
+        input.public_keys,
+    );
     const withdrawals = try normalizeWithdrawals(allocator, payload.withdrawals);
     const execution_requests = if (input.new_payload_request.executionRequests()) |requests|
         try requests.typedOpaqueRequests(allocator)
     else
         &.{};
-    _ = input.public_keys;
     return .{
         .revision = revision,
         .chain_id = input.chain_config.chain_id,
@@ -1224,7 +1234,7 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
             .extra_data = payload.extra_data,
             .base_fee_per_gas = sszUint256FromBytes(payload.base_fee_per_gas),
             .block_hash = payload.block_hash,
-            .transactions = payload.transactions,
+            .transactions = transactions,
             .withdrawals = withdrawals,
             .blob_gas_used = payload.blob_gas_used,
             .excess_blob_gas = payload.excess_blob_gas,
@@ -1240,6 +1250,30 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
             .headers = input.witness.headers,
         },
     };
+}
+
+fn normalizeTransactions(
+    allocator: std.mem.Allocator,
+    transactions: []const []const u8,
+    public_keys: []const [public_key_bytes]u8,
+) Error![]const block_stf.TransactionInput {
+    if (public_keys.len != transactions.len) return error.InvalidPublicKey;
+    if (transactions.len == 0) return &.{};
+
+    const normalized = try allocator.alloc(block_stf.TransactionInput, transactions.len);
+    errdefer allocator.free(normalized);
+    for (normalized, transactions, public_keys) |*target, encoded, expected| {
+        const recovered = transaction_signing.recoverSender(allocator, encoded) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPublicKey,
+        };
+        if (!std.mem.eql(u8, &recovered.public_key, &expected)) return error.InvalidPublicKey;
+        target.* = block_stf.TransactionInput.initAssumeDecoded(
+            try transaction_raw.decodeRawAssumeSender(allocator, encoded, recovered.sender),
+            encoded,
+        );
+    }
+    return normalized;
 }
 
 fn validateChainConfig(chain_config: ChainConfig, request: NewPayloadRequest) Error!void {

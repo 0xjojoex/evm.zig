@@ -1769,6 +1769,101 @@ test "exact spec drives top-level delegated account access" {
     try std.testing.expectEqual(default_gas_left - 7, custom_gas_left);
 }
 
+test "top-level delegated target is a semantic account access" {
+    const sender = evmz.addr(0x1111);
+    const authority = evmz.addr(0x2222);
+    const target = evmz.addr(0x3333);
+    const Observer = struct {
+        target: Address,
+        found: bool = false,
+
+        fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
+            const accounts = pending.observations().accounts;
+            var index: u32 = 0;
+            while (index < accounts.len()) : (index += 1) {
+                const fact = accounts.at(index);
+                if (std.mem.eql(u8, &fact.address, &self.target)) {
+                    try std.testing.expect(fact.observation.semantic_access);
+                    self.found = true;
+                }
+            }
+        }
+    };
+
+    var observer = Observer{ .target = target };
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&delegation_code, target);
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &delegation_code });
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
+
+    const result = (try executor.runStandaloneObserved(
+        testExecutionContext(sender, 100_000),
+        .{ .call = .{
+            .sender = sender,
+            .recipient = authority,
+        } },
+        .legacy(100_000),
+        &observer,
+    )).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expect(observer.found);
+}
+
+test "delegated target is observed before insufficient call balance" {
+    const sender = evmz.addr(0x1111);
+    const parent = evmz.addr(0x2222);
+    const authority = evmz.addr(0x3333);
+    const target = evmz.addr(0x4444);
+    const Observer = struct {
+        target: Address,
+        found: bool = false,
+
+        fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
+            const accounts = pending.observations().accounts;
+            var index: u32 = 0;
+            while (index < accounts.len()) : (index += 1) {
+                const fact = accounts.at(index);
+                if (!std.mem.eql(u8, &fact.address, &self.target)) continue;
+                try std.testing.expect(fact.observation.semantic_access);
+                try std.testing.expect(fact.observation.code_read);
+                self.found = true;
+            }
+        }
+    };
+
+    var observer = Observer{ .target = target };
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    const parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH1, 0x01, .PUSH2, 0x33, 0x33, .GAS, .CALL, .STOP,
+    });
+    var delegation_code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&delegation_code, target);
+    try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &parent_code });
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &delegation_code });
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
+
+    const result = (try executor.runStandaloneObserved(
+        testExecutionContext(sender, 100_000),
+        .{ .call = .{
+            .sender = sender,
+            .recipient = parent,
+        } },
+        .legacy(100_000),
+        &observer,
+    )).expectCall();
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expect(observer.found);
+}
+
 test "top-level call code resolution reuses one traced view" {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
@@ -3818,7 +3913,7 @@ test "sealed observations expose storage state without a trace tape" {
             const storage = pending.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index);
+                const fact = storage.at(index) orelse continue;
                 if (!std.mem.eql(u8, &fact.address, &self.address) or fact.key != self.key) continue;
                 try std.testing.expect(fact.observation.value_read);
                 try std.testing.expect(fact.effect.written);

@@ -3,15 +3,13 @@ const build_options = @import("build_options");
 const zkvm = @import("../crypto/zkvm_accelerators.zig");
 const modexp_impl = @import("modexp.zig");
 
-pub const backend_name = build_options.profile;
+pub const backend_name = @tagName(build_options.profile);
 pub const Status = enum { ok, invalid, oom };
 
-const Backend = if (std.mem.eql(u8, backend_name, "native"))
-    NativeBackend
-else if (std.mem.eql(u8, backend_name, "zkvm"))
-    ZkvmBackend
-else
-    @compileError("unsupported profile '" ++ backend_name ++ "'");
+const Backend = switch (build_options.profile) {
+    .native => NativeBackend,
+    .zkvm => ZkvmBackend,
+};
 
 pub fn ripemd160(input: []const u8, output: *[32]u8) Status {
     return Backend.ripemd160(input, output);
@@ -258,7 +256,7 @@ const NativeBackend = struct {
 };
 
 test "native KZG settings initialize safely under contention" {
-    if (comptime !std.mem.eql(u8, backend_name, "native")) return error.SkipZigTest;
+    if (build_options.profile != .native) return error.SkipZigTest;
 
     const Loader = struct {
         fn run(failed: *std.atomic.Value(bool)) std.Io.Cancelable!void {

@@ -1,7 +1,12 @@
+//! The `evmz-ssz-conformance` CLI. Separate from `main.zig` because this
+//! runner builds without evmz, and because a consensus fixture reports a
+//! `failed` case rather than an error, so it cannot reuse `runner.Runner`.
+
 const std = @import("std");
 const conformance = @import("ssz_conformance.zig");
 const fixture_pool = @import("fixture_pool.zig");
 const lock = @import("lock.zig");
+const runner = @import("runner.zig");
 
 const default_jobs = 4;
 const max_jobs = 64;
@@ -24,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
-            jobs = try parseJobs(value);
+            jobs = try runner.parseJobs(value, max_jobs);
         } else try paths.append(allocator, try arena.dupe(u8, arg));
     }
 
@@ -201,12 +206,6 @@ fn failureLessThan(_: void, lhs: Failure, rhs: Failure) bool {
     return std.mem.order(u8, lhs.path, rhs.path) == .lt;
 }
 
-fn parseJobs(value: []const u8) !usize {
-    const jobs = try std.fmt.parseInt(usize, value, 10);
-    if (jobs == 0 or jobs > max_jobs) return error.InvalidJobs;
-    return jobs;
-}
-
 fn defaultFixturePath(io: std.Io, allocator: std.mem.Allocator, shared_root: ?[]const u8) ![]u8 {
     var value = lock.readValue(io, allocator, "consensus_dest") catch |err| switch (err) {
         error.MissingEestLockKey => return error.MissingConsensusLockKey,
@@ -293,11 +292,4 @@ test "main worktree parser selects the main branch path" {
         \\branch refs/heads/main
     ;
     try std.testing.expectEqualStrings("/tmp/main repo", parseMainWorktree(output).?);
-}
-
-test "jobs parser enforces the bounded worker count" {
-    try std.testing.expectEqual(@as(usize, 1), try parseJobs("1"));
-    try std.testing.expectEqual(@as(usize, max_jobs), try parseJobs("64"));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("0"));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("65"));
 }

@@ -195,6 +195,8 @@ fn Context(comptime KeccakContext: type) type {
 
 /// Apply `updates` (sorted ascending by key; a null value deletes the key) to
 /// the trie rooted at `root_hash` within `index`, returning the new root.
+/// Insertions run before deletions so a combined post-state update does not
+/// require clean sibling nodes that the insertion makes unnecessary.
 pub fn updateSorted(
     keccak_context: anytype,
     backing_allocator: Allocator,
@@ -223,12 +225,14 @@ pub fn updateSorted(
     };
 
     for (updates) |update| {
+        const value = update.value orelse continue;
         const path = try keyNibbles(&context, update.key);
-        if (update.value) |value| {
-            try insert(&context, root_node, path, value);
-        } else {
-            try delete(&context, root_node, path);
-        }
+        try insert(&context, root_node, path, value);
+    }
+    for (updates) |update| {
+        if (update.value != null) continue;
+        const path = try keyNibbles(&context, update.key);
+        try delete(&context, root_node, path);
     }
 
     return encodeRoot(&context, root_node);

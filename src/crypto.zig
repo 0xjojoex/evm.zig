@@ -9,15 +9,15 @@ const std = @import("std");
 const build_options = @import("build_options");
 const zkvm = @import("./crypto/zkvm_accelerators.zig");
 
-pub const provider_name = build_options.profile;
-pub const keccak_provider_name = if (std.mem.eql(u8, provider_name, "native"))
-    build_options.native_keccak
-else
-    "zkvm";
-pub const secp256k1_provider_name = if (std.mem.eql(u8, provider_name, "native"))
-    build_options.native_secp256k1
-else
-    "zkvm";
+pub const provider_name = @tagName(build_options.profile);
+pub const keccak_provider_name = switch (build_options.profile) {
+    .native => @tagName(build_options.native_keccak),
+    .zkvm => "zkvm",
+};
+pub const secp256k1_provider_name = switch (build_options.profile) {
+    .native => @tagName(build_options.native_secp256k1),
+    .zkvm => "zkvm",
+};
 
 /// Keccak-256 digest of the empty byte string.
 pub const keccak256_empty = [_]u8{
@@ -27,26 +27,20 @@ pub const keccak256_empty = [_]u8{
     0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
 };
 
-const Provider = if (std.mem.eql(u8, provider_name, "native"))
-    NativeProvider
-else if (std.mem.eql(u8, provider_name, "zkvm"))
-    ZkvmProvider
-else
-    @compileError("unsupported profile '" ++ provider_name ++ "'");
+const Provider = switch (build_options.profile) {
+    .native => NativeProvider,
+    .zkvm => ZkvmProvider,
+};
 
-const NativeKeccakProvider = if (std.mem.eql(u8, build_options.native_keccak, "std"))
-    StdKeccakProvider
-else if (std.mem.eql(u8, build_options.native_keccak, "xkcp"))
-    XkcpKeccakProvider
-else
-    @compileError("unsupported native Keccak backend '" ++ build_options.native_keccak ++ "'");
+const NativeKeccakProvider = switch (build_options.native_keccak) {
+    .std => StdKeccakProvider,
+    .xkcp => XkcpKeccakProvider,
+};
 
-const NativeSecp256k1Provider = if (std.mem.eql(u8, build_options.native_secp256k1, "std"))
-    StdSecp256k1Provider
-else if (std.mem.eql(u8, build_options.native_secp256k1, "libsecp256k1"))
-    Libsecp256k1Provider
-else
-    @compileError("unsupported native secp256k1 backend '" ++ build_options.native_secp256k1 ++ "'");
+const NativeSecp256k1Provider = switch (build_options.native_secp256k1) {
+    .std => StdSecp256k1Provider,
+    .libsecp256k1 => Libsecp256k1Provider,
+};
 
 pub fn keccak256(input: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
@@ -191,7 +185,7 @@ test keccak256 {
 }
 
 test "native Keccak backend matches std across rate boundaries" {
-    if (!std.mem.eql(u8, provider_name, "native")) return;
+    if (build_options.profile != .native) return;
 
     var storage: [1025]u8 align(8) = undefined;
     const input = storage[1..];
@@ -213,7 +207,7 @@ test sha256 {
 }
 
 test "native secp256k1 backend matches std recovery semantics" {
-    if (!std.mem.eql(u8, provider_name, "native")) return;
+    if (build_options.profile != .native) return;
 
     const message_hash = [_]u8{
         0x18, 0xc5, 0x47, 0xe4, 0xf7, 0xb0, 0xf3, 0x25,

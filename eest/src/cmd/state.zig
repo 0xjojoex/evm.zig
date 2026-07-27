@@ -1,18 +1,17 @@
 const std = @import("std");
-const eest = @import("state.zig");
-const fixture_common = @import("fixture.zig");
-const fixture_pool = @import("fixture_pool.zig");
+const eest = @import("../state.zig");
+const fixture_common = @import("../fixture.zig");
+const runner = @import("../runner.zig");
+
+pub const about = "Run EEST state-test fixtures (--classify, --scope)";
 
 const default_jobs = 4;
 const max_jobs = 16;
+const Fixtures = runner.Runner(eest);
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
-
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
 
     var options = eest.Options{};
     var mode: Mode = .files;
@@ -40,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
             classify_options.limit = try std.fmt.parseInt(usize, value, 10);
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
-            jobs = try parseJobs(value);
+            jobs = try runner.parseJobs(value, max_jobs);
             jobs_explicit = true;
         } else if (std.mem.eql(u8, arg, "--root")) {
             const value = args.next() orelse return error.MissingRoot;
@@ -90,10 +89,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total = eest.Summary{};
     for (paths.items) |path| {
-        const summary = if (jobs == 1)
-            try runPath(init.io, allocator, path, options)
-        else
-            try runPathConcurrent(init.io, allocator, path, options, jobs);
+        const summary = try Fixtures.run(init.io, allocator, path, options, jobs);
         total.add(summary);
         printSummary(path, summary);
     }
@@ -112,120 +108,6 @@ const Mode = enum {
     classify,
     scope,
 };
-
-const FileError = struct {
-    path: []u8,
-    err: anyerror,
-};
-
-const Worker = struct {
-    allocator: std.mem.Allocator,
-    options: eest.Options,
-    summary: eest.Summary = .{},
-    file_errors: std.ArrayList(FileError) = .empty,
-    allocation_error: ?anyerror = null,
-
-    fn deinit(self: *Worker) void {
-        for (self.file_errors.items) |file_error| self.allocator.free(file_error.path);
-        self.file_errors.deinit(self.allocator);
-    }
-
-    fn run(self: *Worker, io: std.Io, queue: *std.Io.Queue([]u8)) std.Io.Cancelable!void {
-        while (true) {
-            const path = queue.getOne(io) catch |err| switch (err) {
-                error.Closed => return,
-                error.Canceled => return error.Canceled,
-            };
-            const summary = eest.runFile(io, self.allocator, path, self.options) catch |err| {
-                self.file_errors.append(self.allocator, .{ .path = path, .err = err }) catch |alloc_err| {
-                    if (self.allocation_error == null) self.allocation_error = alloc_err;
-                    self.allocator.free(path);
-                };
-                continue;
-            };
-            self.summary.add(summary);
-            self.allocator.free(path);
-        }
-    }
-};
-
-fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: eest.Options) !eest.Summary {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir => return eest.runFile(io, allocator, path, options),
-        else => return err,
-    };
-    defer dir.close(io);
-
-    var total = eest.Summary{};
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        const child = try std.fs.path.join(allocator, &.{ path, entry.name });
-        defer allocator.free(child);
-
-        switch (entry.kind) {
-            .directory => total.add(try runPath(io, allocator, child, options)),
-            .file => {
-                if (std.mem.endsWith(u8, entry.name, ".json")) {
-                    total.add(try eest.runFile(io, allocator, child, options));
-                }
-            },
-            else => {},
-        }
-    }
-    return total;
-}
-
-fn runPathConcurrent(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    options: eest.Options,
-    jobs: usize,
-) !eest.Summary {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir => return runPath(io, allocator, path, options),
-        else => return err,
-    };
-    dir.close(io);
-
-    const workers = try allocator.alloc(Worker, jobs);
-    defer {
-        for (workers) |*worker| worker.deinit();
-        allocator.free(workers);
-    }
-    for (workers) |*worker| worker.* = .{
-        .allocator = allocator,
-        .options = options,
-    };
-    try fixture_pool.runWorkers(io, allocator, path, workers, .{ .suffix = ".json" }, Worker.run);
-
-    var total = eest.Summary{};
-    var file_errors: std.ArrayList(FileError) = .empty;
-    defer file_errors.deinit(allocator);
-    var allocation_error: ?anyerror = null;
-    for (workers) |*worker| {
-        total.add(worker.summary);
-        try file_errors.appendSlice(allocator, worker.file_errors.items);
-        if (allocation_error == null) allocation_error = worker.allocation_error;
-    }
-    std.sort.heap(FileError, file_errors.items, {}, fileErrorLessThan);
-    for (file_errors.items) |file_error| {
-        std.debug.print("ERROR {s}: {s}\n", .{ file_error.path, @errorName(file_error.err) });
-    }
-    if (allocation_error) |err| return err;
-    if (file_errors.items.len > 0) return file_errors.items[0].err;
-    return total;
-}
-
-fn fileErrorLessThan(_: void, lhs: FileError, rhs: FileError) bool {
-    return std.mem.order(u8, lhs.path, rhs.path) == .lt;
-}
-
-fn parseJobs(value: []const u8) !usize {
-    const jobs = try std.fmt.parseInt(usize, value, 10);
-    if (jobs == 0 or jobs > max_jobs) return error.InvalidJobs;
-    return jobs;
-}
 
 fn requiresSequential(mode: Mode, options: eest.Options) bool {
     _ = options;
@@ -451,13 +333,6 @@ fn printUsage() void {
         \\Failed/unchecked vectors are reported separately.
         \\
     , .{ default_jobs, max_jobs });
-}
-
-test "jobs parser enforces the state-runner memory bound" {
-    try std.testing.expectEqual(@as(usize, 1), try parseJobs("1"));
-    try std.testing.expectEqual(@as(usize, max_jobs), try parseJobs("16"));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("0"));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("17"));
 }
 
 test "state diagnostics stay sequential" {

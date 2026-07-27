@@ -399,6 +399,7 @@ pub fn bind(
                 return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
 
             try context.warmAccount(tuple.signer);
+            try context.accountAccess(tuple.signer);
             const existing_account = try context.accountSummary(tuple.signer);
             const account_exists = existing_account != null;
             const existing_code = if (account_exists) try context.code(tuple.signer) else &.{};

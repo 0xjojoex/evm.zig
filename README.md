@@ -232,8 +232,9 @@ against it.
 ## Contributing
 
 ```sh
-zig build test        # unit tests
-zig build eest-test   # spec-test lane
+zig build test                       # native unit tests
+zig build test -Dprofile=zkvm        # zkVM adapter semantics on the host
+zig build eest-test                  # spec-test lane
 ```
 
 ## License

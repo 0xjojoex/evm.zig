@@ -4,6 +4,7 @@ const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const smoke = @import("./v1_smoke.zig");
 const ssz = @import("ssz");
+const transaction_signing = @import("../../transaction/signing.zig");
 const wire = @import("./v1.zig");
 
 test "stateless wire v1 smoke validates and returns SSZ output" {
@@ -56,7 +57,7 @@ test "stateless wire v1 normalizes payload words with field-specific byte order"
     try std.testing.expectEqual((@as(u256, 0x02) << 248) | 0x01, normalized.block.base_fee_per_gas);
 }
 
-test "stateless wire v1 decodes but does not trust public-key hints" {
+test "stateless wire v1 decodes and authenticates public-key inputs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -69,7 +70,36 @@ test "stateless wire v1 decodes but does not trust public-key hints" {
     try std.testing.expectEqual(@as(usize, 1), decoded.public_keys.len);
 
     const result = try wire.validateStatelessResultBytes(scratch, encoded);
-    try std.testing.expectEqual(block_stf.Status.valid, result.status);
+    try std.testing.expectEqual(block_stf.Status.invalid_witness, result.status);
+}
+
+test "stateless wire v1 reuses parity-authenticated transaction decoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const hex = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
+    var encoded: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&encoded, hex);
+    const recovered = try transaction_signing.recoverSender(scratch, &encoded);
+
+    var input = try smoke.smokeInput(scratch);
+    const transactions = [_][]const u8{&encoded};
+    const public_keys = [_][65]u8{recovered.public_key};
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.transactions = &transactions;
+    input.public_keys = &public_keys;
+
+    const normalized = try wire.normalize(scratch, input);
+    try std.testing.expectEqual(@as(usize, 1), normalized.block.transactions.len);
+    try std.testing.expectEqualSlices(u8, &encoded, normalized.block.transactions[0].encoded);
+    try std.testing.expectEqualSlices(u8, &recovered.sender, &normalized.block.transactions[0].tx.sender);
+
+    var opposite_parity = encoded;
+    try std.testing.expectEqual(@as(u8, 0x25), opposite_parity[43]);
+    opposite_parity[43] = 0x26;
+    const opposite_key = (try transaction_signing.recoverSender(scratch, &opposite_parity)).public_key;
+    input.public_keys = &[_][65]u8{opposite_key};
+    try std.testing.expectError(error.InvalidPublicKey, wire.normalize(scratch, input));
 }
 
 test "stateless wire v1 is fixed to Amsterdam semantics" {
@@ -83,7 +113,7 @@ test "stateless wire v1 is fixed to Amsterdam semantics" {
     try std.testing.expect(normalized.blob_schedule == null);
 }
 
-test "stateless wire v1 releases decoded ownership when chain validation fails" {
+test "stateless wire v1 validates chain configuration after decoding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -92,10 +122,19 @@ test "stateless wire v1 releases decoded ownership when chain validation fails" 
     const encoded = try input.encodeSchemaPrefixed(std.testing.allocator);
     defer std.testing.allocator.free(encoded);
 
+    var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
+    defer decoded.deinit(std.testing.allocator);
     try std.testing.expectError(
         error.InactiveForkConfig,
-        wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded),
+        wire.normalize(std.testing.allocator, decoded),
     );
+
+    const output = try wire.validateStatelessBytes(std.testing.allocator, encoded);
+    defer std.testing.allocator.free(output);
+    const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output);
+    const request_root = try input.new_payload_request.hashTreeRoot(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &request_root, &result.new_payload_request_root);
+    try std.testing.expect(!result.successful_validation);
 }
 
 test "stateless wire v1 exposes successful decode ownership cleanup" {

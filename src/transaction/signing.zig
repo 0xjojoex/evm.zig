@@ -34,6 +34,7 @@ const AuthorizationSigningFields = struct {
 pub const SenderRecovery = struct {
     sender: Address,
     signing_hash: [32]u8,
+    public_key: [65]u8,
 };
 
 pub const SenderRecoveryError = std.mem.Allocator.Error || rlp.ParseError || error{
@@ -51,9 +52,19 @@ pub fn signingHash(allocator: std.mem.Allocator, bytes: []const u8) SenderRecove
 
 pub fn recoverSender(allocator: std.mem.Allocator, bytes: []const u8) SenderRecoveryError!SenderRecovery {
     const message = try decodeSigningMessage(allocator, bytes);
+    const recovered = try recoverPublicKey(
+        message.signing_hash,
+        message.y_parity,
+        message.r,
+        message.s,
+    );
+    var public_key: [65]u8 = undefined;
+    public_key[0] = 0x04;
+    @memcpy(public_key[1..], &recovered);
     return .{
-        .sender = try recoverAddress(message.signing_hash, message.y_parity, message.r, message.s),
+        .sender = address.fromPublicKey(recovered),
         .signing_hash = message.signing_hash,
+        .public_key = public_key,
     };
 }
 
@@ -253,15 +264,18 @@ fn nextTransactionSignatureUint(cursor: *rlp.Cursor) SenderRecoveryError!u256 {
 }
 
 fn recoverAddress(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError!Address {
+    return address.fromPublicKey(try recoverPublicKey(message_hash, y_parity, r, s));
+}
+
+fn recoverPublicKey(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError![64]u8 {
     if (!eip7702.authorizationSignatureShapeValid(y_parity, null, r, s)) return error.InvalidSignature;
 
-    const public_key = crypto.ecrecoverPublicKey(
+    return crypto.ecrecoverPublicKey(
         message_hash,
         uint256.toBytes32(r),
         uint256.toBytes32(s),
         y_parity,
     ) orelse return error.InvalidSignature;
-    return address.fromPublicKey(public_key);
 }
 
 test "sender recovery reproduces EIP-155 legacy vector" {
@@ -272,6 +286,9 @@ test "sender recovery reproduces EIP-155 legacy vector" {
     const recovered = try recoverSender(std.testing.allocator, &bytes);
     try t.expectHex(&recovered.sender, "9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
     try t.expectHex(&recovered.signing_hash, "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53");
+    try std.testing.expectEqual(@as(u8, 0x04), recovered.public_key[0]);
+    const public_address = address.fromPublicKey(recovered.public_key[1..65].*);
+    try std.testing.expectEqualSlices(u8, &recovered.sender, &public_address);
     const hash_only = try signingHash(std.testing.allocator, &bytes);
     try std.testing.expectEqualSlices(u8, &recovered.signing_hash, &hash_only);
 }

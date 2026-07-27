@@ -48,7 +48,7 @@ const StateCaptureCounter = struct {
         }
         var storage_index: u32 = 0;
         while (storage_index < observations.storage.len()) : (storage_index += 1) {
-            const slot = observations.storage.at(storage_index);
+            const slot = observations.storage.metadataAt(storage_index);
             if (slot.observation.value_read) self.reads += 1;
             if (slot.effect.written) self.writes += 1;
         }

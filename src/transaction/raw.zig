@@ -15,6 +15,16 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || transaction_signi
 
 pub fn decodeRaw(allocator: std.mem.Allocator, bytes: []const u8) Error!transaction.Transaction {
     const sender = (try transaction_signing.recoverSender(allocator, bytes)).sender;
+    return decodeRawAssumeSender(allocator, bytes, sender);
+}
+
+/// Decode an envelope whose sender was already authenticated by a trusted
+/// ingress adapter. The caller must bind `sender` to this exact signed payload.
+pub fn decodeRawAssumeSender(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    sender: Address,
+) Error!transaction.Transaction {
     const envelope = try transaction_envelope.decodeEnvelope(bytes);
     return switch (envelope) {
         .legacy => |legacy| decodeLegacy(allocator, legacy, sender),
@@ -33,7 +43,7 @@ fn decodeLegacy(allocator: std.mem.Allocator, bytes: []const u8, sender: Address
     const to = try nextTo(&fields);
     const value = try fields.nextInt(u256);
     const input = try fields.nextBytes();
-    _ = try fields.nextInt(u256);
+    const v = try fields.nextInt(u256);
     _ = try fields.nextInt(u256);
     _ = try fields.nextInt(u256);
     try fields.expectDone();
@@ -42,6 +52,7 @@ fn decodeLegacy(allocator: std.mem.Allocator, bytes: []const u8, sender: Address
     return .{
         .kind = .legacy,
         .sender = sender,
+        .chain_id = if (v >= 35) (v - 35) / 2 else null,
         .nonce = nonce,
         .gas_limit = gas_limit,
         .to = to,
@@ -66,7 +77,7 @@ fn decodeTyped(allocator: std.mem.Allocator, typed: transaction_envelope.TypedEn
 }
 
 fn decodeAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!transaction.Transaction {
-    _ = try fields.nextInt(u256);
+    const chain_id = try fields.nextInt(u256);
     const nonce = try fields.nextInt(u256);
     const gas_price = try fields.nextInt(u256);
     const gas_limit = try fields.nextInt(u64);
@@ -82,6 +93,7 @@ fn decodeAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
     return .{
         .kind = .access_list,
         .sender = sender,
+        .chain_id = chain_id,
         .nonce = nonce,
         .gas_limit = gas_limit,
         .to = to,
@@ -93,7 +105,7 @@ fn decodeAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
 }
 
 fn decodeDynamicFee(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!transaction.Transaction {
-    _ = try fields.nextInt(u256);
+    const chain_id = try fields.nextInt(u256);
     const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
@@ -110,6 +122,7 @@ fn decodeDynamicFee(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
     return .{
         .kind = .dynamic_fee,
         .sender = sender,
+        .chain_id = chain_id,
         .nonce = nonce,
         .gas_limit = gas_limit,
         .to = to,
@@ -122,7 +135,7 @@ fn decodeDynamicFee(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: A
 }
 
 fn decodeBlob(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!transaction.Transaction {
-    _ = try fields.nextInt(u256);
+    const chain_id = try fields.nextInt(u256);
     const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
@@ -141,6 +154,7 @@ fn decodeBlob(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address
     return .{
         .kind = .blob,
         .sender = sender,
+        .chain_id = chain_id,
         .nonce = nonce,
         .gas_limit = gas_limit,
         .to = to,
@@ -155,7 +169,7 @@ fn decodeBlob(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address
 }
 
 fn decodeSetCode(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Address) Error!transaction.Transaction {
-    _ = try fields.nextInt(u256);
+    const chain_id = try fields.nextInt(u256);
     const nonce = try fields.nextInt(u256);
     const max_priority_fee_per_gas = try fields.nextInt(u256);
     const max_fee_per_gas = try fields.nextInt(u256);
@@ -173,6 +187,7 @@ fn decodeSetCode(allocator: std.mem.Allocator, fields: *rlp.Cursor, sender: Addr
     return .{
         .kind = .set_code,
         .sender = sender,
+        .chain_id = chain_id,
         .nonce = nonce,
         .gas_limit = gas_limit,
         .to = to,

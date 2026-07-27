@@ -162,7 +162,6 @@ pub const AccountMutation = packed struct {
     dirty: bool = false,
     created: bool = false,
     selfdestructed: bool = false,
-    delete_on_finalize: bool = false,
     storage_wiped: bool = false,
     lifecycle_tracked: bool = false,
 };
@@ -541,6 +540,13 @@ pub const StorageObservationFact = struct {
     effect: StorageEffect,
 };
 
+pub const StorageObservationMetadata = struct {
+    address: Address,
+    key: u256,
+    observation: StorageObservation,
+    effect: StorageEffect,
+};
+
 /// Dense transaction-local account facts. Ordering is internal; projectors own
 /// sorting and any retained representation.
 pub const AccountObservations = struct {
@@ -573,8 +579,8 @@ pub const AccountObservations = struct {
     }
 };
 
-/// Dense transaction-local storage facts. Every row has a transaction original
-/// and a checkpoint-resolved current value.
+/// Dense transaction-local storage observations. Gas-only access rows have
+/// metadata but no complete value fact.
 pub const StorageObservations = struct {
     handle: *const anyopaque,
 
@@ -582,7 +588,24 @@ pub const StorageObservations = struct {
         return @intCast(self.transaction().observed_storage.items.len);
     }
 
-    pub fn at(self: StorageObservations, index: u32) StorageObservationFact {
+    pub fn at(self: StorageObservations, index: u32) ?StorageObservationFact {
+        std.debug.assert(index < self.len());
+        const tx = self.transaction();
+        const observed = &tx.observed_storage.items[index];
+        const entry = tx.storage.entryAt(@intFromEnum(observed.storage));
+        const original = entry.value_ptr.transaction_original orelse return null;
+        const current = observed.effect_current orelse entry.value_ptr.current orelse return null;
+        return .{
+            .address = entry.key_ptr.address,
+            .key = entry.key_ptr.key,
+            .original = original,
+            .current = current,
+            .observation = observed.observation,
+            .effect = observed.effect,
+        };
+    }
+
+    pub fn metadataAt(self: StorageObservations, index: u32) StorageObservationMetadata {
         std.debug.assert(index < self.len());
         const tx = self.transaction();
         const observed = &tx.observed_storage.items[index];
@@ -590,9 +613,6 @@ pub const StorageObservations = struct {
         return .{
             .address = entry.key_ptr.address,
             .key = entry.key_ptr.key,
-            .original = entry.value_ptr.transaction_original orelse unreachable,
-            .current = observed.effect_current orelse
-                entry.value_ptr.current orelse unreachable,
             .observation = observed.observation,
             .effect = observed.effect,
         };
@@ -2091,21 +2111,22 @@ pub fn finalize(self: *TrackedState, rules: FinalizationRules) !void {
             };
             account.nonce = 0;
             account.code_hash = crypto.keccak256_empty;
-            row.current = .{ .loaded = account };
+            // A reset account holding no balance is EIP-161 empty: drop the leaf
+            // instead of keeping a zero account the state root would not carry.
+            const emptied = account.balance == 0;
             if (accountObservation(tx, row)) |observation| {
                 observation.effect.nonce_written = true;
                 observation.effect.code_written = true;
+                if (emptied) observation.effect.account_deleted = true;
             }
+            row.current = if (emptied) .absent else .{ .loaded = account };
             row.mutation.dirty = true;
         }
         if (policy.delete_account) {
-            if (accountObservation(tx, row)) |observation|
-                observation.effect_current = row.current;
             row.current = .absent;
             if (accountObservation(tx, row)) |observation|
                 observation.effect.account_deleted = true;
             row.mutation.dirty = true;
-            row.mutation.delete_on_finalize = true;
         }
         row.mutation.created = false;
         row.mutation.selfdestructed = false;
@@ -2437,8 +2458,6 @@ fn wipeTransactionStorage(self: *TrackedState, address: Address) !void {
     while (it.next()) |entry| {
         if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
         try self.appendStorageUndo(entry.entry_id, entry.value_ptr);
-        if (storageObservation(tx, entry.value_ptr)) |observation|
-            observation.effect_current = entry.value_ptr.current;
         entry.value_ptr.current = 0;
         entry.value_ptr.mutation.dirty = true;
     }

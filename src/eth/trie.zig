@@ -929,6 +929,39 @@ test "MPT update root delete materializes hashed sibling before branch collapse"
     try std.testing.expectError(error.MissingNode, updateRoot(scratch, root_hash, &omitted_sibling, &updates));
 }
 
+test "MPT batch inserts before deletes to avoid unnecessary sibling witness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const deleted_key = [_]u8{0x10};
+    const inserted_key = [_]u8{0x11};
+    const preserved_key = [_]u8{0x20};
+    var large_value = [_]u8{0xab} ** 40;
+    const base_pairs = [_]Pair{
+        .{ .key = &deleted_key, .value = &[_]u8{0x01} },
+        .{ .key = &preserved_key, .value = &large_value },
+    };
+    const sorted = try sortedPairsForTest(scratch, &base_pairs);
+    const root_node = try encodeNode(scratch, sorted, 0);
+    const hidden_sibling = try encodeNode(scratch, sorted[1..2], 1);
+    try std.testing.expect(hidden_sibling.len >= 32);
+
+    const root_hash = crypto.keccak256(root_node);
+    const updates = [_]Update{
+        .{ .key = &deleted_key, .value = null },
+        .{ .key = &inserted_key, .value = &[_]u8{0x03} },
+    };
+    const root_only_nodes = [_][]const u8{root_node};
+    const actual = try updateRoot(scratch, root_hash, &root_only_nodes, &updates);
+    const expected_pairs = [_]Pair{
+        .{ .key = &inserted_key, .value = &[_]u8{0x03} },
+        .{ .key = &preserved_key, .value = &large_value },
+    };
+    const expected = try root(scratch, &expected_pairs);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
 test "MPT state root consumes tracked changes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

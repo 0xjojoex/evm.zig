@@ -1,19 +1,27 @@
 const std = @import("std");
 
 const EvmzBuildConfig = struct {
-    profile: []const u8,
-    native_keccak: []const u8,
-    native_secp256k1: []const u8,
+    profile: Profile,
+    native_keccak: KeccakBackend,
+    native_secp256k1: Secp256k1Backend,
 };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const profile = buildProfileOption(b);
-    const is_native_profile = std.mem.eql(u8, profile, "native");
-    const requested_native_keccak = nativeKeccakOption(b);
+    const profile = b.option(Profile, "profile", "Build profile") orelse .native;
+    const is_native_profile = profile == .native;
+    const requested_native_keccak = b.option(
+        KeccakBackend,
+        "native-keccak",
+        "Native Keccak backend (ignored by profile=zkvm)",
+    ) orelse .std;
     const native_keccak = resolveNativeKeccak(profile, target, requested_native_keccak);
-    const requested_native_secp256k1 = nativeSecp256k1Option(b);
+    const requested_native_secp256k1 = b.option(
+        Secp256k1Backend,
+        "native-secp256k1",
+        "Native secp256k1 backend (ignored by profile=zkvm)",
+    ) orelse .std;
     const native_secp256k1 = resolveNativeSecp256k1(profile, target, requested_native_secp256k1);
     const pic = b.option(bool, "pic", "Build the public evmz module as position-independent code") orelse false;
     const evmz_build = EvmzBuildConfig{
@@ -21,7 +29,7 @@ pub fn build(b: *std.Build) void {
         .native_keccak = native_keccak,
         .native_secp256k1 = native_secp256k1,
     };
-    const use_xkcp = std.mem.eql(u8, native_keccak, "xkcp");
+    const use_xkcp = native_keccak == .xkcp;
     const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
     if (use_xkcp and xkcp_dep == null) return;
     const xkcp_object = if (xkcp_dep) |dep|
@@ -32,7 +40,7 @@ pub fn build(b: *std.Build) void {
         const install_license = b.addInstallFile(dep.path("LICENSE"), "share/licenses/evmz/XKCP.txt");
         b.getInstallStep().dependOn(&install_license.step);
     }
-    const use_libsecp256k1 = std.mem.eql(u8, native_secp256k1, "libsecp256k1");
+    const use_libsecp256k1 = native_secp256k1 == .libsecp256k1;
     const libsecp256k1_dep = if (use_libsecp256k1)
         b.lazyDependency("libsecp256k1", .{})
     else
@@ -119,7 +127,7 @@ pub fn build(b: *std.Build) void {
     b.step("check", "Compile the public evmz module").dependOn(&core_check.step);
 
     const call_fixture_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/call_fixture_oracle_cli.zig"),
+        .root_source_file = b.path("src/cli.zig"),
         .target = target,
         .optimize = optimize,
         .link_libcpp = is_native_profile,
@@ -150,6 +158,7 @@ pub fn build(b: *std.Build) void {
 
     // test
     {
+        var zkvm_provider_tests: ?*std.Build.Step.Compile = null;
         const unit_tests_mod = b.createModule(.{
             .root_source_file = b.path("src/evm.zig"),
             .target = target,
@@ -163,6 +172,32 @@ pub fn build(b: *std.Build) void {
         unit_tests_mod.addIncludePath(b.path("include"));
         if (native_precompile_deps) |deps| {
             addPrecompileNative(b, unit_tests_mod, deps);
+        } else {
+            const provider_mod = b.createModule(.{
+                .root_source_file = b.path("src/zkvm_accelerators_native_test.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libcpp = true,
+            });
+            provider_mod.addOptions(
+                "build_options",
+                buildOptions(b, .native, .std, .std),
+            );
+            addPrecompileNative(
+                b,
+                provider_mod,
+                nativePrecompileDeps(b, target, optimize),
+            );
+            const provider = b.addObject(.{
+                .name = "zkvm-test-accelerators",
+                .root_module = provider_mod,
+            });
+            unit_tests_mod.addObject(provider);
+            unit_tests_mod.link_libcpp = true;
+            zkvm_provider_tests = b.addTest(.{
+                .name = "zkvm-test-accelerators",
+                .root_module = provider_mod,
+            });
         }
         addNativeKeccak(unit_tests_mod, xkcp_object);
         addNativeSecp256k1(unit_tests_mod, libsecp256k1_object);
@@ -216,6 +251,9 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(rlp_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(mpt_unit_tests).step);
         test_step.dependOn(&b.addRunArtifact(guest_zisk_ab_tests).step);
+        if (zkvm_provider_tests) |provider_tests| {
+            test_step.dependOn(&b.addRunArtifact(provider_tests).step);
+        }
     }
 
     {
@@ -294,6 +332,7 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, evmz_build);
         addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", "zkevm-input", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, evmz_build);
@@ -339,7 +378,7 @@ pub fn build(b: *std.Build) void {
     );
     const guest_input_path = b.option([]const u8, "guest-input", "Path to ZisK stdin input file for guest-zisk-run");
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
-    const guest_payload = guestPayloadOption(b);
+    const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .basic;
     addGuestZiskAb(b, optimize);
     addGuestZisk(b, optimize, ziskos_staticlib_path, guest_payload, guest_input_path, guest_output_path);
 
@@ -367,72 +406,48 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn buildProfileOption(b: *std.Build) []const u8 {
-    const profile = b.option([]const u8, "profile", "Build profile: native or zkvm") orelse "native";
-    if (!std.mem.eql(u8, profile, "native") and !std.mem.eql(u8, profile, "zkvm")) {
-        std.debug.panic("unsupported profile '{s}' (expected native or zkvm)", .{profile});
-    }
-    return profile;
-}
+// `b.option` validates and lists these in `zig build --help`, so the accepted
+// values live in the type rather than in hand-written checks.
+const Profile = enum { native, zkvm };
+const KeccakBackend = enum { std, xkcp };
+const Secp256k1Backend = enum { std, libsecp256k1 };
 
-fn nativeKeccakOption(b: *std.Build) []const u8 {
-    const backend = b.option(
-        []const u8,
-        "native-keccak",
-        "Native Keccak backend: std or xkcp (ignored by profile=zkvm)",
-    ) orelse "std";
-    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "xkcp")) {
-        std.debug.panic("unsupported native Keccak backend '{s}' (expected std or xkcp)", .{backend});
-    }
-    return backend;
-}
-
-fn nativeSecp256k1Option(b: *std.Build) []const u8 {
-    const backend = b.option(
-        []const u8,
-        "native-secp256k1",
-        "Native secp256k1 backend: std or libsecp256k1 (ignored by profile=zkvm)",
-    ) orelse "std";
-    if (!std.mem.eql(u8, backend, "std") and !std.mem.eql(u8, backend, "libsecp256k1")) {
-        std.debug.panic("unsupported native secp256k1 backend '{s}' (expected std or libsecp256k1)", .{backend});
-    }
-    return backend;
-}
-
+/// Accelerated backends only exist for the architectures we build assembly for,
+/// and never under the zkVM profile.
 fn resolveNativeKeccak(
-    profile: []const u8,
+    profile: Profile,
     target: std.Build.ResolvedTarget,
-    requested: []const u8,
-) []const u8 {
-    if (!std.mem.eql(u8, profile, "native") or !std.mem.eql(u8, requested, "xkcp")) return "std";
+    requested: KeccakBackend,
+) KeccakBackend {
+    if (profile != .native or requested != .xkcp) return .std;
     return switch (target.result.cpu.arch) {
-        .x86_64, .aarch64, .riscv64 => "xkcp",
-        else => "std",
+        .x86_64, .aarch64, .riscv64 => .xkcp,
+        else => .std,
     };
 }
 
 fn resolveNativeSecp256k1(
-    profile: []const u8,
+    profile: Profile,
     target: std.Build.ResolvedTarget,
-    requested: []const u8,
-) []const u8 {
-    if (!std.mem.eql(u8, profile, "native") or !std.mem.eql(u8, requested, "libsecp256k1")) return "std";
+    requested: Secp256k1Backend,
+) Secp256k1Backend {
+    if (profile != .native or requested != .libsecp256k1) return .std;
     return switch (target.result.cpu.arch) {
-        .x86_64, .aarch64, .riscv64 => "libsecp256k1",
-        else => "std",
+        .x86_64, .aarch64, .riscv64 => .libsecp256k1,
+        else => .std,
     };
 }
 
 fn buildOptions(
     b: *std.Build,
-    profile: []const u8,
-    native_keccak: []const u8,
-    native_secp256k1: []const u8,
+    profile: Profile,
+    native_keccak: KeccakBackend,
+    native_secp256k1: Secp256k1Backend,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
-    options.addOption([]const u8, "profile", profile);
-    options.addOption([]const u8, "native_keccak", native_keccak);
-    options.addOption([]const u8, "native_secp256k1", native_secp256k1);
+    options.addOption(Profile, "profile", profile);
+    options.addOption(KeccakBackend, "native_keccak", native_keccak);
+    options.addOption(Secp256k1Backend, "native_secp256k1", native_secp256k1);
     return options;
 }
 
@@ -450,22 +465,23 @@ fn guestZiskTarget(b: *std.Build) std.Build.ResolvedTarget {
     return b.resolveTargetQuery(query);
 }
 
-fn guestPayloadOption(b: *std.Build) []const u8 {
-    const payload = b.option([]const u8, "guest-payload", "Guest payload: basic, stateless-smoke, stateless-ssz-smoke, stateless-ere-smoke, or stateless-ere") orelse "basic";
-    _ = guestPayloadSource(payload) catch |err| switch (err) {
-        error.UnknownGuestPayload => std.debug.panic("unsupported guest payload '{s}' (expected basic, stateless-smoke, stateless-ssz-smoke, stateless-ere-smoke, or stateless-ere)", .{payload}),
-    };
-    return payload;
-}
+const GuestPayload = enum {
+    basic,
+    @"stateless-smoke",
+    @"stateless-ssz-smoke",
+    @"stateless-ere-smoke",
+    @"stateless-ere",
 
-fn guestPayloadSource(payload: []const u8) error{UnknownGuestPayload}![]const u8 {
-    if (std.mem.eql(u8, payload, "basic")) return "guest/payload/basic.zig";
-    if (std.mem.eql(u8, payload, "stateless-smoke")) return "guest/payload/stateless_smoke.zig";
-    if (std.mem.eql(u8, payload, "stateless-ssz-smoke")) return "guest/payload/stateless_ssz_smoke.zig";
-    if (std.mem.eql(u8, payload, "stateless-ere-smoke")) return "guest/payload/stateless_ere_smoke.zig";
-    if (std.mem.eql(u8, payload, "stateless-ere")) return "guest/payload/stateless_ere.zig";
-    return error.UnknownGuestPayload;
-}
+    fn source(self: GuestPayload) []const u8 {
+        return switch (self) {
+            .basic => "guest/payload/basic.zig",
+            .@"stateless-smoke" => "guest/payload/stateless_smoke.zig",
+            .@"stateless-ssz-smoke" => "guest/payload/stateless_ssz_smoke.zig",
+            .@"stateless-ere-smoke" => "guest/payload/stateless_ere_smoke.zig",
+            .@"stateless-ere" => "guest/payload/stateless_ere.zig",
+        };
+    }
+};
 
 fn addGuestPayloadTest(
     b: *std.Build,
@@ -619,7 +635,7 @@ fn addGuestZisk(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
     ziskos_staticlib_path: ?[]const u8,
-    guest_payload: []const u8,
+    guest_payload: GuestPayload,
     guest_input_path: ?[]const u8,
     guest_output_path: ?[]const u8,
 ) void {
@@ -633,10 +649,10 @@ fn addGuestZisk(
     };
 
     const target = guestZiskTarget(b);
-    const build_options = buildOptions(b, "zkvm", "std", "std");
+    const build_options = buildOptions(b, .zkvm, .std, .std);
     const guest_options = guestOptions(b, true);
     const guest_options_mod = guest_options.createModule();
-    const guest_payload_source = guestPayloadSource(guest_payload) catch unreachable;
+    const guest_payload_source = guest_payload.source();
 
     const evmz_mod = b.createModule(.{
         .root_source_file = b.path("src/evm.zig"),
@@ -929,8 +945,8 @@ fn addEvmcDelegate(
         b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}),
         b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}),
         b.fmt("-Doptimize={s}", .{optimize_name}),
-        b.fmt("-Dnative-keccak={s}", .{config.native_keccak}),
-        b.fmt("-Dnative-secp256k1={s}", .{config.native_secp256k1}),
+        b.fmt("-Dnative-keccak={t}", .{config.native_keccak}),
+        b.fmt("-Dnative-secp256k1={t}", .{config.native_secp256k1}),
     });
     if (child_step) |name| run.addArg(name);
     if (b.args) |args| {
@@ -1025,9 +1041,9 @@ fn addBenchMicroDelegate(
 }
 
 fn addEvmzBuildArgs(run: *std.Build.Step.Run, b: *std.Build, config: EvmzBuildConfig) void {
-    run.addArg(b.fmt("-Dprofile={s}", .{config.profile}));
-    run.addArg(b.fmt("-Dnative-keccak={s}", .{config.native_keccak}));
-    run.addArg(b.fmt("-Dnative-secp256k1={s}", .{config.native_secp256k1}));
+    run.addArg(b.fmt("-Dprofile={t}", .{config.profile}));
+    run.addArg(b.fmt("-Dnative-keccak={t}", .{config.native_keccak}));
+    run.addArg(b.fmt("-Dnative-secp256k1={t}", .{config.native_secp256k1}));
 }
 
 const XkcpLane = enum {

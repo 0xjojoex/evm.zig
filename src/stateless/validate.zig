@@ -27,6 +27,8 @@ pub const Options = struct {
     /// by default because witness-backed readers would otherwise traverse the
     /// same proofs again during execution.
     precheck_block_access_list_state: bool = false,
+    /// Optional expected-vs-observed BAL diagnostics.
+    bal_differential: ?*block_stf.BalDifferentialReport = null,
 };
 
 pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
@@ -68,7 +70,12 @@ fn validateWithScratch(
 ) Error!block_stf.Result {
     const block = input.block;
     if (!blockShapeValid(input.revision, block)) return .{ .status = .invalid_block_body };
-    var header_chain = try HeaderChain.init(allocator, input.witness.headers, block.parent_hash);
+    var header_chain = try HeaderChain.init(
+        allocator,
+        input.witness.headers,
+        block.parent_hash,
+        block.number,
+    );
     defer header_chain.deinit(allocator);
     const parent_header = header_chain.parent();
     const codes = try witnessCodes(allocator, input.witness.codes);
@@ -98,7 +105,7 @@ fn validateExact(
     codes: []const state.WitnessStateReader.Code,
 ) Error!block_stf.Result {
     const block = input.block;
-    return block_stf.Exact(revision).apply(allocator, .{
+    return block_stf.Exact(revision).applyAssumeDecoded(allocator, .{
         .config = Config.base,
         .env = .{
             .chain_id = input.chain_id,
@@ -157,6 +164,7 @@ fn validateExact(
             .extra_data = block.extra_data,
         },
         .capture = capture,
+        .bal_differential = options.bal_differential,
         // Future optimization: verified values can seed the execution overlay
         // or reader cache, after which this can become the default without
         // repeating proof traversal. It never changes EVM warmth semantics.
@@ -238,27 +246,31 @@ const ParsedHeader = struct {
 
 const HeaderChain = struct {
     headers: []const ParsedHeader,
+    current_number: u64,
 
-    fn init(allocator: std.mem.Allocator, encoded_headers: []const []const u8, parent_hash: [32]u8) Error!HeaderChain {
+    fn init(
+        allocator: std.mem.Allocator,
+        encoded_headers: []const []const u8,
+        parent_hash: [32]u8,
+        current_number: u64,
+    ) Error!HeaderChain {
         if (encoded_headers.len == 0) return error.MissingParentHeader;
 
-        const parsed = try allocator.alloc(ParsedHeader, encoded_headers.len);
-        defer allocator.free(parsed);
-        for (parsed, encoded_headers) |*target, encoded| target.* = try parseHeader(encoded);
-
-        var chain: std.ArrayList(ParsedHeader) = .empty;
-        errdefer chain.deinit(allocator);
-
-        var wanted_hash = parent_hash;
-        while (chain.items.len < parsed.len) {
-            if (containsHeaderHash(chain.items, wanted_hash)) return error.InvalidHeaderWitness;
-            const header = findHeaderByHash(parsed, wanted_hash) orelse break;
-            try chain.append(allocator, header);
-            wanted_hash = header.parent_hash;
+        // Headers ascend to the parent. Pinning the last hash and every
+        // parent link authenticates the whole ancestry against the payload.
+        const headers = try allocator.alloc(ParsedHeader, encoded_headers.len);
+        errdefer allocator.free(headers);
+        for (headers, encoded_headers) |*target, encoded| target.* = try parseHeader(encoded);
+        if (!std.mem.eql(u8, &headers[headers.len - 1].hash, &parent_hash)) {
+            return error.MissingParentHeader;
         }
-        if (chain.items.len == 0) return error.MissingParentHeader;
+        for (headers[1..], headers[0 .. headers.len - 1]) |child, previous| {
+            if (!std.mem.eql(u8, &child.parent_hash, &previous.hash)) {
+                return error.InvalidHeaderWitness;
+            }
+        }
 
-        return .{ .headers = try chain.toOwnedSlice(allocator) };
+        return .{ .headers = headers, .current_number = current_number };
     }
 
     fn deinit(self: HeaderChain, allocator: std.mem.Allocator) void {
@@ -266,7 +278,7 @@ const HeaderChain = struct {
     }
 
     fn parent(self: HeaderChain) ParsedHeader {
-        return self.headers[0];
+        return self.headers[self.headers.len - 1];
     }
 
     fn source(self: *@This()) Vm.BlockHashSource {
@@ -277,11 +289,12 @@ const HeaderChain = struct {
 
     fn getBlockHash(ptr: *anyopaque, number: u64) !?u256 {
         const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (number >= self.current_number or self.current_number - number > 256) return null;
         for (self.headers) |header| {
             if (header.number != number) continue;
             return std.mem.readInt(u256, &header.hash, .big);
         }
-        return null;
+        return error.InvalidWitness;
     }
 };
 
@@ -326,17 +339,6 @@ fn parseHeader(encoded_header: []const u8) Error!ParsedHeader {
         .blob_gas_used = blob_gas_used,
         .excess_blob_gas = excess_blob_gas,
     };
-}
-
-fn findHeaderByHash(headers: []const ParsedHeader, hash: [32]u8) ?ParsedHeader {
-    for (headers) |header| {
-        if (std.mem.eql(u8, &header.hash, &hash)) return header;
-    }
-    return null;
-}
-
-fn containsHeaderHash(headers: []const ParsedHeader, hash: [32]u8) bool {
-    return findHeaderByHash(headers, hash) != null;
 }
 
 fn witnessCodes(allocator: std.mem.Allocator, codes: []const []const u8) std.mem.Allocator.Error![]const state.WitnessStateReader.Code {
@@ -414,4 +416,14 @@ test "stateless BAL witness precheck is an explicit Amsterdam option" {
     try std.testing.expect(!shouldPrecheckBlockAccessListState(.prague, .{
         .precheck_block_access_list_state = true,
     }));
+}
+
+test "recent block hash lookup rejects a missing authenticated ancestor" {
+    var chain = HeaderChain{
+        .headers = &.{},
+        .current_number = 300,
+    };
+    try std.testing.expectError(error.InvalidWitness, HeaderChain.getBlockHash(&chain, 299));
+    try std.testing.expectEqual(@as(?u256, null), try HeaderChain.getBlockHash(&chain, 300));
+    try std.testing.expectEqual(@as(?u256, null), try HeaderChain.getBlockHash(&chain, 43));
 }

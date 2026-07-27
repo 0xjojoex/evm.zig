@@ -1,14 +1,15 @@
 const std = @import("std");
-const fixture_common = @import("fixture.zig");
-const tx = @import("tx.zig");
+const fixture_common = @import("../fixture.zig");
+const runner = @import("../runner.zig");
+const tx = @import("../tx.zig");
 
-pub fn main(init: std.process.Init) !void {
+pub const about = "Run EEST raw transaction-test fixtures";
+
+const Fixtures = runner.Runner(tx);
+
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
-
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
 
     var options = tx.Options{};
     var paths: std.ArrayList([]const u8) = .empty;
@@ -36,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total = tx.Summary{};
     for (paths.items) |path| {
-        const summary = try runPath(init.io, allocator, path, options);
+        const summary = try Fixtures.sequential(init.io, allocator, path, options);
         total.add(summary);
         printSummary(path, summary);
     }
@@ -48,32 +49,6 @@ pub fn main(init: std.process.Init) !void {
     if (total.failed > 0) {
         std.process.exit(1);
     }
-}
-
-fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: tx.Options) !tx.Summary {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir => return tx.runFile(io, allocator, path, options),
-        else => return err,
-    };
-    defer dir.close(io);
-
-    var total = tx.Summary{};
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        const child = try std.fs.path.join(allocator, &.{ path, entry.name });
-        defer allocator.free(child);
-
-        switch (entry.kind) {
-            .directory => total.add(try runPath(io, allocator, child, options)),
-            .file => {
-                if (std.mem.endsWith(u8, entry.name, ".json")) {
-                    total.add(try tx.runFile(io, allocator, child, options));
-                }
-            },
-            else => {},
-        }
-    }
-    return total;
 }
 
 fn printUsage() void {

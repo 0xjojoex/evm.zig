@@ -365,7 +365,7 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
             const storage = pending.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index);
+                const fact = storage.at(index) orelse continue;
                 if (!std.mem.eql(u8, &fact.address, &self.address) or fact.key != 0) continue;
                 try std.testing.expectEqual(@as(u256, 2), fact.current);
                 try std.testing.expect(fact.effect.written);

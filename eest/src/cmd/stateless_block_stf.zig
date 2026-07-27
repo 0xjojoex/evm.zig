@@ -1,14 +1,15 @@
 const std = @import("std");
-const block_stf = @import("stateless_block_stf.zig");
-const fixture_common = @import("fixture.zig");
+const block_stf = @import("../stateless_block_stf.zig");
+const fixture_common = @import("../fixture.zig");
+const runner = @import("../runner.zig");
 
-pub fn main(init: std.process.Init) !void {
+pub const about = "Run witness-backed zkEVM blockchain fixtures through stateless BlockSTF";
+
+const Fixtures = runner.Runner(block_stf);
+
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
-
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
 
     var options = block_stf.Options{};
     var paths: std.ArrayList([]const u8) = .empty;
@@ -40,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total = block_stf.Summary{};
     for (paths.items) |path| {
-        const summary = try runPath(init.io, allocator, path, options);
+        const summary = try Fixtures.sequential(init.io, allocator, path, options);
         total.add(summary);
         printSummary(path, summary);
     }
@@ -54,30 +55,6 @@ fn defaultFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
         root,
         "blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists",
     });
-}
-
-fn runPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: block_stf.Options) !block_stf.Summary {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir => return block_stf.runFile(io, allocator, path, options),
-        else => return err,
-    };
-    defer dir.close(io);
-
-    var total = block_stf.Summary{};
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        const child = try std.fs.path.join(allocator, &.{ path, entry.name });
-        defer allocator.free(child);
-        switch (entry.kind) {
-            .directory => total.add(try runPath(io, allocator, child, options)),
-            .file => if (std.mem.endsWith(u8, entry.name, ".json")) {
-                total.add(try block_stf.runFile(io, allocator, child, options));
-            },
-            else => {},
-        }
-        if (options.limit > 0 and total.fixtures >= options.limit) break;
-    }
-    return total;
 }
 
 fn printSummary(path: []const u8, summary: block_stf.Summary) void {

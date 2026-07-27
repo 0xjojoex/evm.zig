@@ -55,9 +55,14 @@ pub fn lockedFixturePath(
 }
 
 pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    const dest = try lockedPathValue(io, allocator, "zkevm_dest");
+    const dest = try lockedZkevmReleasePath(io, allocator);
     defer allocator.free(dest);
     return try std.fs.path.join(allocator, &.{ dest, "fixtures" });
+}
+
+pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const dest = try lockedPathValue(io, allocator, "zkevm_dest");
+    return dest;
 }
 
 fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]u8 {

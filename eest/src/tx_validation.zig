@@ -30,6 +30,7 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
         .sender_not_eoa => "TransactionException.SENDER_NOT_EOA",
         .type_4_empty_authorization_list => "TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",
         .type_4_tx_contract_creation => "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
+        .invalid_chain_id => "TransactionException.INVALID_CHAINID",
     };
 }
 

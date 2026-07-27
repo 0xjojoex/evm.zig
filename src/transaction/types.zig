@@ -67,6 +67,9 @@ pub const FeeFields = struct {
 pub const Transaction = struct {
     kind: TxKind = .legacy,
     sender: Address,
+    /// Chain id committed by the signed envelope. Unprotected legacy
+    /// transactions have no encoded chain id.
+    chain_id: ?u256 = null,
     /// Retain the encoded domain until Transaction validation classifies it.
     /// Account and executable nonces are `u64`; this wider input-only value lets
     /// an encoded nonce at or above the account limit receive the exact spec
@@ -91,6 +94,7 @@ pub const Transaction = struct {
 pub const TransactionView = struct {
     kind: TxKind = .legacy,
     sender: Address,
+    chain_id: ?u256 = null,
     nonce: ?u256 = null,
     gas_limit: u64,
     to: ?Address = null,
@@ -223,6 +227,7 @@ pub fn transactionView(tx: Transaction) TransactionView {
     return .{
         .kind = tx.kind,
         .sender = tx.sender,
+        .chain_id = tx.chain_id,
         .nonce = tx.nonce,
         .gas_limit = tx.gas_limit,
         .to = tx.to,

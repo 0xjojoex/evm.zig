@@ -64,6 +64,7 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
 
         pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) (Error || std.mem.Allocator.Error)!Value {
             const count = try decodedCount(bytes);
+            if (count == 0) return &.{};
             const values = try allocator.alloc(Element, count);
             var initialized: usize = 0;
             errdefer {
@@ -156,6 +157,18 @@ test "SSZ ListOf encodes variable elements with offsets" {
     for (values, decoded) |expected, actual| {
         try std.testing.expectEqualSlices(u8, expected, actual);
     }
+}
+
+test "SSZ ListOf decode returns the canonical empty slice" {
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    const Values = ssz.ListOf(ssz.ByteList(4), 2);
+    const canonical: []const []const u8 = &.{};
+
+    var decoded = try Values.decodeAlloc(fixed.allocator(), "");
+    defer Values.deinit(fixed.allocator(), &decoded);
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+    try std.testing.expectEqual(canonical.ptr, decoded.ptr);
 }
 
 test "SSZ ListOf composes variable containers" {

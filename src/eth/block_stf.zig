@@ -2274,7 +2274,7 @@ test "BlockSTF validates a single witnessed transaction" {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             var index: u32 = 0;
             while (index < observations.storage.len()) : (index += 1) {
-                if (observations.storage.at(index).effect.written) {
+                if (observations.storage.metadataAt(index).effect.written) {
                     self.storage_writes += 1;
                 }
             }

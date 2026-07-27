@@ -1,19 +1,17 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const ere_io = @import("stateless_ere_io.zig");
+const ere_io = @import("../stateless_ere_io.zig");
+
+pub const about = "Run raw ERE stateless input through the native adapter";
 
 const Options = struct {
     public_format: ere_io.PublicFormat = .raw,
     expected_public_path: ?[]const u8 = null,
 };
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
-
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
 
     var options = Options{};
     var paths: std.ArrayList([]const u8) = .empty;

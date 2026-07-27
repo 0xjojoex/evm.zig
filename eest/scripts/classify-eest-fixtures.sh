@@ -154,7 +154,7 @@ while IFS= read -r -d '' file; do
   count=$((count + 1))
 
   set +e
-  "$timeout_bin" "$timeout_seconds" "$runner" "$file" >> "$out" 2>&1
+  "$timeout_bin" "$timeout_seconds" "$runner" state "$file" >> "$out" 2>&1
   rc=$?
   set -e
 

@@ -1,7 +1,9 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture_common = @import("fixture.zig");
-const ere_io = @import("stateless_ere_io.zig");
+const fixture_common = @import("../fixture.zig");
+const ere_io = @import("../stateless_ere_io.zig");
+
+pub const about = "Extract one EEST zkEVM stateless input as ZisK stdin";
 
 const JsonValue = fixture_common.JsonValue;
 const asArray = fixture_common.asArray;
@@ -26,13 +28,9 @@ const Selection = struct {
     }
 };
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
-
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
 
     var options = Options{};
     var paths: std.ArrayList([]const u8) = .empty;

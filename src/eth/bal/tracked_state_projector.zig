@@ -9,6 +9,7 @@ const crypto = @import("../../crypto.zig");
 const State = @import("../../state/TrackedState.zig");
 const Account = @import("../../state/Account.zig");
 const MemoryAccount = @import("../../state/MemoryAccount.zig");
+const StateReader = @import("../../state/Reader.zig");
 const bal = @import("model.zig");
 const observation = @import("observation.zig");
 const oracle_recorder = @import("recorder.zig");
@@ -44,8 +45,10 @@ pub fn materialize(
 
     var storage_index: u32 = 0;
     while (storage_index < view.storage.len()) : (storage_index += 1) {
-        const fact = view.storage.at(storage_index);
-        if (!fact.observation.value_read and !fact.effect.written) continue;
+        const metadata = view.storage.metadataAt(storage_index);
+        if (!metadata.observation.value_read and !metadata.effect.written) continue;
+        const fact = view.storage.at(storage_index) orelse
+            return error.IncompleteStorageObservation;
         const builder = try accountBuilderFor(
             allocator,
             &builders,
@@ -341,25 +344,28 @@ const AccountBuilder = struct {
         result.storage = try self.storage.toOwnedSlice(allocator);
 
         const fact = self.account orelse return result;
-        const original = accountOrZero(fact.original);
-        const current = accountOrZero(fact.current);
         result.account_reset = accountAbsent(fact.original) and
             (!accountAbsent(fact.current) or fact.effect.created_contract);
         result.account_deleted = fact.effect.account_deleted;
         result.storage_wiped = fact.effect.storage_wiped;
         if (fact.effect.balance_written) {
             result.balance = .{
-                .original = original.balance,
-                .current = current.balance,
+                .original = accountOrZero(fact.original).balance,
+                .current = accountOrZero(fact.current).balance,
             };
         }
-        if (fact.effect.nonce_written) {
+        // A wipe only ever accompanies a same-transaction creation, so the
+        // account is already reset for the consumer; the zeroed nonce and code
+        // finalization writes are implied and must not reappear as changes.
+        if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
             result.nonce = .{
-                .original = original.nonce,
-                .current = current.nonce,
+                .original = accountOrZero(fact.original).nonce,
+                .current = accountOrZero(fact.current).nonce,
             };
         }
-        if (fact.effect.code_written) {
+        if (fact.effect.code_written and !fact.effect.storage_wiped) {
+            const original = accountOrZero(fact.original);
+            const current = accountOrZero(fact.current);
             const code = view.code(current.code_hash) orelse
                 return error.ObservationCodeUnavailable;
             result.code = .{
@@ -444,6 +450,74 @@ fn deinitAccountObservation(
     allocator.free(@constCast(account.storage));
     if (account.code) |code| allocator.free(@constCast(code.current_code));
     allocator.free(@constCast(account.lifecycle));
+}
+
+test "existence-only semantic access does not require account fields" {
+    const Reader = struct {
+        var context: u8 = 0;
+
+        fn reader() StateReader {
+            return .{ .ptr = &context, .vtable = &.{
+                .accountExists = accountExists,
+                .loadAccount = loadAccount,
+                .loadCode = loadCode,
+                .getStorage = getStorage,
+                .accountHasStorage = accountHasStorage,
+            } };
+        }
+
+        fn accountExists(_: *anyopaque, _: Address) !bool {
+            return true;
+        }
+
+        fn loadAccount(_: *anyopaque, _: Address) !?Account {
+            return .{};
+        }
+
+        fn loadCode(_: *anyopaque, _: [32]u8) ![]const u8 {
+            return &.{};
+        }
+
+        fn getStorage(_: *anyopaque, _: Address, _: u256) !u256 {
+            return 0;
+        }
+
+        fn accountHasStorage(_: *anyopaque, _: Address) !bool {
+            return false;
+        }
+    };
+
+    var state = State.initWithStateReader(std.testing.allocator, Reader.reader());
+    defer state.deinit();
+    const target = address.addr(1);
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try std.testing.expect(try state.accountExists(target));
+    _ = try state.accessAccount(target);
+    state.closeScope();
+    state.seal(attempt);
+
+    var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
+    defer transition.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), transition.accounts.len);
+    try std.testing.expectEqualSlices(u8, &target, &transition.accounts[0].address);
+    try std.testing.expectEqual(@as(?observation.ValueObservation, null), transition.accounts[0].balance);
+    try std.testing.expectEqual(@as(?observation.NonceObservation, null), transition.accounts[0].nonce);
+    try std.testing.expectEqual(@as(?observation.CodeObservation, null), transition.accounts[0].code);
+}
+
+test "gas-only storage access does not require storage values" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    _ = try state.accessStorage(address.addr(1), 7);
+    state.closeScope();
+    state.seal(attempt);
+
+    var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
+    defer transition.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), transition.accounts.len);
 }
 
 test "tracked observations match recorder after inner rollback" {
@@ -547,7 +621,7 @@ test "tracked observations match recorder after inner rollback" {
     try expectEqualEncoded(allocator, expected, actual);
 }
 
-test "tracked observations preserve writes hidden by finalization" {
+test "selfdestruct finalization projects post-transaction BAL state" {
     const allocator = std.testing.allocator;
     const target = address.addr(1);
     const original_code = [_]u8{ 0x60, 0x01 };
@@ -572,27 +646,15 @@ test "tracked observations preserve writes hidden by finalization" {
     try oracle.recordBalanceWrite(.{
         .address = target,
         .previous = 10,
-        .value = 12,
+        .value = 0,
     });
     try state.setNonce(target, 4);
-    try oracle.recordNonceWrite(.{
-        .address = target,
-        .previous = 3,
-        .value = 4,
-    });
     try state.setCode(target, &replacement_code);
-    try oracle.recordCodeWrite(.{
-        .address = target,
-        .previous_hash = crypto.keccak256(&original_code),
-        .size = replacement_code.len,
-        .code = &replacement_code,
-    });
     _ = try state.setStorage(target, 7, 13);
-    try oracle.recordStorageWrite(.{
+    try oracle.recordStorageRead(.{
         .address = target,
         .key = 7,
-        .previous = 11,
-        .value = 13,
+        .value = 11,
     });
     try state.markSelfdestructed(target);
     try oracle.recordLifecycle(.selfdestruct, target);

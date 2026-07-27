@@ -4,6 +4,7 @@
 //! schema ids, fixture fields, and runtime framing are adapter concerns.
 
 const address = @import("../address.zig");
+const block_stf = @import("../eth/block_stf.zig");
 const Withdrawal = @import("../eth/Withdrawal.zig");
 const transaction = @import("../transaction.zig");
 const Revision = @import("../eth/revision.zig").Revision;
@@ -29,7 +30,9 @@ pub const Block = struct {
     extra_data: []const u8,
     base_fee_per_gas: u256,
     block_hash: [32]u8,
-    transactions: []const []const u8 = &.{},
+    /// Transactions authenticated and decoded by the wire adapter. Original
+    /// envelopes remain attached for transaction-root reconstruction.
+    transactions: []const block_stf.TransactionInput = &.{},
     withdrawals: []const Withdrawal = &.{},
     blob_gas_used: ?u64 = null,
     excess_blob_gas: ?u64 = null,

@@ -12,6 +12,12 @@ zig build eest-classify
 zig build eest-tx
 ```
 
+Every runner is a subcommand of one `evmz-eest` binary (`src/main.zig`
+dispatching into `src/cmd/`), and each `zig build` step above is an alias for
+one of them — `zig build eest` runs `evmz-eest state`. Run `evmz-eest --help`
+for the command list. Two runners stay separate executables: `ssz-conformance`
+builds without evmz, and `zkevm-ere-bench` builds at `-Dbench-optimize`.
+
 The default state-test corpus comes from `eest.lock`, currently
 `tests-glamsterdam-devnet@v7.2.0` from `ethereum/execution-specs` for Amsterdam
 work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
@@ -87,6 +93,58 @@ scripts/fetch-eest-benchmarks.sh
 There is no active EEST benchmark runner. Routine engine comparisons live in
 `bench/` and use VM-loop fixtures; EEST benchmark cases should be adapted into
 that protocol or a separate fair block-verdict lane before being reported.
+
+## Stateless zkEVM Fixtures
+
+The `zkevm` runner checks the pinned `tests-zkevm` stateless SSZ contract
+directly. It executes each block carrying `statelessInputBytes` and compares the
+canonical result with `statelessOutputBytes`:
+
+```sh
+scripts/fetch-eest-zkevm-fixtures.sh
+zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+zig build zkevm -- \
+  --report ../.eest/zkevm-v0.6.2.json \
+  ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+zig build zkevm-mutations
+```
+
+`--report` selects a serial run and writes deterministic JSON with one record
+per runnable block. Records include revision, fixture family, validation status,
+first differing result field, and a broad ownership category. The command still
+exits nonzero for any mismatch; the report is diagnostic input for closing the
+baseline, not a waiver for known failures. Blocks without stateless input are
+reported as skips in the terminal summary and are not conformance records.
+
+`zkevm-mutations` is the separate adversarial gate. It starts from a bounded
+manifest of canonical v0.6.2 inputs that validate successfully, applies
+structured mutations, re-encodes and decodes valid schema-v1 SSZ, then requires
+the intended typed `BlockSTF.Status`. It covers missing and altered trie nodes,
+code, authenticated headers and pre-state roots, public keys, explicit payload
+claims, BAL, withdrawals, transaction bodies, and all five Amsterdam request
+families.
+
+The gate is an existence proof, not a coverage proof: a mutation resolves on
+the first variant that reaches its expected status, so it shows each rejection
+path is live, not that every witness element is checked. Node, code, and header
+variants are capped at 128 per input to bound runtime; a mutation that no
+variant resolves fails the gate.
+
+Transaction and withdrawal roots are implicit in the wire's block-hash claim
+rather than independent fields, so mutating a withdrawal body requires
+`block_hash_mismatch`. The gate does not present either as an independent root
+claim. Altered transaction bytes are rejected earlier by authenticated
+public-key validation, which EIP-8025 requires: the corpus carries
+`witness_public_keys` fixtures where an invalid or opposite-parity key must
+make an otherwise valid block fail, so the hint cannot be ignored.
+
+For a mutation-only checkout, the same bounded manifest can drive extraction:
+
+```sh
+scripts/fetch-eest-zkevm-fixtures.sh \
+  --manifest fixtures/stateless-mutations-tests-zkevm-v0.6.2.txt
+zig build zkevm-mutations
+```
 
 ## BlockSTF Fixtures
 

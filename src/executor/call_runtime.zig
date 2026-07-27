@@ -748,6 +748,7 @@ pub fn bind(comptime Executor: type) type {
                     return .{ .stage = .preparation, .result = result };
                 }
                 execution_gas.regular_left -= access_cost;
+                try self.traceAccountAccess(resolved.address);
             }
 
             const bytecode = try resolveExecutionCodeView(self, try resolvedCodeView(self, resolved));
@@ -1215,6 +1216,10 @@ pub fn bind(comptime Executor: type) type {
                 }) };
             }
 
+            const resolved = try resolveCode(self, msg.code_address);
+            if (resolved.delegated) try self.traceAccountAccess(resolved.address);
+            const code = try resolvedCodeView(self, resolved);
+
             var checkpoint = try CheckpointGuard.begin(&self.state);
             defer checkpoint.deinit();
 
@@ -1236,7 +1241,6 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            const resolved = try resolveCode(self, msg.code_address);
             if (!resolved.delegated and spec.precompile.active(msg.code_address)) {
                 if (try runPrecompileCall(self, &msg)) |result| {
                     if (result.status() == .success) {
@@ -1250,7 +1254,6 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            const code = try resolvedCodeView(self, resolved);
             if (code.bytes.len == 0) {
                 try touchEmptyCallRecipient(self, msg);
                 try checkpoint.commit();

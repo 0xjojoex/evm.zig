@@ -32,6 +32,8 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             const access_list_counts = gas.accessListCounts(view.access_list);
             var validation_input = Validation.Input{
                 .kind = view.kind,
+                .chain_id = view.chain_id,
+                .expected_chain_id = input.env.chain_id,
                 .is_create = view.to == null,
                 .is_self_transfer = isSelfTransfer(view),
                 .gas_limit = view.gas_limit,

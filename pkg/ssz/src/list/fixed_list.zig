@@ -61,6 +61,7 @@ fn ListCodec(comptime T: type, comptime limit: comptime_int, comptime progressiv
 
         pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) (Error || std.mem.Allocator.Error)!Value {
             const count = try decodedCount(bytes);
+            if (count == 0) return &.{};
 
             const values = try allocator.alloc(T, count);
             errdefer allocator.free(values);
@@ -160,6 +161,18 @@ test "SSZ List accepts empty and exact-limit values" {
     const decoded_empty = try Values.decodeAlloc(std.testing.allocator, "");
     defer std.testing.allocator.free(decoded_empty);
     try std.testing.expectEqual(@as(usize, 0), decoded_empty.len);
+}
+
+test "SSZ List decode returns the canonical empty slice" {
+    var no_memory: [0]u8 = .{};
+    var fixed_buffer = std.heap.FixedBufferAllocator.init(&no_memory);
+    const Values = ssz.List(u16, 2);
+    const canonical: []const u16 = &.{};
+
+    var decoded = try Values.decodeAlloc(fixed_buffer.allocator(), "");
+    defer Values.deinit(fixed_buffer.allocator(), &decoded);
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+    try std.testing.expectEqual(canonical.ptr, decoded.ptr);
 }
 
 test "SSZ List keeps schema capacity independent from runtime count" {

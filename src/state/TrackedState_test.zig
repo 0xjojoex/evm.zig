@@ -76,6 +76,28 @@ test "normal transaction does not materialize observation state" {
     try std.testing.expect(tx.storage.get(.{ .address = addr(1), .key = 2 }).?.observation_id == null);
 }
 
+test "gas-only storage observation exposes metadata without a value fact" {
+    var backing = TestReader{};
+    var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
+    defer state.deinit();
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try std.testing.expectEqual(.cold, try state.accessStorage(addr(1), 2));
+    state.closeScope();
+    state.seal(attempt);
+
+    const storage = state.pendingView().observations().storage;
+    try std.testing.expectEqual(@as(u32, 1), storage.len());
+    const metadata = storage.metadataAt(0);
+    try std.testing.expectEqual(addr(1), metadata.address);
+    try std.testing.expectEqual(@as(u256, 2), metadata.key);
+    try std.testing.expect(metadata.observation.accessed);
+    try std.testing.expect(!metadata.observation.value_read);
+    try std.testing.expect(!metadata.effect.written);
+    try std.testing.expect(storage.at(0) == null);
+}
+
 test "tracked rows survive scope rollback while current mutations revert" {
     var backing = TestReader{};
     var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
@@ -489,7 +511,7 @@ test "Cancun existing-account selfdestruct only clears lifecycle marker" {
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(addr(1), 2));
 }
 
-test "created-account finalization resets code nonce and storage" {
+test "created-account finalization removes an empty reset account" {
     var state = TrackedState.init(std.testing.allocator);
     defer state.deinit();
 
@@ -505,8 +527,7 @@ test "created-account finalization resets code nonce and storage" {
         .reset_account = true,
     } });
 
-    try std.testing.expect(state.getAccount(addr(2)) != null);
-    try std.testing.expectEqual(@as(u64, 0), try state.getNonce(addr(2)));
+    try std.testing.expect(state.getAccount(addr(2)) == null);
     try std.testing.expectEqualSlices(u8, &.{}, try state.getCode(addr(2)));
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(2), 7));
     try std.testing.expect(!state.createdInTransaction(addr(2)));
@@ -526,6 +547,30 @@ test "created-account finalization resets code nonce and storage" {
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(addr(2), 7));
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(2), 8));
     try std.testing.expect(try state.accountHasStorage(addr(2)));
+}
+
+test "created-account finalization preserves a balance-only account" {
+    var state = TrackedState.init(std.testing.allocator);
+    defer state.deinit();
+
+    _ = state.beginTransaction();
+    state.beginScope();
+    try state.setBalance(addr(2), 1);
+    try state.setNonce(addr(2), 9);
+    try state.setCode(addr(2), &.{0xaa});
+    try std.testing.expectEqual(.added, try state.setStorage(addr(2), 7, 13));
+    try state.markCreatedContract(addr(2));
+    try state.markSelfdestructed(addr(2));
+    try state.finalize(.{ .created_account = .{
+        .clear_storage = true,
+        .reset_account = true,
+    } });
+
+    const account = state.getAccount(addr(2)).?;
+    try std.testing.expectEqual(@as(u64, 0), account.nonce);
+    try std.testing.expectEqual(@as(u256, 1), account.balance);
+    try std.testing.expectEqualSlices(u8, &.{}, try state.getCode(addr(2)));
+    try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(2), 7));
 }
 
 test "finalization allocation failure preserves enclosing transaction" {

@@ -169,7 +169,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
             const storage = pending.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index);
+                const fact = storage.at(index) orelse continue;
                 if (!std.mem.eql(u8, &fact.address, &self.contract) or fact.key != 7) continue;
                 try std.testing.expectEqual(@as(u256, 0), fact.original);
                 try std.testing.expectEqual(@as(u256, 1), fact.current);
@@ -276,7 +276,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
             const storage = pending.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index);
+                const fact = storage.at(index) orelse continue;
                 if (!std.mem.eql(u8, &fact.address, &self.contract) or fact.key != 8) continue;
                 try std.testing.expect(fact.observation.value_read);
                 try std.testing.expect(!fact.effect.written);

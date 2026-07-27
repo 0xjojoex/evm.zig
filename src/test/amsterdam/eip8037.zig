@@ -101,6 +101,46 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
+test "Amsterdam invalid loaded authorization authority is a semantic access" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const target = evmz.addr(0xdddd);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .nonce = 1 });
+
+    const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
+    var vm = evmz.Evm.init(&executor);
+    const executed = try evmz.t.expectExecuted(try vm.transactObserved(.{
+        .env = .{ .gas_limit = 300_000 },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 300_000,
+            .max_fee_per_gas = 1,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+
+    var found = false;
+    const accounts = executed.observations().accounts;
+    var index: u32 = 0;
+    while (index < accounts.len()) : (index += 1) {
+        const fact = accounts.at(index);
+        if (!std.mem.eql(u8, &fact.address, &authority)) continue;
+        try std.testing.expect(fact.observation.semantic_access);
+        try std.testing.expect(!fact.effect.any());
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+}
+
 test "Amsterdam CREATE collision with alive target skips state charge before child gas" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
