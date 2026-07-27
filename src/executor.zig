@@ -481,6 +481,18 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.prepared_code_scratch.reset();
         }
 
+        /// Reuse prepared code and cleared transaction containers for one
+        /// sequential protocol-call batch.
+        pub fn beginSystemCallBatch(self: *Self) void {
+            self.beginPreparedCodeExecution();
+            self.state.beginTransactionCapacityReuse();
+        }
+
+        pub fn endSystemCallBatch(self: *Self) void {
+            self.state.endTransactionCapacityReuse();
+            self.endPreparedCodeExecution();
+        }
+
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
         pub fn deinit(self: *Self) void {
             std.debug.assert(!self.hasActiveBlockExecution());

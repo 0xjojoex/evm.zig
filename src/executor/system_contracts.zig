@@ -143,8 +143,8 @@ fn applyFinalizeBlockMode(
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 
-    executor.beginPreparedCodeExecution();
-    defer executor.endPreparedCodeExecution();
+    executor.beginSystemCallBatch();
+    defer executor.endSystemCallBatch();
 
     for (calls.slice()) |*finalize_call| {
         const call = &finalize_call.call;
@@ -186,8 +186,8 @@ fn applySystemCalls(
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 
-    executor.beginPreparedCodeExecution();
-    defer executor.endPreparedCodeExecution();
+    executor.beginSystemCallBatch();
+    defer executor.endSystemCallBatch();
 
     for (calls.slice()) |*call| {
         try callSystemContract(
