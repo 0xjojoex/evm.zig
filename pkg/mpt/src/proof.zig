@@ -201,9 +201,9 @@ fn lookupWithCache(
             if (resolved.hash) |digest|
                 try active.decode(digest, resolved.encoded, extension_parent)
             else
-                try node.decode(resolved.encoded, extension_parent)
+                try decodeForPath(resolved.encoded, extension_parent, key, depth)
         else
-            try node.decode(resolved.encoded, extension_parent);
+            try decodeForPath(resolved.encoded, extension_parent, key, depth);
         switch (decoded) {
             .leaf => |leaf| {
                 const path = leaf.path;
@@ -238,6 +238,19 @@ fn lookupWithCache(
             },
         }
     }
+}
+
+fn decodeForPath(
+    encoded: []const u8,
+    require_branch: bool,
+    key: []const u8,
+    depth: usize,
+) LookupError!node.Node {
+    const selected: ?u4 = if (depth < nibble.keyNibbleLen(key))
+        @intCast(nibble.keyNibbleAt(key, depth))
+    else
+        null;
+    return node.decodeForLookup(encoded, require_branch, selected);
 }
 
 const ResolvedReference = struct {

@@ -42,6 +42,34 @@ pub const Node = union(enum) {
 /// branch, rejecting non-canonical structure reached through an extension. The
 /// result borrows from `encoded`.
 pub fn decode(encoded: []const u8, require_branch: bool) Error!Node {
+    return decodeWithBranchMode(encoded, require_branch, .full);
+}
+
+/// Decode one node for a single proof path. Branch validation still examines
+/// every reference, but only the selected child is materialized.
+pub fn decodeForLookup(
+    encoded: []const u8,
+    require_branch: bool,
+    selected_child: ?u4,
+) Error!Node {
+    return decodeWithBranchMode(
+        encoded,
+        require_branch,
+        if (selected_child) |index| .{ .selected = index } else .none,
+    );
+}
+
+const BranchMode = union(enum) {
+    full,
+    none,
+    selected: u4,
+};
+
+fn decodeWithBranchMode(
+    encoded: []const u8,
+    require_branch: bool,
+    branch_mode: BranchMode,
+) Error!Node {
     const item = try rlp.parseExact(encoded);
     var fields = item.listCursor() catch return error.InvalidNode;
     var items: [17]rlp.Item = undefined;
@@ -54,7 +82,7 @@ pub fn decode(encoded: []const u8, require_branch: bool) Error!Node {
     if (require_branch and field_count != 17) return error.NonCanonicalNode;
     return switch (field_count) {
         2 => decodeShort(items[0], items[1]),
-        17 => decodeBranch(&items),
+        17 => decodeBranch(&items, branch_mode),
         else => error.InvalidNode,
     };
 }
@@ -75,15 +103,24 @@ fn decodeShort(compact_item: rlp.Item, value_or_reference: rlp.Item) Error!Node 
     return .{ .extension = .{ .path = path, .child = child } };
 }
 
-fn decodeBranch(items: *const [17]rlp.Item) Error!Node {
+fn decodeBranch(items: *const [17]rlp.Item, mode: BranchMode) Error!Node {
     var branch: Node.Branch = .{
         .children = [_]Reference{.empty} ** 16,
         .value = null,
     };
     var occupied: usize = 0;
     for (items[0..16], 0..) |item, index| {
-        branch.children[index] = try decodeReference(item);
-        if (branch.children[index] != .empty) occupied += 1;
+        const materialize = switch (mode) {
+            .full => true,
+            .none => false,
+            .selected => |selected| index == selected,
+        };
+        if (materialize) {
+            branch.children[index] = try decodeReference(item);
+            if (branch.children[index] != .empty) occupied += 1;
+        } else if (try hasReference(item)) {
+            occupied += 1;
+        }
     }
 
     const value = items[16].asBytes() catch return error.InvalidNode;
@@ -93,6 +130,20 @@ fn decodeBranch(items: *const [17]rlp.Item) Error!Node {
     }
     if (occupied < 2) return error.NonCanonicalNode;
     return .{ .branch = branch };
+}
+
+fn hasReference(item: rlp.Item) Error!bool {
+    return switch (item) {
+        .list => {
+            if (item.encoded().len >= 32) return error.InvalidNodeReference;
+            return true;
+        },
+        .bytes => |span| switch (span.payload.len) {
+            0 => false,
+            32 => true,
+            else => error.InvalidNodeReference,
+        },
+    };
 }
 
 fn decodeReference(item: rlp.Item) Error!Reference {
