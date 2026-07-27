@@ -614,7 +614,7 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
                 } });
                 continue;
             },
-            .branch => |branch| {
+            .branch => |*branch| {
                 try frames.append(context.allocator, .{ .encode = .{
                     .node = frame.node,
                     .expanded = true,
@@ -646,7 +646,7 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
                     extension.child.reference,
                 );
             },
-            .branch => |branch| encoded: {
+            .branch => |*branch| encoded: {
                 const node_len = try branchBufferLength(branch);
                 const buffers = try context.buffers(0, node_len);
                 break :encoded try encodeBranch(buffers.node, branch);
@@ -702,7 +702,7 @@ fn extensionBufferLengths(path: []const u8, child_reference: Reference) UpdateEr
     return .{ .compact = compact, .node = try listEncodedLen(payload) };
 }
 
-fn branchBufferLength(branch: SparseNode.Branch) UpdateError!usize {
+fn branchBufferLength(branch: *const SparseNode.Branch) UpdateError!usize {
     var payload = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
         const child_len = if (child) |present|
@@ -770,7 +770,7 @@ fn encodeExtension(
     return node_buffer[0 .. listPrefixLen(payload_len) + writer.written().len];
 }
 
-fn encodeBranch(node_buffer: []u8, branch: SparseNode.Branch) UpdateError![]const u8 {
+fn encodeBranch(node_buffer: []u8, branch: *const SparseNode.Branch) UpdateError![]const u8 {
     var payload_len = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
         if (child) |present| {
