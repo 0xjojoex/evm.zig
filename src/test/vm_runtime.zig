@@ -28,6 +28,23 @@ const expectRejected = support.expectRejected;
 
 const store_42_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
 
+fn executeStandalone(
+    executor: anytype,
+    context: evmz.execution.ExecutionContext,
+    message: evmz.execution.Message,
+    gas: evmz.execution.ExecutionGas,
+) @TypeOf(executor.executeStandalone(.{
+    .context = context,
+    .message = message,
+    .gas = gas,
+}, .{})) {
+    return executor.executeStandalone(.{
+        .context = context,
+        .message = message,
+        .gas = gas,
+    }, .{});
+}
+
 fn accountChange(
     changes: evmz.state.TrackedState.ChangesView,
     target: evmz.Address,
@@ -51,28 +68,6 @@ fn storageChange(
         if (std.mem.eql(u8, &change.address, &target) and change.key == key) return change;
     }
     return null;
-}
-
-test "block claim cannot authorize another Executor" {
-    const Bound = Default.BlockExecution;
-    var claimed_executor = Default.Executor.init(std.testing.allocator, .{});
-    defer claimed_executor.deinit();
-    var other_executor = Default.Executor.init(std.testing.allocator, .{});
-    defer other_executor.deinit();
-
-    var block = try Bound.init(
-        &claimed_executor,
-        .{ .gas_limit = 100_000 },
-    );
-    defer block.discardIfUnfinished();
-    var other_vm = Default.init(&other_executor);
-    try std.testing.expectError(error.WrongBlockExecution, other_vm.transactInBlock(
-        .{
-            .env = .{ .gas_limit = 100_000 },
-            .tx = .{ .sender = addr(0xaaaa), .to = addr(0xbbbb), .gas_limit = 30_000 },
-        },
-        block.claim,
-    ));
 }
 
 test "Executor account code remains overlay-owned and traced with a prepared backend entry" {
@@ -121,9 +116,9 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     };
     const prepared = try prepared_pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
     try executor.beginObservedStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const view = try executor.getCode(contract);
-    try executor.closeTransactionObserved(&observations);
+    try executor.retainStateTransitionObserved(&observations);
 
     try std.testing.expect(view.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view);
@@ -151,7 +146,8 @@ test "Executor runs low-level standalone call" {
         .sender = sender,
         .recipient = contract,
     };
-    const result = (try executor.runStandalone(
+    const result = (try executeStandalone(
+        &executor,
         (Env{}).executionContext(.{ .origin = call.sender }),
         .{ .call = call },
         .legacy(100_000),
@@ -189,7 +185,8 @@ test "Executor runs low-level standalone create" {
         .recipient = create_address,
         .init_code = init_code,
     };
-    const result = (try executor.runStandalone(
+    const result = (try executeStandalone(
+        &executor,
         (Env{}).executionContext(.{ .origin = create.sender }),
         .{ .create = create },
         .legacy(100_000),
@@ -279,7 +276,7 @@ test "executed transaction discards without allocating" {
     try std.testing.expect(executor.hasCurrentTransaction());
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
-    try executed.discard();
+    executed.discard();
     try std.testing.expect(!failing_allocator.has_induced_failure);
     failing_allocator.fail_index = std.math.maxInt(usize);
 
@@ -314,7 +311,7 @@ test "copied execution handles cannot discard a newer transaction" {
     };
     const copied = first;
     try std.testing.expect(first.changes().hasChanges());
-    try first.retain();
+    first.retain();
     copied.discardIfCurrent();
 
     const second = switch (try transact(Default, &executor, .{
@@ -333,7 +330,7 @@ test "copied execution handles cannot discard a newer transaction" {
 
     copied.discardIfCurrent();
     try std.testing.expectEqual(TxStatus.success, second.result().status);
-    try second.discard();
+    second.discard();
 }
 
 test "Executed retainResult retains state and returns the validated output" {
@@ -356,7 +353,7 @@ test "Executed retainResult retains state and returns the validated output" {
         .rejected => return error.UnexpectedRejection,
     };
     const copied = executed;
-    const output = try executed.retainResult();
+    const output = executed.retainResult();
 
     try std.testing.expectEqual(TxStatus.success, output.status);
     copied.discardIfCurrent();
@@ -542,7 +539,7 @@ test "explicit backend commit persists then rebases the Executor overlay" {
     };
     defer executed.discardIfCurrent();
     try memory.committer().commit(executed.changes());
-    try executed.retain();
+    executed.retain();
     executor.discardAccepted();
 
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
@@ -701,7 +698,7 @@ test "transaction STF uses comptime transaction gas policy" {
         .executed => |value| value,
         .rejected => return error.UnexpectedRejection,
     };
-    try default_execution.discard();
+    default_execution.discard();
 
     const Overrides = struct {
         fn intrinsicBaseGas(_: transaction.IntrinsicGasOptions) ?u64 {
@@ -774,7 +771,7 @@ test "exact spec owns total transaction gas limit as a value" {
         .executed => |value| value,
         .rejected => return error.UnexpectedRejection,
     };
-    try executed.discard();
+    executed.discard();
 }
 
 test "exact spec owns block hooks as static dispatch" {
@@ -875,12 +872,12 @@ test "Sequential systemCall updates embedded block gas and restores overflow" {
 
     try std.testing.expectEqual(interpreter_module.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{}, result.outputData());
-    const progress = try block.progress();
+    const progress = block.progress();
     try std.testing.expectEqual(@as(u64, 5), progress.gas_used);
     try std.testing.expectEqual(@as(u64, 5), progress.block_gas.total);
 
     try std.testing.expectError(error.GasAllowanceExceeded, block.systemCall(call));
-    const restored = try block.progress();
+    const restored = block.progress();
     try std.testing.expectEqual(@as(u64, 5), restored.gas_used);
     try std.testing.expectEqual(@as(u64, 5), restored.block_gas.total);
 }
@@ -916,7 +913,7 @@ test "Sequential includes each transaction before returning" {
         .rejected => return error.UnexpectedRejection,
     };
     try std.testing.expectEqual(TxStatus.success, first.result.status);
-    try std.testing.expectEqual(@as(u64, 1), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
 
     const second = switch (try block.transact(.{
         .sender = sender,
@@ -928,7 +925,7 @@ test "Sequential includes each transaction before returning" {
         .rejected => return error.UnexpectedRejection,
     };
     try std.testing.expectEqual(TxStatus.success, second.result.status);
-    try std.testing.expectEqual(@as(u64, 2), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 2), block.progress().tx_count);
     try std.testing.expectEqual(@as(u64, 2), (try executor.getAccountOrLoad(sender)).?.nonce);
     try std.testing.expectEqual(@as(u64, 2), (try block.finish()).tx_count);
 }
@@ -962,7 +959,6 @@ test "Sequential discardIfUnfinished drops included executions" {
     });
 
     block.discardIfUnfinished();
-    try std.testing.expectError(error.BlockExecutionFinished, block.finish());
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
 }
@@ -1010,7 +1006,7 @@ test "Sequential rejects an overlay retained outside its lifetime" {
     };
     defer executed.discardIfCurrent();
     try std.testing.expect(executed.changes().hasChanges());
-    try executed.retain();
+    executed.retain();
 
     try std.testing.expectError(
         error.UncommittedChanges,
@@ -1095,7 +1091,7 @@ test "Sequential returns included result and borrowed receipt view" {
     };
     const receipt = included.receipt;
     const result = included.result;
-    try std.testing.expectEqual(@as(u64, 1), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
     try std.testing.expectEqual(TxStatus.success, receipt.status);
     try std.testing.expectEqual(result.gas.used, receipt.gas_used);
     try std.testing.expectEqual(result.gas.used, receipt.cumulative_gas_used);

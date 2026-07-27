@@ -685,7 +685,7 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
             const outcome = try block.transact(tx);
             return switch (outcome) {
                 .included => |included| blk: {
-                    _ = try block.finish();
+                    _ = block.finish();
                     break :blk .{ .executed = included.result };
                 },
                 .rejected => |err| .{ .rejected = err },

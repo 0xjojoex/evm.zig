@@ -252,7 +252,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         pub fn executeUntilAction(self: *Self) Error!RunResult {
             try self.executeUntraced();
 
-            if (self.call_frame.takePendingAction()) |action| {
+            if (self.call_frame.pending_action) |action| {
                 return .{ .action = action };
             }
             return .{ .finished = self.call_frame.getResult() };
@@ -273,7 +273,7 @@ pub fn Interpreter(comptime spec: Spec) type {
             if (self.call_frame.status == .running) {
                 self.call_frame.status = .success;
             }
-            if (self.call_frame.takePendingAction()) |action| {
+            if (self.call_frame.pending_action) |action| {
                 return .{ .action = action };
             }
             return .{ .finished = self.call_frame.getResult() };
@@ -291,16 +291,17 @@ pub fn Interpreter(comptime spec: Spec) type {
         }
 
         fn resolveHostAction(self: *Self, action: Action) Error!void {
-            switch (action) {
-                .call => |call_action| {
+            const result = switch (action) {
+                .call => |call_action| blk: {
                     const result = (try self.call_frame.host.call(call_action.msg)).expectCall();
-                    try self.call_frame.resumeCallResult(call_action.continuation, result);
+                    break :blk Host.Result{ .call = result };
                 },
-                .create => |create_action| {
+                .create => |create_action| blk: {
                     const result = (try self.call_frame.host.call(create_action.msg)).expectCreate();
-                    try self.call_frame.resumeCreateResult(create_action.continuation, result);
+                    break :blk Host.Result{ .create = result };
                 },
-            }
+            };
+            _ = try self.call_frame.resumePendingAction(result);
         }
     };
 }
@@ -395,10 +396,20 @@ pub const CallFrame = struct {
         self.status = .suspended;
     }
 
-    fn takePendingAction(self: *CallFrame) ?Action {
-        const action = self.pending_action orelse return null;
+    pub fn resumePendingAction(self: *CallFrame, result: Host.Result) !Action {
+        const action = self.pending_action orelse unreachable;
         self.pending_action = null;
         self.status = .running;
+        switch (action) {
+            .call => |call_action| try self.resumeCallResult(
+                call_action.continuation,
+                result.expectCall(),
+            ),
+            .create => |create_action| try self.resumeCreateResult(
+                create_action.continuation,
+                result.expectCreate(),
+            ),
+        }
         return action;
     }
 
@@ -967,6 +978,53 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
             "{\"pc\":2,\"op\":0,\"gas\":\"0x61\",\"gasCost\":\"0x0\",\"memSize\":0,\"stack\":[\"0x2a\"],\"depth\":1,\"returnData\":\"0x\",\"refund\":0,\"opName\":\"STOP\"}\n",
         output.written(),
     );
+}
+
+test "yielded action stays in the call frame until resume" {
+    var host: Host = undefined;
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
+    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+    });
+    defer owned.deinit();
+
+    const continuation = CallResume{
+        .gas_limit = 10,
+        .out_offset = 0,
+        .out_size = 0,
+        .state_gas_charged = 0,
+    };
+    owned.frame.status = .running;
+    owned.frame.setPendingAction(.{ .call = .{
+        .msg = msg,
+        .continuation = continuation,
+    } });
+
+    var interpreter = owned.interpreter();
+    const yielded = try interpreter.executeUntilAction();
+    const action = switch (yielded) {
+        .action => |value| value,
+        .finished => return error.ExpectedAction,
+    };
+    try std.testing.expectEqual(FrameStatus.suspended, owned.frame.status);
+    try std.testing.expect(owned.frame.pending_action != null);
+    const yielded_continuation = switch (action) {
+        .call => |call| call.continuation,
+        .create => return error.ExpectedCallAction,
+    };
+    try std.testing.expectEqual(continuation, yielded_continuation);
+
+    _ = try owned.frame.resumePendingAction(.{ .call = .{
+        .status = .success,
+        .output_data = &.{},
+        .gas_left = 10,
+        .gas_refund = 0,
+    } });
+    try std.testing.expectEqual(FrameStatus.running, owned.frame.status);
+    try std.testing.expect(owned.frame.pending_action == null);
+    try std.testing.expectEqualSlices(u256, &.{1}, owned.frame.stack.asSlice());
 }
 
 test "interpreter gas charge reports whether execution may continue" {

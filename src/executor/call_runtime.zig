@@ -9,7 +9,6 @@ const Interpreter = evmz.interpreter;
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
-const runtime_frames = @import("./runtime_frames.zig");
 const ExecutionGas = @import("../execution.zig").ExecutionGas;
 const ExecutionContext = @import("../execution.zig").ExecutionContext;
 const call_scratch_storage = @import("./call_scratch.zig");
@@ -33,8 +32,6 @@ pub fn bind(comptime Executor: type) type {
             }
         };
 
-        const FrameLease = FrameStore.Lease;
-
         const StartedCall = union(enum) {
             immediate: Host.Result,
             child: ChildCall,
@@ -55,11 +52,16 @@ pub fn bind(comptime Executor: type) type {
             nonce: u64,
         };
 
-        const ChildCreate = runtime_frames.ChildCreate;
-        const RuntimeFrame = runtime_frames.Frame;
+        const ChildCreate = struct {
+            checkpoint_state: ScopeCheckpoint,
+            address: Address,
+            kind: Host.CallKind,
+            msg: Host.Message,
+            init_code: []const u8,
+        };
 
         /// Owns one interior call/create checkpoint until it is resolved or
-        /// transferred to a runtime frame. Any early error restores it.
+        /// transferred to a store row. Any early error restores it.
         const CheckpointGuard = struct {
             state: *State,
             checkpoint_state: ScopeCheckpoint,
@@ -111,7 +113,7 @@ pub fn bind(comptime Executor: type) type {
         const CallRuntime = struct {
             executor: *Executor,
             host_iface: Host,
-            frames: *std.ArrayList(RuntimeFrame),
+            frames: *FrameStore,
             frame_base: usize,
             capture_context: ?*CaptureContext,
 
@@ -119,25 +121,25 @@ pub fn bind(comptime Executor: type) type {
                 return .{
                     .executor = executor,
                     .host_iface = executor.host(),
-                    .frames = &executor.runtime_frames,
-                    .frame_base = executor.runtime_frames.items.len,
+                    .frames = &executor.frame_store,
+                    .frame_base = executor.frame_store.len(),
                     .capture_context = executor.currentCaptureContext(),
                 };
             }
 
             fn deinit(self: *CallRuntime) void {
-                while (self.frames.items.len > self.frame_base) {
+                while (self.frames.len() > self.frame_base) {
                     self.popFrame();
                 }
             }
 
             fn prepare(self: *CallRuntime) !void {
-                if (self.frame_base != 0) return error.ActiveRuntimeFrames;
+                std.debug.assert(self.frame_base == 0);
                 try self.prepareNested();
             }
 
             fn prepareNested(self: *CallRuntime) !void {
-                std.debug.assert(self.frames.items.len == self.frame_base);
+                std.debug.assert(self.frames.len() == self.frame_base);
                 if (self.frame_base == 0) {
                     if (self.capture_context) |context| {
                         if (context.capturesSteps()) {
@@ -148,18 +150,13 @@ pub fn bind(comptime Executor: type) type {
             }
 
             fn pushRootCall(self: *CallRuntime, msg: Host.Message, bytecode: Bytecode.View) !void {
-                var frame = try acquireBytecodeFrame(
-                    self.executor,
-                    self.executor.allocator,
-                    &self.host_iface,
+                try self.pushFrame(
                     &msg,
                     bytecode,
+                    .{
+                        .kind = .root_call,
+                    },
                 );
-                errdefer frame.deinit();
-                try self.appendFrame(.{
-                    .kind = .root_call,
-                    .frame = frame,
-                });
             }
 
             fn pushChildCall(
@@ -169,63 +166,67 @@ pub fn bind(comptime Executor: type) type {
                 bytecode: Bytecode.View,
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
-                var frame = try acquireBytecodeFrame(
-                    self.executor,
-                    self.executor.allocator,
-                    &self.host_iface,
+                try self.pushFrame(
                     &msg,
                     bytecode,
+                    .{
+                        .kind = .{ .call = checkpoint_state },
+                        .call_capture = call_capture,
+                    },
                 );
-                errdefer frame.deinit();
-                try self.appendFrame(.{
-                    .kind = .{ .call = checkpoint_state },
-                    .frame = frame,
-                    .call_capture = call_capture,
-                });
             }
 
             fn pushChildCreate(self: *CallRuntime, child: ChildCreate, call_capture: ?evmz.trace.CallToken) !void {
-                const execution = if (self.executor.prepared_code_execution) |*active|
-                    active
-                else
-                    return error.MissingPreparedCodeExecution;
+                std.debug.assert(self.executor.prepared_code_execution != null);
+                const execution = &self.executor.prepared_code_execution.?;
                 const bytecode = try execution.prepareTransient(child.init_code);
-                var frame = try acquireBytecodeFrame(
-                    self.executor,
-                    self.executor.allocator,
-                    &self.host_iface,
+                try self.pushFrame(
                     &child.msg,
                     bytecode,
+                    .{
+                        .kind = .{ .create = .{
+                            .checkpoint_state = child.checkpoint_state,
+                            .address = child.address,
+                            .kind = child.kind,
+                        } },
+                        .call_capture = call_capture,
+                    },
                 );
-                errdefer frame.deinit();
-
-                try self.appendFrame(.{
-                    .kind = .{ .create = child },
-                    .frame = frame,
-                    .call_capture = call_capture,
-                });
             }
 
-            fn appendFrame(self: *CallRuntime, frame: RuntimeFrame) !void {
-                try self.frames.append(self.executor.allocator, frame);
-                errdefer self.frames.items.len -= 1;
+            fn pushFrame(
+                self: *CallRuntime,
+                msg: *const Host.Message,
+                bytecode: Bytecode.View,
+                control_value: FrameStore.Control,
+            ) !void {
+                const index = try self.frames.push(
+                    self.executor.allocator,
+                    .{
+                        .host = &self.host_iface,
+                        .msg = msg,
+                        .bytecode = bytecode,
+                    },
+                    control_value,
+                );
+                errdefer self.frames.pop();
 
                 if (self.stepCaptureContext()) |context| {
-                    const runtime_frame = &self.frames.items[self.frames.items.len - 1];
-                    const parent_stack = if (self.frames.items.len > 1)
-                        self.frames.items[self.frames.items.len - 2].frame.callFrame().stack.asSlice()
+                    const call_frame = self.frames.frame(index);
+                    const parent_stack = if (index > 0)
+                        self.frames.frame(index - 1).stack.asSlice()
                     else
                         &.{};
-                    const parent_memory_size = if (self.frames.items.len > 1)
-                        self.frames.items[self.frames.items.len - 2].frame.callFrame().memory.len()
+                    const parent_memory_size = if (index > 0)
+                        self.frames.frame(index - 1).memory.len()
                     else
                         0;
                     try context.pushFrame(
-                        runtime_frame.frame.callFrame().msg.depth,
-                        traceFrameKind(runtime_frame),
-                        runtime_frame.frame.callFrame().stack.asSlice(),
-                        runtime_frame.frame.callFrame().memory.len(),
-                        runtime_frame.frame.callFrame().return_data,
+                        call_frame.msg.depth,
+                        traceFrameKind(self.frames, index),
+                        call_frame.stack.asSlice(),
+                        call_frame.memory.len(),
+                        call_frame.return_data,
                         parent_stack,
                         parent_memory_size,
                     );
@@ -233,11 +234,9 @@ pub fn bind(comptime Executor: type) type {
             }
 
             fn popFrame(self: *CallRuntime) void {
-                std.debug.assert(self.frames.items.len > self.frame_base);
-                const index = self.frames.items.len - 1;
+                std.debug.assert(self.frames.len() > self.frame_base);
                 if (self.stepCaptureContext()) |context| context.popFrame();
-                deinitRuntimeFrame(&self.frames.items[index]);
-                self.frames.items.len = index;
+                self.frames.pop();
             }
 
             inline fn stepCaptureContext(self: *CallRuntime) ?*CaptureContext {
@@ -251,11 +250,11 @@ pub fn bind(comptime Executor: type) type {
             }
 
             fn run(self: *CallRuntime) !Host.Result {
-                while (self.frames.items.len > self.frame_base) {
-                    const index = self.frames.items.len - 1;
-                    const runtime_frame = &self.frames.items[index];
-                    var interpreter = runtime_frame.frame.interpreter(spec);
-                    const depth = runtime_frame.frame.callFrame().msg.depth;
+                while (self.frames.len() > self.frame_base) {
+                    const index = self.frames.len() - 1;
+                    const call_frame = self.frames.frame(index);
+                    var interpreter = BoundInterpreter.init(call_frame);
+                    const depth = call_frame.msg.depth;
                     const run_result: Interpreter.RunResult = if (self.stepCaptureContext()) |context|
                         try executeCapturedInterpreterUntilAction(
                             self.executor,
@@ -263,7 +262,7 @@ pub fn bind(comptime Executor: type) type {
                             depth,
                             context.currentFrame(),
                         )
-                    else if (runtime_frame.frame.callFrame().needs_action_loop)
+                    else if (call_frame.needs_action_loop)
                         try executeInterpreterUntilAction(self.executor, &interpreter, depth)
                     else
                         .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
@@ -271,16 +270,14 @@ pub fn bind(comptime Executor: type) type {
                         .action => |action| try self.handleAction(index, action),
                         .finished => |result| {
                             const host_result = try self.finishFrame(index, result);
-                            if (self.frames.items.len == self.frame_base + 1) {
+                            if (self.frames.len() == self.frame_base + 1) {
                                 const stable = try stabilizeFinalResult(self.executor, host_result);
                                 self.popFrame();
                                 return stable;
                             }
 
-                            const parent_index = self.frames.items.len - 2;
-                            const parent_action = self.frames.items[parent_index].pending_action orelse unreachable;
-                            try self.resumeParentAction(parent_index, parent_action, host_result);
-                            self.frames.items[parent_index].pending_action = null;
+                            const parent_index = self.frames.len() - 2;
+                            try self.resumeParentAction(parent_index, host_result);
                             self.popFrame();
                         },
                     }
@@ -293,44 +290,28 @@ pub fn bind(comptime Executor: type) type {
                     .call => |call_action| {
                         if (try self.startCall(call_action.msg)) |host_result| {
                             const call_result = host_result.expectCall();
-                            try self.frames.items[frame_index].frame.callFrame().resumeCallResult(
-                                call_action.continuation,
-                                call_result,
-                            );
+                            _ = try self.frames.frame(frame_index).resumePendingAction(host_result);
                             self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
                             try self.captureReturnData(frame_index);
-                        } else {
-                            self.frames.items[frame_index].pending_action = action;
                         }
                     },
                     .create => |create_action| {
                         if (try self.startCreate(create_action.msg)) |host_result| {
-                            try self.frames.items[frame_index].frame.callFrame().resumeCreateResult(
-                                create_action.continuation,
-                                host_result.expectCreate(),
-                            );
+                            _ = try self.frames.frame(frame_index).resumePendingAction(host_result);
                             try self.captureReturnData(frame_index);
-                        } else {
-                            self.frames.items[frame_index].pending_action = action;
                         }
                     },
                 }
             }
 
-            fn resumeParentAction(self: *CallRuntime, frame_index: usize, action: Interpreter.Action, result: Host.Result) !void {
+            fn resumeParentAction(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
+                const action = try self.frames.frame(frame_index).resumePendingAction(result);
                 switch (action) {
                     .call => |call_action| {
                         const call_result = result.expectCall();
-                        try self.frames.items[frame_index].frame.callFrame().resumeCallResult(
-                            call_action.continuation,
-                            call_result,
-                        );
                         self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
                     },
-                    .create => |create_action| try self.frames.items[frame_index].frame.callFrame().resumeCreateResult(
-                        create_action.continuation,
-                        result.expectCreate(),
-                    ),
+                    .create => {},
                 }
                 try self.captureReturnData(frame_index);
             }
@@ -339,7 +320,7 @@ pub fn bind(comptime Executor: type) type {
                 const context = self.stepCaptureContext() orelse return;
                 try context.replaceFrameReturnData(
                     frame_index,
-                    self.frames.items[frame_index].frame.callFrame().return_data,
+                    self.frames.frame(frame_index).return_data,
                 );
             }
 
@@ -416,8 +397,9 @@ pub fn bind(comptime Executor: type) type {
             }
 
             fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
-                const frame_kind = self.frames.items[frame_index].kind;
-                const call_capture = self.frames.items[frame_index].call_capture;
+                const control = self.frames.control(frame_index).*;
+                const frame_kind = control.kind;
+                const call_capture = control.call_capture;
                 var checkpoint: ?CheckpointGuard = switch (frame_kind) {
                     .root_call => null,
                     .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
@@ -425,7 +407,7 @@ pub fn bind(comptime Executor: type) type {
                 };
                 defer if (checkpoint) |*guard| guard.deinit();
 
-                const call_frame = self.frames.items[frame_index].frame.callFrame();
+                const call_frame = self.frames.frame(frame_index);
                 if (self.stepCaptureContext()) |context| {
                     try context.finishCurrentFrame(.{
                         .outcome = Interpreter.traceFrameOutcome(result.status),
@@ -653,10 +635,10 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        fn traceFrameKind(frame: *const RuntimeFrame) evmz.trace.TraceFrameKind {
-            return switch (frame.kind) {
+        fn traceFrameKind(frames: *FrameStore, index: usize) evmz.trace.TraceFrameKind {
+            return switch (frames.control(index).kind) {
                 .root_call => .root,
-                .call => switch (frame.frame.callFrame().msg.kind) {
+                .call => switch (frames.frame(index).msg.kind) {
                     .call => .call,
                     .staticcall => .staticcall,
                     .callcode => .callcode,
@@ -670,11 +652,6 @@ pub fn bind(comptime Executor: type) type {
                     else => unreachable,
                 },
             };
-        }
-
-        fn deinitRuntimeFrame(frame: *RuntimeFrame) void {
-            frame.frame.deinit();
-            frame.* = undefined;
         }
 
         pub fn executeCall(
@@ -731,7 +708,7 @@ pub fn bind(comptime Executor: type) type {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
-            _ = try currentExecutionContext(self);
+            _ = currentExecutionContext(self);
             var execution_gas = gas;
             const top_frame_state_gas = try chargeTopFrameValueTransferStateGas(self, sender, recipient, value, &execution_gas);
             if (top_frame_state_gas.out_of_gas) {
@@ -891,7 +868,7 @@ pub fn bind(comptime Executor: type) type {
             value: u256,
         ) !Interpreter.Result {
             self.clearLastOutput();
-            _ = try currentExecutionContext(self);
+            _ = currentExecutionContext(self);
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
                     .status = .invalid,
@@ -936,7 +913,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentExecutionContext(self);
+            _ = currentExecutionContext(self);
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .status = .invalid,
@@ -1015,7 +992,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentExecutionContext(self);
+            _ = currentExecutionContext(self);
             var execution_gas = gas;
             const top_frame_state_gas = try chargeTopFrameCreateStateGas(self, options, &execution_gas);
             if (top_frame_state_gas.out_of_gas) {
@@ -1065,7 +1042,7 @@ pub fn bind(comptime Executor: type) type {
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
-            _ = try currentExecutionContext(self);
+            _ = currentExecutionContext(self);
             try self.traceAccountAccess(options.recipient);
             return executeCreateMessage(self, .{
                 .depth = 0,
@@ -1097,10 +1074,8 @@ pub fn bind(comptime Executor: type) type {
         }
 
         pub fn resolveExecutionCodeView(self: *Executor, code: State.CodeView) !Bytecode.View {
-            const execution = if (self.prepared_code_execution) |*active|
-                active
-            else
-                return error.MissingPreparedCodeExecution;
+            std.debug.assert(self.prepared_code_execution != null);
+            const execution = &self.prepared_code_execution.?;
             return execution.resolve(code.code_hash, code.bytes, .{
                 .admit = true,
             });
@@ -1153,27 +1128,14 @@ pub fn bind(comptime Executor: type) type {
             return interpreter.executeCapturedUntilAction(capture);
         }
 
-        pub fn currentExecutionContext(self: *const Executor) !ExecutionContext {
-            return self.execution_context orelse error.MissingExecutionContext;
+        pub fn currentExecutionContext(self: *const Executor) ExecutionContext {
+            std.debug.assert(self.execution_context != null);
+            return self.execution_context.?;
         }
 
         pub fn getExecutionContext(ptr: *anyopaque) !ExecutionContext {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return currentExecutionContext(self);
-        }
-
-        fn acquireBytecodeFrame(
-            self: *Executor,
-            frame_allocator: std.mem.Allocator,
-            host_iface: *Host,
-            msg: *const Host.Message,
-            bytecode: Bytecode.View,
-        ) !FrameLease {
-            return try self.frame_store.acquire(self.allocator, frame_allocator, .{
-                .host = host_iface,
-                .msg = msg,
-                .bytecode = bytecode,
-            });
         }
 
         pub fn callScratch(self: *Executor, depth: u16) !ScratchScope {
@@ -1559,7 +1521,7 @@ pub fn bind(comptime Executor: type) type {
 
         fn finishCreate(
             self: *Executor,
-            child: ChildCreate,
+            child: FrameStore.CreateControl,
             result: Interpreter.Result,
             checkpoint: *CheckpointGuard,
         ) !Host.Result {
@@ -1814,7 +1776,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
         evmz.addr(0x2222),
         &capture,
     );
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
 
     executor.beginPreparedCodeExecution();
     defer executor.endPreparedCodeExecution();
@@ -1835,11 +1797,10 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     var outer = runtime.CallRuntime.init(&executor);
     try outer.prepare();
     try outer.pushRootCall(root_message, bytecode.view());
-    try std.testing.expectEqual(@as(usize, 1), executor.runtime_frames.items.len);
+    try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
 
-    var nested_probe = runtime.CallRuntime.init(&executor);
+    const nested_probe = runtime.CallRuntime.init(&executor);
     try std.testing.expectEqual(@as(usize, 1), nested_probe.frame_base);
-    try std.testing.expectError(error.ActiveRuntimeFrames, nested_probe.prepare());
     const child_result = (try runtime.resolveHostCall(&executor, .{
         .depth = 1,
         .kind = .call,
@@ -1851,13 +1812,13 @@ test "nested call runtime owns its segment and keeps capture indices global" {
         .code_address = child_address,
     })).expectCall();
     try std.testing.expectEqual(Interpreter.Status.success, child_result.status);
-    try std.testing.expectEqual(@as(usize, 1), executor.runtime_frames.items.len);
+    try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
     try std.testing.expectEqual(@as(usize, 1), capture.frame_captures.items.len);
     try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(child_address, 0));
 
     const root_result = (try outer.run()).expectCall();
     try std.testing.expectEqual(Interpreter.Status.success, root_result.status);
-    try std.testing.expectEqual(@as(usize, 0), executor.runtime_frames.items.len);
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;

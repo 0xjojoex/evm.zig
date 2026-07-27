@@ -139,8 +139,17 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
         IncludedTransactionViewType,
         BlockResult,
     );
+    const BlockTransactionRuntime = transaction_program.bindWithPreludeError(
+        ExecutorType,
+        transaction.Transaction,
+        PublicTransactInput,
+        TxExecutionResult,
+        transaction_validation.ValidationError,
+        EthereumTransition,
+        EthereumBlock.Implementation.PreludeError,
+    );
     const BlockExecutionType = block_program_module.bind(
-        TransactionRuntime,
+        BlockTransactionRuntime,
         ExecutorType,
         transaction.Transaction,
         PublicTransactInput,
@@ -180,22 +189,33 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
 
         transaction_runtime: TransactionRuntime,
 
+        /// Bind this exact VM family to one caller-owned Executor.
+        ///
+        /// The VM borrows the Executor and owns no independent lifecycle state.
         pub fn init(executor: *Executor) Self {
             return .{ .transaction_runtime = TransactionRuntime.init(executor) };
         }
 
-        pub fn executorPtr(self: *const Self) *Executor {
-            return self.transaction_runtime.executorPtr();
-        }
-
+        /// Validate and execute one family transaction.
+        ///
+        /// Rejection changes no state. Completion returns the sole unresolved
+        /// `Executed` owner, which must be retained or discarded before the
+        /// Executor can accept another transaction.
         pub fn transact(self: *Self, input: TransactInput) Error!Outcome {
             return self.transaction_runtime.transact(input);
         }
 
+        /// Execute while retaining transaction-scoped state observations.
+        ///
+        /// Observations remain borrowed from the unresolved `Executed` result.
         pub fn transactObserved(self: *Self, input: TransactInput) Error!Outcome {
             return self.transaction_runtime.transactObserved(input);
         }
 
+        /// Execute with caller-owned passive capture storage.
+        ///
+        /// Capture does not resolve state; the returned `Executed` value remains
+        /// the exclusive retain/discard authority.
         pub fn transactCaptured(
             self: *Self,
             input: TransactInput,
@@ -204,59 +224,12 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             return self.transaction_runtime.transactCaptured(input, capture);
         }
 
-        pub fn transactInBlock(
-            self: *Self,
-            input: TransactInput,
-            claim: Executor.BlockExecutionClaim,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactInBlock(input, claim);
-        }
-
-        pub fn transactObservedInBlock(
-            self: *Self,
-            input: TransactInput,
-            claim: Executor.BlockExecutionClaim,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactObservedInBlock(input, claim);
-        }
-
-        pub fn transactInBlockWithPrelude(
-            self: *Self,
-            input: TransactInput,
-            claim: Executor.BlockExecutionClaim,
-            prelude: Prelude,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactInBlockWithPrelude(input, claim, prelude);
-        }
-
-        pub fn transactObservedInBlockWithPrelude(
-            self: *Self,
-            input: TransactInput,
-            claim: Executor.BlockExecutionClaim,
-            prelude: Prelude,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactObservedInBlockWithPrelude(input, claim, prelude);
-        }
-
-        pub fn transactCapturedInBlockWithPrelude(
-            self: *Self,
-            input: TransactInput,
-            claim: Executor.BlockExecutionClaim,
-            prelude: Prelude,
-            capture: *executor_module.CaptureContext,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactCapturedInBlockWithPrelude(
-                input,
-                claim,
-                prelude,
-                capture,
-            );
-        }
-
+        /// Define the narrow family-authoring context for a custom input type.
         pub fn Context(comptime Input: type) type {
             return transaction_program.Context(ExecutorType, Input);
         }
 
+        /// Bind Ethereum transaction stage helpers to a custom input type.
         pub fn Transition(comptime Input: type) type {
             return ethereum_transition.bind(
                 spec,
@@ -265,6 +238,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             );
         }
 
+        /// Bind one closed transaction representation and workflow to this VM.
         pub fn Program(
             comptime TransactionType: type,
             comptime InputType: type,
@@ -309,17 +283,17 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             }
 
             /// Return included block progress.
-            pub fn progress(self: *const @This()) !BlockResult {
-                try self.requireActive();
+            pub fn progress(self: *const @This()) BlockResult {
+                self.requireActive();
                 return self.block.progress();
             }
 
             pub fn beforeBlock(self: *@This(), input: BeforeBlockInput) !void {
-                try self.requireActive();
+                self.requireActive();
                 if (self.phase != .transactions) return error.TransactionPhaseClosed;
-                if (self.block.executorPtr().hasCurrentTransaction()) return error.ExecutedTransactionActive;
+                if (block_program_module.executorFor(&self.block).hasCurrentTransaction()) return error.ExecutedTransactionActive;
                 try executor_module.system_contracts.applyBeforeBlock(
-                    self.block.executorPtr(),
+                    block_program_module.executorFor(&self.block),
                     self.lifecycleExecutionContext(),
                     .{
                         .number = self.block.environment.number,
@@ -363,7 +337,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 mode: TransactionMode,
                 observer: anytype,
             ) !BlockExecution.Outcome {
-                try self.requireActive();
+                self.requireActive();
                 if (self.phase != .transactions) return error.TransactionPhaseClosed;
                 try self.flushAfterTransaction();
                 const progress_value = self.block.progress();
@@ -400,14 +374,14 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             }
 
             pub fn endTransactions(self: *@This()) !void {
-                try self.requireActive();
+                self.requireActive();
                 if (self.phase == .finalized) return error.BlockAlreadyFinalized;
                 try self.flushAfterTransaction();
                 self.phase = .post_transactions;
             }
 
             pub fn afterTransaction(self: *@This()) !void {
-                try self.requireActive();
+                self.requireActive();
                 if (self.retained_for_after_hook == null) return error.NoPendingTransaction;
                 try self.flushAfterTransaction();
             }
@@ -416,7 +390,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 const retained = self.retained_for_after_hook orelse return;
                 const progress_value = self.block.progress();
                 try executor_module.system_contracts.applyAfterTransaction(
-                    self.block.executorPtr(),
+                    block_program_module.executorFor(&self.block),
                     self.lifecycleExecutionContext(),
                     .{
                         .number = self.block.environment.number,
@@ -433,13 +407,13 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             }
 
             pub fn finalizeBlock(self: *@This(), allocator: std.mem.Allocator) ![]const []const u8 {
-                try self.requireActive();
+                self.requireActive();
                 if (self.phase == .finalized) return error.BlockAlreadyFinalized;
                 try self.flushAfterTransaction();
                 self.phase = .post_transactions;
                 const progress_value = self.block.progress();
                 const outputs = try executor_module.system_contracts.applyFinalizeBlock(
-                    self.block.executorPtr(),
+                    block_program_module.executorFor(&self.block),
                     self.lifecycleExecutionContext(),
                     allocator,
                     .{
@@ -465,10 +439,10 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
                 call: SystemCall,
                 observer: anytype,
             ) !EvmResult {
-                try self.requireActive();
+                self.requireActive();
                 if (self.phase == .finalized) return error.BlockAlreadyFinalized;
                 try self.flushAfterTransaction();
-                const executor = self.block.executorPtr();
+                const executor = block_program_module.executorFor(&self.block);
                 const state = &self.block.state;
                 var pre_call = try executor.branchCheckpoint();
                 defer pre_call.deinit();
@@ -502,21 +476,18 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             }
 
             pub fn finish(self: *@This()) !BlockResult {
-                try self.requireActive();
+                self.requireActive();
                 try self.flushAfterTransaction();
                 return self.block.finish();
             }
 
             pub fn discardIfUnfinished(self: *@This()) void {
-                self.requireActive() catch return;
-                std.debug.assert(!self.block.executorPtr().hasCurrentTransaction());
                 self.retained_for_after_hook = null;
                 self.block.discardIfUnfinished();
             }
 
-            fn requireActive(self: *const @This()) !void {
-                if (self.block.finished) return error.BlockExecutionFinished;
-                try self.block.claim.requireFor(self.block.executorPtr());
+            fn requireActive(self: *const @This()) void {
+                block_program_module.requireActive(&self.block);
             }
 
             fn lifecycleExecutionContext(self: *const @This()) execution.ExecutionContext {

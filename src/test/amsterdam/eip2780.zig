@@ -53,7 +53,7 @@ test "Amsterdam authorization-installed recipient suppresses top-frame new-accou
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(recipient, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
         .env = .{ .gas_limit = 300_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .kind = .set_code,
@@ -89,7 +89,7 @@ test "Amsterdam authorization state-gas OOG is included and rolls back authoriza
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,
@@ -123,7 +123,7 @@ test "Amsterdam dispatch state-gas OOG rolls back completed authorization" {
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,

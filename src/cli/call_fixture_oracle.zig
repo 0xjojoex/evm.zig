@@ -275,7 +275,7 @@ fn runEvmzCase(
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
     const sender = try evmz.address.fromHex(cases.sender);
-    _ = try executor.runStandaloneCaptured(
+    _ = try executor.executeCaptured(
         evmz.t.defaultExecutionContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,

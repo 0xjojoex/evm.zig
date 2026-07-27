@@ -150,7 +150,7 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     });
     defer executor.deinit();
 
-    const success = (try executor.runStandaloneRequest(
+    const success = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -160,7 +160,7 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
 
     runtime.tx_kind = 0x99;
     runtime.fail = true;
-    const failure = (try executor.runStandaloneRequest(
+    const failure = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -171,14 +171,14 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     runtime.service_error = error.NotImplemented;
     try std.testing.expectError(
         error.NotImplemented,
-        executor.runStandaloneRequest(request(sender, StatefulPrecompile.target, &.{}), .{}),
+        executor.executeStandalone(request(sender, StatefulPrecompile.target, &.{}), .{}),
     );
 
     runtime.service_error = null;
     runtime.invalid_borrow = true;
     try std.testing.expectError(
         error.InvalidPrecompileOutput,
-        executor.runStandaloneRequest(request(sender, StatefulPrecompile.target, &.{}), .{}),
+        executor.executeStandalone(request(sender, StatefulPrecompile.target, &.{}), .{}),
     );
 }
 
@@ -190,7 +190,7 @@ test "Executor reset preserves and replaces the precompile runtime" {
     });
     defer executor.deinit();
 
-    const first = (try executor.runStandaloneRequest(
+    const first = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -200,7 +200,7 @@ test "Executor reset preserves and replaces the precompile runtime" {
     try executor.reset(.{
         .precompile_runtime = second_runtime.service(),
     });
-    const second = (try executor.runStandaloneRequest(
+    const second = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -215,7 +215,7 @@ test "runtime precompile output survives synchronous host reentry" {
     });
     defer executor.deinit();
 
-    const result = (try executor.runStandaloneRequest(
+    const result = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
@@ -268,7 +268,7 @@ test "reentrant precompile call preserves parent stack across arena growth" {
     try child_account.setCode(&child_code);
     try executor.state.seedAccount(child, child_account);
 
-    const result = (try executor.runStandaloneRequest(request(sender, parent, &.{}), .{})).expectCall();
+    const result = (try executor.executeStandalone(request(sender, parent, &.{}), .{})).expectCall();
 
     try std.testing.expect(runtime.called);
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status);

@@ -4,6 +4,8 @@
 //! code, and precompile providers. Their arbitrary errors are normalized to
 //! `InfrastructureFailure`; native failures keep their useful names. State
 //! readers get one strategy-failure signal and retain provider detail locally.
+//! Lifecycle misuse is asserted at its owning boundary and capture/trace
+//! lifecycle errors remain local to those APIs.
 
 pub const Error = error{
     InfrastructureFailure,
@@ -13,27 +15,6 @@ pub const Error = error{
 
     TraceCapacityExceeded,
     TraceIndexOverflow,
-
-    ActiveCaptureFrames,
-    ActiveCheckpoints,
-    ActiveExecutionCheckpoints,
-    ActivePreparedCodeExecution,
-    ActiveRuntimeFrames,
-    ActiveTransactionScope,
-    BlockExecutionActive,
-    BlockExecutionFinished,
-    CaptureOperationActive,
-    CaptureOperationNotActive,
-    CheckpointIdExhausted,
-    ExecutionContextMismatch,
-    ExecutionScopeRootMismatch,
-    MissingPreparedCodeExecution,
-    MissingTransactionScope,
-    MissingExecutionContext,
-    StaleBlockExecution,
-    TraceOperationActive,
-    TraceOperationNotActive,
-    WrongBlockExecution,
 
     BalanceOverflow,
     CodeHashMismatch,
@@ -58,27 +39,6 @@ pub fn normalize(err: anyerror) Error {
         error.TraceCapacityExceeded => error.TraceCapacityExceeded,
         error.TraceIndexOverflow => error.TraceIndexOverflow,
 
-        error.ActiveCaptureFrames => error.ActiveCaptureFrames,
-        error.ActiveCheckpoints => error.ActiveCheckpoints,
-        error.ActiveExecutionCheckpoints => error.ActiveExecutionCheckpoints,
-        error.ActivePreparedCodeExecution => error.ActivePreparedCodeExecution,
-        error.ActiveRuntimeFrames => error.ActiveRuntimeFrames,
-        error.ActiveTransactionScope => error.ActiveTransactionScope,
-        error.BlockExecutionActive => error.BlockExecutionActive,
-        error.BlockExecutionFinished => error.BlockExecutionFinished,
-        error.CaptureOperationActive => error.CaptureOperationActive,
-        error.CaptureOperationNotActive => error.CaptureOperationNotActive,
-        error.CheckpointIdExhausted => error.CheckpointIdExhausted,
-        error.ExecutionContextMismatch => error.ExecutionContextMismatch,
-        error.ExecutionScopeRootMismatch => error.ExecutionScopeRootMismatch,
-        error.MissingPreparedCodeExecution => error.MissingPreparedCodeExecution,
-        error.MissingTransactionScope => error.MissingTransactionScope,
-        error.MissingExecutionContext => error.MissingExecutionContext,
-        error.StaleBlockExecution => error.StaleBlockExecution,
-        error.TraceOperationActive => error.TraceOperationActive,
-        error.TraceOperationNotActive => error.TraceOperationNotActive,
-        error.WrongBlockExecution => error.WrongBlockExecution,
-
         error.BalanceOverflow => error.BalanceOverflow,
         error.CodeHashMismatch => error.CodeHashMismatch,
         error.CodeUnavailable => error.CodeUnavailable,
@@ -90,7 +50,7 @@ pub fn normalize(err: anyerror) Error {
     };
 }
 
-test "normalization preserves capture failures and contains provider errors" {
+test "normalization preserves bounded capture failures and contains provider errors" {
     const testing = @import("std").testing;
     const capture_failures = [_]anyerror{
         error.TraceCapacityExceeded,

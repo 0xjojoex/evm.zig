@@ -83,7 +83,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
         .env = .{ .gas_limit = 300_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .kind = .set_code,
@@ -162,11 +162,11 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     try executor.beginObservedTransaction(testExecutionContext(sender, 100_000), sender, contract);
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     }, 0);
-    try executor.closeTransactionObserved(&observations);
+    try executor.retainStateTransitionObserved(&observations);
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
     try std.testing.expect(observations.found);
@@ -195,9 +195,9 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     });
     try executor.beginObservedMessageScope(request, .{});
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const outcome = try executor.executeTransactionRequestPhased(request);
-    try executor.closeTransactionObserved(&observations);
+    try executor.retainStateTransitionObserved(&observations);
 
     try std.testing.expectEqual(evmz.executor.TransactionExecutionStage.preparation, outcome.stage);
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, outcome.result.status);

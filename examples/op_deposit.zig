@@ -171,8 +171,8 @@ const DepositPrepared = struct {
     deposit_nonce: u64,
 };
 
-/// OP owns deposit policy; the shared transaction program owns the attempt,
-/// rollback, and retain/discard lifetime around it.
+/// OP owns deposit policy; the shared transaction program owns active and
+/// pending state plus the caller resolution contract.
 fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
     return struct {
         const Gas = EthereumVm.Gas;
@@ -189,24 +189,24 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
             }
 
             const prepared = try prepare(context, tx);
-            const attempt = try context.beginAttempt();
+            try context.beginTransaction();
             // Mint the L1-escrowed value before any execution accounting.
-            try attempt.addBalance(tx.from, tx.mint);
+            try context.addBalance(tx.from, tx.mint);
 
             try context.runPrelude();
             // The message scope opens even when the payload is skipped: nonce
-            // advancement, finalizeState, and the lease lifecycle live inside it.
-            try attempt.beginExecution(prepared.request, .{});
-            const nonce_intent = try attempt.advanceTransactionNonce(prepared.request.message);
+            // advancement and finalizeState live inside it.
+            try context.beginExecution(prepared.request, .{});
+            try context.advanceTransactionNonce(prepared.request.message);
 
             var status: evmz.TxStatus = .invalid;
             var gas_result: evmz.transaction.ExecutionGasResult = .empty;
             var output: []const u8 = &.{};
             if (prepared.execution_gas == null) {
-                try attempt.finalizeState();
+                try context.finalizeState();
             } else {
-                const result = (try attempt.runPayload(prepared.request)).result;
-                try attempt.finalizeState();
+                const result = (try context.runPayload(prepared.request)).result;
+                try context.finalizeState();
                 status = result.status;
                 gas_result = .{
                     .gas_left = result.gas_left,
@@ -217,7 +217,6 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
                 output = result.output_data;
             }
             // Regolith: even a failed deposit consumes the sender nonce.
-            nonce_intent.complete();
 
             return .{ .completed = .{
                 .status = status,
@@ -457,7 +456,7 @@ pub const Fjord = OpFamily(.fjord);
 
 fn retainOutput(outcome: anytype) !OpOutput {
     return switch (outcome) {
-        .executed => |executed| try executed.retainResult(),
+        .executed => |executed| executed.retainResult(),
         .rejected => error.UnexpectedRejection,
     };
 }
@@ -818,7 +817,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     try std.testing.expectEqual(Ecotone.Evm.Rejection.type_3_tx_pre_fork, rejected.ethereum);
     try std.testing.expectEqual(@as(u64, 2), block.progress());
     try std.testing.expectEqual(@as(u64, 2), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u64, 2), try block.finish());
+    try std.testing.expectEqual(@as(u64, 2), block.finish());
 }
 
 test "OP input assembly owns execution environment normalization" {

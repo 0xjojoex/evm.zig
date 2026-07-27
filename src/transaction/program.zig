@@ -1,8 +1,8 @@
 //! Typed transaction-program binding above one reusable Executor branch.
 //!
 //! The program owns transaction representation and semantics. The binder owns
-//! attempt cleanup and the uncommitted pending state. Family output is stored
-//! beside that state, never inside Executor.
+//! active transaction cleanup and the uncommitted pending state. Family output
+//! is stored beside that state, never inside Executor.
 
 const std = @import("std");
 
@@ -15,6 +15,7 @@ const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
 const Interpreter = @import("../Interpreter.zig");
 const state = @import("../state.zig");
+const runtime_ops = @import("runtime.zig");
 const tx = @import("types.zig");
 
 pub fn TransitionOutcome(comptime Output: type, comptime Rejection: type) type {
@@ -31,11 +32,50 @@ pub fn TransactOutcome(comptime Executed: type, comptime Rejection: type) type {
     };
 }
 
+pub fn transactInBlock(
+    transaction_program: anytype,
+    input: anytype,
+) @TypeOf(transaction_program.transactOwned(input, true, null, .normal)) {
+    return transaction_program.transactOwned(input, true, null, .normal);
+}
+
+pub fn transactObservedInBlock(
+    transaction_program: anytype,
+    input: anytype,
+) @TypeOf(transaction_program.transactOwned(input, true, null, .observed)) {
+    return transaction_program.transactOwned(input, true, null, .observed);
+}
+
+pub fn transactInBlockWithPrelude(
+    transaction_program: anytype,
+    input: anytype,
+    prelude: anytype,
+) @TypeOf(transaction_program.transactOwned(input, true, prelude, .normal)) {
+    return transaction_program.transactOwned(input, true, prelude, .normal);
+}
+
+pub fn transactObservedInBlockWithPrelude(
+    transaction_program: anytype,
+    input: anytype,
+    prelude: anytype,
+) @TypeOf(transaction_program.transactOwned(input, true, prelude, .observed)) {
+    return transaction_program.transactOwned(input, true, prelude, .observed);
+}
+
+pub fn transactCapturedInBlockWithPrelude(
+    transaction_program: anytype,
+    input: anytype,
+    prelude: anytype,
+    capture: *CaptureContext,
+) @TypeOf(transaction_program.transactOwned(input, true, prelude, .{ .captured = capture })) {
+    return transaction_program.transactOwned(input, true, prelude, .{ .captured = capture });
+}
+
 /// Internal transport caught by the binder and replaced with the concrete
 /// block-prelude error before it reaches a program caller.
 const ContractError = error{TransactionPreludeFailed};
 
-const AttemptMode = union(enum) {
+const TransactionMode = union(enum) {
     normal,
     observed,
     captured: *CaptureContext,
@@ -51,6 +91,26 @@ pub fn bind(
     comptime RejectionType: type,
     comptime ImplementationType: type,
 ) type {
+    return bindWithPreludeError(
+        ExecutorType,
+        TransactionType,
+        InputType,
+        OutputType,
+        RejectionType,
+        ImplementationType,
+        error{},
+    );
+}
+
+pub fn bindWithPreludeError(
+    comptime ExecutorType: type,
+    comptime TransactionType: type,
+    comptime InputType: type,
+    comptime OutputType: type,
+    comptime RejectionType: type,
+    comptime ImplementationType: type,
+    comptime PreludeErrorType: type,
+) type {
     comptime {
         std.debug.assert(@hasField(InputType, "tx"));
         std.debug.assert(@FieldType(InputType, "tx") == TransactionType);
@@ -65,7 +125,7 @@ pub fn bind(
         OutputType,
         RejectionType,
         ImplementationType,
-        error{},
+        PreludeErrorType,
     );
 }
 
@@ -92,17 +152,15 @@ fn RuntimeState(
 
         executor: *ExecutorType,
         input_value: *const InputType,
-        mode: AttemptMode,
-        attempt: ?ExecutorType.TransactionAttempt = null,
+        mode: TransactionMode,
         prelude: PreludeState = .none,
 
         fn discardIfActive(self: *Self) void {
-            const attempt = self.attempt orelse return;
-            attempt.discardIfCurrent();
-            self.attempt = null;
+            if (!runtime_ops.hasActive(self.executor)) return;
+            runtime_ops.discard(self.executor);
         }
 
-        fn complete(self: *Self) Error!ExecutorType.Pending {
+        fn complete(self: *Self) Error!u64 {
             std.debug.assert(switch (self.prelude) {
                 .none, .consumed => true,
                 .pending, .failed => false,
@@ -111,11 +169,12 @@ fn RuntimeState(
                 .pending, .failed => unreachable,
                 .none, .consumed => {},
             }
-            std.debug.assert(self.attempt != null);
-            const attempt = self.attempt orelse unreachable;
-            const executed = attempt.finish();
-            self.attempt = null;
-            return executed;
+            runtime_ops.requireActive(self.executor);
+            return runtime_ops.finish(self.executor);
+        }
+
+        fn requireActive(self: *Self) void {
+            runtime_ops.requireActive(self.executor);
         }
 
         fn preludeFailure(self: *const Self) ?anyerror {
@@ -123,134 +182,6 @@ fn RuntimeState(
                 .failed => |err| err,
                 else => null,
             };
-        }
-    };
-}
-
-fn AttemptType(
-    comptime ExecutorType: type,
-    comptime Runtime: type,
-) type {
-    const Error = executor_errors.Error || ContractError;
-
-    return struct {
-        handle: *anyopaque,
-
-        const Self = @This();
-
-        pub const TransactionNonceIntent = struct {
-            inner: ExecutorType.TransactionAttempt.TransactionNonceIntent,
-
-            pub fn complete(self: TransactionNonceIntent) void {
-                self.inner.complete();
-            }
-        };
-
-        fn runtimeState(self: Self) *Runtime {
-            return @ptrCast(@alignCast(self.handle));
-        }
-
-        fn token(self: Self) ExecutorType.TransactionAttempt {
-            return self.runtimeState().attempt orelse unreachable;
-        }
-
-        pub fn allocator(self: Self) Error!std.mem.Allocator {
-            return self.token().allocator();
-        }
-
-        pub fn checkpoint(self: Self) Error!ExecutorType.ExecutionCheckpoint {
-            return self.token().checkpoint() catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) Error!Interpreter.Result {
-            return self.token().executeRequest(request) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn executeRequestPhased(
-            self: Self,
-            request: execution.EvmExecutionRequest,
-        ) Error!ExecutorType.TransactionExecutionOutcome {
-            return self.token().executeRequestPhased(request) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn runPayload(
-            self: Self,
-            request: execution.EvmExecutionRequest,
-        ) Error!ExecutorType.TransactionExecutionOutcome {
-            return self.token().runPayload(request) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn beginExecution(
-            self: Self,
-            request: execution.EvmExecutionRequest,
-            init_value: execution.ExecutionScopeInit,
-        ) Error!void {
-            return self.token().beginExecution(request, init_value) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn accountSummary(self: Self, account_address: Address) Error!?ExecutorType.TransactionAttempt.AccountSummary {
-            return self.token().accountSummary(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn code(self: Self, account_address: Address) Error![]const u8 {
-            return self.token().code(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn balance(self: Self, account_address: Address) Error!u256 {
-            return self.token().balance(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn accountAccess(self: Self, account_address: Address) Error!void {
-            return self.token().accountAccess(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn touchAccount(self: Self, account_address: Address) Error!void {
-            return self.token().touchAccount(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn addBalance(self: Self, account_address: Address, value: u256) Error!void {
-            return self.token().addBalance(account_address, value) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn subtractBalance(self: Self, account_address: Address, value: u256) Error!bool {
-            return self.token().subtractBalance(account_address, value) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn setNonce(self: Self, account_address: Address, nonce: u64) Error!void {
-            return self.token().setNonce(account_address, nonce) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn incrementNonce(self: Self, account_address: Address) Error!void {
-            return self.token().incrementNonce(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn advanceTransactionNonce(
-            self: Self,
-            message: execution.Message,
-        ) Error!TransactionNonceIntent {
-            const intent = self.token().advanceTransactionNonce(message) catch |err|
-                return executor_errors.normalize(err);
-            return .{ .inner = intent };
-        }
-
-        pub fn setCode(self: Self, account_address: Address, code_bytes: []const u8) Error!void {
-            return self.token().setCode(account_address, code_bytes) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn clearCode(self: Self, account_address: Address) Error!void {
-            return self.token().clearCode(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn warmAccount(self: Self, account_address: Address) Error!void {
-            return self.token().warmAccount(account_address) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn warmStorage(self: Self, account_address: Address, key: u256) Error!void {
-            return self.token().warmStorage(account_address, key) catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn finalizeState(self: Self) Error!void {
-            return self.token().finalizeState() catch |err| return executor_errors.normalize(err);
         }
     };
 }
@@ -274,16 +205,16 @@ fn PreludeContext(
             return @ptrCast(@alignCast(self.handle));
         }
 
-        fn token(self: Self) ExecutorType.TransactionAttempt {
-            return self.runtimeState().attempt orelse unreachable;
-        }
-
         pub fn code(self: Self, account_address: Address) ContextError![]const u8 {
-            return self.token().code(account_address) catch |err| return executor_errors.normalize(err);
+            const runtime = self.runtimeState();
+            runtime.requireActive();
+            return runtime.executor.getCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
         pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
-            return self.token().executePreludeRequest(request) catch |err| return executor_errors.normalize(err);
+            const runtime = self.runtimeState();
+            runtime.requireActive();
+            return runtime_ops.runPrelude(runtime.executor, request) catch |err| return executor_errors.normalize(err);
         }
     };
 }
@@ -331,7 +262,6 @@ pub fn Context(
 ) type {
     const ContextError = executor_errors.Error || ContractError;
     const RuntimeType = RuntimeState(ExecutorType, InputType);
-    const Attempt = AttemptType(ExecutorType, RuntimeType);
 
     return struct {
         handle: *anyopaque,
@@ -342,16 +272,17 @@ pub fn Context(
         pub const Executor = ExecutorType;
         pub const specification = ExecutorType.specification;
         pub const Input = InputType;
-        pub const AttemptCapability = Attempt;
 
         fn runtimeState(self: *const Self) *RuntimeType {
             return @ptrCast(@alignCast(self.handle));
         }
 
+        /// Borrow the exact caller input for this transaction invocation.
         pub fn input(self: *const Self) *const InputType {
             return self.runtimeState().input_value;
         }
 
+        /// Expose the minimal state access required by transaction preparation.
         pub fn preparationState(self: *Self) tx.PreparationStateAccess {
             return .{
                 .ptr = self.runtimeState(),
@@ -359,29 +290,145 @@ pub fn Context(
             };
         }
 
-        pub fn beginAttempt(self: *Self) ContextError!Attempt {
+        fn activeExecutor(self: *const Self) *ExecutorType {
             const runtime = self.runtimeState();
-            std.debug.assert(runtime.attempt == null);
-            runtime.attempt = switch (runtime.mode) {
-                .normal => runtime.executor.beginTransactionAttemptLifetime(),
-                .observed => runtime.executor.beginObservedTransactionAttemptLifetime(),
-                .captured => |capture| runtime.executor.beginCapturedTransactionAttemptLifetime(capture),
-            } catch |err| return executor_errors.normalize(err);
-            return .{ .handle = runtime };
+            runtime.requireActive();
+            return runtime.executor;
         }
 
-        pub fn activeAttempt(self: *Self) ContextError!Attempt {
+        /// Open the one rollback-armed outer transaction lifetime.
+        ///
+        /// Validation that may reject without state must run first. Prelude,
+        /// payload, and settlement effects then share this lifetime.
+        pub fn beginTransaction(self: *Self) ContextError!void {
             const runtime = self.runtimeState();
-            std.debug.assert(runtime.attempt != null);
-            return .{ .handle = runtime };
+            std.debug.assert(!runtime.executor.hasCurrentTransaction());
+            const mode: runtime_ops.Mode = switch (runtime.mode) {
+                .normal => .normal,
+                .observed => .observed,
+                .captured => |capture| .{ .captured = capture },
+            };
+            runtime_ops.begin(runtime.executor, mode) catch |err|
+                return executor_errors.normalize(err);
         }
 
+        /// Borrow the Executor allocator while the transaction is active.
+        pub fn allocator(self: *const Self) ContextError!std.mem.Allocator {
+            return self.activeExecutor().allocator;
+        }
+
+        /// Open an inner rollback checkpoint without resolving the transaction.
+        pub fn checkpoint(self: *Self) ContextError!ExecutorType.ExecutionCheckpoint {
+            return self.activeExecutor().checkpoint() catch |err| return executor_errors.normalize(err);
+        }
+
+        /// Execute the root payload under its own inner rollback checkpoint.
+        ///
+        /// A rollback status restores payload effects while preserving earlier
+        /// family effects such as nonce advancement.
+        pub fn runPayload(
+            self: *Self,
+            request: execution.EvmExecutionRequest,
+        ) ContextError!ExecutorType.TransactionExecutionOutcome {
+            return runtime_ops.runPayload(self.activeExecutor(), request) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Open the root message scope after family prelude work is complete.
+        ///
+        /// Call exactly once before `runPayload`.
+        pub fn beginExecution(
+            self: *Self,
+            request: execution.EvmExecutionRequest,
+            init_value: execution.ExecutionScopeInit,
+        ) ContextError!void {
+            return runtime_ops.beginExecution(self.activeExecutor(), request, init_value) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Read transaction-relevant account metadata from tracked state.
+        pub fn accountSummary(
+            self: *Self,
+            account_address: Address,
+        ) ContextError!?ExecutorType.TransactionAccountSummary {
+            return self.activeExecutor().transactionAccountSummary(account_address) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn code(self: *Self, account_address: Address) ContextError![]const u8 {
+            return self.activeExecutor().getCode(account_address) catch |err| return executor_errors.normalize(err);
+        }
+
+        pub fn accountAccess(self: *Self, account_address: Address) ContextError!void {
+            return self.activeExecutor().traceAccountAccess(account_address) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn touchAccount(self: *Self, account_address: Address) ContextError!void {
+            return self.activeExecutor().state.touchAccount(account_address) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn addBalance(self: *Self, account_address: Address, value: u256) ContextError!void {
+            return self.activeExecutor().state.addBalance(account_address, value) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn subtractBalance(self: *Self, account_address: Address, value: u256) ContextError!bool {
+            return self.activeExecutor().state.subtractBalance(account_address, value) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn setNonce(self: *Self, account_address: Address, nonce: u64) ContextError!void {
+            return self.activeExecutor().state.setNonce(account_address, nonce) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Advance the root sender nonce once before payload execution.
+        pub fn advanceTransactionNonce(
+            self: *Self,
+            message: execution.Message,
+        ) ContextError!void {
+            return self.activeExecutor().advanceTransactionNonce(message) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn setCode(self: *Self, account_address: Address, code_bytes: []const u8) ContextError!void {
+            return self.activeExecutor().state.setCode(account_address, code_bytes) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn clearCode(self: *Self, account_address: Address) ContextError!void {
+            return self.activeExecutor().state.clearCode(account_address) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn warmAccount(self: *Self, account_address: Address) ContextError!void {
+            return self.activeExecutor().warmAccount(account_address) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        pub fn warmStorage(self: *Self, account_address: Address, key: u256) ContextError!void {
+            return self.activeExecutor().warmStorage(account_address, key) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Apply the exact specification's end-of-transaction state rules.
+        pub fn finalizeState(self: *Self) ContextError!void {
+            return self.activeExecutor().finalizeTransactionState() catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Run the bound block/family prelude at most once.
+        ///
+        /// Prelude effects share the outer transaction lifetime but execute in
+        /// their own fresh message scope.
         pub fn runPrelude(self: *Self) ContextError!void {
             const runtime = self.runtimeState();
             switch (runtime.prelude) {
                 .none => return,
                 .pending => |binding| {
-                    std.debug.assert(runtime.attempt != null);
+                    runtime.requireActive();
                     runtime.prelude = .consumed;
                     binding.run(binding.handle, runtime) catch |err| {
                         runtime.prelude = .{ .failed = err };
@@ -444,70 +491,7 @@ fn BoundTransaction(
     const PreludeType = Prelude(PreludeContextType);
     const ProgramError = ContextError || ImplementationType.Error || PreludeErrorType;
 
-    const ExecutedType = struct {
-        pending: ExecutorType.Pending,
-        output_value: OutputType,
-
-        pub const View = struct {
-            output: *const OutputType,
-            logs: ExecutorType.State.LogView,
-        };
-
-        /// Borrow the complete inclusion view after one pending-state assertion.
-        pub fn view(self: *const @This()) View {
-            return .{
-                .output = &self.output_value,
-                .logs = self.pending.logView(),
-            };
-        }
-
-        pub fn output(self: *const @This()) *const OutputType {
-            self.pending.requireCurrent();
-            return &self.output_value;
-        }
-
-        pub fn result(self: @This()) OutputType {
-            self.pending.requireCurrent();
-            return self.output_value;
-        }
-
-        pub fn logs(self: @This()) ExecutorType.State.LogView {
-            return self.pending.logView();
-        }
-
-        pub fn allocator(self: @This()) std.mem.Allocator {
-            return self.pending.allocator();
-        }
-
-        pub fn changes(self: @This()) ExecutorType.State.ChangesView {
-            return self.pending.changes();
-        }
-
-        pub fn observations(self: @This()) ExecutorType.State.ObservationsView {
-            return self.pending.view().observations();
-        }
-
-        pub fn retain(self: @This()) executor_errors.Error!void {
-            self.pending.retain() catch |err| return executor_errors.normalize(err);
-        }
-
-        /// Retain the attempt's state writes and return the output in one
-        /// step. Read `view`/`logs` first: retention closes pending state.
-        /// Borrowed output slices stay valid until the next Executor
-        /// operation.
-        pub fn retainResult(self: @This()) executor_errors.Error!OutputType {
-            try self.retain();
-            return self.output_value;
-        }
-
-        pub fn discard(self: @This()) executor_errors.Error!void {
-            return self.pending.discard() catch |err| return executor_errors.normalize(err);
-        }
-
-        pub fn discardIfCurrent(self: @This()) void {
-            self.pending.discardIfCurrent();
-        }
-    };
+    const ExecutedType = ExecutorType.Executed(OutputType);
 
     const OutcomeType = TransactOutcome(ExecutedType, RejectionType);
 
@@ -529,22 +513,36 @@ fn BoundTransaction(
 
         executor: *ExecutorType,
 
+        /// Bind this exact family program to one caller-owned Executor.
+        ///
+        /// The program borrows the Executor; it owns no state and must not
+        /// outlive that Executor.
         pub fn init(executor: *ExecutorType) @This() {
             return .{ .executor = executor };
         }
 
-        pub fn executorPtr(self: *const @This()) *ExecutorType {
-            return self.executor;
-        }
-
+        /// Close this transaction program over one block-fold policy.
+        ///
+        /// The returned type is the only public in-block transaction entry
+        /// point; block claims and transaction-runtime choreography stay
+        /// internal to that type.
         pub fn Block(
             comptime EnvType: type,
             comptime IncludedType: type,
             comptime ResultType: type,
             comptime BlockImplementationType: type,
         ) type {
+            const RuntimeWithPrelude = bindWithPreludeError(
+                ExecutorType,
+                TransactionType,
+                TransactInputType,
+                OutputType,
+                RejectionType,
+                ImplementationType,
+                PreludeErrorType || BlockImplementationType.PreludeError,
+            );
             return block_program.bind(
-                @This(),
+                RuntimeWithPrelude,
                 ExecutorType,
                 TransactionType,
                 TransactInputType,
@@ -557,41 +555,27 @@ fn BoundTransaction(
             );
         }
 
-        /// Rebind the same transaction program with block-prelude failures that
-        /// must remain typed across the rollback-integrated callback boundary.
-        pub fn withPreludeError(comptime AdditionalError: type) type {
-            if (AdditionalError == error{}) return @This();
-            return BoundTransaction(
-                ExecutorType,
-                ContextType,
-                TransactionType,
-                TransactInputType,
-                OutputType,
-                RejectionType,
-                ImplementationType,
-                PreludeErrorType || AdditionalError,
-            );
-        }
-
-        /// Rebind this runtime value to a wider block-prelude error set while
-        /// preserving its Executor.
-        pub fn rebindPreludeError(
-            self: @This(),
-            comptime AdditionalError: type,
-        ) withPreludeError(AdditionalError) {
-            return .{
-                .executor = self.executor,
-            };
-        }
-
+        /// Execute one family transaction.
+        ///
+        /// Rejection opens no pending state. Completion returns the sole
+        /// rollback-armed `Executed` owner, which the caller must retain or
+        /// discard before reusing this Executor.
         pub fn transact(self: *@This(), input_value: TransactInputType) Error!Outcome {
             return self.transactOwned(input_value, false, null, .normal);
         }
 
+        /// Execute and retain transaction-scoped state observations.
+        ///
+        /// Observation views belong to the unresolved `Executed` result and
+        /// remain borrowed until that result is retained or discarded.
         pub fn transactObserved(self: *@This(), input_value: TransactInputType) Error!Outcome {
             return self.transactOwned(input_value, false, null, .observed);
         }
 
+        /// Execute with caller-owned passive capture storage.
+        ///
+        /// `capture` must already be active and must outlive execution. The
+        /// returned `Executed` value still exclusively resolves state.
         pub fn transactCaptured(
             self: *@This(),
             input_value: TransactInputType,
@@ -600,70 +584,16 @@ fn BoundTransaction(
             return self.transactOwned(input_value, false, null, .{ .captured = capture });
         }
 
-        /// Execute under the exclusive block claim owned by a bound block
-        /// program. Direct callers cannot bypass block ownership with a bool.
-        pub fn transactInBlock(
-            self: *@This(),
-            input_value: TransactInputType,
-            claim: ExecutorType.BlockExecutionClaim,
-        ) Error!Outcome {
-            try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, null, .normal);
-        }
-
-        pub fn transactObservedInBlock(
-            self: *@This(),
-            input_value: TransactInputType,
-            claim: ExecutorType.BlockExecutionClaim,
-        ) Error!Outcome {
-            try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, null, .observed);
-        }
-
-        /// Execute under a block claim with a family prelude that is invoked by
-        /// the transaction implementation after validation/preparation and
-        /// after opening the rollback-armed attempt.
-        pub fn transactInBlockWithPrelude(
-            self: *@This(),
-            input_value: TransactInputType,
-            claim: ExecutorType.BlockExecutionClaim,
-            prelude: PreludeType,
-        ) Error!Outcome {
-            try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, prelude, .normal);
-        }
-
-        pub fn transactObservedInBlockWithPrelude(
-            self: *@This(),
-            input_value: TransactInputType,
-            claim: ExecutorType.BlockExecutionClaim,
-            prelude: PreludeType,
-        ) Error!Outcome {
-            try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, prelude, .observed);
-        }
-
-        pub fn transactCapturedInBlockWithPrelude(
-            self: *@This(),
-            input_value: TransactInputType,
-            claim: ExecutorType.BlockExecutionClaim,
-            prelude: PreludeType,
-            capture: *CaptureContext,
-        ) Error!Outcome {
-            try claim.requireFor(self.executor);
-            return self.transactOwned(input_value, true, prelude, .{ .captured = capture });
-        }
-
         fn transactOwned(
             self: *@This(),
             input_value: TransactInputType,
             block_claimed: bool,
             prelude: ?PreludeType,
-            mode: AttemptMode,
+            mode: TransactionMode,
         ) Error!OutcomeType {
             const executor = self.executor;
-            if (!block_claimed and executor.hasActiveBlockExecution())
-                return error.BlockExecutionActive;
+            if (!block_claimed)
+                std.debug.assert(executor.active_block_execution_generation == null);
             std.debug.assert(!executor.hasCurrentTransaction());
             executor.clearLogs();
 
@@ -692,7 +622,8 @@ fn BoundTransaction(
                     break :blk .{ .rejected = reason };
                 },
                 .completed => |output_value| .{ .executed = .{
-                    .pending = try runtime.complete(),
+                    .executor = executor,
+                    .generation = try runtime.complete(),
                     .output_value = output_value,
                 } },
             };

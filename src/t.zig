@@ -459,7 +459,7 @@ pub fn seedStoreAccount(store: anytype, address: Address, seed: MemoryAccountSee
     if (seed.code.len != 0) try account.setCode(seed.code);
 }
 
-pub fn expectExecutedLease(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
+pub fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
     return switch (outcome) {
         .executed => |executed| executed,
         .rejected => error.UnexpectedRejection,

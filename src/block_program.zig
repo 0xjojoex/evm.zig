@@ -9,7 +9,7 @@ const std = @import("std");
 const CaptureContext = @import("./executor/capture_context.zig").Context;
 const Address = @import("./address.zig").Address;
 const execution = @import("./execution.zig");
-const executor_errors = @import("./executor/error.zig");
+const transaction_program = @import("./transaction/program.zig");
 
 const AttemptMode = union(enum) {
     normal,
@@ -119,6 +119,28 @@ pub fn TransactOutcome(comptime Included: type, comptime Rejection: type) type {
     };
 }
 
+pub fn executorFor(block: anytype) @TypeOf(block.transaction_runtime.executor) {
+    return block.transaction_runtime.executor;
+}
+
+pub fn requireActive(block: anytype) void {
+    std.debug.assert(!block.finished);
+    const executor = executorFor(block);
+    std.debug.assert(executor.active_block_execution_generation == block.generation);
+}
+
+fn claim(executor: anytype) u64 {
+    std.debug.assert(executor.active_block_execution_generation == null);
+    executor.next_block_execution_generation +%= 1;
+    executor.active_block_execution_generation = executor.next_block_execution_generation;
+    return executor.next_block_execution_generation;
+}
+
+fn release(executor: anytype, generation: u64) void {
+    if (executor.active_block_execution_generation == generation)
+        executor.active_block_execution_generation = null;
+}
+
 test "block hook collections preserve insertion order" {
     const first = [_]u8{0x11} ** 20;
     const second = [_]u8{0x22} ** 20;
@@ -132,7 +154,7 @@ test "block hook collections preserve insertion order" {
 
 /// Internal flat binder used by a concrete VM program's `Block(...)` closure.
 pub fn bind(
-    comptime TransactionRuntimeType: type,
+    comptime RuntimeWithPrelude: type,
     comptime ExecutorType: type,
     comptime TransactionType: type,
     comptime TransactInputType: type,
@@ -143,13 +165,9 @@ pub fn bind(
     comptime ResultType: type,
     comptime ImplementationType: type,
 ) type {
-    comptime {
-        std.debug.assert(@hasDecl(ImplementationType, "PreludeError"));
-    }
+    comptime std.debug.assert(@hasDecl(ImplementationType, "PreludeError"));
 
-    const RuntimeWithPrelude = TransactionRuntimeType.withPreludeError(ImplementationType.PreludeError);
     return BoundBlockProgram(
-        TransactionRuntimeType,
         RuntimeWithPrelude,
         ExecutorType,
         TransactionType,
@@ -166,7 +184,6 @@ pub fn bind(
 }
 
 fn BoundBlockProgram(
-    comptime BaseTransactionRuntimeType: type,
     comptime TransactionRuntimeType: type,
     comptime ExecutorType: type,
     comptime TransactionType: type,
@@ -200,8 +217,8 @@ fn BoundBlockProgram(
     return struct {
         const Self = @This();
 
-        pub const TransactionRuntime = TransactionRuntimeType;
-        pub const Executor = ExecutorType;
+        const TransactionRuntime = TransactionRuntimeType;
+        const Executor = ExecutorType;
         pub const Transaction = TransactionType;
         pub const Output = OutputType;
         pub const Rejection = RejectionType;
@@ -214,50 +231,35 @@ fn BoundBlockProgram(
         pub const Error = ErrorType;
 
         transaction_runtime: TransactionRuntimeType,
-        claim: Executor.BlockExecutionClaim,
+        generation: u64,
         environment: Env,
         state: ImplementationType.State,
         finished: bool = false,
 
+        /// Claim one Executor branch for an ordered block fold.
+        ///
+        /// The Executor must have no unresolved transaction or accepted
+        /// changes. The returned block must eventually be finished or cleaned
+        /// up with `discardIfUnfinished`.
         pub fn init(
             executor: *Executor,
             environment: Env,
         ) Error!Self {
-            return initWithRuntime(
-                BaseTransactionRuntimeType.init(executor),
-                environment,
-            );
-        }
-
-        /// Advanced composition seam for a preconfigured transaction runtime.
-        pub fn initWithRuntime(
-            transaction_runtime: BaseTransactionRuntimeType,
-            environment: Env,
-        ) Error!Self {
-            return initRuntime(transaction_runtime, environment);
-        }
-
-        fn initRuntime(
-            transaction_runtime: BaseTransactionRuntimeType,
-            environment: Env,
-        ) Error!Self {
-            const runtime = transaction_runtime.rebindPreludeError(ImplementationType.PreludeError);
-            const executor = runtime.executorPtr();
-            if (executor.hasActiveBlockExecution()) return error.BlockExecutionActive;
+            std.debug.assert(executor.active_block_execution_generation == null);
             std.debug.assert(!executor.hasCurrentTransaction());
             if (executor.acceptedView().hasChanges()) return error.UncommittedChanges;
             return .{
-                .transaction_runtime = runtime,
-                .claim = executor.claimBlockExecution() catch |err| return executor_errors.normalize(err),
+                .transaction_runtime = TransactionRuntimeType.init(executor),
+                .generation = claim(executor),
                 .environment = environment,
                 .state = ImplementationType.init(environment),
             };
         }
 
-        pub fn executorPtr(self: *const Self) *Executor {
-            return self.transaction_runtime.executorPtr();
-        }
-
+        /// Execute, include, and retain one transaction atomically.
+        ///
+        /// All fallible inclusion planning happens before retain. Rejection
+        /// leaves both the Executor branch and block accumulator unchanged.
         pub fn transact(self: *Self, transaction_value: Transaction) Error!Outcome {
             return self.transactOwned(
                 transaction_value,
@@ -294,6 +296,10 @@ fn BoundBlockProgram(
             return self.transactOwned(transaction_value, prelude, .observed, observer);
         }
 
+        /// Capture root execution events and inspect the sealed included state.
+        ///
+        /// Captured events are written into `capture`; borrowed observer views
+        /// remain valid only for the duration of `observer.observe`.
         pub fn transactWithPreludeCaptured(
             self: *Self,
             transaction_value: Transaction,
@@ -316,32 +322,32 @@ fn BoundBlockProgram(
             mode: AttemptMode,
             observer: anytype,
         ) anyerror!Outcome {
-            if (self.finished) return error.BlockExecutionFinished;
+            requireActive(self);
             const input = ImplementationType.transactInput(
                 &self.environment,
                 &self.state,
                 &transaction_value,
             );
             const outcome = if (prelude) |value| switch (mode) {
-                .normal => try self.transaction_runtime.transactInBlockWithPrelude(
+                .normal => try transaction_program.transactInBlockWithPrelude(
+                    &self.transaction_runtime,
                     input,
-                    self.claim,
                     value,
                 ),
-                .observed => try self.transaction_runtime.transactObservedInBlockWithPrelude(
+                .observed => try transaction_program.transactObservedInBlockWithPrelude(
+                    &self.transaction_runtime,
                     input,
-                    self.claim,
                     value,
                 ),
-                .captured => |capture| try self.transaction_runtime.transactCapturedInBlockWithPrelude(
+                .captured => |capture| try transaction_program.transactCapturedInBlockWithPrelude(
+                    &self.transaction_runtime,
                     input,
-                    self.claim,
                     value,
                     capture,
                 ),
             } else switch (mode) {
-                .normal => try self.transaction_runtime.transactInBlock(input, self.claim),
-                .observed => try self.transaction_runtime.transactObservedInBlock(input, self.claim),
+                .normal => try transaction_program.transactInBlock(&self.transaction_runtime, input),
+                .observed => try transaction_program.transactObservedInBlock(&self.transaction_runtime, input),
                 .captured => unreachable,
             };
             return switch (outcome) {
@@ -363,32 +369,40 @@ fn BoundBlockProgram(
                         view.logs,
                         plan,
                     );
-                    try observer.observe(executed.pending.view());
-                    try executed.retain();
+                    try observer.observe(executed.pendingView());
+                    executed.retain();
                     ImplementationType.applyInclude(&self.state, plan);
                     break :blk .{ .included = included };
                 },
             };
         }
 
+        /// Return current block-fold output without releasing ownership.
         pub fn progress(self: *const Self) Result {
+            requireActive(self);
             return ImplementationType.finish(&self.environment, &self.state);
         }
 
-        pub fn finish(self: *Self) Error!Result {
-            if (self.finished) return error.BlockExecutionFinished;
-            try self.claim.requireFor(self.executorPtr());
+        /// Return final block-fold output and release the Executor claim.
+        ///
+        /// This does not commit the accepted branch to a durable backend.
+        pub fn finish(self: *Self) Result {
+            requireActive(self);
             const result = ImplementationType.finish(&self.environment, &self.state);
-            self.claim.release();
+            release(executorFor(self), self.generation);
             self.finished = true;
             return result;
         }
 
+        /// Roll back accepted block changes if this copy still owns the claim.
+        ///
+        /// This is the idempotent cleanup operation for `defer`.
         pub fn discardIfUnfinished(self: *Self) void {
             if (self.finished) return;
-            self.claim.requireFor(self.executorPtr()) catch return;
-            self.executorPtr().discardAccepted();
-            self.claim.release();
+            const executor = executorFor(self);
+            if (executor.active_block_execution_generation != self.generation) return;
+            executor.discardAccepted();
+            release(executor, self.generation);
             self.finished = true;
         }
 

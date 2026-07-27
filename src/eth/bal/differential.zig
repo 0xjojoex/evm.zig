@@ -648,7 +648,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                         ),
                     );
                     defer effects_builder.discardIfUnfinished();
-                    try executed.retain();
+                    executed.retain();
                     return effects_builder.finish();
                 },
             }

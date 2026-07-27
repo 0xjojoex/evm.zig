@@ -33,7 +33,7 @@ pub fn transact(
 pub fn expectExecuted(result: anytype) !TxExecutionResult {
     if (comptime @hasField(@TypeOf(result), "executed")) {
         return switch (result) {
-            .executed => |executed| try executed.retainResult(),
+            .executed => |executed| executed.retainResult(),
             .rejected => error.UnexpectedRejection,
         };
     }

@@ -312,7 +312,7 @@ test "Sequential failing before-transaction prelude discards the opened attempt"
     }));
     try std.testing.expect(!executor.hasCurrentTransaction());
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u64, 0), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 0), block.progress().tx_count);
 }
 
 test "Sequential empty before-transaction prelude stays in one observed transition" {
@@ -435,7 +435,7 @@ test "Sequential block rejection restores before-transaction hook and payload wr
 
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(LifecycleBlock.before_transaction_address, 0));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(payload, 0));
-    const progress = try block.progress();
+    const progress = block.progress();
     try std.testing.expectEqual(@as(u64, 0), progress.tx_count);
     try std.testing.expectEqual(std.math.maxInt(u64), progress.block_gas.total);
 }
@@ -475,7 +475,7 @@ test "Sequential discard restores included hook and payload without allocating" 
     };
     const receipt = included.receipt;
     try std.testing.expectEqual(receipt.gas_used, receipt.cumulative_gas_used);
-    try std.testing.expectEqual(@as(u64, 1), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
     block.discardIfUnfinished();
@@ -484,7 +484,6 @@ test "Sequential discard restores included hook and payload without allocating" 
 
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(LifecycleBlock.before_transaction_address, 0));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(payload, 0));
-    try std.testing.expectError(error.BlockExecutionFinished, block.progress());
 }
 
 test "Sequential restores a system call when outer commit observation fails" {
@@ -632,40 +631,11 @@ test "Sequential next transaction stops when the previous after hook fails" {
         .to = recipient,
         .gas_limit = 100_000,
     }));
-    try std.testing.expectEqual(@as(u64, 1), (try block.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
     try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
 
     block.discardIfUnfinished();
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
-}
-
-test "one Executor admits only one active Sequential" {
-    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    var block = try beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 });
-    defer block.discardIfUnfinished();
-    var vm = evmz.Evm.init(&executor);
-
-    try std.testing.expectError(
-        error.BlockExecutionActive,
-        beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 }),
-    );
-    try std.testing.expectError(
-        error.BlockExecutionActive,
-        vm.transact(.{
-            .env = .{ .gas_limit = 1_000_000 },
-            .tx = .{
-                .sender = evmz.addr(0xaaaa),
-                .to = evmz.addr(0xbbbb),
-                .gas_limit = 21_000,
-            },
-        }),
-    );
-    try std.testing.expectError(
-        error.BlockExecutionActive,
-        executor.reset(.{}),
-    );
 }
 
 test "independent Executors admit independent Sequential lifetimes" {
@@ -679,11 +649,11 @@ test "independent Executors admit independent Sequential lifetimes" {
     var second = try beginBlock(evmz.Evm, &second_executor, .{ .gas_limit = 1_000_000 });
     defer second.discardIfUnfinished();
 
-    try std.testing.expectEqual(@as(u64, 0), (try first.progress()).tx_count);
-    try std.testing.expectEqual(@as(u64, 0), (try second.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 0), first.progress().tx_count);
+    try std.testing.expectEqual(@as(u64, 0), second.progress().tx_count);
 }
 
-test "stale Sequential copy cannot resolve a later generation" {
+test "stale Sequential cleanup cannot resolve a later generation" {
     var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -695,8 +665,7 @@ test "stale Sequential copy cannot resolve a later generation" {
     defer second.discardIfUnfinished();
     stale.discardIfUnfinished();
 
-    try std.testing.expectError(error.StaleBlockExecution, stale.progress());
-    try std.testing.expectEqual(@as(u64, 0), (try second.progress()).tx_count);
+    try std.testing.expectEqual(@as(u64, 0), second.progress().tx_count);
 }
 
 fn beginBlock(comptime Engine: type, executor: *Engine.Executor, env: evmz.Env) !Engine.Sequential {

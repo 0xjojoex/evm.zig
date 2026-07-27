@@ -79,7 +79,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
     const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(.{ .origin = sender });
     const request = transaction.executionRequest(context, message, .legacy(100_000));
     try executor.beginMessageScope(request, .{});
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const result = try executor.executeTransactionRequest(request);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
@@ -98,7 +98,7 @@ test "Amsterdam created contract selfdestruct clears code and keeps account at c
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });
 
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecutedLease(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
         .env = .{ .gas_limit = 1_000_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .sender = sender,

@@ -156,10 +156,10 @@ pub fn bind(
                     .accounts = initial_accounts[0..initial_account_count],
                 },
             };
-            const attempt = try context.beginAttempt();
+            try context.beginTransaction();
             try context.runPrelude();
-            try attempt.beginExecution(request, scope_init);
-            const result = try executePrepared(context, attempt, executable);
+            try context.beginExecution(request, scope_init);
+            const result = try executePrepared(context, executable);
             const created_address = if (result.status == .success) switch (executable.message) {
                 .call => null,
                 .create => |create| create.recipient,
@@ -174,7 +174,6 @@ pub fn bind(
 
         fn executePrepared(
             context: *Context,
-            attempt: Context.AttemptCapability,
             executable: PreparedTransaction,
         ) Error!struct {
             status: interpreter.Status,
@@ -184,13 +183,12 @@ pub fn bind(
             const sender = executable.message.sender();
             const execution_gas = executable.execution_gas;
             const transaction_charged = if (execution_gas != null)
-                try chargeTransactionCosts(context, attempt, sender, executable.settlement)
+                try chargeTransactionCosts(context, sender, executable.settlement)
             else
                 false;
-            var nonce_intent: ?Context.AttemptCapability.TransactionNonceIntent = null;
             if (transaction_charged) {
-                nonce_intent = try attempt.advanceTransactionNonce(executable.message);
-                try warmAccessList(attempt, executable.scope.access_list);
+                try context.advanceTransactionNonce(executable.message);
+                try warmAccessList(context, executable.scope.access_list);
             }
 
             var result = interpreter.Result{
@@ -206,16 +204,14 @@ pub fn bind(
                     const has_authorization_phase = authorization_spec.active and
                         executable.scope.authorizationCount() != 0;
                     result = if (has_authorization_phase)
-                        try executeAuthorizedPayload(context, attempt, executable, gas)
+                        try executeAuthorizedPayload(context, executable, gas)
                     else
-                        try executePayload(attempt, executable, gas);
+                        try executePayload(context, executable, gas);
                 }
             }
 
-            if (nonce_intent) |intent| intent.complete();
-
             const result_gas = if (transaction_charged)
-                try settleTransactionCosts(context, attempt, sender, executable.settlement, result)
+                try settleTransactionCosts(context, sender, executable.settlement, result)
             else blk: {
                 const settlement_planner = settlementPlanner(context);
                 break :blk settlement_planner.planGas(try settlement_planner.planCosts(executable.settlement, .{
@@ -234,17 +230,15 @@ pub fn bind(
 
         fn executeAuthorizedPayload(
             context: *Context,
-            attempt: Context.AttemptCapability,
             executable: PreparedTransaction,
             initial_gas: execution.ExecutionGas,
         ) Error!interpreter.Result {
-            var preparation_checkpoint = try attempt.checkpoint();
+            var preparation_checkpoint = try context.checkpoint();
             defer preparation_checkpoint.deinit();
 
             var gas = PreExecutionGas.init(initial_gas);
             const authorized = try applyAuthorizationList(
                 context,
-                attempt,
                 executable.scope.context.chain.chain_id,
                 executable.message,
                 executable.scope,
@@ -254,9 +248,9 @@ pub fn bind(
                 preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
                 return gas.includedOutOfGas();
             }
-            try warmDelegatedTransactionTarget(attempt, executable.message);
+            try warmDelegatedTransactionTarget(context, executable.message);
 
-            const outcome = try attempt.runPayload(transaction.executionRequest(
+            const outcome = try context.runPayload(transaction.executionRequest(
                 executable.scope.context,
                 executable.message,
                 gas.gas,
@@ -272,31 +266,30 @@ pub fn bind(
                 preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
             } else {
                 preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
-                try attempt.finalizeState();
+                try context.finalizeState();
             }
             return result;
         }
 
         fn executePayload(
-            attempt: Context.AttemptCapability,
+            context: *Context,
             executable: PreparedTransaction,
             gas: execution.ExecutionGas,
         ) Error!interpreter.Result {
-            const outcome = try attempt.runPayload(transaction.executionRequest(
+            const outcome = try context.runPayload(transaction.executionRequest(
                 executable.scope.context,
                 executable.message,
                 gas,
             ));
             const result = outcome.result;
             if (!executionRolledBack(result.status)) {
-                try attempt.finalizeState();
+                try context.finalizeState();
             }
             return result;
         }
 
         fn chargeTransactionCosts(
-            context: *const Context,
-            attempt: Context.AttemptCapability,
+            context: *Context,
             sender: Address,
             plan: tx_settlement.DefaultPlan,
         ) !bool {
@@ -304,14 +297,13 @@ pub fn bind(
             const required_balance = @max(precharge.minimum_balance, precharge.upfront_debit);
             if (required_balance == 0) return true;
             const payer = precharge.payer orelse sender;
-            const payer_account = try attempt.accountSummary(payer) orelse return false;
+            const payer_account = try context.accountSummary(payer) orelse return false;
             if (payer_account.balance < required_balance) return false;
-            return attempt.subtractBalance(payer, precharge.upfront_debit);
+            return context.subtractBalance(payer, precharge.upfront_debit);
         }
 
         fn settleTransactionCosts(
-            context: *const Context,
-            attempt: Context.AttemptCapability,
+            context: *Context,
             sender: Address,
             plan: tx_settlement.DefaultPlan,
             result: interpreter.Result,
@@ -323,43 +315,42 @@ pub fn bind(
                 .gas_reservoir = result.gas_reservoir,
                 .state_gas_spent = result.state_gas_spent,
             });
-            try attempt.addBalance(plan.payer orelse sender, costs.payer_refund);
+            try context.addBalance(plan.payer orelse sender, costs.payer_refund);
             if (costs.fee_payment == 0) {
-                try attempt.accountAccess(plan.fee_recipient);
+                try context.accountAccess(plan.fee_recipient);
             }
             if (costs.fee_payment == 0 and
                 settlement_spec.touches_fee_recipient_on_zero_payment)
             {
-                try attempt.touchAccount(plan.fee_recipient);
+                try context.touchAccount(plan.fee_recipient);
             } else {
-                try attempt.addBalance(plan.fee_recipient, costs.fee_payment);
+                try context.addBalance(plan.fee_recipient, costs.fee_payment);
             }
             return settlement_planner.planGas(costs);
         }
 
         fn warmAccessList(
-            attempt: Context.AttemptCapability,
+            context: *Context,
             access_list: []const transaction.AccessListEntry,
         ) !void {
             for (access_list) |entry| {
-                try attempt.warmAccount(entry.address);
+                try context.warmAccount(entry.address);
                 for (entry.storage_keys) |key| {
-                    try attempt.warmStorage(entry.address, key);
+                    try context.warmStorage(entry.address, key);
                 }
             }
         }
 
         // TODO: perf check
         fn applyAuthorizationList(
-            _: *const Context,
-            attempt: Context.AttemptCapability,
+            context: *Context,
             chain_id: u256,
             message: execution.Message,
             scope: transaction.TransactionScope,
             gas: *PreExecutionGas,
         ) !bool {
             if (!authorization_spec.active) return true;
-            const allocator = try attempt.allocator();
+            const allocator = try context.allocator();
             var written_accounts = std.AutoHashMap(Address, void).init(allocator);
             defer written_accounts.deinit();
             try written_accounts.put(message.sender(), {});
@@ -373,7 +364,7 @@ pub fn bind(
             defer delegation_set_for.deinit();
             for (scope.authorization_list) |authorization| {
                 const outcome = try applyAuthorizationTuple(
-                    attempt,
+                    context,
                     chain_id,
                     authorization,
                     gas,
@@ -387,7 +378,7 @@ pub fn bind(
         }
 
         fn applyAuthorizationTuple(
-            attempt: Context.AttemptCapability,
+            context: *Context,
             chain_id: u256,
             tuple: transaction.AuthorizationTuple,
             gas: *PreExecutionGas,
@@ -407,10 +398,10 @@ pub fn bind(
             if (tuple.nonce == std.math.maxInt(u64))
                 return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
 
-            try attempt.warmAccount(tuple.signer);
-            const existing_account = try attempt.accountSummary(tuple.signer);
+            try context.warmAccount(tuple.signer);
+            const existing_account = try context.accountSummary(tuple.signer);
             const account_exists = existing_account != null;
-            const existing_code = if (account_exists) try attempt.code(tuple.signer) else &.{};
+            const existing_code = if (account_exists) try context.code(tuple.signer) else &.{};
             const currently_delegated = eip7702.delegationTarget(existing_code) != null;
             const delegated_before_first = if (pre_delegated_by_authority.get(tuple.signer)) |delegated|
                 delegated
@@ -440,13 +431,13 @@ pub fn bind(
             try written_accounts.put(tuple.signer, {});
             if (!clears_delegation) try delegation_set_for.put(tuple.signer, {});
             if (clears_delegation) {
-                try attempt.clearCode(tuple.signer);
+                try context.clearCode(tuple.signer);
             } else {
                 var code: [eip7702.delegation_code_len]u8 = undefined;
                 eip7702.writeDelegationCode(&code, tuple.target);
-                try attempt.setCode(tuple.signer, &code);
+                try context.setCode(tuple.signer, &code);
             }
-            try attempt.setNonce(tuple.signer, tuple.nonce + 1);
+            try context.setNonce(tuple.signer, tuple.nonce + 1);
             return .applied;
         }
 
@@ -460,14 +451,14 @@ pub fn bind(
         }
 
         fn warmDelegatedTransactionTarget(
-            attempt: Context.AttemptCapability,
+            context: *Context,
             message: execution.Message,
         ) !void {
             if (!authorization_spec.warms_delegated_target) return;
             switch (message) {
                 .call => |call_tx| {
-                    const target = executor.eip7702.delegationTarget(try attempt.code(call_tx.recipient)) orelse return;
-                    try attempt.warmAccount(target);
+                    const target = executor.eip7702.delegationTarget(try context.code(call_tx.recipient)) orelse return;
+                    try context.warmAccount(target);
                 },
                 .create => {},
             }

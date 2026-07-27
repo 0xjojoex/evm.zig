@@ -5,17 +5,18 @@
 //! `Vm` handle validation and user-facing transaction shapes; this type is the
 //! execution substrate underneath them.
 //!
-//! The public methods fall into two lifecycle layers:
+//! Prefer one of three explicit ownership layers:
 //!
-//! 1. `runStandalone` is the convenience path for raw call/create messages. It
-//!    opens a transaction scope, checkpoints state, executes, then commits or
-//!    rolls back from the result status.
-//! 2. `beginMessageScope` + `beginTransactionAttempt` is the engine transaction
-//!    program boundary used by `Vm.transact`: the family program owns charging,
-//!    nonce/access/authorization effects, execution rollback, and settlement.
-//! `beginTransaction` / `beginCreateTransaction` + `executeCall` /
-//! `executeCreate` are lower-level building blocks for tests, fixtures,
-//! benchmarks, and code that needs to drive a partially-managed scope.
+//! 1. `Vm.transact` for complete family transaction semantics. Completion
+//!    returns one `Executed` owner that must be retained or discarded.
+//! 2. `executeStandalone*` for a fully managed raw CALL/CREATE message. These
+//!    methods do not perform family validation, charging, or settlement.
+//! 3. Manual scope methods for STF work and diagnostic harnesses that must place
+//!    checkpoints themselves. A successful manual transition must be committed
+//!    or explicitly retained; failure cleanup must discard it.
+//!
+//! Family transaction choreography is private to `transaction/runtime.zig`.
+//! Consumers cannot begin or finish the Executor's active transaction row.
 //!
 //! `executor/call_runtime.zig` owns call/create frame execution and bytecode
 //! frame setup. `executor/host_callbacks.zig` owns the `Host` vtable adapter.
@@ -57,16 +58,15 @@ const call_scratch_storage = @import("./executor/call_scratch.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
 const FrameStore = @import("./executor/frame_store.zig");
 const host_callbacks = @import("./executor/host_callbacks.zig");
-const runtime_frame_defs = @import("./executor/runtime_frames.zig");
 pub const state_io = @import("./executor/state_io.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
+const transaction_runtime = @import("./transaction/runtime.zig");
 const uint256 = @import("./uint256.zig");
 
 const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
-const RuntimeFrameStack = std.ArrayList(runtime_frame_defs.Frame);
 
 const IgnorePending = struct {
     pub fn observe(_: IgnorePending, _: TrackedState.PendingView) !void {}
@@ -113,7 +113,7 @@ const InitOptions = struct {
 ///
 /// This is the narrowest call entrypoint. Use it when a benchmark/test wants to
 /// control bytecode preprocessing explicitly; otherwise prefer `executeCall` or
-/// `runStandalone`.
+/// `executeStandalone`.
 pub const PreparedCallTransaction = struct {
     bytecode: Bytecode.View,
     sender: Address,
@@ -167,14 +167,13 @@ pub fn Executor(comptime spec: ExactSpec) type {
         allocator: std.mem.Allocator,
         state: TrackedState,
         frame_store: FrameStore,
-        runtime_frames: RuntimeFrameStack,
         call_scratch_slots: CallScratchSlots,
         prepared_code_scratch: call_scratch_storage.Slot,
         execution_context: ?execution_values.ExecutionContext = null,
         scope_root: ?ScopeRoot = null,
         manual_state_attempt: ?ManualStateAttempt = null,
-        current_transaction_attempt: ?TransactionAttemptState = null,
-        next_transaction_attempt_generation: u64 = 0,
+        transaction_runtime_state: ?TransactionRuntimeState = null,
+        next_transaction_generation: u64 = 0,
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
         checkpoint_top: usize = 0,
@@ -188,16 +187,16 @@ pub fn Executor(comptime spec: ExactSpec) type {
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        const AttemptMode = union(enum) {
+        const ExecutionMode = union(enum) {
             normal,
             observed,
             captured: *CaptureContext,
 
-            fn observesState(self: AttemptMode) bool {
+            fn observesState(self: ExecutionMode) bool {
                 return self != .normal;
             }
 
-            fn captureContext(self: AttemptMode) ?*CaptureContext {
+            fn captureContext(self: ExecutionMode) ?*CaptureContext {
                 return switch (self) {
                     .normal, .observed => null,
                     .captured => |context| context,
@@ -207,361 +206,157 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         const ManualStateAttempt = struct {
             id: TrackedState.AttemptId,
-            mode: AttemptMode,
+            mode: ExecutionMode,
         };
 
-        const TransactionAttemptState = struct {
+        const TransactionRuntimeState = struct {
             state_attempt_id: TrackedState.AttemptId,
             generation: u64,
-            mode: AttemptMode,
+            mode: ExecutionMode,
             phase: enum { active, pending } = .active,
-            nonce_intent: TransactionNonceIntentState = .unused,
+            nonce_advanced: bool = false,
             payload_started: bool = false,
         };
 
-        const TransactionNonceIntentState = union(enum) {
-            unused,
-            active: struct {
-                root: ScopeRoot,
-            },
-            completed,
-        };
+        /// The exclusive externally copyable owner of one completed but
+        /// unresolved transaction. Executor keeps the phase state; this value
+        /// carries the generation needed to reject stale copies.
+        pub fn Executed(comptime Output: type) type {
+            return struct {
+                const Execution = @This();
 
-        /// Generation-checked mutation capability for one rollback-armed
-        /// transaction attempt. It exposes execution and direct state
-        /// operations, but only the owning transaction binder may finish it.
-        pub const TransactionAttempt = struct {
-            executor: *Self,
-            generation: u64,
-
-            pub const AccountSummary = struct {
-                nonce: u64,
-                balance: u256,
-                code_hash: [32]u8,
-            };
-
-            /// One transaction-owned sender-nonce advancement. The mutation is
-            /// placed outside the payload checkpoint. Root transaction execution
-            /// treats nonce handling as complete; raw and nested CREATE do not.
-            pub const TransactionNonceIntent = struct {
                 executor: *Self,
-                attempt_generation: u64,
-                sender: Address,
+                generation: u64,
+                output_value: Output,
 
-                pub fn complete(self: TransactionNonceIntent) void {
-                    const attempt = TransactionAttempt{
-                        .executor = self.executor,
-                        .generation = self.attempt_generation,
+                pub const View = struct {
+                    output: *const Output,
+                    logs: TrackedState.LogView,
+                };
+
+                /// Borrow family output and logs while this result is unresolved.
+                pub fn view(self: *const Execution) View {
+                    return .{
+                        .output = &self.output_value,
+                        .logs = self.pendingView().logs(),
                     };
-                    const attempt_state = attempt.state();
-                    const intent = switch (attempt_state.nonce_intent) {
-                        .active => |intent| intent,
-                        .unused, .completed => unreachable,
-                    };
-                    std.debug.assert(std.mem.eql(u8, &intent.root.sender, &self.sender));
-                    attempt_state.nonce_intent = .completed;
+                }
+
+                /// Borrow the family output while this result is unresolved.
+                pub fn output(self: *const Execution) *const Output {
+                    _ = self.state();
+                    return &self.output_value;
+                }
+
+                /// Copy the family output while leaving state unresolved.
+                pub fn result(self: Execution) Output {
+                    _ = self.state();
+                    return self.output_value;
+                }
+
+                /// Borrow transaction logs while this result is unresolved.
+                pub fn logs(self: Execution) TrackedState.LogView {
+                    return self.pendingView().logs();
+                }
+
+                /// Return the Executor allocator after validating this generation.
+                pub fn allocator(self: Execution) std.mem.Allocator {
+                    _ = self.state();
+                    return self.executor.allocator;
+                }
+
+                /// Borrow the complete sealed state view before resolution.
+                pub fn pendingView(self: Execution) TrackedState.PendingView {
+                    _ = self.state();
+                    return self.executor.state.pendingView();
+                }
+
+                /// Borrow net state changes before resolution.
+                pub fn changes(self: Execution) TrackedState.ChangesView {
+                    return self.pendingView().changes();
+                }
+
+                /// Borrow retained state observations before resolution.
+                pub fn observations(self: Execution) TrackedState.ObservationsView {
+                    return self.pendingView().observations();
+                }
+
+                /// Accept this transaction's sealed state into the Executor branch.
+                ///
+                /// The value and all copies become stale after this call.
+                pub fn retain(self: Execution) void {
+                    const state_value = self.state();
+                    self.executor.state.retain(state_value.state_attempt_id);
+                    self.executor.finishCurrentTransaction(false);
+                }
+
+                /// Retain state and return the family output by value.
+                pub fn retainResult(self: Execution) Output {
+                    self.retain();
+                    return self.output_value;
+                }
+
+                /// Roll back this transaction's sealed state.
+                ///
+                /// The value and all copies become stale after this call.
+                pub fn discard(self: Execution) void {
+                    _ = self.state();
+                    self.executor.discardCurrentTransaction();
+                }
+
+                /// Discard only if this copy still identifies the current result.
+                ///
+                /// This is the idempotent cleanup operation for `defer`.
+                pub fn discardIfCurrent(self: Execution) void {
+                    const current = if (self.executor.transaction_runtime_state) |*value| value else return;
+                    if (current.generation != self.generation or current.phase != .pending) return;
+                    self.discard();
+                }
+
+                fn state(self: Execution) *TransactionRuntimeState {
+                    const state_value = if (self.executor.transaction_runtime_state) |*value| value else unreachable;
+                    std.debug.assert(state_value.generation == self.generation);
+                    std.debug.assert(state_value.phase == .pending);
+                    return state_value;
                 }
             };
+        }
 
-            pub fn allocator(self: TransactionAttempt) std.mem.Allocator {
-                self.requireActive();
-                return self.executor.allocator;
-            }
-
-            pub fn executeRequest(
-                self: TransactionAttempt,
-                request: execution_values.EvmExecutionRequest,
-            ) !Interpreter.Result {
-                self.requireActive();
-                return self.executor.executeTransactionRequest(request);
-            }
-
-            pub fn executeRequestPhased(
-                self: TransactionAttempt,
-                request: execution_values.EvmExecutionRequest,
-            ) !TransactionExecutionOutcomeType {
-                self.requireActive();
-                return self.executor.executeTransactionRequestPhased(request);
-            }
-
-            /// Execute one root payload under a managed inner checkpoint.
-            ///
-            /// The payload writes remain in the outer attempt only when dispatch
-            /// reaches payload execution and succeeds. Preparation failure and
-            /// EVM revert/invalid/out-of-gas restore only this inner checkpoint.
-            /// The caller still owns scope opening, family preparation and
-            /// finalization, settlement, and completion of the outer attempt.
-            pub fn runPayload(
-                self: TransactionAttempt,
-                request: execution_values.EvmExecutionRequest,
-            ) !TransactionExecutionOutcomeType {
-                self.requireActive();
-                return self.executor.runPayloadInOpenScope(request);
-            }
-
-            /// Execute a nested prelude request under this attempt's outer
-            /// rollback checkpoint while temporarily using the request's own
-            /// opcode-visible context and root message.
-            pub fn executePreludeRequest(
-                self: TransactionAttempt,
-                request: execution_values.EvmExecutionRequest,
-            ) !Interpreter.Result {
-                self.requireActive();
-                return self.executor.runTransactionPreludeRequest(request);
-            }
-
-            /// Open the payload's execution scope after any transaction
-            /// prelude scopes have closed.
-            pub fn beginExecution(
-                self: TransactionAttempt,
-                request: execution_values.EvmExecutionRequest,
-                scope_init: execution_values.ExecutionScopeInit,
-            ) !void {
-                self.requireActive();
-                try self.executor.beginMessageScopeInAttempt(request, scope_init);
-            }
-
-            pub fn checkpoint(self: TransactionAttempt) !ExecutionCheckpoint {
-                self.requireActive();
-                return self.executor.checkpoint();
-            }
-
-            pub fn accountSummary(self: TransactionAttempt, account_address: Address) !?AccountSummary {
-                self.requireActive();
-                const account = try self.executor.getAccountOrLoad(account_address) orelse return null;
-                return .{
-                    .nonce = account.nonce,
-                    .balance = account.balance,
-                    .code_hash = account.code_hash,
-                };
-            }
-
-            pub fn code(self: TransactionAttempt, account_address: Address) ![]const u8 {
-                self.requireActive();
-                return self.executor.getCode(account_address);
-            }
-
-            pub fn balance(self: TransactionAttempt, account_address: Address) !u256 {
-                self.requireActive();
-                return self.executor.getBalance(account_address);
-            }
-
-            pub fn accountAccess(self: TransactionAttempt, account_address: Address) !void {
-                self.requireActive();
-                try self.executor.traceAccountAccess(account_address);
-            }
-
-            pub fn touchAccount(self: TransactionAttempt, account_address: Address) !void {
-                self.requireActive();
-                try self.executor.state.touchAccount(account_address);
-            }
-
-            pub fn addBalance(self: TransactionAttempt, account_address: Address, value: u256) !void {
-                self.requireActive();
-                try self.executor.state.addBalance(account_address, value);
-            }
-
-            pub fn subtractBalance(self: TransactionAttempt, account_address: Address, value: u256) !bool {
-                self.requireActive();
-                return self.executor.state.subtractBalance(account_address, value);
-            }
-
-            pub fn setNonce(self: TransactionAttempt, account_address: Address, nonce: u64) !void {
-                self.requireActive();
-                try self.executor.state.setNonce(account_address, nonce);
-            }
-
-            pub fn incrementNonce(self: TransactionAttempt, account_address: Address) !void {
-                self.requireActive();
-                try self.executor.incrementNonce(account_address);
-            }
-
-            /// Advance the transaction sender nonce exactly once outside the
-            /// payload rollback boundary. Completion is mandatory before the
-            /// attempt can finish.
-            pub fn advanceTransactionNonce(
-                self: TransactionAttempt,
-                message: MessageType,
-            ) !TransactionNonceIntent {
-                const attempt_state = self.state();
-                std.debug.assert(std.meta.activeTag(attempt_state.nonce_intent) == .unused);
-                std.debug.assert(!attempt_state.payload_started);
-                try self.executor.validateScopeRoot(.fromMessage(message));
-
-                const sender = message.sender();
-                try self.executor.incrementNonce(sender);
-                attempt_state.nonce_intent = .{ .active = .{
-                    .root = .fromMessage(message),
-                } };
-                return .{
-                    .executor = self.executor,
-                    .attempt_generation = self.generation,
-                    .sender = sender,
-                };
-            }
-
-            pub fn setCode(self: TransactionAttempt, account_address: Address, code_bytes: []const u8) !void {
-                self.requireActive();
-                try self.executor.state.setCode(account_address, code_bytes);
-            }
-
-            pub fn clearCode(self: TransactionAttempt, account_address: Address) !void {
-                self.requireActive();
-                try self.executor.state.clearCode(account_address);
-            }
-
-            pub fn warmAccount(self: TransactionAttempt, account_address: Address) !void {
-                self.requireActive();
-                try self.executor.warmAccount(account_address);
-            }
-
-            pub fn warmStorage(self: TransactionAttempt, account_address: Address, key: u256) !void {
-                self.requireActive();
-                try self.executor.warmStorage(account_address, key);
-            }
-
-            pub fn finalizeState(self: TransactionAttempt) !void {
-                self.requireActive();
-                try self.executor.finalizeTransactionState();
-            }
-
-            pub fn logView(self: TransactionAttempt) TrackedState.LogView {
-                self.requireActive();
-                return self.executor.state.logView();
-            }
-
-            /// Finish the attempt into an uncommitted pending state. Family
-            /// transaction output stays in the transaction binder.
-            pub fn finish(self: TransactionAttempt) Pending {
-                const state_value = self.state();
-                std.debug.assert(std.meta.activeTag(state_value.nonce_intent) != .active);
-                self.executor.closeTransactionAttemptScope();
-                self.executor.state.seal(state_value.state_attempt_id);
-                state_value.phase = .pending;
-                return .{
-                    .executor = self.executor,
-                    .generation = self.generation,
-                };
-            }
-
-            pub fn discard(self: TransactionAttempt) !void {
-                _ = self.state();
-                try self.executor.discardCurrentTransaction();
-            }
-
-            pub fn discardIfCurrent(self: TransactionAttempt) void {
-                const current = if (self.executor.current_transaction_attempt) |*value| value else return;
-                if (current.generation != self.generation) return;
-                if (current.phase != .active) return;
-                self.discard() catch {};
-            }
-
-            fn requireActive(self: TransactionAttempt) void {
-                _ = self.state();
-            }
-
-            fn state(self: TransactionAttempt) *TransactionAttemptState {
-                const state_value = if (self.executor.current_transaction_attempt) |*value| value else unreachable;
-                std.debug.assert(state_value.generation == self.generation);
-                std.debug.assert(state_value.phase == .active);
-                return state_value;
-            }
+        pub const TransactionAccountSummary = struct {
+            nonce: u64,
+            balance: u256,
+            code_hash: [32]u8,
         };
 
-        /// Generation-checked exclusive claim over this mutable state branch.
-        /// Independent executors carry independent claims.
-        pub const BlockExecutionClaim = struct {
-            executor: *Self,
-            generation: u64,
+        pub fn transactionAccountSummary(self: *Self, account_address: Address) !?TransactionAccountSummary {
+            transaction_runtime.requireActive(self);
+            const account = try self.getAccountOrLoad(account_address) orelse return null;
+            return .{
+                .nonce = account.nonce,
+                .balance = account.balance,
+                .code_hash = account.code_hash,
+            };
+        }
 
-            pub fn requireActive(self: BlockExecutionClaim) !void {
-                const active = self.executor.active_block_execution_generation orelse
-                    return error.BlockExecutionFinished;
-                if (active != self.generation) return error.StaleBlockExecution;
-            }
+        pub fn advanceTransactionNonce(
+            self: *Self,
+            message: MessageType,
+        ) !void {
+            const runtime_state = if (self.transaction_runtime_state) |*value| value else unreachable;
+            std.debug.assert(runtime_state.phase == .active);
+            std.debug.assert(!runtime_state.nonce_advanced);
+            std.debug.assert(!runtime_state.payload_started);
+            self.validateScopeRoot(.fromMessage(message));
 
-            pub fn requireFor(self: BlockExecutionClaim, executor: *Self) !void {
-                if (self.executor != executor) return error.WrongBlockExecution;
-                try self.requireActive();
-            }
-
-            pub fn release(self: BlockExecutionClaim) void {
-                if (self.executor.active_block_execution_generation == self.generation) {
-                    self.executor.active_block_execution_generation = null;
-                }
-            }
-        };
-
-        /// Thin identity token for one completed transaction attempt.
-        /// Lifecycle misuse is a programmer error. The generation only makes a
-        /// copied stale token assert before it can resolve a newer attempt.
-        pub const Pending = struct {
-            executor: *Self,
-            generation: u64,
-
-            pub fn requireCurrent(self: Pending) void {
-                _ = self.state();
-            }
-
-            pub fn view(self: Pending) TrackedState.PendingView {
-                _ = self.state();
-                return self.executor.state.pendingView();
-            }
-
-            pub fn logView(self: Pending) TrackedState.LogView {
-                return self.view().logs();
-            }
-
-            /// Allocator that owns detached pending artifacts. It remains
-            /// caller-owned and must outlive them.
-            pub fn allocator(self: Pending) std.mem.Allocator {
-                _ = self.state();
-                return self.executor.allocator;
-            }
-
-            /// Borrow transaction-local changes while rollback remains armed.
-            pub fn changes(self: Pending) TrackedState.ChangesView {
-                return self.view().changes();
-            }
-
-            /// Retain pending state whose family output lives beside it.
-            pub fn retain(self: Pending) !void {
-                const state_value = self.state();
-                try self.retainState(state_value);
-            }
-
-            fn retainState(self: Pending, state_value: *TransactionAttemptState) !void {
-                self.executor.state.retain(state_value.state_attempt_id);
-                self.executor.finishCurrentTransaction(false);
-            }
-
-            /// Restore the state that preceded this execution. Transaction
-            /// ownership closes even if rollback observation reports an error.
-            pub fn discard(self: Pending) !void {
-                _ = self.state();
-                try self.executor.discardCurrentTransaction();
-            }
-
-            pub fn discardIfCurrent(self: Pending) void {
-                const current = if (self.executor.current_transaction_attempt) |*value| value else return;
-                if (current.generation != self.generation) return;
-                if (current.phase != .pending) return;
-                self.discard() catch {};
-            }
-
-            fn state(self: Pending) *TransactionAttemptState {
-                const state_value = if (self.executor.current_transaction_attempt) |*value| value else unreachable;
-                std.debug.assert(state_value.generation == self.generation);
-                std.debug.assert(state_value.phase == .pending);
-                return state_value;
-            }
-        };
+            try self.incrementNonce(message.sender());
+            runtime_state.nonce_advanced = true;
+        }
 
         /// Scope-bound execution checkpoint paired with one trace/BAL lifecycle.
         ///
         /// This journal-backed token must be opened and closed inside one active
         /// transaction scope. It never finalizes or closes that scope. The owning
-        /// transaction attempt can span prelude writes and payload execution;
+        /// transaction runtime can span prelude writes and payload execution;
         /// broader block phases still use their own STF/backend lifetime.
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
@@ -614,7 +409,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 .allocator = allocator,
                 .state = state,
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
-                .runtime_frames = .empty,
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
                 .block_hash_source = options.block_hash_source,
@@ -627,14 +421,14 @@ pub fn Executor(comptime spec: ExactSpec) type {
         }
 
         pub fn currentCaptureContext(self: *Self) ?*CaptureContext {
-            if (self.current_transaction_attempt) |attempt|
+            if (self.transaction_runtime_state) |attempt|
                 return attempt.mode.captureContext();
             if (self.manual_state_attempt) |attempt|
                 return attempt.mode.captureContext();
             return null;
         }
 
-        fn assertAttemptMode(mode: AttemptMode) void {
+        fn assertExecutionMode(mode: ExecutionMode) void {
             const context = mode.captureContext() orelse return;
             std.debug.assert(context.isActive());
         }
@@ -645,12 +439,12 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         /// Rebind fixture/benchmark inputs and reset tracked state.
         pub fn reset(self: *Self, options: Init) !void {
-            if (self.hasActiveBlockExecution()) return error.BlockExecutionActive;
-            if (self.runtime_frames.items.len != 0) return error.ActiveRuntimeFrames;
-            if (self.checkpoint_top != 0) return error.ActiveCheckpoints;
-            std.debug.assert(self.current_transaction_attempt == null);
-            if (self.state.scopeActive()) return error.ActiveTransactionScope;
-            if (self.prepared_code_execution_depth != 0) return error.ActivePreparedCodeExecution;
+            std.debug.assert(!self.hasActiveBlockExecution());
+            std.debug.assert(self.frame_store.len() == 0);
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.state.scopeActive());
+            std.debug.assert(self.prepared_code_execution_depth == 0);
 
             self.state.reset(options.state_reader);
             self.execution_context = null;
@@ -673,11 +467,8 @@ pub fn Executor(comptime spec: ExactSpec) type {
                     self.config.jumpdest_strategy,
                 );
             }
-            self.prepared_code_execution_depth = std.math.add(
-                usize,
-                self.prepared_code_execution_depth,
-                1,
-            ) catch @panic("prepared-code execution depth overflow");
+            std.debug.assert(self.prepared_code_execution_depth < std.math.maxInt(usize));
+            self.prepared_code_execution_depth += 1;
         }
 
         pub fn endPreparedCodeExecution(self: *Self) void {
@@ -693,13 +484,12 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
         pub fn deinit(self: *Self) void {
             std.debug.assert(!self.hasActiveBlockExecution());
-            std.debug.assert(self.runtime_frames.items.len == 0);
+            std.debug.assert(self.frame_store.len() == 0);
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.transaction_runtime_state == null);
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
             self.state.deinit();
-            self.runtime_frames.deinit(self.allocator);
             self.frame_store.deinit(self.allocator);
             self.prepared_code_scratch.deinit();
             for (self.call_scratch_slots.items) |slot| {
@@ -725,13 +515,13 @@ pub fn Executor(comptime spec: ExactSpec) type {
         fn openTransactionScope(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: AttemptMode,
+            mode: ExecutionMode,
         ) !void {
-            if (self.execution_context != null) return error.ActiveTransactionScope;
-            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
-            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.execution_context == null);
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
             std.debug.assert(self.manual_state_attempt == null);
-            assertAttemptMode(mode);
+            assertExecutionMode(mode);
             const state_attempt_id = if (mode.observesState())
                 self.state.beginObservedTransaction()
             else
@@ -742,53 +532,39 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.scope_root = null;
         }
 
-        fn openTransactionAttemptScope(self: *Self, context: execution_values.ExecutionContext) !void {
-            std.debug.assert(self.current_transaction_attempt != null);
-            std.debug.assert(self.current_transaction_attempt.?.phase == .active);
-            std.debug.assert(self.execution_context == null);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(!self.state.scopeActive());
-            self.execution_context = context;
-            self.scope_root = null;
-            self.state.beginScope();
+        fn requireTransactionScope(self: *const Self) void {
+            std.debug.assert(self.execution_context != null);
         }
 
-        fn closeTransactionAttemptScope(self: *Self) void {
-            if (self.execution_context == null) return;
-            std.debug.assert(self.current_transaction_attempt != null);
-            std.debug.assert(self.state.scopeActive());
-            self.state.closeScope();
-            self.execution_context = null;
-            self.scope_root = null;
+        fn validateScopeContext(self: *const Self, context: execution_values.ExecutionContext) void {
+            self.requireTransactionScope();
+            std.debug.assert(self.execution_context.?.eql(context));
         }
 
-        fn requireTransactionScope(self: *const Self) !void {
-            if (self.execution_context == null) return error.MissingTransactionScope;
-        }
-
-        fn validateScopeContext(self: *const Self, context: execution_values.ExecutionContext) !void {
-            const open_context = self.execution_context orelse return error.MissingTransactionScope;
-            if (!open_context.eql(context)) return error.ExecutionContextMismatch;
-        }
-
-        fn validateScopeRoot(self: *const Self, root: ScopeRoot) !void {
-            try self.requireTransactionScope();
-            const open_root = self.scope_root orelse return error.ExecutionScopeRootMismatch;
-            if (!ScopeRoot.eql(open_root, root)) return error.ExecutionScopeRootMismatch;
+        fn validateScopeRoot(self: *const Self, root: ScopeRoot) void {
+            self.requireTransactionScope();
+            std.debug.assert(self.scope_root != null);
+            std.debug.assert(ScopeRoot.eql(self.scope_root.?, root));
         }
 
         /// Open a manual call transaction scope.
         ///
-        /// Callers that use this directly must eventually call `commitTransaction`,
-        /// `rollbackTransaction`, `closeTransaction`, or another helper that does so.
+        /// This low-level API does not finalize or resolve the transition. A
+        /// successful caller must use `commitTransaction` or
+        /// `retainStateTransition`; failure cleanup must use
+        /// `discardStateTransition`.
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
         pub fn beginTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address, recipient: Address) !void {
             try self.openTransactionScope(context, .normal);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, recipient);
         }
 
+        /// Open an observed manual call transaction scope.
+        ///
+        /// This has the same ownership contract as `beginTransaction`; the
+        /// observed mode is carried into any root message execution.
         pub fn beginObservedTransaction(
             self: *Self,
             context: execution_values.ExecutionContext,
@@ -796,10 +572,14 @@ pub fn Executor(comptime spec: ExactSpec) type {
             recipient: Address,
         ) !void {
             try self.openTransactionScope(context, .observed);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, recipient);
         }
 
+        /// Open a captured manual call transaction scope.
+        ///
+        /// This has the same ownership contract as `beginTransaction`; captured
+        /// call events are written into `capture`.
         pub fn beginCapturedTransaction(
             self: *Self,
             context: execution_values.ExecutionContext,
@@ -808,7 +588,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             capture: *CaptureContext,
         ) !void {
             try self.openTransactionScope(context, .{ .captured = capture });
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, recipient);
         }
 
@@ -818,14 +598,15 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// to warm before the create address is derived during execution.
         pub fn beginCreateTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address) !void {
             try self.openTransactionScope(context, .normal);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, null);
         }
 
         /// Open a direct message-execution scope from its authoritative context.
         ///
         /// This is open-only: callers own checkpoint placement, execution, and
-        /// the eventual commit, restore, or close. Mandatory sender/recipient/
+        /// the eventual commit, rollback, retain, or discard. Mandatory
+        /// sender/recipient warmth is derived from `request`;
         /// `scope_init` supplies family- or witness-resolved warmth beyond the
         /// mandatory root sender/recipient accounts.
         pub fn beginMessageScope(
@@ -836,6 +617,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             try self.beginMessageScopeContext(request.context, request.message, scope_init, .normal);
         }
 
+        /// Open the observed counterpart to `beginMessageScope`.
         pub fn beginObservedMessageScope(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
@@ -844,158 +626,47 @@ pub fn Executor(comptime spec: ExactSpec) type {
             try self.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
         }
 
-        /// Atomically open one transaction attempt and its payload execution
-        /// scope. Transaction programs with preludes use
-        /// `beginTransactionAttemptLifetime` and open the payload afterwards.
-        pub fn beginTransactionAttempt(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-        ) !TransactionAttempt {
-            const attempt = try self.beginTransactionAttemptLifetime();
-            errdefer attempt.discardIfCurrent();
-            try attempt.beginExecution(request, scope_init);
-            return attempt;
-        }
-
-        pub fn beginCapturedTransactionAttempt(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-            capture: *CaptureContext,
-        ) !TransactionAttempt {
-            const attempt = try self.beginCapturedTransactionAttemptLifetime(capture);
-            errdefer attempt.discardIfCurrent();
-            try attempt.beginExecution(request, scope_init);
-            return attempt;
-        }
-
-        /// Open only the rollback-armed transaction lifetime. Prelude execution
-        /// scopes and the payload scope are sequenced beneath this attempt.
-        pub fn beginTransactionAttemptLifetime(self: *Self) !TransactionAttempt {
-            return self.beginTransactionAttemptLifetimeMode(.normal);
-        }
-
-        pub fn beginObservedTransactionAttemptLifetime(self: *Self) !TransactionAttempt {
-            return self.beginTransactionAttemptLifetimeMode(.observed);
-        }
-
-        pub fn beginCapturedTransactionAttemptLifetime(
-            self: *Self,
-            capture: *CaptureContext,
-        ) !TransactionAttempt {
-            return self.beginTransactionAttemptLifetimeMode(.{ .captured = capture });
-        }
-
-        fn beginTransactionAttemptLifetimeMode(
-            self: *Self,
-            mode: AttemptMode,
-        ) !TransactionAttempt {
-            std.debug.assert(self.current_transaction_attempt == null);
-            std.debug.assert(self.execution_context == null);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(!self.state.scopeActive());
-
-            assertAttemptMode(mode);
-            const state_attempt_id = if (mode.observesState())
-                self.state.beginObservedTransaction()
-            else
-                self.state.beginTransaction();
-            std.debug.assert(self.next_transaction_attempt_generation != std.math.maxInt(u64));
-            self.next_transaction_attempt_generation += 1;
-            self.current_transaction_attempt = .{
-                .state_attempt_id = state_attempt_id,
-                .generation = self.next_transaction_attempt_generation,
-                .mode = mode,
-            };
-            return .{
-                .executor = self,
-                .generation = self.next_transaction_attempt_generation,
-            };
-        }
-
         fn beginMessageScopeContext(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: AttemptMode,
+            mode: ExecutionMode,
         ) !void {
             try self.openTransactionScope(context, mode);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
 
-            try self.initializeMessageScope(message, scope_init);
-        }
-
-        fn beginMessageScopeInAttempt(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-        ) !void {
-            try self.openTransactionAttemptScope(request.context);
-            errdefer self.closeTransactionAttemptScope();
-
-            try self.initializeMessageScope(request.message, scope_init);
-        }
-
-        fn initializeMessageScope(
-            self: *Self,
-            message: Self.Message,
-            scope_init: execution_values.ExecutionScopeInit,
-        ) !void {
-            const initial_warm_set = scope_init.initial_warm_set;
-            if (initial_warm_set.accounts.len != 0 or initial_warm_set.storage_slots.len != 0) {
-                const root_accounts: usize = switch (message) {
-                    .call => 2,
-                    .create => 1,
-                };
-                std.debug.assert(initial_warm_set.accounts.len <= std.math.maxInt(usize) - root_accounts);
-                const account_hint = root_accounts + initial_warm_set.accounts.len;
-                try self.state.reserveAccessHint(.{
-                    .accounts = account_hint,
-                    .storage_keys = initial_warm_set.storage_slots.len,
-                });
-            }
-
-            switch (message) {
-                .call => |call| try warmTransactionAccesses(self, call.sender, call.recipient),
-                .create => |create| try warmTransactionAccesses(self, create.sender, null),
-            }
-            for (initial_warm_set.accounts) |address| {
-                try self.state.warmAccount(address);
-            }
-            for (initial_warm_set.storage_slots) |slot| {
-                try self.state.warmStorage(slot.address, slot.key);
-            }
+            try transaction_runtime.initializeMessageScope(self, message, scope_init);
         }
 
         fn beginSystemCall(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: AttemptMode,
+            mode: ExecutionMode,
         ) !void {
             try self.openTransactionScope(context, mode);
         }
 
         /// Open a transaction-like scope for family/STF state work without a
-        /// root EVM message.
+        /// root EVM message. Retain or discard it explicitly.
         pub fn beginStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
             try self.openTransactionScope(context, .normal);
         }
 
+        /// Open an observed state transition without a root EVM message.
         pub fn beginObservedStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
             try self.openTransactionScope(context, .observed);
         }
 
         /// Mark an account warm in the current transaction scope.
         pub fn warmAccount(self: *Self, address: Address) !void {
-            try self.requireTransactionScope();
+            self.requireTransactionScope();
             try self.state.warmAccount(address);
         }
 
         /// Mark a storage slot warm in the current transaction scope.
         pub fn warmStorage(self: *Self, address: Address, key: u256) !void {
-            try self.requireTransactionScope();
+            self.requireTransactionScope();
             try self.state.warmStorage(address, key);
         }
 
@@ -1027,7 +698,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// Record one semantic account access without changing warmth or
         /// loading account metadata.
         pub fn observeAccountAccess(self: *Self, address_value: Address) !void {
-            try self.requireTransactionScope();
+            self.requireTransactionScope();
             try self.state.observeAccountAccess(address_value);
         }
 
@@ -1055,8 +726,9 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         /// Open one journal-backed checkpoint inside the active execution scope.
         pub fn checkpoint(self: *Self) !ExecutionCheckpoint {
-            try self.requireTransactionScope();
-            const id = std.math.add(usize, self.next_checkpoint_id, 1) catch return error.CheckpointIdExhausted;
+            self.requireTransactionScope();
+            std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
+            const id = self.next_checkpoint_id + 1;
             const parent_id = self.checkpoint_top;
             const journal_checkpoint = self.state.checkpoint();
             self.next_checkpoint_id = id;
@@ -1069,8 +741,12 @@ pub fn Executor(comptime spec: ExactSpec) type {
             };
         }
 
+        /// Report whether an unresolved transaction currently owns the Executor.
+        ///
+        /// This is diagnostic state only; it does not grant resolution
+        /// authority or expose the active transaction.
         pub fn hasCurrentTransaction(self: *const Self) bool {
-            return self.current_transaction_attempt != null;
+            return self.transaction_runtime_state != null;
         }
 
         /// Restore the mutable branch independently from execution checkpoints.
@@ -1078,19 +754,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.state.restoreBranch(checkpoint_state);
         }
 
-        /// Internal lifetime seam used by the engine's BlockExecution scope.
-        /// Public integrations construct that scope instead of claiming directly.
-        pub fn claimBlockExecution(self: *Self) !BlockExecutionClaim {
-            if (self.hasActiveBlockExecution()) return error.BlockExecutionActive;
-            self.next_block_execution_generation +%= 1;
-            self.active_block_execution_generation = self.next_block_execution_generation;
-            return .{
-                .executor = self,
-                .generation = self.next_block_execution_generation,
-            };
-        }
-
-        pub fn hasActiveBlockExecution(self: *const Self) bool {
+        fn hasActiveBlockExecution(self: *const Self) bool {
             return self.active_block_execution_generation != null;
         }
 
@@ -1098,7 +762,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             return self.state.acceptedView();
         }
 
-        /// Finalize state changes for the current transaction and close its context.
+        /// Run protocol finalization, retain the transition, and close its scope.
         pub fn commitTransaction(self: *Self) !void {
             try self.commitTransactionObserved(IgnorePending{});
         }
@@ -1106,39 +770,71 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// Finalize and expose the sealed pending view before retaining it.
         /// Observer failure discards the complete transition.
         pub fn commitTransactionObserved(self: *Self, observer: anytype) !void {
-            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
-            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
             try self.finalizeTransactionState();
             try self.resolveManualTransaction(observer);
         }
 
-        fn finalizeTransactionState(self: *Self) !void {
+        /// Apply protocol finalization without resolving the current transition.
+        ///
+        /// This is an advanced building block for callers that must inspect or
+        /// extend finalized state before retaining it.
+        pub fn finalizeTransactionState(self: *Self) !void {
             try self.state.finalize(.{
                 .existing_account = spec.self_destruct.finalization(false),
                 .created_account = spec.self_destruct.finalization(true),
             });
         }
 
-        /// Restore from a branch checkpoint and close the transaction context.
-        pub fn rollbackTransaction(self: *Self, checkpoint_state: *Self.BranchCheckpoint) !void {
-            if (self.checkpoint_top != 0) return error.ActiveExecutionCheckpoints;
-            std.debug.assert(self.current_transaction_attempt == null);
+        /// Restore a caller-owned branch checkpoint and discard the transition.
+        pub fn rollbackTransaction(self: *Self, checkpoint_state: *Self.BranchCheckpoint) void {
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
             self.restoreBranch(checkpoint_state);
-            self.closeTransaction();
+            self.discardStateTransition();
         }
 
-        /// Close the transaction context without restoring its mutations.
-        pub fn closeTransaction(self: *Self) void {
-            self.closeTransactionObserved(IgnorePending{}) catch unreachable;
+        /// Retain the current manual state transition exactly as it stands.
+        ///
+        /// This seals and retains mutations but does not run protocol
+        /// finalization. Prefer `commitTransaction` unless the caller
+        /// deliberately owns finalization. Failure cleanup must use
+        /// `discardStateTransition`.
+        pub fn retainStateTransition(self: *Self) void {
+            self.retainStateTransitionObserved(IgnorePending{}) catch unreachable;
         }
 
-        /// Seal and expose an already-resolved manual transaction before
-        /// retaining it. This skips protocol finalization.
-        pub fn closeTransactionObserved(self: *Self, observer: anytype) !void {
-            if (self.checkpoint_top != 0) @panic("cannot close a transaction scope while an execution checkpoint is open");
-            std.debug.assert(self.current_transaction_attempt == null);
+        /// Expose and retain the current manual transition without finalizing it.
+        ///
+        /// Borrowed pending views are valid only during `observer.observe`.
+        /// Observer failure discards the transition.
+        pub fn retainStateTransitionObserved(self: *Self, observer: anytype) !void {
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
             if (self.execution_context == null) return;
             try self.resolveManualTransaction(observer);
+        }
+
+        /// Discard the active manual transition and close its execution scope.
+        ///
+        /// This is allocation-free and safe in `defer` or `errdefer`. It is a
+        /// no-op after the transition has already been committed, retained, or
+        /// discarded.
+        pub fn discardStateTransition(self: *Self) void {
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
+            if (self.execution_context == null) {
+                std.debug.assert(self.manual_state_attempt == null);
+                return;
+            }
+            std.debug.assert(self.state.scopeActive());
+            const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
+            self.state.closeScope();
+            self.state.discard(state_attempt_id);
+            self.manual_state_attempt = null;
+            self.execution_context = null;
+            self.scope_root = null;
         }
 
         fn resolveManualTransaction(self: *Self, observer: anytype) !void {
@@ -1163,35 +859,35 @@ pub fn Executor(comptime spec: ExactSpec) type {
         /// attempt, or clear an execution-less attempt's retained journal.
         fn closeTransactionLifetime(self: *Self) void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.current_transaction_attempt != null);
+            std.debug.assert(self.transaction_runtime_state != null);
             std.debug.assert(!self.state.scopeActive());
             self.execution_context = null;
             self.scope_root = null;
         }
 
-        fn discardCurrentTransaction(self: *Self) !void {
-            std.debug.assert(self.current_transaction_attempt != null);
+        fn discardCurrentTransaction(self: *Self) void {
+            std.debug.assert(self.transaction_runtime_state != null);
             defer self.finishCurrentTransaction(true);
-            self.state.discard(self.current_transaction_attempt.?.state_attempt_id);
+            self.state.discard(self.transaction_runtime_state.?.state_attempt_id);
         }
 
         fn finishCurrentTransaction(self: *Self, clear_output: bool) void {
-            std.debug.assert(self.current_transaction_attempt != null);
+            std.debug.assert(self.transaction_runtime_state != null);
             if (clear_output) self.clearLastOutput();
             self.closeTransactionLifetime();
-            self.current_transaction_attempt = null;
+            self.transaction_runtime_state = null;
         }
 
         /// Borrow the cumulative accepted changes relative to the state reader.
         pub fn acceptedChanges(self: *const Self) TrackedState.ChangesView {
-            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.transaction_runtime_state == null);
             return self.acceptedView().changes();
         }
 
         /// Drop the cumulative accepted branch and clear any open context.
         pub fn discardAccepted(self: *Self) void {
-            if (self.checkpoint_top != 0) @panic("cannot discard changes while an execution checkpoint is open");
-            std.debug.assert(self.current_transaction_attempt == null);
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
             self.state.discardAccepted();
             self.execution_context = null;
             self.scope_root = null;
@@ -1261,10 +957,10 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         /// Execute a raw call/create message inside an already-open tx scope.
         ///
-        /// This does not open or close a transaction scope. Use `runStandalone` for the
+        /// This does not open or close a transaction scope. Use `executeStandalone` for the
         /// fully-managed raw-message lifecycle.
         pub fn executeMessage(self: *Self, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
-            try self.validateScopeRoot(.fromMessage(message));
+            self.validateScopeRoot(.fromMessage(message));
             const call_capture = try runtime.beginRootCapture(self, message, gas);
             const result = try switch (message) {
                 .call => |call| runtime.executeCall(self, call, gas),
@@ -1274,8 +970,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             return result;
         }
 
-        /// Run one call/create message from the authoritative execution context.
-        pub fn runStandalone(self: *Self, context: execution_values.ExecutionContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        fn runStandalone(self: *Self, context: execution_values.ExecutionContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
             return self.runStandaloneContext(
                 context,
                 message,
@@ -1288,7 +983,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         /// Run one direct message and consume its sealed observations before
         /// the transition is retained.
-        pub fn runStandaloneObserved(
+        fn runStandaloneObserved(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
@@ -1305,7 +1000,13 @@ pub fn Executor(comptime spec: ExactSpec) type {
             );
         }
 
-        pub fn runStandaloneCaptured(
+        /// Execute one raw message with a managed scope and passive capture.
+        ///
+        /// `capture` must already be active and outlive this call. Captured
+        /// artifacts do not own or resolve transaction state. This uses the
+        /// default initial warm set; family validation, charging, settlement,
+        /// and receipts remain outside this API.
+        pub fn executeCaptured(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
@@ -1322,13 +1023,14 @@ pub fn Executor(comptime spec: ExactSpec) type {
             );
         }
 
-        /// Run one direct execution request as a complete transaction scope.
+        /// Execute one normalized raw message with a fully managed lifecycle.
         ///
-        /// Lifecycle: open scope -> checkpoint -> execute -> finalize+commit on
-        /// success, or restore on revert/invalid/out-of-gas -> close. Family
-        /// validation, authorization processing, settlement, and receipts remain
-        /// outside this convenience.
-        pub fn runStandaloneRequest(
+        /// This opens and resolves the state transition internally. EVM
+        /// rollback statuses restore the message checkpoint; successful
+        /// execution finalizes and retains state. Family transaction
+        /// validation, charging, settlement, and receipts remain outside this
+        /// low-level API.
+        pub fn executeStandalone(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
@@ -1343,19 +1045,23 @@ pub fn Executor(comptime spec: ExactSpec) type {
             );
         }
 
-        pub fn runStandaloneCapturedRequest(
+        /// Execute a managed raw message and expose its sealed state before retain.
+        ///
+        /// `observer` may only borrow the pending view during `observe`; an
+        /// observer error discards the complete transition.
+        pub fn executeStandaloneObserved(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
-            capture: *CaptureContext,
+            observer: anytype,
         ) !Self.EvmResult {
             return self.runStandaloneContext(
                 request.context,
                 request.message,
                 request.gas,
                 scope_init,
-                .{ .captured = capture },
-                IgnorePending{},
+                .observed,
+                observer,
             );
         }
 
@@ -1365,11 +1071,11 @@ pub fn Executor(comptime spec: ExactSpec) type {
             message: Self.Message,
             gas: execution_values.ExecutionGas,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: AttemptMode,
+            mode: ExecutionMode,
             observer: anytype,
         ) !Self.EvmResult {
             try self.beginMessageScopeContext(context, message, scope_init, mode);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
 
             var pre_execution = try self.checkpoint();
             defer pre_execution.deinit();
@@ -1377,11 +1083,11 @@ pub fn Executor(comptime spec: ExactSpec) type {
             const result = try self.executeMessage(message, gas);
             if (executionRolledBack(result.status())) {
                 try pre_execution.restore();
-                try self.closeTransactionObserved(observer);
+                try self.retainStateTransitionObserved(observer);
             } else {
                 try self.finalizeTransactionState();
                 try pre_execution.commit();
-                try self.closeTransactionObserved(observer);
+                try self.retainStateTransitionObserved(observer);
             }
             return result;
         }
@@ -1402,59 +1108,9 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self: *Self,
             request: execution_values.EvmExecutionRequest,
         ) !TransactionExecutionOutcomeType {
-            try self.validateScopeContext(request.context);
-            try self.validateScopeRoot(.fromMessage(request.message));
+            self.validateScopeContext(request.context);
+            self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrustedPhased(request);
-        }
-
-        /// Resolve one root payload's inner rollback boundary inside an
-        /// already-open transaction-attempt scope.
-        fn runPayloadInOpenScope(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-        ) !TransactionExecutionOutcomeType {
-            std.debug.assert(self.current_transaction_attempt != null);
-            const attempt_state = if (self.current_transaction_attempt) |*value| value else unreachable;
-            std.debug.assert(!attempt_state.payload_started);
-            attempt_state.payload_started = true;
-
-            var execution_checkpoint = try self.checkpoint();
-            defer execution_checkpoint.deinit();
-
-            const outcome = try self.executeTransactionRequestPhased(request);
-            if (outcome.stage == .preparation or executionRolledBack(outcome.result.status)) {
-                try execution_checkpoint.restore();
-            } else {
-                try execution_checkpoint.commit();
-            }
-            return outcome;
-        }
-
-        /// Execute and finalize one family prelude request in its own execution
-        /// scope while retaining the transaction attempt's outer journal. The
-        /// next prelude request or payload starts with fresh warmth, transient
-        /// storage, logs, and original-storage tracking.
-        fn runTransactionPreludeRequest(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
-            try self.openTransactionAttemptScope(request.context);
-            errdefer self.closeTransactionAttemptScope();
-            self.scope_root = .fromMessage(request.message);
-
-            var execution_checkpoint = try self.checkpoint();
-            defer execution_checkpoint.deinit();
-            const result = try self.executeTransactionRequestTrusted(request);
-            if (executionRolledBack(result.status)) {
-                try execution_checkpoint.restore();
-                self.closeTransactionAttemptScope();
-            } else {
-                try self.finalizeTransactionState();
-                try execution_checkpoint.commit();
-                self.closeTransactionAttemptScope();
-            }
-            return result;
-        }
-
-        fn executeTransactionRequestTrusted(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
-            return (try self.executeTransactionRequestTrustedPhased(request)).result;
         }
 
         fn executeTransactionRequestTrustedPhased(
@@ -1558,14 +1214,14 @@ pub fn Executor(comptime spec: ExactSpec) type {
             recipient: Address,
             input: []const u8,
             gas: execution_values.ExecutionGas,
-            mode: AttemptMode,
+            mode: ExecutionMode,
             observer: anytype,
         ) !Interpreter.Result {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
             try self.beginSystemCall(context, mode);
-            errdefer self.closeTransaction();
+            errdefer self.discardStateTransition();
 
             self.clearLastOutput();
             const checkpoint_state = self.state.checkpoint();
@@ -1604,7 +1260,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
             if (executionRolledBack(result.status)) {
                 self.state.revertToCheckpoint(checkpoint_state);
                 checkpoint_open = false;
-                try self.closeTransactionObserved(observer);
+                try self.retainStateTransitionObserved(observer);
             } else {
                 self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
@@ -1749,7 +1405,7 @@ test "parent prepared view survives child admission" {
 
     try executor.beginTransaction(execution_context, sender, contract);
     const first = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.closeTransaction();
+    executor.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, first.status);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
@@ -1758,7 +1414,7 @@ test "parent prepared view survives child admission" {
 
     try executor.beginTransaction(execution_context, sender, contract);
     const second = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.closeTransaction();
+    executor.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, second.status);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
@@ -1783,7 +1439,7 @@ test "CREATE initcode preparation remains execution-local" {
         .recipient = evmz.address.create(sender, 0),
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
     }, .legacy(100_000))).expectCreate();
-    executor.closeTransaction();
+    executor.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 0), pool.count());
@@ -1843,7 +1499,7 @@ test "trace replay runs after prepared code leaves the live frame" {
         &capture,
     );
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.closeTransaction();
+    executor.retainStateTransition();
 
     const span = (try capture.finish()).?;
     capture_open = false;
@@ -1897,7 +1553,7 @@ test "prepared execution follows current code hash without owning public code re
 
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &original_code });
     try executor.beginStateTransition(testExecutionContext(contract, 100_000));
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
 
     executor.beginPreparedCodeExecution();
     var prepared_execution_open = true;
@@ -1917,7 +1573,7 @@ test "prepared execution follows current code hash without owning public code re
 
     executor.endPreparedCodeExecution();
     prepared_execution_open = false;
-    executor.closeTransaction();
+    executor.retainStateTransition();
     try pool.clearRetainingCapacity();
     try std.testing.expectEqualSlices(u8, &replacement_code, public_replacement);
     try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
@@ -2952,15 +2608,17 @@ test "captured span is inspectable before executed transaction resolution" {
         .gas = .legacy(100_000),
     };
     try capture.begin();
-    const attempt = try executor.beginCapturedTransactionAttempt(
-        request_value,
-        .{},
-        &capture,
-    );
-    defer attempt.discardIfCurrent();
-    const result = try attempt.executeRequest(request_value);
+    try transaction_runtime.begin(&executor, .{ .captured = &capture });
+    errdefer transaction_runtime.discard(&executor);
+    try transaction_runtime.beginExecution(&executor, request_value, .{});
+    defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+    const result = try executor.executeTransactionRequest(request_value);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
-    const executed = attempt.finish();
+    const executed = Osaka.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
     defer executed.discardIfCurrent();
 
     const span = (try capture.finish()).?;
@@ -2968,12 +2626,12 @@ test "captured span is inspectable before executed transaction resolution" {
     try std.testing.expectEqual(@as(u8, @intFromEnum(evmz.Opcode.SSTORE)), span.steps[2].opcode);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 
-    try executed.discard();
+    executed.discard();
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
     try tape.resolve(span);
 }
 
-test "transaction attempt owns rollback before pending state" {
+test "active transaction owns rollback before pending state" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -2990,21 +2648,25 @@ test "transaction attempt owns rollback before pending state" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    const first = try executor.beginTransactionAttempt(request, .{});
-    const first_generation = first.generation;
-    try first.addBalance(sender, 9);
-    try std.testing.expectEqual(@as(u256, 9), try first.balance(sender));
+    try transaction_runtime.begin(&executor, .normal);
+    errdefer transaction_runtime.discard(&executor);
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    const first_generation = executor.transaction_runtime_state.?.generation;
+    try executor.state.addBalance(sender, 9);
+    try std.testing.expectEqual(@as(u256, 9), try executor.getBalance(sender));
 
-    try first.discard();
+    transaction_runtime.discard(&executor);
     try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(sender));
     try std.testing.expect(!executor.hasCurrentTransaction());
 
-    const second = try executor.beginTransactionAttempt(request, .{});
-    defer second.discardIfCurrent();
-    try std.testing.expect(first_generation != second.generation);
+    try transaction_runtime.begin(&executor, .normal);
+    errdefer transaction_runtime.discard(&executor);
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    defer transaction_runtime.discard(&executor);
+    try std.testing.expect(first_generation != executor.transaction_runtime_state.?.generation);
 }
 
-test "transaction attempt finishes into pending state" {
+test "active transaction finishes into pending state" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -3021,15 +2683,21 @@ test "transaction attempt finishes into pending state" {
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
-    const attempt = try executor.beginTransactionAttempt(request, .{});
-    try attempt.addBalance(sender, 7);
-    const executed = attempt.finish();
-    try executed.retain();
+    try transaction_runtime.begin(&executor, .normal);
+    errdefer transaction_runtime.discard(&executor);
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.state.addBalance(sender, 7);
+    const executed = Cancun.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    executed.retain();
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
     try std.testing.expect(!executor.hasCurrentTransaction());
 }
 
-test "transaction nonce intent survives payload rollback" {
+test "transaction nonce advancement survives payload rollback" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -3052,21 +2720,24 @@ test "transaction nonce intent survives payload rollback" {
     });
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
-    const attempt = try executor.beginTransactionAttemptLifetime();
-    defer attempt.discardIfCurrent();
-    try attempt.beginExecution(request, .{});
-    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
-    const outcome = try attempt.runPayload(request);
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.advanceTransactionNonce(request.message);
+    const outcome = try transaction_runtime.runPayload(&executor, request);
     try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status);
-    try std.testing.expectEqual(@as(u64, 8), (try attempt.accountSummary(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    nonce_intent.complete();
-    const executed = attempt.finish();
-    try executed.retain();
+    const executed = Cancun.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    executed.retain();
     try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
 }
 
-test "transaction nonce intent completion remains recorded for the attempt" {
+test "transaction nonce advancement remains recorded for the runtime" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -3085,26 +2756,21 @@ test "transaction nonce intent completion remains recorded for the attempt" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
 
-    const first_attempt = try executor.beginTransactionAttemptLifetime();
-    try first_attempt.beginExecution(request, .{});
-    const first_intent = try first_attempt.advanceTransactionNonce(request.message);
-    first_intent.complete();
-    try std.testing.expectEqual(
-        .completed,
-        std.meta.activeTag(executor.current_transaction_attempt.?.nonce_intent),
-    );
-    try std.testing.expectEqual(@as(u64, 8), (try first_attempt.accountSummary(sender)).?.nonce);
-    try first_attempt.discard();
+    try transaction_runtime.begin(&executor, .normal);
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.advanceTransactionNonce(request.message);
+    try std.testing.expect(executor.transaction_runtime_state.?.nonce_advanced);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
+    transaction_runtime.discard(&executor);
 
-    const second_attempt = try executor.beginTransactionAttemptLifetime();
-    defer second_attempt.discardIfCurrent();
-    try second_attempt.beginExecution(request, .{});
-    const current_intent = try second_attempt.advanceTransactionNonce(request.message);
-    current_intent.complete();
-    try std.testing.expectEqual(@as(u64, 8), (try second_attempt.accountSummary(sender)).?.nonce);
+    try transaction_runtime.begin(&executor, .normal);
+    defer transaction_runtime.discard(&executor);
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.advanceTransactionNonce(request.message);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
 }
 
-test "transaction nonce intent selects the after-advance root create entry" {
+test "transaction nonce advancement selects the root create entry" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.address.create(sender, 7);
     const request = execution_values.EvmExecutionRequest{
@@ -3127,22 +2793,25 @@ test "transaction nonce intent selects the after-advance root create entry" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
 
-    const attempt = try executor.beginTransactionAttemptLifetime();
-    defer attempt.discardIfCurrent();
-    try attempt.beginExecution(request, .{});
-    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
-    const outcome = try attempt.runPayload(request);
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.advanceTransactionNonce(request.message);
+    const outcome = try transaction_runtime.runPayload(&executor, request);
     try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
-    try std.testing.expectEqual(@as(u64, 8), (try attempt.accountSummary(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    nonce_intent.complete();
-    try attempt.finalizeState();
-    const executed = attempt.finish();
-    try executed.retain();
+    try executor.finalizeTransactionState();
+    const executed = Cancun.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    executed.retain();
     try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
 }
 
-test "transaction nonce intent leaves max-nonce acceptance to transaction policy" {
+test "transaction nonce advancement leaves max-nonce acceptance to policy" {
     const sender = evmz.addr(0xaaaa);
     const max_nonce = std.math.maxInt(u64);
     const recipient = evmz.address.create(sender, max_nonce);
@@ -3165,22 +2834,25 @@ test "transaction nonce intent leaves max-nonce acceptance to transaction policy
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = max_nonce });
 
-    const attempt = try executor.beginTransactionAttemptLifetime();
-    defer attempt.discardIfCurrent();
-    try attempt.beginExecution(request, .{});
-    const nonce_intent = try attempt.advanceTransactionNonce(request.message);
-    const outcome = try attempt.runPayload(request);
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+    try transaction_runtime.beginExecution(&executor, request, .{});
+    try executor.advanceTransactionNonce(request.message);
+    const outcome = try transaction_runtime.runPayload(&executor, request);
     try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
-    try std.testing.expectEqual(max_nonce, (try attempt.accountSummary(sender)).?.nonce);
+    try std.testing.expectEqual(max_nonce, (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    nonce_intent.complete();
-    try attempt.finalizeState();
-    const executed = attempt.finish();
-    try executed.retain();
+    try executor.finalizeTransactionState();
+    const executed = Cancun.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    executed.retain();
     try std.testing.expectEqual(max_nonce, (try executor.getAccountOrLoad(sender)).?.nonce);
 }
 
-test "transaction attempt runPayload resolves only its inner checkpoint" {
+test "transaction payload resolves only its inner checkpoint" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -3205,24 +2877,28 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
         });
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
-        const attempt = try executor.beginTransactionAttemptLifetime();
-        defer attempt.discardIfCurrent();
-        try attempt.addBalance(sender, 7);
-        try attempt.beginExecution(request, .{});
+        try transaction_runtime.begin(&executor, .normal);
+        defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+        try executor.state.addBalance(sender, 7);
+        try transaction_runtime.beginExecution(&executor, request, .{});
 
-        var preparation_checkpoint = try attempt.checkpoint();
+        var preparation_checkpoint = try executor.checkpoint();
         defer preparation_checkpoint.deinit();
-        try attempt.addBalance(sender, 5);
+        try executor.state.addBalance(sender, 5);
 
-        const outcome = try attempt.runPayload(request);
+        const outcome = try transaction_runtime.runPayload(&executor, request);
         try std.testing.expectEqual(TransactionExecutionStage.payload, outcome.stage);
         try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status);
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
-        try std.testing.expectEqual(@as(u256, 12), try attempt.balance(sender));
+        try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
 
         try preparation_checkpoint.commit();
-        const executed = attempt.finish();
-        try executed.retain();
+        const executed = Cancun.Executor.Executed(void){
+            .executor = &executor,
+            .generation = transaction_runtime.finish(&executor),
+            .output_value = {},
+        };
+        executed.retain();
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
     }
 
@@ -3235,65 +2911,26 @@ test "transaction attempt runPayload resolves only its inner checkpoint" {
         });
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &success_code });
 
-        const attempt = try executor.beginTransactionAttemptLifetime();
-        defer attempt.discardIfCurrent();
-        try attempt.addBalance(sender, 7);
-        try attempt.beginExecution(request, .{});
+        try transaction_runtime.begin(&executor, .normal);
+        defer if (executor.hasCurrentTransaction()) executor.discardCurrentTransaction();
+        try executor.state.addBalance(sender, 7);
+        try transaction_runtime.beginExecution(&executor, request, .{});
 
-        const outcome = try attempt.runPayload(request);
+        const outcome = try transaction_runtime.runPayload(&executor, request);
         try std.testing.expectEqual(TransactionExecutionStage.payload, outcome.stage);
         try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status);
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
-        try std.testing.expectEqual(@as(u256, 7), try attempt.balance(sender));
+        try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
 
-        try attempt.finalizeState();
-        const executed = attempt.finish();
-        try executed.retain();
+        try executor.finalizeTransactionState();
+        const executed = Cancun.Executor.Executed(void){
+            .executor = &executor,
+            .generation = transaction_runtime.finish(&executor),
+            .output_value = {},
+        };
+        executed.retain();
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
     }
-}
-
-test "top-level transaction execution requires begin execution context" {
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .legacy(100_000), 0),
-    );
-    var amsterdam_executor = Amsterdam.Executor.init(std.testing.allocator, .{});
-    defer amsterdam_executor.deinit();
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        amsterdam_executor.executeCallTransaction(evmz.addr(0xaaaa), evmz.addr(0xbbbb), &.{}, .{
-            .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
-        }, 1),
-    );
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        executor.executeCreateTransaction(
-            evmz.addr(0xaaaa),
-            evmz.address.create(evmz.addr(0xaaaa), 0),
-            &.{},
-            .legacy(100_000),
-            0,
-        ),
-    );
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        executor.executeCall(.{
-            .sender = evmz.addr(0xaaaa),
-            .recipient = evmz.addr(0xbbbb),
-        }, .legacy(100_000)),
-    );
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        executor.executeCreate(.{
-            .sender = evmz.addr(0xaaaa),
-            .recipient = evmz.address.create(evmz.addr(0xaaaa), 0),
-            .init_code = &.{},
-        }, .legacy(100_000)),
-    );
 }
 
 test "rollback transaction restores branch checkpoint and closes execution context" {
@@ -3312,7 +2949,7 @@ test "rollback transaction restores branch checkpoint and closes execution conte
     try std.testing.expectEqual(Host.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
 
-    try executor.rollbackTransaction(&pre_execution);
+    executor.rollbackTransaction(&pre_execution);
 
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 7));
     try std.testing.expectEqual(@as(usize, 0), executor.state.journalEntryCount());
@@ -3690,14 +3327,14 @@ test "exact spec drives precompile warm access" {
     var default_executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer default_executor.deinit();
     try default_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
-    defer default_executor.closeTransaction();
+    defer default_executor.discardStateTransition();
     var default_host = default_executor.host();
     try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(precompile_address));
 
     var custom_executor = NoPrecompile.Executor.init(std.testing.allocator, .{});
     defer custom_executor.deinit();
     try custom_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
-    defer custom_executor.closeTransaction();
+    defer custom_executor.discardStateTransition();
     var custom_host = custom_executor.host();
     try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(precompile_address));
 }
@@ -3826,7 +3463,7 @@ test "callcode with insufficient balance leaves caller storage unchanged" {
     try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{ 0x60, 0x11, 0x60, 0x64, 0x55, 0x00 } });
 
     try executor.beginTransaction(execution_context, caller, caller);
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const result = (try executeHostCall(&executor, .{
         .depth = 1,
         .kind = .callcode,
@@ -3855,7 +3492,7 @@ test "create address collision preserves nonce and warmth outside payload rollba
     try evmz.t.seedExecutorAccount(&executor, create_address, .{ .nonce = 1 });
 
     try executor.beginCreateTransaction(execution_context, sender);
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
 
     const result = (try executor.executeCreateTransaction(sender, create_address, &.{0x00}, .legacy(100_000), 1)).expectCreate();
 
@@ -3899,7 +3536,7 @@ test "call-like message at max depth still executes in recipient storage" {
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status);
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(caller, slot));
-        executor.closeTransaction();
+        executor.retainStateTransition();
     }
 }
 
@@ -4211,9 +3848,9 @@ test "sealed observations expose storage state without a trace tape" {
         },
     });
     try executor.beginObservedTransaction(execution_context, sender, contract);
-    defer executor.closeTransaction();
+    defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    try executor.closeTransactionObserved(&observations);
+    try executor.retainStateTransitionObserved(&observations);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(usize, 1), observations.calls);

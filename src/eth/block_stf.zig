@@ -1383,7 +1383,7 @@ fn serialFold(
         differential_candidate = runner.finishCandidate(input.withdrawals);
     }
 
-    const block_result = try block.finish();
+    const block_result = block.finish();
     const changes = executor.acceptedChanges();
 
     var result = Result{
@@ -1866,7 +1866,7 @@ fn applyWithdrawals(
 ) !void {
     if (withdrawals.len == 0) return;
     try executor.beginObservedStateTransition(execution_context);
-    errdefer executor.closeTransaction();
+    errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
         try executor.observeAccountAccess(withdrawal.address);
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
@@ -1885,7 +1885,7 @@ fn applyWithdrawalsNormal(
 ) !void {
     if (withdrawals.len == 0) return;
     try executor.beginStateTransition(execution_context);
-    errdefer executor.closeTransaction();
+    errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch
             return error.WithdrawalBalanceOverflow;
