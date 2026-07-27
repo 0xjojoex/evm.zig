@@ -25,9 +25,11 @@ pub const Target = union(enum) {
 };
 
 pub const Entry = struct {
+    /// Explicit family-local identity. Ethereum names derive from `Opcode`;
+    /// custom definitions retain their open literal only at comptime.
+    name: ?@EnumLiteral() = null,
     info: OpInfo,
     active: bool,
-    static_gas: i64,
     target: Target,
 
     pub fn defined(self: Entry) bool {
@@ -54,6 +56,10 @@ pub const Spec = struct {
         return self.table[opcode_byte];
     }
 
+    pub fn fmt(comptime self: Spec, opcode_byte: u8) Formatter(self) {
+        return .{ .opcode_byte = opcode_byte };
+    }
+
     // The mutation helpers below are conveniences for deriving one table
     // value from another; `table` stays a plain value and callers may
     // equally index it directly.
@@ -75,7 +81,7 @@ pub const Spec = struct {
 
     /// Reprice opcodes without touching their semantics.
     pub fn setStaticGas(self: *Spec, comptime opcodes: []const Opcode, gas: i64) void {
-        inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].static_gas = gas;
+        inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].info.static_gas = gas;
     }
 
     /// Repoint dispatch for one byte, keeping its activation and gas.
@@ -83,13 +89,25 @@ pub const Spec = struct {
         self.table[opcode_byte].target = target;
     }
 
-    /// Install a fork-new instruction on any byte — typically an unassigned
-    /// one: activates the slot, prices it, and points dispatch at `target`.
-    pub fn install(self: *Spec, opcode_byte: u8, static_gas: i64, comptime target: Target) void {
+    /// Install a complete fork-new instruction on any byte — typically an
+    /// unassigned one.
+    pub fn install(
+        self: *Spec,
+        comptime name: @EnumLiteral(),
+        comptime opcode_byte: u8,
+        comptime info: OpInfo,
+        comptime target: Target,
+    ) void {
+        assertNameAvailable(self.*, name, opcode_byte);
+        var defined_info = info;
+        defined_info.defined = true;
         const slot = &self.table[opcode_byte];
-        slot.active = true;
-        slot.static_gas = static_gas;
-        slot.target = target;
+        slot.* = .{
+            .name = name,
+            .info = defined_info,
+            .active = true,
+            .target = target,
+        };
     }
 
     pub fn codeAccountAccessGas(comptime self: Spec, status: execution.AccountAccessStatus) ?i64 {
@@ -100,8 +118,45 @@ pub const Spec = struct {
     }
 };
 
+fn Formatter(comptime spec: Spec) type {
+    return struct {
+        opcode_byte: u8,
+
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            return switch (self.opcode_byte) {
+                inline 0...255 => |opcode_byte| {
+                    if (comptime spec.table[opcode_byte].name) |name| {
+                        return writer.writeAll(@tagName(name));
+                    }
+                    return @as(Opcode, @enumFromInt(opcode_byte)).format(writer);
+                },
+            };
+        }
+    };
+}
+
+fn assertNameAvailable(comptime spec: Spec, comptime name: @EnumLiteral(), comptime opcode_byte: u8) void {
+    @setEvalBranchQuota(10_000);
+    if (std.meta.stringToEnum(Opcode, @tagName(name))) |opcode| {
+        if (@intFromEnum(opcode) != opcode_byte) {
+            @compileError("instruction name already belongs to opcode byte: " ++ @tagName(name));
+        }
+    }
+    for (spec.table, 0..) |entry, index| {
+        if (index == opcode_byte) continue;
+        if (entry.name) |existing| {
+            if (existing == name) {
+                @compileError("duplicate custom instruction name: " ++ @tagName(name));
+            }
+        }
+    }
+}
+
 pub fn validate(comptime table: Table) void {
     // Covers evaluating the full fork-derivation chain when this forces it.
     @setEvalBranchQuota(100_000);
-    for (table) |entry| entry.target.assertValid();
+    for (table) |entry| {
+        std.debug.assert(!entry.active or entry.defined());
+        entry.target.assertValid();
+    }
 }

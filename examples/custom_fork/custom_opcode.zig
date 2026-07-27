@@ -19,7 +19,7 @@ comptime {
 /// table, so the handler charges its own spec-assigned static gas from it.
 const Square = struct {
     pub inline fn execute(comptime Instructions: type, frame: *evmz.interpreter.CallFrame) anyerror!void {
-        if (!frame.trackGas(comptime Instructions.table[square_byte].static_gas)) return;
+        if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
         const x = try frame.stack.pop();
         try frame.stack.push(x *% x);
     }
@@ -30,7 +30,11 @@ const Square = struct {
 const custom_instruction = blk: {
     var instruction = evmz.eth.cancun.instruction;
     // New opcode on an unassigned byte.
-    instruction.install(square_byte, square_gas, .{ .custom = Square });
+    instruction.install(.SQUARE, square_byte, .{
+        .static_gas = square_gas,
+        .stack_in = 1,
+        .stack_out = 1,
+    }, .{ .custom = Square });
     // Retire an opcode this fork does not want.
     instruction.deactivate(&.{.SELFDESTRUCT});
     // Reprice a builtin without touching its semantics.
@@ -46,8 +50,8 @@ const CancunVm = evmz.Vm(evmz.eth.cancun);
 comptime {
     std.debug.assert(SquareVm.specification.instruction.entry(square_byte).active);
     std.debug.assert(!SquareVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.SELFDESTRUCT)).active);
-    std.debug.assert(SquareVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).static_gas == 1_000);
-    std.debug.assert(CancunVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).static_gas == 100);
+    std.debug.assert(SquareVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 1_000);
+    std.debug.assert(CancunVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 100);
 }
 
 const sender = evmz.addr(0xaaaa);
@@ -82,8 +86,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer stock_selfdestruct.deinit(allocator);
 
     std.debug.print(
-        "SQUARE (0x{x:0>2}) fork: {s}, storage[0] = {d}; stock cancun: {s}\n",
-        .{ square_byte, @tagName(squared.status), squared.storage, @tagName(stock_square.status) },
+        "{f} (0x{x:0>2}) fork: {s}, storage[0] = {d}; stock cancun: {s}\n",
+        .{
+            SquareVm.specification.instruction.fmt(square_byte),
+            square_byte,
+            @tagName(squared.status),
+            squared.storage,
+            @tagName(stock_square.status),
+        },
     );
     std.debug.print(
         "retired SELFDESTRUCT: fork {s} vs stock {s}\n",
@@ -105,6 +115,14 @@ test "custom opcode executes on the fork and stays invalid on stock Cancun" {
     try std.testing.expectEqual(evmz.TxStatus.success, squared.status);
     try std.testing.expectEqual(@as(u256, 49), squared.storage);
     try std.testing.expect(stock.status != .success);
+
+    var name_buffer: [16]u8 = undefined;
+    const name = try std.fmt.bufPrint(
+        &name_buffer,
+        "{f}",
+        .{SquareVm.specification.instruction.fmt(square_byte)},
+    );
+    try std.testing.expectEqualStrings("SQUARE", name);
 }
 
 test "retired opcode is invalid on the fork only" {

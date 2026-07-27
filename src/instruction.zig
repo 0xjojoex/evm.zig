@@ -228,14 +228,14 @@ fn instructionOverrideSpec(
 
 fn instructionGasSpec(comptime opcode: Opcode, comptime gas: i64) evmz.eth.Spec {
     var exact = evmz.eth.frontier.instruction;
-    exact.table[@intFromEnum(opcode)].static_gas = gas;
+    exact.table[@intFromEnum(opcode)].info.static_gas = gas;
     return evmz.eth.frontier.extend(.{
         .instruction = exact,
     });
 }
 
 fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
-    return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).static_gas;
+    return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).info.static_gas;
 }
 
 fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: interpreter.FrameStatus) !void {
@@ -321,7 +321,7 @@ test "static gas helper uses resolved rule gas" {
     try std.testing.expectEqual(@as(i64, 11), Instruction(instructionGasSpec(.CALL, 11)).staticGasForFrame(frame.frame, .CALL));
 }
 
-pub fn staticGas(opcode: Opcode) u16 {
+pub fn staticGas(opcode: Opcode) i64 {
     return opcode_info.table[@intFromEnum(opcode)].static_gas;
 }
 
@@ -695,7 +695,7 @@ pub fn Instruction(comptime spec: ExactSpec) type {
         }
 
         pub inline fn staticGasForFrame(_: *CallFrame, comptime opcode: Opcode) i64 {
-            return Self.dispatchEntryForOpcode(opcode).static_gas;
+            return Self.dispatchEntryForOpcode(opcode).info.static_gas;
         }
 
         pub noinline fn execute(opcode_byte: u8, frame: *CallFrame) anyerror!void {

@@ -23,7 +23,6 @@ fn baseSpec() Spec {
         spec.table[index] = .{
             .info = info,
             .active = false,
-            .static_gas = if (info.defined) @intCast(info.static_gas) else 0,
             .target = defaultTarget(opcode_byte, info.defined),
         };
     }
@@ -172,11 +171,11 @@ test "exact instruction specs extend activation and gas values" {
     try std.testing.expect(!osaka.table[@intFromEnum(Opcode.SLOTNUM)].active);
     try std.testing.expect(amsterdam.table[@intFromEnum(Opcode.SLOTNUM)].active);
 
-    try std.testing.expectEqual(@as(i64, 20), frontier.table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try std.testing.expectEqual(@as(i64, 400), tangerine_whistle.table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try std.testing.expectEqual(@as(i64, 700), istanbul.table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try std.testing.expectEqual(@as(i64, 100), berlin.table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try std.testing.expectEqual(@as(i64, tx.amsterdam_create_access_cost), amsterdam.table[@intFromEnum(Opcode.CREATE)].static_gas);
+    try std.testing.expectEqual(@as(i64, 20), frontier.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 400), tangerine_whistle.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 700), istanbul.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 100), berlin.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, tx.amsterdam_create_access_cost), amsterdam.table[@intFromEnum(Opcode.CREATE)].info.static_gas);
 }
 
 test "instruction spec mutation helpers derive one table value from another" {
@@ -191,7 +190,11 @@ test "instruction spec mutation helpers derive one table value from another" {
 
     const derived = comptime spec: {
         var result = cancun;
-        result.install(unassigned_byte, 5, .{ .custom = Noop });
+        result.install(.NOOP, unassigned_byte, .{
+            .static_gas = 5,
+            .stack_in = 1,
+            .stack_out = 1,
+        }, .{ .custom = Noop });
         result.deactivate(&.{.SELFDESTRUCT});
         result.setStaticGas(&.{.BALANCE}, 1_000);
         result.setTarget(@intFromEnum(Opcode.ADD), .invalid);
@@ -199,14 +202,26 @@ test "instruction spec mutation helpers derive one table value from another" {
     };
 
     try std.testing.expect(derived.table[unassigned_byte].active);
-    try std.testing.expectEqual(@as(i64, 5), derived.table[unassigned_byte].static_gas);
+    try std.testing.expectEqual(@as(i64, 5), derived.table[unassigned_byte].info.static_gas);
+    try std.testing.expect(derived.table[unassigned_byte].defined());
+    try std.testing.expectEqual(@as(u8, 1), derived.table[unassigned_byte].info.stack_in);
+    try std.testing.expectEqual(@as(u8, 1), derived.table[unassigned_byte].info.stack_out);
     try std.testing.expect(derived.table[unassigned_byte].target == .custom);
+    try std.testing.expectEqualStrings("NOOP", @tagName(derived.table[unassigned_byte].name.?));
     try std.testing.expect(!derived.table[@intFromEnum(Opcode.SELFDESTRUCT)].active);
-    try std.testing.expectEqual(@as(i64, 1_000), derived.table[@intFromEnum(Opcode.BALANCE)].static_gas);
+    try std.testing.expectEqual(@as(i64, 1_000), derived.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
     try std.testing.expect(derived.table[@intFromEnum(Opcode.ADD)].target == .invalid);
     // The base value stays untouched.
     try std.testing.expect(!cancun.table[unassigned_byte].active);
     try std.testing.expect(cancun.table[@intFromEnum(Opcode.SELFDESTRUCT)].active);
+
+    var buffer: [32]u8 = undefined;
+    const custom = try std.fmt.bufPrint(&buffer, "{f}", .{derived.fmt(unassigned_byte)});
+    try std.testing.expectEqualStrings("NOOP", custom);
+    const builtin = try std.fmt.bufPrint(&buffer, "{f}", .{derived.fmt(@intFromEnum(Opcode.ADD))});
+    try std.testing.expectEqualStrings("ADD", builtin);
+    const unnamed = try std.fmt.bufPrint(&buffer, "{f}", .{cancun.fmt(unassigned_byte)});
+    try std.testing.expectEqualStrings("0xb0", unnamed);
 }
 
 test "exact instruction spec carries execution constants as values" {

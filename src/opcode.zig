@@ -179,6 +179,13 @@ pub const Opcode = enum(u8) {
     pub inline fn toByte(self: Opcode) u8 {
         return @intFromEnum(self);
     }
+
+    pub fn format(self: Opcode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (std.enums.tagName(Opcode, self)) |name| {
+            return writer.writeAll(name);
+        }
+        try writer.print("0x{x:0>2}", .{self.toByte()});
+    }
 };
 
 /// Control-flow class of an instruction. `.eof` is never produced per-opcode;
@@ -208,16 +215,12 @@ pub const Flags = struct {
 /// truth that the gas / stack / flags / exit / push-width switches collapse into.
 /// Indexed by raw byte via `table`; undefined bytes get the default (invalid) row.
 pub const OpInfo = struct {
-    /// Shared mnemonic. Ethereum-known rows get the base enum tag;
-    /// custom specs may use chain-local names without extending `Opcode`.
-    name: ?[]const u8 = null,
     /// false for the 106 unused byte values in 0x00..0xff (and only those;
     /// INVALID/0xfe is a *defined* opcode with `.exit = .invalid`).
     defined: bool = false,
-    /// Baseline fixed gas before exact-spec overrides. This is opcode
-    /// metadata, not a fork-resolved gas query; use a bound exact spec's static
-    /// gas resolver for execution.
-    static_gas: u16 = 0,
+    /// Static gas for this row. The shared opcode table holds the baseline;
+    /// exact instruction specs copy and reprice the same field.
+    static_gas: i64 = 0,
     /// Minimum stack height required to execute without underflow.
     stack_in: u8 = 0,
     /// Stack height after execution, relative to `stack_in` (height contribution,
@@ -240,7 +243,6 @@ pub const table: [256]OpInfo = blk: {
     for (std.enums.values(Opcode)) |op| {
         var row = infoFor(op);
         row.defined = true;
-        row.name = @tagName(op);
         t[@intFromEnum(op)] = row;
     }
     break :blk t;
@@ -463,18 +465,17 @@ test "opcode table reproduces the per-opcode switches" {
 
     // gas + stack delta for a plain binary op
     const add = table[@intFromEnum(Opcode.ADD)];
-    try std.testing.expectEqualStrings("ADD", add.name.?);
-    try expectEqual(@as(u16, 3), add.static_gas);
+    try expectEqual(@as(i64, 3), add.static_gas);
     try expectEqual(@as(i16, -1), add.stackChange());
 
     // Historically repriced opcodes keep base gas here; fork-resolved gas
     // belongs to the exact instruction spec.
-    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODESIZE)].static_gas);
-    try expectEqual(@as(u16, 20), table[@intFromEnum(Opcode.EXTCODECOPY)].static_gas);
-    try expectEqual(@as(u16, 400), table[@intFromEnum(Opcode.EXTCODEHASH)].static_gas);
-    try expectEqual(@as(u16, 50), table[@intFromEnum(Opcode.SLOAD)].static_gas);
-    try expectEqual(@as(u16, 0), table[@intFromEnum(Opcode.SELFDESTRUCT)].static_gas);
+    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.BALANCE)].static_gas);
+    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.EXTCODESIZE)].static_gas);
+    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.EXTCODECOPY)].static_gas);
+    try expectEqual(@as(i64, 400), table[@intFromEnum(Opcode.EXTCODEHASH)].static_gas);
+    try expectEqual(@as(i64, 50), table[@intFromEnum(Opcode.SLOAD)].static_gas);
+    try expectEqual(@as(i64, 0), table[@intFromEnum(Opcode.SELFDESTRUCT)].static_gas);
 
     // PUSH immediate width
     try expectEqual(@as(u8, 1), table[@intFromEnum(Opcode.PUSH1)].immediate);
@@ -487,13 +488,13 @@ test "opcode table reproduces the per-opcode switches" {
 
     // EIP-8024 opcodes carry execution immediates but do not mask JUMPDEST analysis.
     try expectEqual(@as(u8, 0), table[@intFromEnum(Opcode.DUPN)].immediate);
-    try expectEqual(@as(u16, 3), table[@intFromEnum(Opcode.DUPN)].static_gas);
+    try expectEqual(@as(i64, 3), table[@intFromEnum(Opcode.DUPN)].static_gas);
     try expectEqual(@as(i16, 1), table[@intFromEnum(Opcode.DUPN)].stackChange());
     try expectEqual(@as(i16, 0), table[@intFromEnum(Opcode.SWAPN)].stackChange());
     try expectEqual(@as(u8, 30), table[@intFromEnum(Opcode.EXCHANGE)].stack_in);
 
     // LOG family gas + flags
-    try expectEqual(@as(u16, 1875), table[@intFromEnum(Opcode.LOG4)].static_gas);
+    try expectEqual(@as(i64, 1875), table[@intFromEnum(Opcode.LOG4)].static_gas);
     try std.testing.expect(table[@intFromEnum(Opcode.LOG4)].flags.writes_state);
 
     // exits + flags on the spicy ones
@@ -523,14 +524,23 @@ test "opcode table defined rows match Opcode enum exactly" {
             defined_count += 1;
             try std.testing.expect(row.immediate <= 32);
         } else {
-            try std.testing.expectEqual(@as(u16, 0), row.static_gas);
+            try std.testing.expectEqual(@as(i64, 0), row.static_gas);
             try std.testing.expectEqual(@as(u8, 0), row.stack_in);
             try std.testing.expectEqual(@as(u8, 0), row.stack_out);
             try std.testing.expectEqual(@as(u8, 0), row.immediate);
             try std.testing.expectEqual(ExitKind.invalid, row.exit);
             try std.testing.expectEqual(Flags{}, row.flags);
-            try std.testing.expect(row.name == null);
         }
     }
     try std.testing.expectEqual(std.enums.values(Opcode).len, defined_count);
+}
+
+test "opcode formatter derives named tags and preserves unnamed bytes" {
+    var buffer: [32]u8 = undefined;
+
+    const named = try std.fmt.bufPrint(&buffer, "{f}", .{Opcode.ADD});
+    try std.testing.expectEqualStrings("ADD", named);
+
+    const unnamed = try std.fmt.bufPrint(&buffer, "{f}", .{@as(Opcode, @enumFromInt(0x0c))});
+    try std.testing.expectEqualStrings("0x0c", unnamed);
 }
