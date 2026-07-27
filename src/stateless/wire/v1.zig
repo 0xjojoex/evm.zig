@@ -707,6 +707,13 @@ pub const StatelessInput = struct {
         return decode(allocator, bytes[schema_id_size..]);
     }
 
+    fn decodeSchemaPrefixedBorrowed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
+        if (bytes.len < schema_id_size) return error.MissingSchemaId;
+        const actual_schema_id = std.mem.readInt(u16, bytes[0..schema_id_size], .big);
+        if (actual_schema_id != schema_id) return error.UnsupportedSchemaId;
+        return decodeBorrowed(allocator, bytes[schema_id_size..]);
+    }
+
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
         var value = try decodeWire(StatelessInputWire.Ssz, allocator, bytes);
         var owns_value = true;
@@ -719,6 +726,16 @@ pub const StatelessInput = struct {
             .new_payload_request = new_payload_request,
             .witness = value.witness,
             .chain_config = chain_config,
+            .public_keys = value.public_keys,
+        };
+    }
+
+    fn decodeBorrowed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
+        const value = try decodeWire(BorrowedStatelessInputSsz, allocator, bytes);
+        return .{
+            .new_payload_request = .{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) },
+            .witness = value.witness,
+            .chain_config = value.chain_config,
             .public_keys = value.public_keys,
         };
     }
@@ -759,6 +776,31 @@ const TransactionsSsz = ssz.ListOf(ssz.ByteList(max_bytes_per_transaction), max_
 const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
 const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
 const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
+
+fn BorrowedByteList(comptime limit: comptime_int) type {
+    const Base = ssz.ByteList(limit);
+    return struct {
+        pub const Value = Base.Value;
+        pub const kind = Base.kind;
+        pub const element_codec = Base.element_codec;
+        pub const max_length = Base.max_length;
+        pub const is_progressive = Base.is_progressive;
+        pub const is_variable_size = Base.is_variable_size;
+        pub const fixed_size = Base.fixed_size;
+        pub const requires_allocator = false;
+        pub const encodedLen = Base.encodedLen;
+        pub const encode = Base.encode;
+        pub const decode = Base.decode;
+        pub const validate = Base.validate;
+    };
+}
+
+const BorrowedTransactionsSsz = ssz.ListOf(BorrowedByteList(max_bytes_per_transaction), max_transactions_per_payload);
+const BorrowedExecutionWitnessSsz = ssz.Container(ExecutionWitness, .{
+    .state = ssz.ListOf(BorrowedByteList(max_bytes_per_witness_node), max_witness_nodes),
+    .codes = ssz.ListOf(BorrowedByteList(max_bytes_per_code), max_witness_codes),
+    .headers = ssz.ListOf(BorrowedByteList(max_bytes_per_header), max_witness_headers),
+});
 
 const ExecutionPayloadV2Wire = struct {
     parent_hash: [32]u8,
@@ -907,6 +949,22 @@ const StatelessInputWire = struct {
         .public_keys = PublicKeysSsz,
     });
 };
+
+const BorrowedExecutionPayloadV4Ssz = ssz.Container(ExecutionPayloadV4Wire, .{
+    .extra_data = BorrowedByteList(max_extra_data_bytes),
+    .transactions = BorrowedTransactionsSsz,
+    .withdrawals = WithdrawalsSsz,
+    .block_access_list = BorrowedByteList(max_block_access_list_bytes),
+});
+const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAmsterdamWire, .{
+    .execution_payload = BorrowedExecutionPayloadV4Ssz,
+    .versioned_hashes = VersionedHashesSsz,
+});
+const BorrowedStatelessInputSsz = ssz.Container(StatelessInputWire, .{
+    .new_payload_request = BorrowedNewPayloadRequestAmsterdamSsz,
+    .witness = BorrowedExecutionWitnessSsz,
+    .public_keys = PublicKeysSsz,
+});
 
 const StatelessValidationResultWire = struct {
     new_payload_request_root: [32]u8,
@@ -1115,7 +1173,7 @@ pub fn validateStatelessBytesWithOptions(allocator: std.mem.Allocator, bytes: []
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const input = StatelessInput.decodeSchemaPrefixed(scratch, bytes) catch |err| switch (err) {
+    const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(allocator),
     };
@@ -1327,4 +1385,20 @@ fn sszUint256FromBytes(bytes: [32]u8) u256 {
 
 fn evmWordFromBytes32(bytes: [32]u8) u256 {
     return uint256.fromBytes32(&bytes);
+}
+
+test "borrowed witness decoding keeps byte lists in the wire input" {
+    const state = [_][]const u8{"node"};
+    const encoded = try encodeWire(ExecutionWitness.Ssz, std.testing.allocator, .{ .state = &state });
+    defer std.testing.allocator.free(encoded);
+
+    var decoded = try decodeWire(BorrowedExecutionWitnessSsz, std.testing.allocator, encoded);
+    defer BorrowedExecutionWitnessSsz.deinit(std.testing.allocator, &decoded);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.state.len);
+    try std.testing.expectEqualSlices(u8, "node", decoded.state[0]);
+    const borrowed_start = @intFromPtr(decoded.state[0].ptr);
+    const input_start = @intFromPtr(encoded.ptr);
+    try std.testing.expect(borrowed_start >= input_start);
+    try std.testing.expect(borrowed_start + decoded.state[0].len <= input_start + encoded.len);
 }
