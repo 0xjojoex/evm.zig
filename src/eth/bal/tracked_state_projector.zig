@@ -196,12 +196,20 @@ const ObservationFold = struct {
         }
 
         var storage_index: u32 = 0;
+        var previous_address: ?Address = null;
+        var previous_account_index: usize = undefined;
         while (storage_index < view.storage.len()) : (storage_index += 1) {
             const metadata = view.storage.metadataAt(storage_index);
             if (!metadata.observation.value_read and !metadata.effect.written) continue;
             const fact = view.storage.at(storage_index) orelse
                 return error.IncompleteStorageObservation;
-            const target = try self.accountFor(fact.address);
+            if (previous_address == null or
+                !std.mem.eql(u8, &previous_address.?, &fact.address))
+            {
+                previous_address = fact.address;
+                previous_account_index = try self.accountIndexFor(fact.address);
+            }
+            const target = &self.accounts.items[previous_account_index];
             try target.appendStorage(self.allocator, .{
                 .slot = fact.key,
                 .original = fact.original,
@@ -212,9 +220,13 @@ const ObservationFold = struct {
     }
 
     fn accountFor(self: *ObservationFold, target: Address) !*FoldAccount {
+        return &self.accounts.items[try self.accountIndexFor(target)];
+    }
+
+    fn accountIndexFor(self: *ObservationFold, target: Address) !usize {
         if (self.indices.count() == 0) {
-            for (self.accounts.items) |*account| {
-                if (std.mem.eql(u8, &account.address, &target)) return account;
+            for (self.accounts.items, 0..) |account, index| {
+                if (std.mem.eql(u8, &account.address, &target)) return index;
             }
             if (self.accounts.items.len == linear_index_limit) {
                 try self.indices.ensureTotalCapacity(linear_index_limit + 1);
@@ -223,7 +235,7 @@ const ObservationFold = struct {
                 }
             }
         }
-        if (self.indices.get(target)) |index| return &self.accounts.items[index];
+        if (self.indices.get(target)) |index| return index;
         const index = self.accounts.items.len;
         try self.accounts.append(self.allocator, .{
             .address = target,
@@ -234,7 +246,7 @@ const ObservationFold = struct {
             removed.deinit(self.allocator);
         }
         if (self.indices.count() != 0) try self.indices.put(target, index);
-        return &self.accounts.items[index];
+        return index;
     }
 };
 
