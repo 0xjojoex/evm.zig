@@ -15,7 +15,6 @@ const Address = address.Address;
 const WitnessStateReader = @This();
 
 pub const Error = error{InvalidWitness};
-const AccountCache = std.AutoHashMapUnmanaged(Address, ?trie.Account);
 
 pub const Code = struct {
     hash: [32]u8,
@@ -26,7 +25,7 @@ allocator: std.mem.Allocator,
 state_root: [32]u8,
 indexed: *trie.IndexedNodes,
 codes: []const Code = &.{},
-accounts: AccountCache = .empty,
+accounts: trie.AccountFacts = .empty,
 proof_cache: trie.ProofCache,
 
 pub fn init(

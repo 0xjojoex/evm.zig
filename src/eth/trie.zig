@@ -76,6 +76,8 @@ pub const Account = struct {
     }
 };
 
+pub const AccountFacts = std.AutoHashMapUnmanaged(address.Address, ?Account);
+
 pub const Update = mpt.Update;
 
 pub const IndexedNodes = mpt.IndexedNodes;
@@ -214,13 +216,14 @@ pub fn stateRootAfterChanges(
     const scratch = arena.allocator();
     var indexed = try indexNodes(scratch, nodes);
     defer indexed.deinit();
-    return stateRootAfterChangesIndexed(scratch, root_hash, indexed, changes);
+    return stateRootAfterChangesIndexed(scratch, root_hash, indexed, null, changes);
 }
 
 pub fn stateRootAfterChangesIndexed(
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
+    authenticated_accounts: ?*const AccountFacts,
     changes: ChangesView,
 ) UpdateError![32]u8 {
     const scratch = allocator;
@@ -255,7 +258,17 @@ pub fn stateRootAfterChangesIndexed(
 
     const accounts = accountTrie(scratch);
     for (addresses.items) |target| {
-        const previous = try loadAccountOrEmpty(accounts, root_hash, indexed.index(), target);
+        const previous = if (authenticated_accounts) |facts| previous: {
+            if (facts.getEntry(target)) |entry| {
+                break :previous entry.value_ptr.* orelse Account{};
+            }
+            break :previous try loadAccountOrEmpty(
+                accounts,
+                root_hash,
+                indexed.index(),
+                target,
+            );
+        } else try loadAccountOrEmpty(accounts, root_hash, indexed.index(), target);
         const account_change = changesAccount(changes, target);
         const storage_root = try storageRootAfterChangesIndexed(
             scratch,
@@ -1018,6 +1031,59 @@ test "MPT state root consumes tracked changes" {
         wiped_changes,
     );
     try std.testing.expectEqualSlices(u8, &empty_root_hash, &wiped_direct);
+}
+
+test "MPT state root reuses authenticated present account" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const target = address.addr(0x1000);
+    const previous = Account{ .nonce = 3, .balance = 10 };
+    const account_key = hashedAddressKey(target);
+    const account_value = try accountValueFrom(scratch, previous);
+    const root_node = try encodedRootForTest(
+        scratch,
+        &.{.{ .key = &account_key, .value = account_value }},
+    );
+    const root_hash = crypto.keccak256(root_node);
+    const nodes = [_][]const u8{root_node};
+    var indexed = try indexNodes(scratch, &nodes);
+    defer indexed.deinit();
+
+    const MemoryAccount = @import("../state/MemoryAccount.zig");
+    var state = TrackedState.init(scratch);
+    defer state.deinit();
+    var seeded = MemoryAccount.init(scratch);
+    seeded.nonce = previous.nonce;
+    seeded.balance = previous.balance;
+    try state.seedAccount(target, seeded);
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    _ = try state.setStorage(target, 1, 7);
+    state.closeScope();
+    state.seal(attempt);
+    state.retain(attempt);
+    const changes = state.acceptedView().changes();
+
+    var facts: AccountFacts = .empty;
+    defer facts.deinit(scratch);
+    try facts.put(scratch, target, previous);
+    const cached = try stateRootAfterChangesIndexed(
+        scratch,
+        root_hash,
+        indexed,
+        &facts,
+        changes,
+    );
+    const fallback = try stateRootAfterChangesIndexed(
+        scratch,
+        root_hash,
+        indexed,
+        null,
+        changes,
+    );
+    try std.testing.expectEqualSlices(u8, &fallback, &cached);
 }
 
 fn sortedPairsForTest(allocator: Allocator, pairs: []const Pair) ![]Pair {

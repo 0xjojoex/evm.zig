@@ -117,6 +117,7 @@ fn witnessRootAfterChanges(
         arena.allocator(),
         witness.state_root,
         witness.indexed,
+        &witness.accounts,
         changes,
     );
 }
@@ -152,6 +153,7 @@ test "witness backend derives root directly from tracked changes" {
         &.{},
     );
     defer backend.deinit();
+    try std.testing.expect(!try backend.reader().accountExists(address.addr(1)));
 
     const actual = try backend.stateRootAfterChanges(std.testing.allocator, changes);
     const expected = try trie.stateRootAfterChanges(
