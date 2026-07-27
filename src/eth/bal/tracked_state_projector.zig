@@ -131,14 +131,12 @@ pub const BlockBuilder = struct {
         self.active = null;
         defer active.deinit();
 
-        var delta = try active.finish();
-        defer delta.deinit(self.allocator);
-        var shard = try delta.toOwnedBlockAccessList(
-            self.allocator,
-            self.active_index.?,
-        );
-        defer shard.deinit(self.allocator);
-        try self.shards.append(shard.accounts);
+        for (active.accounts.items) |*account| {
+            try self.shards.appendObservation(
+                account.asObservation(),
+                self.active_index.?,
+            );
+        }
         self.active_index = null;
     }
 
@@ -214,24 +212,6 @@ const ObservationFold = struct {
                 }},
             });
         }
-    }
-
-    fn finish(self: *ObservationFold) !observation.LaneTransition {
-        std.mem.sort(FoldAccount, self.accounts.items, {}, foldAccountLessThan);
-        const accounts = try self.allocator.alloc(
-            observation.AccountObservation,
-            self.accounts.items.len,
-        );
-        errdefer self.allocator.free(accounts);
-
-        var initialized: usize = 0;
-        errdefer for (accounts[0..initialized]) |account|
-            deinitAccountObservation(self.allocator, account);
-        for (self.accounts.items, 0..) |*account, index| {
-            accounts[index] = try account.takeObservation(self.allocator);
-            initialized += 1;
-        }
-        return .{ .accounts = accounts };
     }
 
     fn accountFor(self: *ObservationFold, target: Address) !*FoldAccount {
@@ -401,38 +381,20 @@ const FoldAccount = struct {
         try self.append(allocator, projected);
     }
 
-    fn takeObservation(
-        self: *FoldAccount,
-        allocator: Allocator,
-    ) !observation.AccountObservation {
-        std.mem.sort(
-            observation.StorageObservation,
-            self.storage.items,
-            {},
-            storageObservationLessThan,
-        );
-        var result = observation.AccountObservation{
+    fn asObservation(self: *const FoldAccount) observation.AccountObservation {
+        return .{
             .address = self.address,
+            .storage = self.storage.items,
             .balance = self.balance,
             .nonce = self.nonce,
+            .code = self.code,
+            .lifecycle = self.lifecycle.items,
             .account_reset = self.account_reset,
             .account_deleted = self.account_deleted,
             .storage_wiped = self.storage_wiped,
         };
-        errdefer deinitAccountObservation(allocator, result);
-        result.storage = try self.storage.toOwnedSlice(allocator);
-        if (self.code) |code| {
-            result.code = code;
-            self.code = null;
-        }
-        result.lifecycle = try self.lifecycle.toOwnedSlice(allocator);
-        return result;
     }
 };
-
-fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
-}
 
 const AccountBuilder = struct {
     address: Address,
