@@ -337,19 +337,15 @@ fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u
                 current = extension.child;
                 remaining = remaining[common..];
             },
-            .branch => |branch| {
+            .branch => |*branch| {
                 if (remaining.len == 0) {
-                    var next = branch;
-                    next.value = value;
-                    current.* = .{ .kind = .{ .branch = next } };
+                    branch.value = value;
                     return;
                 }
                 const child_index = remaining[0];
                 const child = branch.children[child_index] orelse child: {
                     const created = try context.newNode(.empty);
-                    var next = branch;
-                    next.children[child_index] = created;
-                    current.* = .{ .kind = .{ .branch = next } };
+                    branch.children[child_index] = created;
                     break :child created;
                 };
                 current = child;
@@ -461,12 +457,11 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
                 current = extension.child;
                 remaining = remaining[extension.path.len..];
             },
-            .branch => |branch| {
+            .branch => |*branch| {
                 if (remaining.len == 0) {
                     if (branch.value == null) return;
-                    var next = branch;
-                    next.value = null;
-                    try compressBranch(context, current, next);
+                    branch.value = null;
+                    try compressBranch(context, current, branch.*);
                     break;
                 }
                 const child_index = remaining[0];
