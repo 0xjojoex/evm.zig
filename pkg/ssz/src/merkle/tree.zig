@@ -198,10 +198,14 @@ pub fn hashPair(left: Root, right: Root) Root {
 }
 
 pub fn hashPairWith(context: anytype, left: Root, right: Root) Root {
+    return hashPairRefsWith(context, &left, &right);
+}
+
+fn hashPairRefsWith(context: anytype, left: *const Root, right: *const Root) Root {
     comptime hash_context.assertHashContext(@TypeOf(context));
     var input: [64]u8 = undefined;
-    @memcpy(input[0..32], &left);
-    @memcpy(input[32..64], &right);
+    @memcpy(input[0..32], left);
+    @memcpy(input[32..64], right);
     return context.hash64(&input);
 }
 
@@ -314,8 +318,8 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             return root;
         }
 
-        pub fn branch(self: *Self, path: *const TreePath, left: Root, right: Root) WalkError!Root {
-            const root = hashPairWith(self.context, left, right);
+        pub fn branch(self: *Self, path: *const TreePath, left: *const Root, right: *const Root) WalkError!Root {
+            const root = hashPairRefsWith(self.context, left, right);
             try self.visitor.visit(path, .{ .root = root, .kind = .branch });
             return root;
         }
@@ -391,7 +395,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
         fn mixIn(self: *Self, path: *const TreePath, left: Root, right: Root) WalkError!Root {
             var right_path = path.child(.right);
             _ = try self.leaf(&right_path, right);
-            return self.branch(path, left, right);
+            return self.branch(path, &left, &right);
         }
 
         fn merkleizeSourceDepth(
@@ -433,7 +437,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
                     &right_path,
                 );
             };
-            return self.branch(path, left, right);
+            return self.branch(path, &left, &right);
         }
 
         fn merkleizeProgressiveSourceRange(
@@ -473,7 +477,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
                     &right_path,
                 );
             };
-            return self.branch(path, left, right);
+            return self.branch(path, &left, &right);
         }
     };
 }
