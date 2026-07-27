@@ -17,6 +17,7 @@ const ShardFold = @import("shard_fold.zig").ShardFold;
 
 const Address = address.Address;
 const Allocator = std.mem.Allocator;
+const linear_index_limit = 8;
 
 pub fn materialize(
     view: State.ObservationsView,
@@ -234,6 +235,17 @@ const ObservationFold = struct {
     }
 
     fn accountFor(self: *ObservationFold, target: Address) !*FoldAccount {
+        if (self.indices.count() == 0) {
+            for (self.accounts.items) |*account| {
+                if (std.mem.eql(u8, &account.address, &target)) return account;
+            }
+            if (self.accounts.items.len == linear_index_limit) {
+                try self.indices.ensureTotalCapacity(linear_index_limit + 1);
+                for (self.accounts.items, 0..) |account, index| {
+                    self.indices.putAssumeCapacity(account.address, index);
+                }
+            }
+        }
         if (self.indices.get(target)) |index| return &self.accounts.items[index];
         const index = self.accounts.items.len;
         try self.accounts.append(self.allocator, .{
@@ -244,7 +256,7 @@ const ObservationFold = struct {
             var removed = self.accounts.pop().?;
             removed.deinit(self.allocator);
         }
-        try self.indices.put(target, index);
+        if (self.indices.count() != 0) try self.indices.put(target, index);
         return &self.accounts.items[index];
     }
 };
@@ -275,13 +287,14 @@ const FoldAccount = struct {
         account: observation.AccountObservation,
     ) !void {
         for (account.storage) |slot| {
-            if (self.storage_indices.get(slot.slot)) |index| {
+            if (try self.storageIndex(slot.slot)) |index| {
                 self.storage.items[index].current = slot.current;
             } else {
                 const index = self.storage.items.len;
                 try self.storage.append(allocator, slot);
                 errdefer _ = self.storage.pop();
-                try self.storage_indices.put(slot.slot, index);
+                if (self.storage_indices.count() != 0)
+                    try self.storage_indices.put(slot.slot, index);
             }
         }
         if (account.balance) |balance| {
@@ -317,6 +330,20 @@ const FoldAccount = struct {
         if (account.account_reset) self.account_deleted = false;
         if (account.account_deleted) self.account_deleted = true;
         self.storage_wiped = self.storage_wiped or account.storage_wiped;
+    }
+
+    fn storageIndex(self: *FoldAccount, slot: u256) !?usize {
+        if (self.storage_indices.count() == 0) {
+            for (self.storage.items, 0..) |entry, index| {
+                if (entry.slot == slot) return index;
+            }
+            if (self.storage.items.len < linear_index_limit) return null;
+            try self.storage_indices.ensureTotalCapacity(linear_index_limit + 1);
+            for (self.storage.items, 0..) |entry, index| {
+                self.storage_indices.putAssumeCapacity(entry.slot, index);
+            }
+        }
+        return self.storage_indices.get(slot);
     }
 
     fn appendAccountFact(
@@ -780,6 +807,52 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var expected = try oracle.toOwnedBlockAccessList(allocator);
     defer expected.deinit(allocator);
     try expectEqualEncoded(allocator, expected, actual);
+}
+
+test "small observation indices promote and preserve duplicate merges" {
+    const allocator = std.testing.allocator;
+    var fold = ObservationFold.init(allocator);
+    defer fold.deinit();
+
+    for (0..linear_index_limit + 1) |index| {
+        _ = try fold.accountFor(address.addr(@as(u64, @intCast(index + 1))));
+    }
+    try std.testing.expectEqual(linear_index_limit + 1, fold.accounts.items.len);
+    try std.testing.expectEqual(linear_index_limit + 1, fold.indices.count());
+    const duplicate = address.addr(@as(u64, 4));
+    _ = try fold.accountFor(duplicate);
+    try std.testing.expectEqual(linear_index_limit + 1, fold.accounts.items.len);
+
+    var account = FoldAccount{
+        .address = address.addr(1),
+        .storage_indices = .init(allocator),
+    };
+    defer account.deinit(allocator);
+    for (0..linear_index_limit + 1) |index| {
+        const slot: u256 = @intCast(index);
+        try account.append(allocator, .{
+            .address = account.address,
+            .storage = &.{.{
+                .slot = slot,
+                .original = slot,
+                .current = slot + 1,
+                .written = true,
+            }},
+        });
+    }
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage.items.len);
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage_indices.count());
+    try account.append(allocator, .{
+        .address = account.address,
+        .storage = &.{.{
+            .slot = 3,
+            .original = 3,
+            .current = 99,
+            .written = true,
+        }},
+    });
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage.items.len);
+    try std.testing.expectEqual(@as(u256, 99), account.storage.items[3].current);
 }
 
 test "block builder coalesces transitions at one access index" {
