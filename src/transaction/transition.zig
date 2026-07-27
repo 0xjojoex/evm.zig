@@ -127,18 +127,7 @@ pub fn bind(
             const input_value = context.input();
             const prepared = (transaction_prepare.Runtime(spec){}).prepare(.{
                 .tx = tx_value,
-                .env = .{
-                    .chain_id = input_value.env.chain_id,
-                    .coinbase = input_value.env.coinbase,
-                    .number = input_value.env.number,
-                    .slot_number = input_value.env.slot_number,
-                    .timestamp = input_value.env.timestamp,
-                    .gas_limit = input_value.env.gas_limit,
-                    .prev_randao = input_value.env.prev_randao,
-                    .base_fee = input_value.env.base_fee,
-                    .blob_base_fee = input_value.env.blob_base_fee,
-                    .blob_schedule = input_value.env.blob_schedule,
-                },
+                .env = input_value.env,
                 .block = input_value.progress,
                 .state = context.preparationState(),
             }) catch |err| return context.infrastructureError(err);

@@ -538,7 +538,7 @@ fn BoundTransaction(
         }
 
         pub fn Block(
-            comptime EnvironmentType: type,
+            comptime EnvType: type,
             comptime IncludedType: type,
             comptime ResultType: type,
             comptime BlockImplementationType: type,
@@ -550,7 +550,7 @@ fn BoundTransaction(
                 TransactInputType,
                 OutputType,
                 RejectionType,
-                EnvironmentType,
+                EnvType,
                 IncludedType,
                 ResultType,
                 BlockImplementationType,

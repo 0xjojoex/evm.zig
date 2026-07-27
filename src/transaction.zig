@@ -30,7 +30,7 @@ pub const AuthorizationGasAdjustment = authorization.GasAdjustment;
 pub const FeeFields = transaction_mod.FeeFields;
 pub const Transaction = transaction_mod.Transaction;
 pub const TransactionView = transaction_mod.TransactionView;
-pub const EnvFacts = transaction_mod.EnvFacts;
+pub const Env = transaction_mod.Env;
 pub const PreparationAccount = transaction_mod.PreparationAccount;
 pub const PreparationStateAccess = transaction_mod.PreparationStateAccess;
 pub const PreparationBlockProgress = transaction_mod.PreparationBlockProgress;
@@ -44,7 +44,8 @@ pub const SenderRecoveryError = signing.SenderRecoveryError;
 
 pub const transactionView = transaction_mod.transactionView;
 pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
-pub const executionContext = transaction_mod.executionContext;
+// The opcode-visible context is projected by `Env.executionContext`, so there is
+// no free-function form to re-export here.
 pub const executionRequest = transaction_mod.executionRequest;
 pub const accessListCounts = gas_mod.accessListCounts;
 pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;

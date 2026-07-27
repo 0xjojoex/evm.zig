@@ -30,42 +30,10 @@ pub const Committer = executor_module.state_io.Committer;
 pub const Log = Host.Log;
 
 /// Block/environment values supplied by the caller.
-pub const Env = struct {
-    chain_id: u256 = 1,
-    coinbase: Address = std.mem.zeroes(Address),
-    number: u64 = 0,
-    slot_number: u64 = 0,
-    timestamp: u64 = 0,
-    gas_limit: u64 = 0,
-    prev_randao: u256 = 0,
-    base_fee: u256 = 0,
-    blob_base_fee: u256 = 0,
-    /// Optional dynamic chain/fixture override for blob gas rules.
-    /// When null, transaction validation and settlement use the exact spec schedule.
-    // TODO: consider removing it in favor of policy
-    blob_schedule: ?transaction.BlobSchedule = null,
-
-    pub fn executionContext(
-        self: Env,
-        origin: Address,
-        gas_price: u256,
-        gas_limit: u64,
-        blob_hashes: []const u256,
-    ) execution.ExecutionContext {
-        return transaction.executionContext(.{
-            .chain_id = self.chain_id,
-            .coinbase = self.coinbase,
-            .number = self.number,
-            .slot_number = self.slot_number,
-            .timestamp = self.timestamp,
-            .gas_limit = self.gas_limit,
-            .prev_randao = self.prev_randao,
-            .base_fee = self.base_fee,
-            .blob_base_fee = self.blob_base_fee,
-            .blob_schedule = self.blob_schedule,
-        }, origin, gas_price, gas_limit, blob_hashes);
-    }
-};
+///
+/// The engine has exactly one of these. Transaction preparation reads the same
+/// type the caller fills in, so there is nothing to copy between the two.
+pub const Env = transaction.Env;
 
 /// Terminal status of a transaction that reached execution.
 pub const TxStatus = execution.Status;
@@ -552,7 +520,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             }
 
             fn lifecycleExecutionContext(self: *const @This()) execution.ExecutionContext {
-                return self.block.environment.executionContext(addr(0), 0, self.block.environment.gas_limit, &.{});
+                return self.block.environment.executionContext(.{ .origin = addr(0) });
             }
         };
 
@@ -563,9 +531,8 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
             observer: anytype,
         ) !EvmResult {
             if (env.gas_limit != 0 and call.gas > env.gas_limit) return error.GasAllowanceExceeded;
-            const context_gas_limit = if (env.gas_limit == 0) call.gas else env.gas_limit;
             const result = try executor.executeSystemCallObserved(
-                env.executionContext(call.sender, 0, context_gas_limit, &.{}),
+                env.executionContext(.{ .origin = call.sender }),
                 call.sender,
                 call.recipient,
                 call.input,

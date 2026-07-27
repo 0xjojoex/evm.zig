@@ -684,7 +684,7 @@ pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
 
 fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
-    return env.executionContext(address.addr(0), 0, env.gas_limit, &.{});
+    return env.executionContext(.{ .origin = address.addr(0) });
 }
 
 const RootField = enum {

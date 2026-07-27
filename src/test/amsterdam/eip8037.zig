@@ -190,7 +190,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
         .recipient = create_address,
         .init_code = &.{},
     } };
-    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(sender, 0, 1_000_000, &.{});
+    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(.{ .origin = sender });
     const request = transaction.executionRequest(context, message, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     });

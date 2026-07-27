@@ -258,12 +258,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
                 .execution_gas = execution_gas,
                 // Deposits execute at gas price zero and carry no blob hashes.
                 .request = evmz.transaction.executionRequest(
-                    context.input().env.executionContext(
-                        tx.from,
-                        0,
-                        context.input().env.gas_limit,
-                        &.{},
-                    ),
+                    context.input().env.executionContext(.{ .origin = tx.from }),
                     message,
                     execution_gas orelse evmz.execution.ExecutionGas.none,
                 ),

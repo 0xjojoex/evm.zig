@@ -138,7 +138,7 @@ pub fn bind(
     comptime TransactInputType: type,
     comptime OutputType: type,
     comptime RejectionType: type,
-    comptime EnvironmentType: type,
+    comptime EnvType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
     comptime ImplementationType: type,
@@ -158,7 +158,7 @@ pub fn bind(
         RejectionType,
         RuntimeWithPrelude.Prelude,
         RuntimeWithPrelude.PreludeContext,
-        EnvironmentType,
+        EnvType,
         IncludedType,
         ResultType,
         ImplementationType,
@@ -175,7 +175,7 @@ fn BoundBlockProgram(
     comptime RejectionType: type,
     comptime PreludeType: type,
     comptime PreludeContextType: type,
-    comptime EnvironmentType: type,
+    comptime EnvType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
     comptime ImplementationType: type,
@@ -191,7 +191,7 @@ fn BoundBlockProgram(
         TransactInputType,
         OutputType,
         TransactionLogs,
-        EnvironmentType,
+        EnvType,
         IncludedType,
         ResultType,
         ImplementationType,
@@ -207,7 +207,7 @@ fn BoundBlockProgram(
         pub const Rejection = RejectionType;
         pub const Prelude = PreludeType;
         pub const PreludeContext = PreludeContextType;
-        pub const Environment = EnvironmentType;
+        pub const Env = EnvType;
         pub const Included = IncludedType;
         pub const Result = ResultType;
         pub const Outcome = OutcomeType;
@@ -215,13 +215,13 @@ fn BoundBlockProgram(
 
         transaction_runtime: TransactionRuntimeType,
         claim: Executor.BlockExecutionClaim,
-        environment: Environment,
+        environment: Env,
         state: ImplementationType.State,
         finished: bool = false,
 
         pub fn init(
             executor: *Executor,
-            environment: Environment,
+            environment: Env,
         ) Error!Self {
             return initWithRuntime(
                 BaseTransactionRuntimeType.init(executor),
@@ -232,14 +232,14 @@ fn BoundBlockProgram(
         /// Advanced composition seam for a preconfigured transaction runtime.
         pub fn initWithRuntime(
             transaction_runtime: BaseTransactionRuntimeType,
-            environment: Environment,
+            environment: Env,
         ) Error!Self {
             return initRuntime(transaction_runtime, environment);
         }
 
         fn initRuntime(
             transaction_runtime: BaseTransactionRuntimeType,
-            environment: Environment,
+            environment: Env,
         ) Error!Self {
             const runtime = transaction_runtime.rebindPreludeError(ImplementationType.PreludeError);
             const executor = runtime.executorPtr();
@@ -403,7 +403,7 @@ fn validateImplementation(
     comptime TransactInputType: type,
     comptime OutputType: type,
     comptime TransactionLogsType: type,
-    comptime EnvironmentType: type,
+    comptime EnvType: type,
     comptime IncludedType: type,
     comptime ResultType: type,
     comptime Implementation: type,
@@ -413,14 +413,14 @@ fn validateImplementation(
         std.debug.assert(@hasDecl(Implementation, "InclusionPlan"));
         std.debug.assert(@hasDecl(Implementation, "Error"));
 
-        assertSignature(Implementation.init, &.{EnvironmentType}, Implementation.State);
+        assertSignature(Implementation.init, &.{EnvType}, Implementation.State);
         assertSignature(Implementation.transactInput, &.{
-            *const EnvironmentType,
+            *const EnvType,
             *const Implementation.State,
             *const TransactionType,
         }, TransactInputType);
         assertSignature(Implementation.planInclude, &.{
-            *const EnvironmentType,
+            *const EnvType,
             *const Implementation.State,
             *const TransactionType,
             *const OutputType,
@@ -437,7 +437,7 @@ fn validateImplementation(
             Implementation.InclusionPlan,
         }, void);
         assertSignature(Implementation.finish, &.{
-            *const EnvironmentType,
+            *const EnvType,
             *const Implementation.State,
         }, ResultType);
     }

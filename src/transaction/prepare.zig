@@ -107,7 +107,11 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 null;
             return .{ .executable = .{
                 .scope = .{
-                    .context = tx.executionContext(input.env, view.sender, gas_price, input.env.gas_limit, view.blob_hashes),
+                    .context = input.env.executionContext(.{
+                        .origin = view.sender,
+                        .gas_price = gas_price,
+                        .blob_hashes = view.blob_hashes,
+                    }),
                     .access_list = view.access_list,
                     .authorization_list = view.authorization_list,
                     .authorization_count = view.authorization_count,

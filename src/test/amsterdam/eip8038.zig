@@ -76,7 +76,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
         .init_code = &init_code,
     } };
 
-    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(sender, 0, 1_000_000, &.{});
+    const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(.{ .origin = sender });
     const request = transaction.executionRequest(context, message, .legacy(100_000));
     try executor.beginMessageScope(request, .{});
     defer executor.closeTransaction();

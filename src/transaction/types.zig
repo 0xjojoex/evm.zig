@@ -103,19 +103,53 @@ pub const TransactionView = struct {
     blob_hashes: []const u256 = &.{},
 };
 
-pub const EnvFacts = struct {
+/// Every block-scoped value a caller supplies, read by transaction validation,
+/// settlement, and the projection into `execution.ExecutionContext`.
+///
+/// One type deliberately spans all three readers: a second struct with this same
+/// field set would only add a hand-copy to keep in sync, not a boundary. The
+/// narrowing that *is* a boundary is `executionContext`, which drops everything
+/// no opcode can observe.
+pub const Env = struct {
     chain_id: u256 = 1,
-    coinbase: Address,
+    coinbase: Address = std.mem.zeroes(Address),
     number: u64 = 0,
     slot_number: u64 = 0,
     timestamp: u64 = 0,
+    /// The block's gas limit, reported by GASLIMIT. Never a transaction budget.
     gas_limit: u64 = 0,
     prev_randao: u256 = 0,
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
     /// Optional dynamic chain/fixture override for blob gas rules.
     /// When null, transaction validation and settlement use the exact spec schedule.
+    // TODO: consider removing it in favor of policy
     blob_schedule: ?BlobSchedule = null,
+
+    /// Project these facts into the engine's opcode-visible context.
+    ///
+    /// The block gas limit comes from `self`. The transaction's own gas limit is
+    /// not part of the context at all: it is the execution budget carried by
+    /// `EvmExecutionRequest.gas`.
+    pub fn executionContext(
+        self: Env,
+        transaction: execution.TransactionEnvironment,
+    ) execution.ExecutionContext {
+        return .{
+            .chain = .{ .chain_id = self.chain_id },
+            .block = .{
+                .coinbase = self.coinbase,
+                .number = self.number,
+                .slot_number = self.slot_number,
+                .timestamp = self.timestamp,
+                .gas_limit = self.gas_limit,
+                .difficulty_or_prev_randao = self.prev_randao,
+                .base_fee = self.base_fee,
+                .blob_base_fee = self.blob_base_fee,
+            },
+            .transaction = transaction,
+        };
+    }
 };
 
 /// Minimal account proof consumed during exact-spec transaction preparation.
@@ -157,28 +191,6 @@ pub const PreparationBlockProgress = struct {
     /// Block/header dimensions, used by multidimensional gas accounting.
     block_gas: BlockGas = .{},
 };
-
-/// Project preparation facts into the engine's concrete opcode-visible context.
-pub fn executionContext(env: EnvFacts, origin: Address, gas_price: u256, gas_limit: u64, blob_hashes: []const u256) execution.ExecutionContext {
-    return .{
-        .chain = .{ .chain_id = env.chain_id },
-        .block = .{
-            .coinbase = env.coinbase,
-            .number = env.number,
-            .slot_number = env.slot_number,
-            .timestamp = env.timestamp,
-            .gas_limit = gas_limit,
-            .difficulty_or_prev_randao = env.prev_randao,
-            .base_fee = env.base_fee,
-            .blob_base_fee = env.blob_base_fee,
-        },
-        .transaction = .{
-            .origin = origin,
-            .gas_price = gas_price,
-            .blob_hashes = blob_hashes,
-        },
-    };
-}
 
 /// Transaction-scoped execution environment: the data that belongs to the whole
 /// transaction rather than to the top-level call/create frame.
@@ -229,7 +241,7 @@ pub fn transactionView(tx: Transaction) TransactionView {
     };
 }
 
-pub fn effectiveGasPrice(env: EnvFacts, view: TransactionView) u256 {
+pub fn effectiveGasPrice(env: Env, view: TransactionView) u256 {
     return switch (view.kind) {
         .legacy, .access_list => view.fee.gas_price,
         .dynamic_fee, .blob, .set_code => blk: {
@@ -275,7 +287,7 @@ pub fn PrepareResult(comptime SettlementPlan: type, comptime Rejection: type) ty
 
 pub const PrepareInput = struct {
     tx: Transaction,
-    env: EnvFacts,
+    env: Env,
     block: PreparationBlockProgress = .{},
     state: PreparationStateAccess,
 };

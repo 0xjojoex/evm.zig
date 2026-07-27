@@ -13,7 +13,7 @@ const executor = @import("../executor.zig");
 /// bound transaction runtime.
 pub fn bind(
     comptime TransactionRuntime: type,
-    comptime Environment: type,
+    comptime Env: type,
     comptime IncludedTransaction: type,
     comptime BlockResult: type,
 ) type {
@@ -23,7 +23,7 @@ pub fn bind(
     const TransactionLogs = TransactionRuntime.TransactionLogs;
 
     const BeforeTransactionPrelude = struct {
-        env: Environment,
+        env: Env,
         transaction_index: u64,
 
         pub fn run(
@@ -32,7 +32,7 @@ pub fn bind(
         ) TransactionRuntime.PreludeContext.Error!void {
             try executor.system_contracts.applyBeforeTransactionPrelude(
                 prelude,
-                self.env.executionContext(address.addr(0), 0, self.env.gas_limit, &.{}),
+                self.env.executionContext(.{ .origin = address.addr(0) }),
                 .{
                     .number = self.env.number,
                     .timestamp = self.env.timestamp,
@@ -48,12 +48,12 @@ pub fn bind(
         pub const PreludeError = error{};
         pub const InclusionPlan = struct { next: State };
 
-        pub fn init(_: Environment) State {
+        pub fn init(_: Env) State {
             return .{};
         }
 
         pub fn transactInput(
-            env: *const Environment,
+            env: *const Env,
             state: *const State,
             tx_value: *const Transaction,
         ) TransactionInput {
@@ -68,7 +68,7 @@ pub fn bind(
         }
 
         pub fn planInclude(
-            env: *const Environment,
+            env: *const Env,
             state: *const State,
             _: *const Transaction,
             output: *const TransactionOutput,
@@ -104,7 +104,7 @@ pub fn bind(
             state.* = plan.next;
         }
 
-        pub fn finish(_: *const Environment, state: *const State) BlockResult {
+        pub fn finish(_: *const Env, state: *const State) BlockResult {
             return state.*;
         }
     };

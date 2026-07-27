@@ -152,7 +152,7 @@ test "Executor runs low-level standalone call" {
         .recipient = contract,
     };
     const result = (try executor.runStandalone(
-        (Env{}).executionContext(call.sender, 0, 100_000, &.{}),
+        (Env{}).executionContext(.{ .origin = call.sender }),
         .{ .call = call },
         .legacy(100_000),
     )).expectCall();
@@ -190,7 +190,7 @@ test "Executor runs low-level standalone create" {
         .init_code = init_code,
     };
     const result = (try executor.runStandalone(
-        (Env{}).executionContext(create.sender, 0, 100_000, &.{}),
+        (Env{}).executionContext(.{ .origin = create.sender }),
         .{ .create = create },
         .legacy(100_000),
     )).expectCreate();

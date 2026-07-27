@@ -13,7 +13,7 @@ const expectRejected = support.expectRejected;
 test "Env execution context derives opcode-visible gas limit from the environment" {
     const origin = addr(0xaaaa);
     const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };
-    const context = env.executionContext(origin, 7, env.gas_limit, &.{});
+    const context = env.executionContext(.{ .origin = origin, .gas_price = 7 });
 
     try std.testing.expectEqual(@as(u256, 10), context.chain.chain_id);
     try std.testing.expectEqual(@as(u64, 30_000_000), context.block.gas_limit);
