@@ -29,14 +29,14 @@ pub fn inputBytes(allocator: std.mem.Allocator, input: []const u8, format: Input
     };
 }
 
-pub fn publicValuesBytes(allocator: std.mem.Allocator, public_values: []const u8, format: PublicFormat) ![]u8 {
-    if (public_values.len != 32) return error.InvalidPublicValuesLength;
+pub fn outputBytes(allocator: std.mem.Allocator, output: []const u8, format: PublicFormat) ![]u8 {
     return switch (format) {
-        .raw => try allocator.dupe(u8, public_values),
+        .raw => try allocator.dupe(u8, output),
         .zisk => blk: {
+            if (output.len > 256) return error.OutputTooLong;
             const out = try allocator.alloc(u8, 256);
             @memset(out, 0);
-            @memcpy(out[0..32], public_values);
+            @memcpy(out[0..output.len], output);
             break :blk out;
         },
     };
@@ -68,12 +68,24 @@ test "input zisk format stores one length-prefixed padded record" {
     try std.testing.expect(std.mem.allEqual(u8, frame[13..], 0));
 }
 
-test "public zisk format pads digest to 256 bytes" {
-    const digest = [_]u8{0xab} ** 32;
-    const out = try publicValuesBytes(std.testing.allocator, &digest, .zisk);
+test "public raw format leaves canonical output unchanged" {
+    const output = [_]u8{0xab} ** 69;
+    const out = try outputBytes(std.testing.allocator, &output, .raw);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualSlices(u8, &output, out);
+}
+
+test "public zisk format pads canonical output to 256 bytes" {
+    const output = [_]u8{0xab} ** 69;
+    const out = try outputBytes(std.testing.allocator, &output, .zisk);
     defer std.testing.allocator.free(out);
 
     try std.testing.expectEqual(@as(usize, 256), out.len);
-    try std.testing.expectEqualSlices(u8, &digest, out[0..32]);
-    try std.testing.expect(std.mem.allEqual(u8, out[32..], 0));
+    try std.testing.expectEqualSlices(u8, &output, out[0..output.len]);
+    try std.testing.expect(std.mem.allEqual(u8, out[output.len..], 0));
+}
+
+test "public zisk format rejects output larger than its public region" {
+    const output = [_]u8{0} ** 257;
+    try std.testing.expectError(error.OutputTooLong, outputBytes(std.testing.allocator, &output, .zisk));
 }

@@ -109,6 +109,12 @@ zig build zkevm -- \
 zig build zkevm-mutations
 ```
 
+The ERE adapter uses the same raw SSZ output as the fixture and upstream guest
+programs. `zkevm-input` extracts raw input or ZisK-framed stdin together with
+the expected public output; `zkevm-ere` runs the native adapter, and
+`zkevm-ere-bench` emits ERE-compatible metrics. ZisK framing pads the raw
+result to 256 bytes without hashing it.
+
 `--report` selects a serial run and writes deterministic JSON with one record
 per runnable block. Records include revision, fixture family, validation status,
 first differing result field, and a broad ownership category. The command still

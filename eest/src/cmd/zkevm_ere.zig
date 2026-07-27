@@ -43,8 +43,9 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const input = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, .limited(512 * 1024 * 1024));
     defer allocator.free(input);
 
-    const public = try evmz.stateless.ere.validateStatelessPublicValues(allocator, input);
-    const output = try ere_io.publicValuesBytes(allocator, &public, options.public_format);
+    const public = try evmz.stateless.wire.validateStatelessBytes(allocator, input);
+    defer allocator.free(public);
+    const output = try ere_io.outputBytes(allocator, public, options.public_format);
     defer allocator.free(output);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = output_path, .data = output });
 
@@ -62,7 +63,7 @@ fn printUsage() void {
         \\usage: zig build zkevm-ere -- [--public-format raw|zisk] [--expected-public PATH] <stateless-input.bin> <public-output.bin>
         \\
         \\Runs raw ERE/benchmark-workload statelessInputBytes through the native
-        \\evmz adapter and writes sha256(statelessOutputBytes). Use
+        \\evmz adapter and writes the raw SSZ StatelessValidationResult. Use
         \\--public-format zisk to write the 256-byte ZisK-padded public output.
         \\
     , .{});

@@ -348,7 +348,7 @@ const ExecutionMetrics = union(enum) {
     fn deinit(self: *ExecutionMetrics, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .crashed => |crash| allocator.free(crash.reason),
-            .success => {},
+            .success => |success| allocator.free(success.public_values.chars),
         }
     }
 };
@@ -363,14 +363,14 @@ const ExecutionSuccess = struct {
 };
 
 const PublicValuesHex = struct {
-    chars: [evmz.stateless.ere.public_values_size * 2]u8,
+    chars: []u8,
 
-    fn init(bytes: *const evmz.stateless.ere.PublicValues) PublicValuesHex {
-        return .{ .chars = std.fmt.bytesToHex(bytes, .lower) };
+    fn init(allocator: std.mem.Allocator, bytes: []const u8) !PublicValuesHex {
+        return .{ .chars = try hexAlloc(allocator, bytes) };
     }
 
     pub fn jsonStringify(self: PublicValuesHex, jws: anytype) !void {
-        try jws.write(self.chars[0..]);
+        try jws.write(self.chars);
     }
 };
 
@@ -392,15 +392,14 @@ fn executeFixture(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixt
 }
 
 fn executeNative(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture) !ExecutionMetrics {
-    _ = allocator;
     const start = monotonicNanos(io);
-    const run = try validateWithMeteredFixedHeap(fixture.stateless_input_bytes, "native-fixed");
+    var run = try validateWithMeteredFixedHeap(allocator, fixture.stateless_input_bytes, "native-fixed");
+    defer run.deinit(allocator);
     const elapsed_ns = monotonicNanos(io) - start;
 
-    const expected_public = evmz.stateless.ere.outputPublicValues(fixture.stateless_output_bytes);
     return .{ .success = .{
-        .output_matched = std.mem.eql(u8, &run.public_values, &expected_public),
-        .public_values = .init(&run.public_values),
+        .output_matched = std.mem.eql(u8, run.output, fixture.stateless_output_bytes),
+        .public_values = try .init(allocator, run.output),
         .total_num_cycles = 0,
         .execution_duration = durationJson(elapsed_ns),
         .heap = run.heap,
@@ -410,7 +409,8 @@ fn executeNative(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixtu
 fn executeZisk(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture, options: Options) !ExecutionMetrics {
     const ziskemu_path = options.ziskemu_path orelse return error.MissingZiskemuPath;
     const zisk_elf_path = options.zisk_elf_path orelse return error.MissingZiskElfPath;
-    const heap = (try validateWithMeteredFixedHeap(fixture.stateless_input_bytes, "native-fixed-mirror")).heap;
+    var mirror = try validateWithMeteredFixedHeap(allocator, fixture.stateless_input_bytes, "native-fixed-mirror");
+    defer mirror.deinit(allocator);
 
     const run_id = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ fixture.name, monotonicNanos(io) });
     defer allocator.free(run_id);
@@ -460,36 +460,37 @@ fn executeZisk(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture
 
     const actual = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(1024));
     defer allocator.free(actual);
-    if (actual.len < evmz.stateless.ere.public_values_size) return error.InvalidPublicOutput;
-    var actual_public: evmz.stateless.ere.PublicValues = undefined;
-    @memcpy(&actual_public, actual[0..evmz.stateless.ere.public_values_size]);
-    const expected_public = evmz.stateless.ere.outputPublicValues(fixture.stateless_output_bytes);
-    const expected = try ere_io.publicValuesBytes(allocator, &expected_public, .zisk);
+    const expected = try ere_io.outputBytes(allocator, fixture.stateless_output_bytes, .zisk);
     defer allocator.free(expected);
+    const public_len = @min(actual.len, fixture.stateless_output_bytes.len);
 
     return .{ .success = .{
         .output_matched = std.mem.eql(u8, actual, expected),
-        .public_values = .init(&actual_public),
+        .public_values = try .init(allocator, actual[0..public_len]),
         .total_num_cycles = steps,
         .execution_duration = durationJson(elapsed_ns),
-        .heap = heap,
+        .heap = mirror.heap,
     } };
 }
 
 const MeteredRun = struct {
-    public_values: evmz.stateless.ere.PublicValues,
+    output: []u8,
     heap: HeapMetrics,
+
+    fn deinit(self: *MeteredRun, allocator: std.mem.Allocator) void {
+        allocator.free(self.output);
+    }
 };
 
-fn validateWithMeteredFixedHeap(input: []const u8, measurement: []const u8) !MeteredRun {
+fn validateWithMeteredFixedHeap(allocator: std.mem.Allocator, input: []const u8, measurement: []const u8) !MeteredRun {
     const buffer = try std.heap.page_allocator.alignedAlloc(u8, .@"16", guest_heap_capacity_bytes);
     defer std.heap.page_allocator.free(buffer);
 
     var metered = evmz.fixed_buffer_meter.MeteredFixedBufferAllocator.init(buffer);
-    const public_values = try evmz.stateless.ere.validateStatelessPublicValues(metered.allocator(), input);
+    const output = try evmz.stateless.wire.validateStatelessBytes(metered.allocator(), input);
     const metrics = metered.metrics();
     return .{
-        .public_values = public_values,
+        .output = try allocator.dupe(u8, output),
         .heap = .{
             .capacity_bytes = @intCast(metrics.capacity_bytes),
             .peak_used_bytes = @intCast(metrics.peak_used_bytes),
@@ -856,6 +857,7 @@ test "native run writes BenchmarkRun execution success row" {
     try std.testing.expect(std.mem.indexOf(u8, row, "\"name\": \"eest__smoke__block0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, row, "\"success\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, row, "\"output_matched\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, row, output_hex) != null);
     try std.testing.expect(std.mem.indexOf(u8, row, "\"heap\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, row, "\"peak_used_bytes\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, row, "\"fixture_format\": \"eest\"") != null);

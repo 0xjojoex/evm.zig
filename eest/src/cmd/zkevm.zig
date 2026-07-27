@@ -47,8 +47,6 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             const value = args.next() orelse return error.MissingReportPath;
             report_path = try arena.dupe(u8, value);
             options.report = &report;
-        } else if (std.mem.eql(u8, arg, "--ere-public")) {
-            options.ere_public = true;
         } else {
             try paths.append(allocator, try arena.dupe(u8, arg));
         }
@@ -92,11 +90,10 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--report PATH] [--ere-public] [path ...]
+        \\usage: zig build zkevm -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--report PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
-        \\against statelessOutputBytes. With --ere-public, compares the ERE
-        \\public-value convention: sha256(statelessOutputBytes).
+        \\against the raw statelessOutputBytes public values.
         \\Uses {d} workers by default (maximum {d}). --limit and diagnostic
         \\output options require --jobs 1.
         \\Use --trace-mismatch with --verbose to print selected gas/state trace events.

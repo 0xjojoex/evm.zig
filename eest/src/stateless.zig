@@ -17,7 +17,6 @@ pub const Options = struct {
     verbose: bool = false,
     trace_mismatch: bool = false,
     classify_failures: bool = false,
-    ere_public: bool = false,
     report: ?*Report = null,
 };
 
@@ -26,7 +25,6 @@ pub const FailReason = enum(u8) {
     missing_stateless_output,
     validation_error,
     output_mismatch,
-    public_values_mismatch,
     unexpected_success,
     unexpected_failure,
 };
@@ -126,7 +124,7 @@ fn runFixture(
         summary.fixtures += 1;
 
         const expected_success = block.get("expectException") == null;
-        const result = evmz.stateless.ere.runStatelessValidator(allocator, input_bytes) catch |err| {
+        const result = evmz.stateless.wire.validateStatelessBytes(allocator, input_bytes) catch |err| {
             if (options.verbose) std.debug.print("  validation error: {s}\n", .{@errorName(err)});
             if (options.classify_failures) printValidationClassification(path, test_name, block_index, expected_success, err);
             try reporter.add(.{
@@ -138,7 +136,7 @@ fn runFixture(
             summary.countFail(.validation_error);
             continue;
         };
-        defer result.deinit(allocator);
+        defer allocator.free(result);
 
         if (block.get("statelessOutputBytes")) |expected_value| {
             const expected_output = parseBytesFromValue(allocator, expected_value) catch {
@@ -152,36 +150,21 @@ fn runFixture(
                 continue;
             };
             defer allocator.free(expected_output);
-            if (options.ere_public) {
-                const expected_public = evmz.stateless.ere.outputPublicValues(expected_output);
-                if (!std.mem.eql(u8, &result.public_values, &expected_public)) {
-                    if (options.verbose) printPublicMismatch(allocator, input_bytes, result.output, expected_output, result.public_values, expected_public, options.trace_mismatch);
-                    try reporter.add(.{
-                        .category = .implementation_mismatch,
-                        .validation_status = validationStatus(allocator, input_bytes, false),
-                        .difference = .public_values,
-                        .expected_success = expected_success,
-                    });
-                    summary.countFail(.public_values_mismatch);
-                    continue;
-                }
-            } else {
-                if (!std.mem.eql(u8, result.output, expected_output)) {
-                    if (options.verbose) printMismatch(allocator, input_bytes, result.output, expected_output, options.trace_mismatch);
-                    if (options.classify_failures) printOutputClassification(allocator, path, test_name, block_index, input_bytes, result.output, expected_output);
-                    try reportOutputMismatch(
-                        allocator,
-                        reporter,
-                        expected_success,
-                        input_bytes,
-                        result.output,
-                        expected_output,
-                    );
-                    summary.countFail(.output_mismatch);
-                    continue;
-                }
+            if (!std.mem.eql(u8, result, expected_output)) {
+                if (options.verbose) printMismatch(allocator, input_bytes, result, expected_output, options.trace_mismatch);
+                if (options.classify_failures) printOutputClassification(allocator, path, test_name, block_index, input_bytes, result, expected_output);
+                try reportOutputMismatch(
+                    allocator,
+                    reporter,
+                    expected_success,
+                    input_bytes,
+                    result,
+                    expected_output,
+                );
+                summary.countFail(.output_mismatch);
+                continue;
             }
-            const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result.output) catch null;
+            const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch null;
             try reporter.add(.{
                 .category = .pass,
                 .validation_status = if (actual) |value| validationStatus(allocator, input_bytes, value.successful_validation) else "valid",
@@ -193,7 +176,7 @@ fn runFixture(
             continue;
         }
 
-        const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result.output) catch {
+        const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch {
             try reporter.add(.{
                 .category = .adapter_wire_mismatch,
                 .validation_status = "actual_decode_error",
@@ -346,11 +329,6 @@ test "stateless zkevm runner compares canonical SSZ bytes" {
     try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
-
-    const ere_summary = try runSlice(std.testing.allocator, fixture, .{ .ere_public = true }, "smoke.json");
-    try std.testing.expectEqual(@as(usize, 1), ere_summary.fixtures);
-    try std.testing.expectEqual(@as(usize, 1), ere_summary.passed);
-    try std.testing.expectEqual(@as(usize, 0), ere_summary.failed);
 }
 
 fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -638,16 +616,3 @@ const GasTracePrinter = struct {
         });
     }
 };
-
-fn printPublicMismatch(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    actual_output: []const u8,
-    expected_output: []const u8,
-    actual_public: evmz.stateless.ere.PublicValues,
-    expected_public: evmz.stateless.ere.PublicValues,
-    trace_mismatch: bool,
-) void {
-    std.debug.print("  public mismatch: actual={x} expected={x}\n", .{ actual_public, expected_public });
-    printMismatch(allocator, input, actual_output, expected_output, trace_mismatch);
-}

@@ -80,13 +80,12 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
 
     std.debug.print("wrote input_bytes={} output_bytes={} format={s} path={s}\n", .{ selection.input.len, encoded.len, @tagName(options.input_format), output_path });
     if (selection.expected_output) |expected_output| {
-        const public = evmz.stateless.ere.outputPublicValues(expected_output);
         if (options.expected_public_path) |path| {
-            const public_bytes = try ere_io.publicValuesBytes(allocator, &public, options.expected_public_format);
+            const public_bytes = try ere_io.outputBytes(allocator, expected_output, options.expected_public_format);
             defer allocator.free(public_bytes);
             try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = public_bytes });
         }
-        std.debug.print("expected_public={x} format={s}\n", .{ public, @tagName(options.expected_public_format) });
+        std.debug.print("expected_public={x} format={s}\n", .{ expected_output, @tagName(options.expected_public_format) });
     }
 }
 

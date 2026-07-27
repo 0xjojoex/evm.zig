@@ -12,13 +12,11 @@ pub const validateWithOptions = validator.validateWithOptions;
 pub const validateWithCapture = validator.validateWithCapture;
 pub const validateWithCaptureOptions = validator.validateWithCaptureOptions;
 pub const wire = @import("./stateless/wire.zig");
-pub const ere = @import("./stateless/ere.zig");
 pub const tx = @import("./stateless/tx.zig");
 
 test {
     _ = input;
     _ = validator;
     _ = wire;
-    _ = ere;
     _ = tx;
 }

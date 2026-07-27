@@ -5,14 +5,9 @@ const guest_options = @import("guest_options");
 const guest_io = @import("guest_io");
 const guest_allocator = @import("guest_allocator");
 
-pub var evmz_guest_public_values: evmz.stateless.ere.PublicValues = [_]u8{0} ** evmz.stateless.ere.public_values_size;
 pub var evmz_guest_error: u32 = 0;
 pub var evmz_guest_heap_capacity_bytes: u64 = 0;
 pub var evmz_guest_heap_peak_used_bytes: u64 = 0;
-
-pub const RunResult = struct {
-    public_values: evmz.stateless.ere.PublicValues,
-};
 
 pub fn evmz_guest_entry() callconv(.c) void {
     const input = guest_io.readInput() catch |err| {
@@ -29,13 +24,11 @@ pub fn evmz_guest_entry() callconv(.c) void {
 
     writeHeapTelemetry(&fixed);
     evmz_guest_error = 0;
-    evmz_guest_public_values = result.public_values;
-    guest_io.writeOutput(&result.public_values);
+    guest_io.writeOutput(result);
 }
 
 comptime {
     if (!builtin.is_test) {
-        @export(&evmz_guest_public_values, .{ .name = "evmz_guest_public_values" });
         @export(&evmz_guest_error, .{ .name = "evmz_guest_error" });
         @export(&evmz_guest_heap_capacity_bytes, .{ .name = "evmz_guest_heap_capacity_bytes" });
         @export(&evmz_guest_heap_peak_used_bytes, .{ .name = "evmz_guest_heap_peak_used_bytes" });
@@ -50,9 +43,8 @@ fn ziskMain() callconv(.c) void {
     evmz_guest_entry();
 }
 
-pub fn runStatelessEreInput(allocator: std.mem.Allocator, input: []const u8) evmz.stateless.wire.Error!RunResult {
-    const public_values = try evmz.stateless.ere.validateStatelessPublicValues(allocator, input);
-    return .{ .public_values = public_values };
+pub fn runStatelessEreInput(allocator: std.mem.Allocator, input: []const u8) evmz.stateless.wire.Error![]u8 {
+    return evmz.stateless.wire.validateStatelessBytes(allocator, input);
 }
 
 fn writeError(err: anyerror) void {

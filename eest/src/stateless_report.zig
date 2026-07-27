@@ -15,7 +15,6 @@ pub const Difference = enum {
     new_payload_request_root,
     chain_config,
     result_encoding,
-    public_values,
     fixture_shape,
     execution_error,
 };
