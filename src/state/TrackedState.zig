@@ -2131,6 +2131,7 @@ pub fn wasSelfdestructed(self: *const TrackedState, address: Address) bool {
 pub fn finalize(self: *TrackedState, rules: FinalizationRules) !void {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
+    if (tx.lifecycle_accounts.items.len == 0) return;
 
     const lifecycle_count = index32(tx.lifecycle_accounts.items.len);
     const pending_accounts = tx.changed_accounts.items.len + @as(usize, lifecycle_count);
