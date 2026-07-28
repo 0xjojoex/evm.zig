@@ -28,6 +28,7 @@ const vm = @import("./vm.zig");
 
 /// Compile one complete exact engine specification.
 pub const Vm = vm.Vm;
+pub const VmWithOptions = vm.VmWithOptions;
 
 /// The latest exact Ethereum engine — the usual ready-to-use entry point.
 pub const Evm = Vm(eth.latest);

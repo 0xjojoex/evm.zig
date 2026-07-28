@@ -31,51 +31,88 @@ pub const Options = struct {
     bal_differential: ?*block_stf.BalDifferentialReport = null,
 };
 
-pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
-    return validateWithOptions(allocator, input, .{});
+/// Exact stateless validator for one Ethereum revision.
+///
+/// Callers supporting multiple revisions dispatch to these types themselves;
+/// this library never compiles or loops over a runtime fork set.
+pub fn Exact(comptime revision: Revision) type {
+    return ExactWithOptions(revision, .{});
 }
 
-pub fn validateWithOptions(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    options: Options,
-) Error!block_stf.Result {
-    return validateWithCaptureOptions(allocator, input, null, options);
+pub fn ExactWithOptions(comptime revision: Revision, comptime compile_options: Vm.CompileOptions) type {
+    const ExactBlockStf = block_stf.ExactWithOptions(revision, compile_options);
+
+    return struct {
+        pub const fork = revision;
+        pub const options = compile_options;
+        pub const BlockStf = ExactBlockStf;
+
+        pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
+            return validateWithOptions(allocator, input, .{});
+        }
+
+        pub fn validateWithOptions(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            validation_options: Options,
+        ) Error!block_stf.Result {
+            return validateWithCaptureOptions(allocator, input, null, validation_options);
+        }
+
+        pub fn validateWithCapture(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            capture: ?block_stf.ExecutionCapture,
+        ) Error!block_stf.Result {
+            return validateWithCaptureOptions(allocator, input, capture, .{});
+        }
+
+        pub fn validateWithCaptureOptions(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            capture: ?block_stf.ExecutionCapture,
+            validation_options: Options,
+        ) Error!block_stf.Result {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            return validateWithScratchExact(
+                revision,
+                ExactBlockStf,
+                arena.allocator(),
+                input,
+                capture,
+                validation_options,
+            );
+        }
+
+        /// Reuses a caller-owned one-shot scratch lifetime instead of nesting
+        /// another arena. The caller releases all allocations together.
+        pub fn validateOneShot(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+        ) Error!block_stf.Result {
+            return validateWithScratchExact(
+                revision,
+                ExactBlockStf,
+                allocator,
+                input,
+                null,
+                .{},
+            );
+        }
+    };
 }
 
-pub fn validateWithCapture(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    capture: ?block_stf.ExecutionCapture,
-) Error!block_stf.Result {
-    return validateWithCaptureOptions(allocator, input, capture, .{});
-}
-
-pub fn validateWithCaptureOptions(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    capture: ?block_stf.ExecutionCapture,
-    options: Options,
-) Error!block_stf.Result {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    return validateWithScratch(arena.allocator(), input, capture, options);
-}
-
-/// Reuses a caller-owned one-shot scratch lifetime instead of nesting another
-/// arena. The caller must release every allocation together after validation.
-pub fn validateOneShot(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
-    return validateWithScratch(allocator, input, null, .{});
-}
-
-fn validateWithScratch(
+fn validateWithScratchExact(
+    comptime revision: Revision,
+    comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
     options: Options,
 ) Error!block_stf.Result {
     const block = input.block;
-    if (!blockShapeValid(input.revision, block)) return .{ .status = .invalid_block_body };
+    if (!blockShapeValid(revision, block)) return .{ .status = .invalid_block_body };
     var header_chain = try HeaderChain.init(
         allocator,
         input.witness.headers,
@@ -86,22 +123,22 @@ fn validateWithScratch(
     const parent_header = header_chain.parent();
     const codes = try witnessCodes(allocator, input.witness.codes);
 
-    return switch (input.revision) {
-        inline else => |revision| validateExact(
-            revision,
-            allocator,
-            input,
-            capture,
-            options,
-            &header_chain,
-            parent_header,
-            codes,
-        ),
-    };
+    return validateExact(
+        revision,
+        ExactBlockStf,
+        allocator,
+        input,
+        capture,
+        options,
+        &header_chain,
+        parent_header,
+        codes,
+    );
 }
 
 fn validateExact(
     comptime revision: Revision,
+    comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
@@ -111,7 +148,7 @@ fn validateExact(
     codes: []const state.WitnessStateReader.Code,
 ) Error!block_stf.Result {
     const block = input.block;
-    return block_stf.Exact(revision).applyAssumeDecoded(allocator, .{
+    return ExactBlockStf.applyAssumeDecoded(allocator, .{
         .env = .{
             .chain_id = input.chain_id,
             .coinbase = block.fee_recipient,

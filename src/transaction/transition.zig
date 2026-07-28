@@ -23,10 +23,11 @@ const Address = address.Address;
 /// progress; `Output` is the family-facing executed transaction result.
 pub fn bind(
     comptime spec: ExactSpec,
+    comptime ExactExecutor: type,
     comptime Context: type,
     comptime Output: type,
 ) type {
-    comptime std.debug.assert(Context.Executor == executor.Executor(spec));
+    comptime std.debug.assert(Context.Executor == ExactExecutor);
     const PreparedTransaction = transaction.Prepared(tx_settlement.DefaultPlan);
     const Rejection = transaction_validation.ValidationError;
 

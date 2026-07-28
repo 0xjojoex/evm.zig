@@ -7,7 +7,6 @@ const address = @import("../address.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const Withdrawal = @import("../eth/Withdrawal.zig");
 const transaction = @import("../transaction.zig");
-const Revision = @import("../eth/revision.zig").Revision;
 
 pub const Witness = struct {
     state: []const []const u8 = &.{},
@@ -44,9 +43,6 @@ pub const Block = struct {
 };
 
 pub const Input = struct {
-    /// Already-selected runtime fork. Activation metadata is consumed by the
-    /// adapter and does not enter Ethereum execution.
-    revision: Revision,
     /// Transaction replay domain and `CHAINID` opcode value.
     chain_id: u256,
     blob_schedule: ?transaction.BlobSchedule = null,

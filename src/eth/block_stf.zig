@@ -722,11 +722,23 @@ comptime {
 /// resolved spec. Custom chains can retain a named header lineage while
 /// replacing execution values/functions through `bind`.
 pub fn Exact(comptime revision: Revision) type {
-    return bind(revision, eth_spec.specAt(revision));
+    return ExactWithOptions(revision, .{});
 }
 
 pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
-    const ExactVm = vm.Vm(spec);
+    return bindWithOptions(revision, spec, .{});
+}
+
+pub fn ExactWithOptions(comptime revision: Revision, comptime options: vm.CompileOptions) type {
+    return bindWithOptions(revision, eth_spec.specAt(revision), options);
+}
+
+pub fn bindWithOptions(
+    comptime revision: Revision,
+    comptime spec: eth_spec.Spec,
+    comptime options: vm.CompileOptions,
+) type {
+    const ExactVm = vm.VmWithOptions(spec, options);
     const BlockInputAlias = BlockInput;
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
@@ -736,6 +748,7 @@ pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
     return struct {
         pub const fork = revision;
         pub const specification = spec;
+        pub const compile_options = options;
         pub const Vm = ExactVm;
         pub const BlockInput = BlockInputAlias;
         pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
@@ -744,6 +757,7 @@ pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
         pub const BalExecutor = BalExecutorAlias;
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
+            try requireStepCaptureSupport(options, input.capture);
             return applyExact(revision, ExactVm, allocator, input);
         }
 
@@ -751,10 +765,12 @@ pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedBlockInputAlias,
         ) !Result {
+            try requireStepCaptureSupport(options, input.capture);
             return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
 
         pub fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
+            try requireStepCaptureSupport(options, input.capture);
             return produceExact(revision, ExactVm, allocator, input);
         }
 
@@ -762,9 +778,39 @@ pub fn bind(comptime revision: Revision, comptime spec: eth_spec.Spec) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedProduceInputAlias,
         ) !ProduceOutcome {
+            try requireStepCaptureSupport(options, input.capture);
             return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
+}
+
+fn requireStepCaptureSupport(
+    comptime options: vm.CompileOptions,
+    capture: ?ExecutionCapture,
+) !void {
+    if (!options.step_capture and capture != null and capture.?.steps != null)
+        return error.StepCaptureUnavailable;
+}
+
+test "slim exact STF rejects unavailable step capture" {
+    const Sink = struct {
+        fn consume(_: *anyopaque, _: trace.TraceSpan) !void {}
+    };
+
+    var sink: u8 = 0;
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+    const capture = ExecutionCapture{ .steps = .{
+        .tape = &tape,
+        .target = trace.TraceSpanTarget.init(&sink, Sink.consume),
+    } };
+
+    try std.testing.expectError(
+        error.StepCaptureUnavailable,
+        requireStepCaptureSupport(.{ .step_capture = false }, capture),
+    );
+    try requireStepCaptureSupport(.{}, capture);
+    try requireStepCaptureSupport(.{ .step_capture = false }, null);
 }
 
 /// Decode raw transaction envelopes once, then validate one block transition

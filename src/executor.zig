@@ -138,18 +138,29 @@ const default_max_live_frames_value = default_max_live_frames;
 const ErrorType = errors.Error;
 pub const CaptureContext = capture_context.Context;
 
+/// Non-consensus capabilities selected when compiling an exact executor.
+pub const CompileOptions = struct {
+    /// Include opcode-step capture and its traced dispatch table.
+    step_capture: bool = true,
+};
+
 /// The execution engine bound to one exact execution specification.
 ///
 /// Returns the `Executor` struct type described in the module doc above: it
 /// carries the fork-specific message/result aliases and call/create lifecycle
 /// methods. A `Vm` closes it over one complete spec at comptime.
 pub fn Executor(comptime spec: ExactSpec) type {
+    return ExecutorWithOptions(spec, .{});
+}
+
+pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: CompileOptions) type {
     return struct {
         const Self = @This();
         const runtime = call_runtime.bind(Self);
         const callbacks = host_callbacks.bind(Self);
 
         pub const specification = spec;
+        pub const compile_options = options_value;
         pub const State = TrackedState;
         pub const ScopeCheckpoint = TrackedState.Checkpoint;
         pub const BranchCheckpoint = TrackedState.BranchCheckpoint;

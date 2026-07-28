@@ -43,6 +43,20 @@ test "exact VM closes the complete spec without revision state" {
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
 }
 
+test "exact VM compile options can omit step capture" {
+    const Full = evmz.Vm(evmz.eth.amsterdam);
+    const Slim = evmz.VmWithOptions(evmz.eth.amsterdam, .{ .step_capture = false });
+
+    comptime {
+        std.debug.assert(Full != Slim);
+        std.debug.assert(Full.Executor != Slim.Executor);
+        std.debug.assert(Full.compile_options.step_capture);
+        std.debug.assert(!Slim.compile_options.step_capture);
+        std.debug.assert(Full.specification.transaction.max_initcode_size ==
+            Slim.specification.transaction.max_initcode_size);
+    }
+}
+
 test "Spec.extend creates a distinct exact VM from static values" {
     const Strict = evmz.Vm(evmz.eth.london.extend(.{
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },

@@ -17,6 +17,12 @@ const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 const zisk_profile = @import("stateless_profile");
 
+pub const revision: Revision = .amsterdam;
+const AmsterdamValidator = stateless_validate.Exact(revision);
+const AmsterdamOneShotValidator = stateless_validate.ExactWithOptions(revision, .{
+    .step_capture = false,
+});
+
 pub const schema_id: u16 = 0x1501;
 pub const schema_id_size = 2;
 const max_extra_data_bytes = 32;
@@ -1194,7 +1200,10 @@ fn validateStatelessBytesUsingScratch(
         else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
     };
     zisk_profile.end(.ssz_decode);
-    const result = try validateStatelessWithOptionsImpl(reuse_scratch, scratch, input, options);
+    const result = if (comptime reuse_scratch)
+        try validateStatelessWithOptionsImpl(AmsterdamOneShotValidator, true, scratch, input, options)
+    else
+        try validateStatelessWithOptionsImpl(AmsterdamValidator, false, scratch, input, options);
     if (comptime zisk_profile.enabled) {
         zisk_profile.begin(.result_encode);
         const encoded = try result.encode(result_allocator);
@@ -1242,7 +1251,7 @@ pub fn validateStatelessResultBytesWithCaptureAndOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    return stateless_validate.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
+    return AmsterdamValidator.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
         else => .{ .status = .invalid_witness },
@@ -1254,10 +1263,11 @@ pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Er
 }
 
 pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: StatelessInput, options: ValidationOptions) Error!StatelessValidationResult {
-    return validateStatelessWithOptionsImpl(false, allocator, input, options);
+    return validateStatelessWithOptionsImpl(AmsterdamValidator, false, allocator, input, options);
 }
 
 fn validateStatelessWithOptionsImpl(
+    comptime Validator: type,
     comptime reuse_scratch: bool,
     allocator: std.mem.Allocator,
     input: StatelessInput,
@@ -1278,9 +1288,9 @@ fn validateStatelessWithOptionsImpl(
     zisk_profile.end(.normalize);
     zisk_profile.begin(.execute);
     const native_result = (if (comptime reuse_scratch)
-        stateless_validate.validateOneShot(allocator, normalized)
+        Validator.validateOneShot(allocator, normalized)
     else
-        stateless_validate.validate(allocator, normalized)) catch |err| switch (err) {
+        Validator.validate(allocator, normalized)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
@@ -1303,7 +1313,6 @@ fn validateStatelessWithOptionsImpl(
 /// callers should use one block-lifetime arena.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
-    const revision: Revision = .amsterdam;
     const payload = input.new_payload_request.payloadView();
     const transactions = try normalizeTransactions(
         allocator,
@@ -1316,7 +1325,6 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
     else
         &.{};
     return .{
-        .revision = revision,
         .chain_id = input.chain_config.chain_id,
         .blob_schedule = null,
         .block = .{

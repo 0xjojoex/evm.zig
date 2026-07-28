@@ -102,14 +102,14 @@ test "stateless wire v1 reuses parity-authenticated transaction decoding" {
     try std.testing.expectError(error.InvalidPublicKey, wire.normalize(scratch, input));
 }
 
-test "stateless wire v1 is fixed to Amsterdam semantics" {
+test "stateless wire v1 declares Amsterdam semantics at its type boundary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
     const input = try smoke.amsterdamSmokeInput(scratch, .{});
     const normalized = try wire.normalize(scratch, input);
-    try std.testing.expectEqual(.amsterdam, normalized.revision);
+    try std.testing.expectEqual(.amsterdam, wire.revision);
     try std.testing.expect(normalized.blob_schedule == null);
 }
 

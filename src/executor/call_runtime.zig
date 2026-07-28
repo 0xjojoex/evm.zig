@@ -266,8 +266,10 @@ pub fn bind(comptime Executor: type) type {
                     self.executor.trace_depth = depth;
                     const run_result: Interpreter.RunResult = result: {
                         defer self.executor.trace_depth = previous_depth;
-                        if (self.stepCaptureContext()) |context| {
-                            break :result try interpreter.executeCapturedUntilAction(context.currentFrame());
+                        if (comptime Executor.compile_options.step_capture) {
+                            if (self.stepCaptureContext()) |context| {
+                                break :result try interpreter.executeCapturedUntilAction(context.currentFrame());
+                            }
                         }
                         if (call_frame.needs_action_loop) {
                             break :result try interpreter.executeUntilAction();
