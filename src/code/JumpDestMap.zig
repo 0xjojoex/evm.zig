@@ -59,6 +59,21 @@ pub fn analyze(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const 
     try self.ensureValidBytes(allocator, bytes);
 }
 
+pub fn analyzeAndClassifyActionsScalar(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !bool {
+    std.debug.assert(self.strategy == .scalar_bitmask);
+    std.debug.assert(!self.analyzed);
+
+    if (bytes.len == 0) {
+        self.analyzed = true;
+        return false;
+    }
+
+    self.bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, bytes.len);
+    const needs_action_loop = scanner.markJumpDestsAndClassifyActionsScalar(&self.bits, bytes);
+    self.analyzed = true;
+    return needs_action_loop;
+}
+
 fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !void {
     if (self.analyzed) return;
 

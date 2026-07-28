@@ -11,6 +11,11 @@ pub const RawMasks = struct {
     jumpdest: u64,
 };
 
+const ClassifiedRawMasks = struct {
+    raw: RawMasks,
+    action: u64,
+};
+
 pub const BoundaryMasks = struct {
     boundary: u64,
     jumpdest: u64,
@@ -90,6 +95,30 @@ pub fn markJumpDestsScalar(map: *BitSet, bytes: []const u8) void {
     scanScalar(*BitSet, map, bytes, scatterJumpDests);
 }
 
+pub fn markJumpDestsAndClassifyActionsScalar(map: *BitSet, bytes: []const u8) bool {
+    var index: usize = 0;
+    var carry_payload: usize = 0;
+    var needs_action_loop = false;
+
+    while (bytes.len - index >= lanes) : (index += lanes) {
+        const chunk = bytes[index..][0..lanes];
+        const masks = rawScalarMasksWithActions(chunk);
+        const boundaries = resolveBoundaryMasks(chunk, masks.raw.push, masks.raw.jumpdest, &carry_payload);
+        orMask(map, index, boundaries.jumpdest);
+        needs_action_loop = needs_action_loop or masks.action & boundaries.boundary != 0;
+    }
+
+    if (index < bytes.len) {
+        const tail = bytes[index..];
+        const masks = rawScalarMasksWithActions(tail);
+        const boundaries = resolveBoundaryMasks(tail, masks.raw.push, masks.raw.jumpdest, &carry_payload);
+        orMask(map, index, boundaries.jumpdest);
+        needs_action_loop = needs_action_loop or masks.action & boundaries.boundary != 0;
+    }
+
+    return needs_action_loop;
+}
+
 fn scatterJumpDests(map: *BitSet, base: usize, masks: BoundaryMasks) void {
     orMask(map, base, masks.jumpdest);
 }
@@ -142,6 +171,28 @@ pub fn rawScalarMasks(bytes: []const u8) RawMasks {
         jumpdest |= @as(u64, @intFromBool(opcode == .JUMPDEST)) << @intCast(index);
     }
     return .{ .push = push, .jumpdest = jumpdest };
+}
+
+fn rawScalarMasksWithActions(bytes: []const u8) ClassifiedRawMasks {
+    var push: u64 = 0;
+    var jumpdest: u64 = 0;
+    var action: u64 = 0;
+    for (bytes, 0..) |byte, index| {
+        const opcode: Opcode = @enumFromInt(byte);
+        push |= @as(u64, @intFromBool(opcode.isPushN())) << @intCast(index);
+        jumpdest |= @as(u64, @intFromBool(opcode == .JUMPDEST)) << @intCast(index);
+        action |= @as(u64, @intFromBool(isActionBoundaryOpcode(byte))) << @intCast(index);
+    }
+    return .{
+        .raw = .{ .push = push, .jumpdest = jumpdest },
+        .action = action,
+    };
+}
+
+pub inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
+    const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
+    return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
+        opcode_byte == @intFromEnum(Opcode.STATICCALL);
 }
 
 fn resolveBoundaryMasks(bytes: []const u8, raw_push_mask: u64, raw_jumpdest_mask: u64, carry_payload: *usize) BoundaryMasks {
@@ -244,4 +295,24 @@ test "scanner carries PUSH payload across chunks" {
     try std.testing.expect(!map.isSet(1));
     try std.testing.expect(!map.isSet(31));
     try std.testing.expect(map.isSet(33));
+}
+
+test "scalar scanner classifies action boundaries while ignoring PUSH payloads" {
+    var bytecode = [_]u8{0} ** 48;
+    bytecode[0] = Opcode.PUSH32.toByte();
+    bytecode[1] = Opcode.CALL.toByte();
+    bytecode[33] = Opcode.JUMPDEST.toByte();
+    bytecode[34] = Opcode.PUSH1.toByte();
+    bytecode[35] = Opcode.STATICCALL.toByte();
+    bytecode[36] = Opcode.CREATE2.toByte();
+
+    var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
+    defer map.deinit(std.testing.allocator);
+
+    try std.testing.expect(markJumpDestsAndClassifyActionsScalar(&map, &bytecode));
+    try std.testing.expect(map.isSet(33));
+
+    bytecode[36] = Opcode.STOP.toByte();
+    map.unsetAll();
+    try std.testing.expect(!markJumpDestsAndClassifyActionsScalar(&map, &bytecode));
 }

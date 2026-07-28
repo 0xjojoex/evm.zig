@@ -7,6 +7,7 @@
 const std = @import("std");
 const JumpDestStrategy = @import("Config.zig").JumpDestStrategy;
 const JumpDestMap = @import("JumpDestMap.zig");
+const scanner = @import("scanner.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
 
@@ -80,10 +81,15 @@ pub fn prepare(allocator: std.mem.Allocator, bytes: []const u8, strategy: JumpDe
         .bytes = padded.bytes,
         .read_bytes = padded.read_bytes,
         .jumpdests = JumpDestMap.initWithStrategy(strategy),
-        .needs_action_loop = needsActionLoop(padded.bytes),
+        .needs_action_loop = false,
     };
     errdefer self.deinit(allocator);
-    try self.jumpdests.analyze(allocator, self.bytes);
+    if (strategy == .scalar_bitmask) {
+        self.needs_action_loop = try self.jumpdests.analyzeAndClassifyActionsScalar(allocator, self.bytes);
+    } else {
+        self.needs_action_loop = needsActionLoop(self.bytes);
+        try self.jumpdests.analyze(allocator, self.bytes);
+    }
 
     return self;
 }
@@ -101,16 +107,10 @@ pub fn needsActionLoop(code: []const u8) bool {
     while (pc < code.len) {
         const opcode_byte = code[pc];
         pc += 1;
-        if (isActionBoundaryOpcode(opcode_byte)) return true;
+        if (scanner.isActionBoundaryOpcode(opcode_byte)) return true;
         pc += @min(pushDataLen(opcode_byte), code.len - pc);
     }
     return false;
-}
-
-inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
-    const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
-    return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
-        opcode_byte == @intFromEnum(Opcode.STATICCALL);
 }
 
 inline fn pushDataLen(opcode_byte: u8) usize {
