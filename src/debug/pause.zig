@@ -5,9 +5,9 @@
 //! pause without naming a specification. Only the driver in `./session.zig`
 //! binds an executor.
 //!
-//! Stage 0 moves the spike's three pause kinds here unchanged. The
-//! `frame_exit` kind, borrowed `View`, `Budget`, and `Authority` arrive in stage
-//! 1 with the full session shape.
+//! The vocabulary stays at the three boundaries the current driver proves.
+//! Additional pause kinds or inspection containers belong to a concrete
+//! debugger consumer, not this ownership layer.
 
 const evmz = @import("../evm.zig");
 
@@ -19,6 +19,12 @@ const Interpreter = evmz.interpreter;
 pub const Site = struct {
     frame_index: usize,
     depth: u16,
+};
+
+/// Whether controlled execution followed canonical EVM semantics throughout.
+pub const Completion = union(enum) {
+    canonical: Host.Result,
+    intervened: Host.Result,
 };
 
 /// One boundary the driver can stop at.
@@ -42,5 +48,5 @@ pub const Pause = union(enum) {
         value: Interpreter.Action,
     },
     /// The root execution resolved. The driver's frame span is empty.
-    finished: Host.Result,
+    finished: Completion,
 };

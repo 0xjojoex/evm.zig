@@ -134,6 +134,35 @@ pub fn build(b: *std.Build) void {
 
     addTidy(b);
 
+    if (is_native_profile) {
+        const debug_demo_mod = b.createModule(.{
+            .root_source_file = b.path("src/debug_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+        });
+        debug_demo_mod.addOptions("build_options", build_options);
+        debug_demo_mod.addImport("ssz", ssz_mod);
+        debug_demo_mod.addImport("rlp", rlp_mod);
+        debug_demo_mod.addImport("mpt", mpt_mod);
+        debug_demo_mod.addIncludePath(b.path("include"));
+        if (native_precompile_deps) |deps| {
+            addPrecompileNative(b, debug_demo_mod, deps);
+        }
+        addNativeKeccak(debug_demo_mod, xkcp_object);
+        addNativeSecp256k1(debug_demo_mod, libsecp256k1_object);
+
+        const debug_demo = b.addExecutable(.{
+            .name = "evmz-debug-demo",
+            .root_module = debug_demo_mod,
+        });
+        const run_debug_demo = b.addRunArtifact(debug_demo);
+        b.step("debug-demo", "Run the internal controlled-execution demo").dependOn(&run_debug_demo.step);
+    } else {
+        const debug_demo = b.step("debug-demo", "Run the internal controlled-execution demo");
+        debug_demo.dependOn(&b.addFail("debug-demo is native-only").step);
+    }
+
     const call_fixture_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
         .target = target,

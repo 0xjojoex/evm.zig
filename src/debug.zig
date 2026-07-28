@@ -20,9 +20,10 @@
 //!   variant are untouched; this is a separate entry point over the same frames.
 //! - **I3 unreferenced means unemitted.** Zig analyses generic declarations
 //!   lazily, so a build that never names this module pays nothing. Verified by
-//!   byte-identical ReleaseFast artifacts with and without the lane present.
-//! - **I4 capture stays a recorder.** Every driver entry point asserts no capture
-//!   context is active. Combining live control with capture is a later decision,
+//!   identical ReleaseFast production text, constants, and section sizes with
+//!   and without the lane present.
+//! - **I4 capture stays a recorder.** Session construction rejects an active
+//!   capture context. Combining live control with capture is a later decision,
 //!   not an accident.
 //!
 //! I0 through I4 are the merge gate for every stage. The dependency
@@ -36,6 +37,7 @@ pub const session = @import("./debug/session.zig");
 
 pub const Pause = pause.Pause;
 pub const Site = pause.Site;
+pub const Completion = pause.Completion;
 
 /// Bind the pull-driven driver to one exact executor.
 pub const bind = session.bind;
