@@ -6,7 +6,7 @@ const BitSet = std.DynamicBitSetUnmanaged;
 
 pub const lanes = 16;
 
-pub const RawMasks = struct {
+const RawMasks = struct {
     push: u64,
     jumpdest: u64,
 };
@@ -20,10 +20,6 @@ const BoundaryMasks = struct {
     boundary: u64,
     jumpdest: u64,
 };
-
-pub fn markJumpDests(map: *BitSet, bytes: []const u8) void {
-    _ = markScan(map, bytes, false);
-}
 
 /// Marks jump destinations and reports whether any instruction boundary is an
 /// action opcode, from the same pass.
@@ -154,10 +150,6 @@ inline fn swarWordMasks(word: u64) SwarWordMasks {
         // skips the move-mask entirely.
         .high_f0 = swarZeroBytes(high_zero),
     };
-}
-
-pub fn rawMasks(bytes: []const u8) RawMasks {
-    return rawMasksClassified(bytes, false).raw;
 }
 
 fn rawMasksClassified(bytes: []const u8, comptime classify_actions: bool) ClassifiedRawMasks {
@@ -316,11 +308,11 @@ test "raw masks place bits at the byte's own lane" {
     inline for (0..lanes) |lane| {
         var bytes = [_]u8{0} ** lanes;
         bytes[lane] = Opcode.PUSH1.toByte();
-        try std.testing.expectEqual(@as(u64, 1) << lane, rawMasks(&bytes).push);
+        try std.testing.expectEqual(@as(u64, 1) << lane, rawMasksClassified(&bytes, false).raw.push);
 
         bytes = [_]u8{0} ** lanes;
         bytes[lane] = Opcode.JUMPDEST.toByte();
-        try std.testing.expectEqual(@as(u64, 1) << lane, rawMasks(&bytes).jumpdest);
+        try std.testing.expectEqual(@as(u64, 1) << lane, rawMasksClassified(&bytes, false).raw.jumpdest);
     }
 }
 
@@ -334,7 +326,7 @@ test "raw masks match reference across adjacent-byte combinations" {
                 bytes[lane] = @intCast(first);
                 bytes[lane + 1] = @intCast(second);
                 const expected = referenceRawMasks(&bytes);
-                const actual = rawMasks(&bytes);
+                const actual = rawMasksClassified(&bytes, false).raw;
                 try std.testing.expectEqual(expected.push, actual.push);
                 try std.testing.expectEqual(expected.jumpdest, actual.jumpdest);
             }
@@ -352,7 +344,7 @@ test "raw masks match reference on random chunks of every length" {
         const len = random.intRangeAtMost(usize, 1, lanes);
         const chunk = bytes[0..len];
         const expected = referenceRawMasks(chunk);
-        const actual = rawMasks(chunk);
+        const actual = rawMasksClassified(chunk, false).raw;
         try std.testing.expectEqual(expected.push, actual.push);
         try std.testing.expectEqual(expected.jumpdest, actual.jumpdest);
     }
@@ -393,7 +385,7 @@ test "scanner marks jumpdests while ignoring PUSH payload noise" {
     var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
 
-    markJumpDests(&map, &bytecode);
+    try std.testing.expect(!markJumpDestsAndClassifyActions(&map, &bytecode));
 
     try std.testing.expect(!map.isSet(0));
     try std.testing.expect(!map.isSet(1));
@@ -409,7 +401,7 @@ test "scanner carries PUSH payload across chunks" {
     var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
 
-    markJumpDests(&map, &bytecode);
+    try std.testing.expect(!markJumpDestsAndClassifyActions(&map, &bytecode));
 
     try std.testing.expect(!map.isSet(1));
     try std.testing.expect(!map.isSet(31));

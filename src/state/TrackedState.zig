@@ -17,7 +17,6 @@ const MemoryAccount = @import("./MemoryAccount.zig");
 const StateReader = @import("./Reader.zig");
 const storage = @import("./storage.zig");
 const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
-const SparseHashMapWithContext = @import("./sparse_hash_map.zig").WithContext;
 
 const TrackedState = @This();
 const StorageKey = storage.Key;
@@ -28,7 +27,7 @@ const CodeHashSet = SparseHashMap(CodeHash, void);
 const AcceptedAccountMap = SparseHashMap(Address, AcceptedAccountRow);
 const AcceptedStorageMap = SparseHashMap(StorageKey, AcceptedStorageRow);
 const TransactionAccountMap = SparseHashMap(Address, AccountRow);
-const TransactionStorageMap = SparseHashMapWithContext(StorageKey, StorageRow, storage.TransactionKeyContext);
+const TransactionStorageMap = SparseHashMap(StorageKey, StorageRow);
 const ScopeStorageMap = SparseHashMap(StorageKey, ScopeStorage);
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 const CodeMap = SparseHashMap(CodeHash, CodeEntry);

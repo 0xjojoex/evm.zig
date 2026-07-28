@@ -88,7 +88,7 @@ pub fn lookupAuthenticated(self: *Execution, code_hash: [32]u8) ?Bytecode.View {
 pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
     if (raw_code.len == 0) return .empty;
 
-    var bytecode = Bytecode.prepare(self.scratch_allocator, raw_code) catch |err| switch (err) {
+    var bytecode = Bytecode.init(self.scratch_allocator, raw_code) catch |err| switch (err) {
         error.OutOfMemory => return error.PreparedCodeCapacityExceeded,
     };
     errdefer bytecode.deinit(self.scratch_allocator);

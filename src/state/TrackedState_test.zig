@@ -5,7 +5,6 @@ const uint256 = @import("../uint256.zig");
 const Account = @import("./Account.zig");
 const Reader = @import("./Reader.zig");
 const TrackedState = @import("./TrackedState.zig");
-const storage_mod = @import("./storage.zig");
 
 const TestReader = struct {
     account_address: @import("../address.zig").Address = addr(1),
@@ -203,27 +202,6 @@ test "accepted access hint reserves account and storage maps" {
 
     try std.testing.expect(state.accepted.accounts.capacity() >= 9);
     try std.testing.expect(state.accepted.storage.capacity() >= 17);
-}
-
-test "transaction storage preserves colliding fixed-hash keys" {
-    const context = storage_mod.TransactionKeyContext{};
-    const first_key: u256 = 1;
-    const second_key: u256 = @as(u256, std.math.rotr(u64, 1, 13)) << 64;
-    try std.testing.expectEqual(
-        context.hash(.{ .address = addr(1), .key = first_key }),
-        context.hash(.{ .address = addr(1), .key = second_key }),
-    );
-
-    var state = TrackedState.init(std.testing.allocator);
-    defer state.deinit();
-    _ = state.beginTransaction();
-    state.beginScope();
-
-    _ = try state.setStorage(addr(1), first_key, 11);
-    _ = try state.setStorage(addr(1), second_key, 22);
-
-    try std.testing.expectEqual(@as(u256, 11), try state.getStorage(addr(1), first_key));
-    try std.testing.expectEqual(@as(u256, 22), try state.getStorage(addr(1), second_key));
 }
 
 test "retained account writes advance accepted state" {

@@ -18,23 +18,9 @@ pub const prepared_empty = JumpDestMap{
     .analyzed = true,
 };
 
-pub fn init() JumpDestMap {
-    return empty;
-}
-
 pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
     self.bits.deinit(allocator);
     self.* = empty;
-}
-
-pub fn isValid(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8, target: usize) !bool {
-    if (target >= bytes.len) return false;
-
-    const opcode: Opcode = @enumFromInt(bytes[target]);
-    if (opcode != .JUMPDEST) return false;
-
-    try self.ensureValidBytes(allocator, bytes);
-    return self.bits.isSet(target);
 }
 
 /// Query an eagerly analyzed map without mutation or allocation.
@@ -43,10 +29,6 @@ pub fn isValidPrepared(self: *const JumpDestMap, bytes: []const u8, target: usiz
     if (target >= bytes.len) return false;
     if (bytes[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
     return self.bits.isSet(target);
-}
-
-pub fn analyze(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !void {
-    try self.ensureValidBytes(allocator, bytes);
 }
 
 /// Analyze and report whether `bytes` contains an action-boundary opcode, both
@@ -65,27 +47,15 @@ pub fn analyzeAndClassifyActions(self: *JumpDestMap, allocator: std.mem.Allocato
     return needs_action_loop;
 }
 
-fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !void {
-    if (self.analyzed) return;
-
-    if (bytes.len == 0) {
-        self.analyzed = true;
-        return;
-    }
-
-    self.bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, bytes.len);
-    scanner.markJumpDests(&self.bits, bytes);
-    self.analyzed = true;
-}
-
 test "jumpdest map skips PUSH data" {
     var map = JumpDestMap.empty;
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 1));
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 2));
+    try std.testing.expect(!map.isValidPrepared(&bytecode, 1));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 2));
 }
 
 test "jumpdest map accepts destinations after push-looking data" {
@@ -93,18 +63,20 @@ test "jumpdest map accepts destinations after push-looking data" {
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .PUSH2, 0x00, .PUSH1, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 3));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 3));
 }
 
-test "jumpdest map rejects non-destinations without analysis" {
+test "jumpdest map rejects non-destinations after analysis" {
     var map = JumpDestMap.empty;
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .STOP, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 0));
-    try std.testing.expect(!map.analyzed);
+    try std.testing.expect(!map.isValidPrepared(&bytecode, 0));
+    try std.testing.expect(map.analyzed);
 }
 
 test "jumpdest map handles sparse long bytecode" {
@@ -117,8 +89,9 @@ test "jumpdest map handles sparse long bytecode" {
     bytecode[2] = 127;
     bytecode[3] = Opcode.JUMP.toByte();
     bytecode[127] = Opcode.JUMPDEST.toByte();
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 127));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 127));
 }
 
 test "jumpdest map ignores fake push in PUSH payload" {
@@ -130,19 +103,21 @@ test "jumpdest map ignores fake push in PUSH payload" {
 test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
     {
         const bytecode = t.bytecode(.{ .DUPN, .JUMPDEST });
-        var map = JumpDestMap.init();
+        var map = JumpDestMap.empty;
         defer map.deinit(std.testing.allocator);
+        _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-        try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 1));
+        try std.testing.expect(map.isValidPrepared(&bytecode, 1));
         try expectMatchesLinear(&bytecode);
     }
 
     {
         const bytecode = t.bytecode(.{ .DUPN, .PUSH1, .JUMPDEST });
-        var map = JumpDestMap.init();
+        var map = JumpDestMap.empty;
         defer map.deinit(std.testing.allocator);
+        _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-        try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 2));
+        try std.testing.expect(!map.isValidPrepared(&bytecode, 2));
         try expectMatchesLinear(&bytecode);
     }
 }
@@ -182,7 +157,7 @@ fn expectMatchesLinear(bytes: []const u8) !void {
 
     var scanned = JumpDestMap.empty;
     defer scanned.deinit(std.testing.allocator);
-    try scanned.analyze(std.testing.allocator, bytes);
+    _ = try scanned.analyzeAndClassifyActions(std.testing.allocator, bytes);
 
     try std.testing.expect(linear.eql(scanned.bits));
 }

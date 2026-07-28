@@ -37,20 +37,10 @@ test "micro/state/sparse-hash-map/hash" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
 
-    var auto_hash_context = StorageKeyHashBench(std.hash_map.AutoContext(StorageKey)){
-        .keys = &keys,
-    };
+    var hash_context = StorageKeyHashBench{ .keys = &keys };
     try bench.addParam(
-        "sparse-hash-map/storage-key/hash/auto/1024x",
-        @as(*const @TypeOf(auto_hash_context), &auto_hash_context),
-        .{},
-    );
-    var fixed_hash_context = StorageKeyHashBench(evmz.state.storage.TransactionKeyContext){
-        .keys = &keys,
-    };
-    try bench.addParam(
-        "sparse-hash-map/storage-key/hash/fixed/1024x",
-        @as(*const @TypeOf(fixed_hash_context), &fixed_hash_context),
+        "sparse-hash-map/storage-key/hash/1024x",
+        @as(*const StorageKeyHashBench, &hash_context),
         .{},
     );
 
@@ -430,18 +420,16 @@ const StateMapCase = struct {
     live: usize,
 };
 
-fn StorageKeyHashBench(comptime Context: type) type {
-    return struct {
-        keys: []const StorageKey,
+const StorageKeyHashBench = struct {
+    keys: []const StorageKey,
 
-        pub fn run(self: *@This(), _: std.mem.Allocator) void {
-            const context = Context{};
-            var acc: u64 = 0;
-            for (self.keys) |key| acc +%= context.hash(key);
-            std.mem.doNotOptimizeAway(acc);
-        }
-    };
-}
+    pub fn run(self: *StorageKeyHashBench, _: std.mem.Allocator) void {
+        const context: std.hash_map.AutoContext(StorageKey) = .{};
+        var acc: u64 = 0;
+        for (self.keys) |key| acc +%= context.hash(key);
+        std.mem.doNotOptimizeAway(acc);
+    }
+};
 
 fn ContainsBench(comptime Map: type, comptime Key: type) type {
     return struct {

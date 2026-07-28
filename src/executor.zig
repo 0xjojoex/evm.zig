@@ -928,7 +928,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
 
         /// Prepare code according to the executor preprocessing configuration.
         pub fn prepareBytecode(self: *const Self, code: []const u8) !Bytecode {
-            return Bytecode.prepare(self.allocator, code);
+            return Bytecode.init(self.allocator, code);
         }
 
         /// Duplicate the effective execution code for an address.

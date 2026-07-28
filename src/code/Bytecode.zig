@@ -71,10 +71,6 @@ pub const empty = Bytecode{
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
-    return prepare(allocator, bytes);
-}
-
-pub fn prepare(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
     zisk_profile.begin(.prepared_code_padding);
     const padded = try ZeroPaddedCode.init(allocator, bytes);
     zisk_profile.end(.prepared_code_padding);
@@ -141,7 +137,7 @@ test "bytecode caches action-loop classification while ignoring push data" {
 
 test "bytecode eagerly completes jumpdest analysis" {
     const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
-    var bytecode = try Bytecode.prepare(std.testing.allocator, &raw);
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
     defer bytecode.deinit(std.testing.allocator);
 
     try std.testing.expect(bytecode.jumpdests.analyzed);

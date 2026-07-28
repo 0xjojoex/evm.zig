@@ -75,7 +75,7 @@ pub fn getOrPrepare(
         raw_code.len,
     ) catch return error.OutOfMemory;
 
-    var bytecode = try Bytecode.prepare(self.allocator, raw_code);
+    var bytecode = try Bytecode.init(self.allocator, raw_code);
     errdefer bytecode.deinit(self.allocator);
     const view = bytecode.view();
     try self.entries.putNoClobber(expected_hash, bytecode);

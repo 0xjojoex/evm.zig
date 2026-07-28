@@ -28,41 +28,54 @@ pub const Lookup = union(enum) {
 /// Decoded fields borrow from the witness bytes, which must outlive the cache.
 pub const LookupCache = struct {
     allocator: std.mem.Allocator,
-    entries: std.ArrayList(Entry) = .empty,
+    index: ?*const NodeIndex = null,
+    slots: []usize = &.{},
+    entries: std.ArrayList(node.Node) = .empty,
 
-    const Entry = struct {
-        hash: hash.Root,
-        decoded: node.Node,
-    };
+    const empty_slot = std.math.maxInt(usize);
 
     pub fn init(allocator: std.mem.Allocator) LookupCache {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *LookupCache) void {
+        self.allocator.free(self.slots);
         self.entries.deinit(self.allocator);
         self.* = undefined;
     }
 
     fn decode(
         self: *LookupCache,
-        digest: hash.Root,
+        index: *const NodeIndex,
+        position: usize,
         encoded: []const u8,
         require_branch: bool,
     ) (std.mem.Allocator.Error || LookupError)!node.Node {
-        for (self.entries.items) |entry| {
-            if (!std.mem.eql(u8, &entry.hash, &digest)) continue;
-            if (require_branch and entry.decoded != .branch) {
+        try self.prepareIndex(index);
+        const entry_index = self.slots[position];
+        if (entry_index != empty_slot) {
+            const decoded = self.entries.items[entry_index];
+            if (require_branch and decoded != .branch) {
                 return error.NonCanonicalNode;
             }
-            return entry.decoded;
+            return decoded;
         }
+
         const decoded = try node.decode(encoded, require_branch);
-        try self.entries.append(self.allocator, .{
-            .hash = digest,
-            .decoded = decoded,
-        });
+        try self.entries.append(self.allocator, decoded);
+        self.slots[position] = self.entries.items.len - 1;
         return decoded;
+    }
+
+    fn prepareIndex(self: *LookupCache, index: *const NodeIndex) std.mem.Allocator.Error!void {
+        if (self.index == index) return;
+
+        const slots = try self.allocator.alloc(usize, nodeCount(index));
+        @memset(slots, empty_slot);
+        self.allocator.free(self.slots);
+        self.slots = slots;
+        self.entries.clearRetainingCapacity();
+        self.index = index;
     }
 };
 
@@ -83,9 +96,9 @@ pub const NodeIndex = opaque {};
 const IndexData = struct {
     records: []const NodeRecord = &.{},
 
-    /// The encoded node whose hash equals `digest`, or null. Records must be
-    /// sorted ascending by hash (as produced by `indexNodes`).
-    pub fn find(self: IndexData, digest: hash.Root) ?[]const u8 {
+    /// The node whose hash equals `digest`, or null. Records must be sorted
+    /// ascending by hash (as produced by `indexNodes`).
+    pub fn find(self: IndexData, digest: hash.Root) ?IndexedNode {
         var low: usize = 0;
         var high = self.records.len;
         while (low < high) {
@@ -93,11 +106,16 @@ const IndexData = struct {
             switch (std.mem.order(u8, &self.records[mid].hash, &digest)) {
                 .lt => low = mid + 1,
                 .gt => high = mid,
-                .eq => return self.records[mid].encoded,
+                .eq => return .{ .encoded = self.records[mid].encoded, .position = mid },
             }
         }
         return null;
     }
+};
+
+const IndexedNode = struct {
+    encoded: []const u8,
+    position: usize,
 };
 
 /// Hash each node in `encoded_nodes` and build a sorted, deduplicated sealed
@@ -144,7 +162,8 @@ pub fn nodeCount(index: *const NodeIndex) usize {
 }
 
 pub fn find(index: *const NodeIndex, digest: hash.Root) ?[]const u8 {
-    return dataFromIndex(index).find(digest);
+    const indexed = dataFromIndex(index).find(digest) orelse return null;
+    return indexed.encoded;
 }
 
 fn indexFromData(data: *const IndexData) *const NodeIndex {
@@ -185,9 +204,10 @@ fn lookupWithCache(
     const step_capacity = std.math.add(usize, key_nibbles, 1) catch
         return error.ResourceLimitExceeded;
 
+    const root_node = dataFromIndex(index).find(root) orelse return error.MissingNode;
     var resolved = ResolvedReference{
-        .encoded = find(index, root) orelse return error.MissingNode,
-        .hash = root,
+        .encoded = root_node.encoded,
+        .position = root_node.position,
     };
     var depth: usize = 0;
     var steps: usize = 0;
@@ -198,8 +218,8 @@ fn lookupWithCache(
         if (steps > step_capacity) return error.ResourceLimitExceeded;
 
         const decoded = if (cache) |active|
-            if (resolved.hash) |digest|
-                try active.decode(digest, resolved.encoded, extension_parent)
+            if (resolved.position) |position|
+                try active.decode(index, position, resolved.encoded, extension_parent)
             else
                 try decodeForPath(resolved.encoded, extension_parent, key, depth)
         else
@@ -255,7 +275,7 @@ fn decodeForPath(
 
 const ResolvedReference = struct {
     encoded: []const u8,
-    hash: ?hash.Root,
+    position: ?usize,
 };
 
 fn resolveRequiredReference(index: *const NodeIndex, reference: node.Reference) LookupError!ResolvedReference {
@@ -265,15 +285,37 @@ fn resolveRequiredReference(index: *const NodeIndex, reference: node.Reference) 
 fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupError!?ResolvedReference {
     return switch (reference) {
         .empty => null,
-        .embedded => |embedded| .{ .encoded = embedded, .hash = null },
+        .embedded => |embedded| .{ .encoded = embedded, .position = null },
         .hashed => |digest| {
-            const encoded = find(index, digest.*) orelse return error.MissingNode;
-            if (encoded.len < 32) return error.InvalidNodeReference;
-            return .{ .encoded = encoded, .hash = digest.* };
+            const indexed = dataFromIndex(index).find(digest.*) orelse return error.MissingNode;
+            if (indexed.encoded.len < 32) return error.InvalidNodeReference;
+            return .{ .encoded = indexed.encoded, .position = indexed.position };
         },
     };
 }
 
 fn recordLessThan(_: void, lhs: NodeRecord, rhs: NodeRecord) bool {
     return std.mem.order(u8, &lhs.hash, &rhs.hash) == .lt;
+}
+
+test "decoded-node cache indexes many witness positions" {
+    var cache = LookupCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const node_count = 4_096;
+    const records = try std.testing.allocator.alloc(NodeRecord, node_count);
+    defer std.testing.allocator.free(records);
+    const index_data = IndexData{ .records = records };
+    const index = indexFromData(&index_data);
+    const encoded_leaf = [_]u8{ 0xc2, 0x20, 0x01 };
+    for (0..node_count) |position| {
+        try std.testing.expect((try cache.decode(index, position, &encoded_leaf, false)) == .leaf);
+    }
+    try std.testing.expectEqual(@as(usize, node_count), cache.entries.items.len);
+
+    for (0..node_count) |offset| {
+        const position = node_count - offset - 1;
+        try std.testing.expect((try cache.decode(index, position, &encoded_leaf, false)) == .leaf);
+    }
+    try std.testing.expectEqual(@as(usize, node_count), cache.entries.items.len);
 }

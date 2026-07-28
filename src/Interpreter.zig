@@ -1163,7 +1163,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             const bytecode = options.bytecode orelse prepared: {
                 const code = options.code orelse &.{};
                 if (code.len == 0) break :prepared Bytecode.View.empty;
-                const prepared = try Bytecode.prepare(allocator, code);
+                const prepared = try Bytecode.init(allocator, code);
                 owned_bytecode = prepared;
                 break :prepared prepared.view();
             };

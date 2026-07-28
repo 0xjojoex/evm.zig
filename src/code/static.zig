@@ -71,7 +71,7 @@ test "static view matches runtime preparation" {
         .STOP,
     });
     const Prepared = View(&raw);
-    var runtime = try Bytecode.prepare(std.testing.allocator, &raw);
+    var runtime = try Bytecode.init(std.testing.allocator, &raw);
     defer runtime.deinit(std.testing.allocator);
 
     try std.testing.expectEqualSlices(u8, &raw, Prepared.view.bytes);
@@ -116,7 +116,7 @@ test "linear static analysis agrees with runtime scanner" {
 
 fn expectLinearMatchesRuntime(bytes: []const u8, masks: []usize) !void {
     const needs_action_loop = analyzeLinear(bytes, masks);
-    var runtime = try Bytecode.prepare(std.testing.allocator, bytes);
+    var runtime = try Bytecode.init(std.testing.allocator, bytes);
     defer runtime.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(runtime.needs_action_loop, needs_action_loop);
