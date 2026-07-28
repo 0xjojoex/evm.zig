@@ -267,9 +267,9 @@ fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupEr
         .empty => null,
         .embedded => |embedded| .{ .encoded = embedded, .hash = null },
         .hashed => |digest| {
-            const encoded = find(index, digest) orelse return error.MissingNode;
+            const encoded = find(index, digest.*) orelse return error.MissingNode;
             if (encoded.len < 32) return error.InvalidNodeReference;
-            return .{ .encoded = encoded, .hash = digest };
+            return .{ .encoded = encoded, .hash = digest.* };
         },
     };
 }

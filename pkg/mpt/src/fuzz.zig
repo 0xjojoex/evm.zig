@@ -87,6 +87,7 @@ const Properties = struct {
 
         try checkLeafProof(trie, entries[0]);
         try checkEmbeddedBranchUpdates(trie);
+        try checkHashedBranchUpdateDifferential(trie, smith);
         try checkArbitraryProofDeterminism(trie, smith);
     }
 };
@@ -125,6 +126,68 @@ fn checkEmbeddedBranchUpdates(trie: mpt.DefaultTrie) !void {
     };
     const emptied = try trie.updateSorted(root, indexed.index(), &deletions);
     try expectRootEqual(mpt.empty_root, emptied);
+}
+
+fn checkHashedBranchUpdateDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Smith) !void {
+    const child_count = 4;
+    const value_len = 40;
+    var values: [child_count][value_len]u8 = undefined;
+    smith.bytes(std.mem.asBytes(&values));
+    var replacement: [value_len]u8 = undefined;
+    smith.bytes(&replacement);
+    const selected: usize = smith.valueRangeAtMost(u8, 0, child_count - 1);
+    const delete_selected = smith.valueRangeAtMost(u8, 0, 1) == 0;
+
+    var leaves: [child_count][value_len + 3]u8 = undefined;
+    var leaf_hashes: [child_count]mpt.Root = undefined;
+    var keys: [child_count][1]u8 = undefined;
+    var entries: [child_count]mpt.Entry = undefined;
+    for (0..child_count) |index| {
+        leaves[index][0..3].* = .{ 0xea, 0x30, 0xa8 };
+        @memcpy(leaves[index][3..], &values[index]);
+        leaf_hashes[index] = mpt.StdKeccak256Context.keccak256(.{}, &leaves[index]);
+        keys[index][0] = @as(u8, @intCast(index)) << 4;
+        entries[index] = .{ .key = &keys[index], .value = &values[index] };
+    }
+
+    var root_node: [147]u8 = undefined;
+    root_node[0..2].* = .{ 0xf8, 0x91 };
+    var cursor: usize = 2;
+    for (leaf_hashes) |digest| {
+        root_node[cursor] = 0xa0;
+        @memcpy(root_node[cursor + 1 .. cursor + 33], &digest);
+        cursor += 33;
+    }
+    @memset(root_node[cursor..], 0x80);
+
+    const encoded_nodes = [_][]const u8{
+        &root_node,
+        &leaves[0],
+        &leaves[1],
+        &leaves[2],
+        &leaves[3],
+    };
+    var indexed = try trie.indexNodes(&encoded_nodes);
+    defer indexed.deinit();
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
+    const update = [_]mpt.Update{.{
+        .key = &keys[selected],
+        .value = if (delete_selected) null else &replacement,
+    }};
+    const actual = try trie.updateSorted(root_hash, indexed.index(), &update);
+
+    var expected_entries: [child_count]mpt.Entry = undefined;
+    var expected_len: usize = 0;
+    for (entries, 0..) |entry, index| {
+        if (delete_selected and index == selected) continue;
+        expected_entries[expected_len] = if (index == selected)
+            .{ .key = entry.key, .value = &replacement }
+        else
+            entry;
+        expected_len += 1;
+    }
+    const expected = try trie.rootSorted(expected_entries[0..expected_len]);
+    try expectRootEqual(expected, actual);
 }
 
 fn shapeKey(

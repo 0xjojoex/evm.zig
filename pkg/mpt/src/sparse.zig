@@ -46,8 +46,15 @@ const SparseNode = struct {
     };
 
     const Branch = struct {
-        children: [16]?*SparseNode,
+        /// Hashed siblings stay borrowed until an update selects them.
+        children: [16]BranchChild,
         value: ?[]const u8,
+    };
+
+    const BranchChild = union(enum) {
+        empty,
+        hash: node_codec.HashedReference,
+        node: *SparseNode,
     };
 };
 
@@ -264,7 +271,19 @@ fn decodeBranchNode(
 ) AllocUpdateError!void {
     var branch = emptyBranch();
     for (decoded.children, 0..) |reference, child_index| {
-        branch.children[child_index] = try decodeChildReference(context, frames, reference, false);
+        branch.children[child_index] = switch (reference) {
+            .empty => .empty,
+            .hashed => |digest| .{ .hash = digest },
+            .embedded => |encoded| child: {
+                const child = try context.newNode(.empty);
+                try frames.append(context.allocator, .{ .decode = .{
+                    .target = child,
+                    .encoded = encoded,
+                    .require_branch = false,
+                } });
+                break :child .{ .node = child };
+            },
+        };
     }
     branch.value = decoded.value;
     target.* = .{ .kind = .{ .branch = branch } };
@@ -287,7 +306,7 @@ fn decodeChildReference(
             } });
             return child;
         },
-        .hashed => |digest| try context.newNode(.{ .hash = digest }),
+        .hashed => |digest| try context.newNode(.{ .hash = digest.* }),
     };
 }
 
@@ -306,6 +325,18 @@ fn materializeHash(context: anytype, sparse_node: *SparseNode) AllocUpdateError!
         },
         else => {},
     }
+}
+
+fn branchChildNode(context: anytype, child: *SparseNode.BranchChild) AllocUpdateError!?*SparseNode {
+    return switch (child.*) {
+        .empty => null,
+        .node => |node| node,
+        .hash => |digest| node: {
+            const node = try context.newNode(.{ .hash = digest.* });
+            child.* = .{ .node = node };
+            break :node node;
+        },
+    };
 }
 
 fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u8) AllocUpdateError!void {
@@ -343,9 +374,9 @@ fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u
                     return;
                 }
                 const child_index = remaining[0];
-                const child = branch.children[child_index] orelse child: {
+                const child = (try branchChildNode(context, &branch.children[child_index])) orelse child: {
                     const created = try context.newNode(.empty);
-                    branch.children[child_index] = created;
+                    branch.children[child_index] = .{ .node = created };
                     break :child created;
                 };
                 current = child;
@@ -378,22 +409,22 @@ fn splitExtension(
 ) AllocUpdateError!void {
     var branch = emptyBranch();
     const old_remaining = extension.path[common..];
-    branch.children[old_remaining[0]] = if (old_remaining.len == 1)
+    branch.children[old_remaining[0]] = .{ .node = if (old_remaining.len == 1)
         extension.child
     else
         try context.newNode(.{ .extension = .{
             .path = old_remaining[1..],
             .child = extension.child,
-        } });
+        } }) };
 
     const new_remaining = key[common..];
     if (new_remaining.len == 0) {
         branch.value = value;
     } else {
-        branch.children[new_remaining[0]] = try context.newNode(.{ .leaf = .{
+        branch.children[new_remaining[0]] = .{ .node = try context.newNode(.{ .leaf = .{
             .path = new_remaining[1..],
             .value = value,
-        } });
+        } }) };
     }
 
     const branch_node = try context.newNode(.{ .branch = branch });
@@ -414,18 +445,18 @@ fn splitValues(
     if (old_path.len == 0) {
         branch.value = old_value;
     } else {
-        branch.children[old_path[0]] = try context.newNode(.{ .leaf = .{
+        branch.children[old_path[0]] = .{ .node = try context.newNode(.{ .leaf = .{
             .path = old_path[1..],
             .value = old_value,
-        } });
+        } }) };
     }
     if (new_path.len == 0) {
         branch.value = new_value;
     } else {
-        branch.children[new_path[0]] = try context.newNode(.{ .leaf = .{
+        branch.children[new_path[0]] = .{ .node = try context.newNode(.{ .leaf = .{
             .path = new_path[1..],
             .value = new_value,
-        } });
+        } }) };
     }
     return context.newNode(.{ .branch = branch });
 }
@@ -465,7 +496,7 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
                     break;
                 }
                 const child_index = remaining[0];
-                const child = branch.children[child_index] orelse return;
+                const child = (try branchChildNode(context, &branch.children[child_index])) orelse return;
                 try frames.append(context.allocator, .{ .delete = .{ .branch = .{
                     .parent = current,
                     .child_index = child_index,
@@ -491,8 +522,11 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
                     .branch => |value| value,
                     else => unreachable,
                 };
-                const child = branch.children[frame.child_index].?;
-                if (child.kind == .empty) branch.children[frame.child_index] = null;
+                const child = switch (branch.children[frame.child_index]) {
+                    .node => |value| value,
+                    else => unreachable,
+                };
+                if (child.kind == .empty) branch.children[frame.child_index] = .empty;
                 try compressBranch(context, frame.parent, branch);
             },
         }
@@ -517,12 +551,10 @@ fn compressExtension(context: anytype, node: *SparseNode, extension: SparseNode.
 fn compressBranch(context: anytype, node: *SparseNode, branch: SparseNode.Branch) AllocUpdateError!void {
     var child_count: usize = 0;
     var only_child_index: usize = 0;
-    var only_child: ?*SparseNode = null;
     for (branch.children, 0..) |child, index| {
-        if (child == null) continue;
+        if (child == .empty) continue;
         child_count += 1;
         only_child_index = index;
-        only_child = child;
     }
 
     if (branch.value) |value| {
@@ -541,7 +573,11 @@ fn compressBranch(context: anytype, node: *SparseNode, branch: SparseNode.Branch
         return;
     }
 
-    const child = only_child.?;
+    const child = switch (branch.children[only_child_index]) {
+        .empty => unreachable,
+        .node => |value| value,
+        .hash => |digest| try context.newNode(.{ .hash = digest.* }),
+    };
     try materializeHash(context, child);
     const child_nibble: u8 = @intCast(only_child_index);
     switch (child.kind) {
@@ -618,12 +654,15 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
                 var index: usize = branch.children.len;
                 while (index > 0) {
                     index -= 1;
-                    if (branch.children[index]) |child| {
-                        try frames.append(context.allocator, .{ .encode = .{
-                            .node = child,
-                            .expanded = false,
-                            .is_root = false,
-                        } });
+                    switch (branch.children[index]) {
+                        .node => |child| {
+                            try frames.append(context.allocator, .{ .encode = .{
+                                .node = child,
+                                .expanded = false,
+                                .is_root = false,
+                            } });
+                        },
+                        .empty, .hash => {},
                     }
                 }
                 continue;
@@ -700,10 +739,11 @@ fn extensionBufferLengths(path: []const u8, child_reference: Reference) UpdateEr
 fn branchBufferLength(branch: *const SparseNode.Branch) UpdateError!usize {
     var payload = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
-        const child_len = if (child) |present|
-            try referenceEncodedLen(present.reference)
-        else
-            1;
+        const child_len = switch (child) {
+            .empty => 1,
+            .hash => 33,
+            .node => |present| try referenceEncodedLen(present.reference),
+        };
         payload = std.math.add(usize, payload, child_len) catch
             return error.ResourceLimitExceeded;
     }
@@ -768,21 +808,20 @@ fn encodeExtension(
 fn encodeBranch(node_buffer: []u8, branch: *const SparseNode.Branch) UpdateError![]const u8 {
     var payload_len = try bytesEncodedLen(branch.value orelse "");
     for (branch.children) |child| {
-        if (child) |present| {
-            if (present.reference == .unset or present.reference == .empty) return error.InvalidNode;
-            payload_len = std.math.add(usize, payload_len, try referenceEncodedLen(present.reference)) catch
-                return error.ResourceLimitExceeded;
-        } else {
-            payload_len = std.math.add(usize, payload_len, 1) catch
-                return error.ResourceLimitExceeded;
-        }
+        const child_len = switch (child) {
+            .empty => 1,
+            .hash => 33,
+            .node => |present| try referenceEncodedLen(present.reference),
+        };
+        payload_len = std.math.add(usize, payload_len, child_len) catch
+            return error.ResourceLimitExceeded;
     }
     var writer = try listWriter(node_buffer, payload_len);
     for (branch.children) |child| {
-        if (child) |present| {
-            try writeReference(&writer, present.reference);
-        } else {
-            try writeBytes(&writer, "");
+        switch (child) {
+            .empty => try writeBytes(&writer, ""),
+            .hash => |digest| try writeReference(&writer, .{ .hashed = digest.* }),
+            .node => |present| try writeReference(&writer, present.reference),
         }
     }
     try writeBytes(&writer, branch.value orelse "");
@@ -884,7 +923,7 @@ fn keyNibbles(context: anytype, key: []const u8) AllocUpdateError![]u8 {
 }
 
 fn emptyBranch() SparseNode.Branch {
-    return .{ .children = [_]?*SparseNode{null} ** 16, .value = null };
+    return .{ .children = [_]SparseNode.BranchChild{.empty} ** 16, .value = null };
 }
 
 fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {

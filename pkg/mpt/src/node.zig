@@ -6,11 +6,14 @@ const Error = @import("error.zig").CodecError;
 const hash = @import("hash.zig");
 const nibble = @import("nibble.zig");
 
+/// Hashed references borrow their exact-width payload from the encoded node.
+pub const HashedReference = *align(1) const hash.Root;
+
 /// Reference to a child node: absent, inline (encoded < 32 bytes), or by hash.
 pub const Reference = union(enum) {
     empty,
     embedded: []const u8,
-    hashed: hash.Root,
+    hashed: HashedReference,
 };
 
 /// A decoded trie node. Paths and values borrow from the encoded input.
@@ -154,11 +157,7 @@ fn decodeReference(item: rlp.Item) Error!Reference {
         },
         .bytes => |span| switch (span.payload.len) {
             0 => .empty,
-            32 => hashed: {
-                var digest: hash.Root = undefined;
-                @memcpy(&digest, span.payload);
-                break :hashed .{ .hashed = digest };
-            },
+            32 => .{ .hashed = @ptrCast(span.payload.ptr) },
             else => error.InvalidNodeReference,
         },
     };
