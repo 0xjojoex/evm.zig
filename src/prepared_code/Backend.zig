@@ -26,6 +26,10 @@ pub const VTable = struct {
     /// Return the retained artifact for `code_hash`, or `null` when it has not
     /// been admitted.
     lookup: *const fn (ptr: *anyopaque, code_hash: [32]u8) anyerror!?Bytecode.View,
+    /// `lookup` results can execute from an authenticated hash alone. Backends
+    /// must exclude representations such as EIP-7702 designators whose bytes
+    /// affect code-address resolution.
+    authenticated_lookup: bool = false,
     /// Prepare and retain `raw_code`, returning the artifact, or `null` when
     /// backend policy declines it.
     admit: *const fn (ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8) anyerror!?Bytecode.View,
@@ -41,6 +45,11 @@ pub fn endExecution(self: Backend) void {
 
 pub fn lookup(self: Backend, code_hash: [32]u8) !?Bytecode.View {
     return self.vtable.lookup(self.ptr, code_hash);
+}
+
+pub fn lookupAuthenticated(self: Backend, code_hash: [32]u8) !?Bytecode.View {
+    if (!self.vtable.authenticated_lookup) return null;
+    return self.lookup(code_hash);
 }
 
 /// Return a retained artifact, or `null` when backend policy declines it.

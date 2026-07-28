@@ -1257,11 +1257,16 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
             zisk_profile.begin(.system_call_code_resolution);
             zisk_profile.begin(.system_call_tracked_code_view);
-            const resolved = try runtime.resolveCode(self, recipient);
-            const resolved_view = try runtime.resolvedCodeView(self, resolved);
+            const code_hash = try self.state.getCodeHashForCodeRead(recipient);
+            const authenticated_code = runtime.lookupAuthenticatedExecutionCode(self, code_hash);
+            const resolved_view = if (authenticated_code == null) blk: {
+                const resolved = try runtime.resolveCode(self, recipient);
+                break :blk try runtime.resolvedCodeView(self, resolved);
+            } else null;
             zisk_profile.end(.system_call_tracked_code_view);
             zisk_profile.begin(.system_call_prepare_code);
-            const bytecode = try runtime.resolveExecutionCodeView(self, resolved_view);
+            const bytecode = authenticated_code orelse
+                try runtime.resolveExecutionCodeView(self, resolved_view.?);
             zisk_profile.end(.system_call_prepare_code);
             zisk_profile.begin(.system_call_trace_recipient);
             try self.traceAccountAccess(recipient);
@@ -1621,19 +1626,7 @@ test "prepared execution follows current code hash without owning public code re
     try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
 }
 
-test "prepared cache cannot satisfy code omitted from the active witness" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const target = evmz.addr(0x3000);
-    const code = [_]u8{@intFromEnum(evmz.Opcode.STOP)};
-    const code_hash = evmz.crypto.keccak256(&code);
-    const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{
-        .code_hash = code_hash,
-    });
-    const account_key = evmz.eth.trie.hashedAddressKey(target);
-
+test "only authenticated system artifacts can bypass omitted witness code" {
     const TestTrie = struct {
         fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
             const path = try allocator.alloc(u8, key.len + 1);
@@ -1651,27 +1644,75 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
             return try out.toOwnedSlice();
         }
     };
-    const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
-    const state_root = evmz.crypto.keccak256(state_node);
-    const nodes = [_][]const u8{state_node};
-    const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-    var witness = evmz.state.WitnessStateReader.init(scratch, state_root, indexed, &.{});
-    defer witness.deinit();
+    const target = evmz.addr(0x3000);
+    const account_key = evmz.eth.trie.hashedAddressKey(target);
 
-    var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
-    defer pool.deinit();
-    var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = witness.reader(),
-        .prepared_code_backend = pool.backend(),
-    });
-    defer executor.deinit();
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const code = [_]u8{@intFromEnum(evmz.Opcode.STOP)};
+        const code_hash = evmz.crypto.keccak256(&code);
+        const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{ .code_hash = code_hash });
+        const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
+        const nodes = [_][]const u8{state_node};
+        const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
+        var witness = evmz.state.WitnessStateReader.init(
+            scratch,
+            evmz.crypto.keccak256(state_node),
+            indexed,
+            &.{},
+        );
+        defer witness.deinit();
 
-    _ = try pool.getOrPrepare(code_hash, &code);
-    try std.testing.expect(pool.get(code_hash) != null);
-    try std.testing.expectError(
-        error.InvalidWitness,
-        call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, target),
-    );
+        var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+        defer pool.deinit();
+        var executor = Osaka.Executor.init(std.testing.allocator, .{
+            .state_reader = witness.reader(),
+            .prepared_code_backend = pool.backend(),
+        });
+        defer executor.deinit();
+
+        _ = try pool.getOrPrepare(code_hash, &code);
+        try std.testing.expectError(
+            error.InvalidWitness,
+            call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, target),
+        );
+    }
+
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const system_prepared_code = @import("./eth/system_prepared_code.zig");
+        const code_hash = evmz.crypto.keccak256(&system_prepared_code.beacon_roots_code);
+        const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{ .code_hash = code_hash });
+        const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
+        const nodes = [_][]const u8{state_node};
+        const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
+        var witness = evmz.state.WitnessStateReader.init(
+            scratch,
+            evmz.crypto.keccak256(state_node),
+            indexed,
+            &.{},
+        );
+        defer witness.deinit();
+
+        var executor = Osaka.Executor.init(std.testing.allocator, .{
+            .state_reader = witness.reader(),
+            .prepared_code_backend = system_prepared_code.backend(),
+        });
+        defer executor.deinit();
+
+        const result = try executor.executeSystemCall(
+            testExecutionContext(evmz.addr(1), 100_000),
+            evmz.addr(1),
+            target,
+            &.{},
+            .legacy(100_000),
+        );
+        try std.testing.expectEqual(Interpreter.Status.revert, result.status);
+    }
 }
 
 test "executor BLOCKHASH reads configured block hash source" {

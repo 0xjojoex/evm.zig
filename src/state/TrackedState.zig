@@ -1709,6 +1709,16 @@ pub fn getCodeView(self: *TrackedState, address: Address) !CodeView {
     return codeView(self, try self.readAccountValue(address, .code));
 }
 
+/// Record a code read without materializing bytes. Keep this system-call-only
+/// path outlined so it cannot perturb ordinary CALL lowering.
+pub noinline fn getCodeHashForCodeRead(self: *TrackedState, address: Address) !CodeHash {
+    return switch (try self.readAccountValue(address, .code)) {
+        .loaded => |account| account.code_hash,
+        .absent => crypto.keccak256_empty,
+        .exists_only => unreachable,
+    };
+}
+
 pub fn getCode(self: *TrackedState, address: Address) ![]const u8 {
     return (try self.getCodeView(address)).bytes;
 }
