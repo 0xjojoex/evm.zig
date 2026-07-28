@@ -252,10 +252,16 @@ allocated slice via `Alloc`.
 ### Borrowed decoding
 
 Borrowed decoding is opt-in when the input buffer already has a stable lifetime.
-`Borrowed(ByteList(...))` keeps the normal `[]const u8` value shape while
-selecting `ByteList.decode`, so it composes inside ordinary lists and containers.
-A containing `ListOf` still materializes its element slice, but each byte payload
-borrows directly from the encoded input:
+`Borrowed(Codec)` is not a universal zero-copy switch. It accepts only an
+allocating codec that also exposes an input-backed `decode(bytes)` with the same
+`Value`. The package currently provides that dual owned/borrowed capability
+directly for:
+
+- `ByteList(limit)`
+- `ProgressiveByteList`
+- `Mapped` codecs whose wire codec preserves that capability
+
+Apply `Borrowed` at those leaves, then compose them normally:
 
 ```zig
 const Items = ssz.ListOf(ssz.Borrowed(ssz.ByteList(32)), 1_000);
@@ -264,8 +270,20 @@ defer ssz.deinitOwned(Items, allocator, &items);
 const first = items[0]; // borrows encoded_items
 ```
 
+`ListOf` and `ProgressiveListOf` still allocate their outer element slice;
+only the byte payloads borrow from the input. Containers, inline vectors,
+optionals, unions, and mapped host representations compose transitively and
+allocate according to their remaining field codecs.
+
+Do not wrap codecs that already decode without allocation, such as basic
+values, `ByteVector`, `Bitvector`, and `OptionalList`; use them directly.
+Slice-backed vectors, fixed-element lists, expanded `Bitlist` values, and outer
+`ListOf` storage have no input-backed representation with the same `Value`, so
+`Borrowed` intentionally rejects them.
+
 The `PackedBitvector`, `PackedBitlist`, and `ProgressivePackedBitlist` codecs
-retain canonical packed bytes and expose semantic bits through `PackedBitsView`:
+are already borrowed codecs; do not wrap them in `Borrowed`. They retain
+canonical packed bytes and expose semantic bits through `PackedBitsView`:
 
 ```zig
 const Flags = ssz.PackedBitlist(4_096);
