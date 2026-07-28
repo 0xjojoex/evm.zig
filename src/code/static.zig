@@ -20,6 +20,7 @@ pub fn View(comptime source: []const u8) type {
         needs_action_loop: bool,
     };
     const analysis: Analysis = analysis: {
+        @setEvalBranchQuota(20_000);
         var result = Analysis{
             .masks = [_]usize{0} ** mask_count,
             .needs_action_loop = false,
