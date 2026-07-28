@@ -489,6 +489,10 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.endPreparedCodeExecution();
         }
 
+        pub fn reserveAcceptedAccessHint(self: *Self, hint: anytype) !void {
+            try self.state.reserveAcceptedAccessHint(hint);
+        }
+
         /// Release state, frame pools, scratch arenas, and retained return-data buffers.
         pub fn deinit(self: *Self) void {
             std.debug.assert(!self.hasActiveBlockExecution());

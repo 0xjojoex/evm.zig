@@ -194,6 +194,16 @@ test "transaction capacity reuse clears rows and releases its cache" {
     try std.testing.expect(!state.transaction_reuse_active);
 }
 
+test "accepted access hint reserves account and storage maps" {
+    var state = TrackedState.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.reserveAcceptedAccessHint(.{ .accounts = 9, .storage_keys = 17 });
+
+    try std.testing.expect(state.accepted.accounts.capacity() >= 9);
+    try std.testing.expect(state.accepted.storage.capacity() >= 17);
+}
+
 test "retained account writes advance accepted state" {
     var backing = TestReader{};
     var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());

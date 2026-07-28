@@ -1338,6 +1338,12 @@ pub fn reserveAccessHint(self: *TrackedState, hint: anytype) !void {
     try tx.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
 }
 
+pub fn reserveAcceptedAccessHint(self: *TrackedState, hint: anytype) !void {
+    std.debug.assert(self.tx == null);
+    try self.accepted.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
+    try self.accepted.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
+}
+
 pub fn beginTransaction(self: *TrackedState) AttemptId {
     return self.beginTransactionMode(false);
 }

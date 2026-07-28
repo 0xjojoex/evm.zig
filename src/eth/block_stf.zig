@@ -956,6 +956,7 @@ fn serialFold(
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
     var claimed_block_access_list: ?eth_bal.Decoded = null;
+    var claimed_block_access_counts: ?eth_bal.Counts = null;
     defer if (claimed_block_access_list) |*decoded| decoded.deinit(allocator);
     if (input.block_access_list) |encoded_claim| {
         var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
@@ -970,7 +971,7 @@ fn serialFold(
             => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
-        validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
+        claimed_block_access_counts = validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
@@ -1040,6 +1041,13 @@ fn serialFold(
         .block_hash_source = input.block_hash_source,
     });
     defer executor.deinit();
+    if (claimed_block_access_counts) |counts| {
+        // Capacity is advisory; it must not change block validity on allocation failure.
+        executor.reserveAcceptedAccessHint(.{
+            .accounts = counts.accounts,
+            .storage_keys = counts.storage_read_keys + counts.storage_write_keys,
+        }) catch {};
+    }
 
     var observation_builder = tracked_state_projector.BlockBuilder.init(allocator);
     defer observation_builder.deinit();
@@ -1368,7 +1376,7 @@ fn serialFold(
             error.OutOfMemory => return error.OutOfMemory,
             else => return err,
         };
-        validateBlockAccessList(observed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
+        _ = validateBlockAccessList(observed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return err,
         };
@@ -1777,9 +1785,12 @@ fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessInd
     return std.math.cast(eth_bal.BlockAccessIndex, transaction_count) orelse error.BlockAccessIndexOverflow;
 }
 
-fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!void {
+fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!eth_bal.Counts {
     try eth_bal.validate(block_access_list, .{ .transaction_count = transaction_count });
-    if (gas_limit != 0) try eth_bal.validateGasLimit(block_access_list, gas_limit);
+    const counts = eth_bal.count(block_access_list);
+    if (gas_limit != 0 and counts.blockAccessItems() > gas_limit / eth_bal.item_cost)
+        return error.BlockAccessListGasLimitExceeded;
+    return counts;
 }
 
 fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
