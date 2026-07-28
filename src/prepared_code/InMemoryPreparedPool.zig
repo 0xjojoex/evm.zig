@@ -13,7 +13,6 @@
 const std = @import("std");
 const Backend = @import("Backend.zig");
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 const crypto = @import("../crypto.zig");
 
 const InMemoryPreparedPool = @This();
@@ -65,7 +64,6 @@ pub fn getOrPrepare(
     self: *InMemoryPreparedPool,
     expected_hash: [32]u8,
     raw_code: []const u8,
-    strategy: JumpDestStrategy,
 ) !Bytecode.View {
     if (self.get(expected_hash)) |prepared| return prepared;
 
@@ -77,7 +75,7 @@ pub fn getOrPrepare(
         raw_code.len,
     ) catch return error.OutOfMemory;
 
-    var bytecode = try Bytecode.prepare(self.allocator, raw_code, strategy);
+    var bytecode = try Bytecode.prepare(self.allocator, raw_code);
     errdefer bytecode.deinit(self.allocator);
     const view = bytecode.view();
     try self.entries.putNoClobber(expected_hash, bytecode);
@@ -125,9 +123,9 @@ fn backendLookup(ptr: *anyopaque, code_hash: [32]u8) !?Bytecode.View {
     return self.get(code_hash);
 }
 
-fn backendAdmit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) !?Bytecode.View {
+fn backendAdmit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8) !?Bytecode.View {
     const self: *InMemoryPreparedPool = @ptrCast(@alignCast(ptr));
-    return try self.getOrPrepare(code_hash, raw_code, strategy);
+    return try self.getOrPrepare(code_hash, raw_code);
 }
 
 test "wrong hash rejects admission atomically" {
@@ -136,7 +134,7 @@ test "wrong hash rejects admission atomically" {
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const wrong_hash = [_]u8{0xff} ** 32;
-    try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(wrong_hash, &raw_code, .scalar_bitmask));
+    try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(wrong_hash, &raw_code));
     try std.testing.expectEqual(@as(usize, 0), pool.count());
     try std.testing.expectEqual(@as(usize, 0), pool.retained_code_bytes);
 }
@@ -148,7 +146,7 @@ test "prepared bytecode owns source bytes" {
     var raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const original = raw_code;
     const code_hash = crypto.keccak256(&raw_code);
-    const prepared = try pool.getOrPrepare(code_hash, &raw_code, .scalar_bitmask);
+    const prepared = try pool.getOrPrepare(code_hash, &raw_code);
 
     try std.testing.expect(prepared.bytes.ptr != raw_code[0..].ptr);
     @memset(&raw_code, 0xff);
@@ -161,13 +159,13 @@ test "prepared views remain valid while map grows" {
 
     const anchor_code = [_]u8{ 0x60, 0x01, 0x5b, 0x00 };
     const anchor_hash = crypto.keccak256(&anchor_code);
-    const anchor = try pool.getOrPrepare(anchor_hash, &anchor_code, .scalar_bitmask);
+    const anchor = try pool.getOrPrepare(anchor_hash, &anchor_code);
 
     for (0..256) |index| {
         var code: [9]u8 = undefined;
         std.mem.writeInt(u64, code[0..8], @intCast(index), .big);
         code[8] = 0x00;
-        _ = try pool.getOrPrepare(crypto.keccak256(&code), &code, .scalar_bitmask);
+        _ = try pool.getOrPrepare(crypto.keccak256(&code), &code);
     }
 
     try std.testing.expectEqual(@as(usize, 257), pool.count());
@@ -175,16 +173,16 @@ test "prepared views remain valid while map grows" {
     try std.testing.expectEqualSlices(u8, &anchor_code, anchor.bytes);
 }
 
-test "preparation strategies share retained artifacts" {
+test "repeated preparation shares one retained artifact" {
     var pool = InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
 
     const code = [_]u8{ 0x5b, 0x00 };
     const code_hash = crypto.keccak256(&code);
-    const scalar = try pool.getOrPrepare(code_hash, &code, .scalar_bitmask);
-    const simd = try pool.getOrPrepare(code_hash, &code, .simd_bitmask);
+    const first = try pool.getOrPrepare(code_hash, &code);
+    const second = try pool.getOrPrepare(code_hash, &code);
 
-    try std.testing.expectEqual(scalar.bytes.ptr, simd.bytes.ptr);
+    try std.testing.expectEqual(first.bytes.ptr, second.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
@@ -193,7 +191,7 @@ test "active execution rejects invalidation" {
     defer pool.deinit();
 
     const code = [_]u8{0x00};
-    _ = try pool.getOrPrepare(crypto.keccak256(&code), &code, .scalar_bitmask);
+    _ = try pool.getOrPrepare(crypto.keccak256(&code), &code);
     pool.beginExecution();
     try std.testing.expectError(error.ActivePreparedCodeExecution, pool.clearRetainingCapacity());
     pool.endExecution();

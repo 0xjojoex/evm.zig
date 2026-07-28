@@ -18,9 +18,15 @@ pub fn writeInt(writer: anytype, comptime T: type, value: T) !void {
     if (value == 0) return writeBytes(writer, &.{});
 
     const encoded = intBytes(T, value);
-    var first: usize = 0;
-    while (encoded[first] == 0) : (first += 1) {}
+    const first = encoded.len - significantBytes(T, value);
     try writeBytes(writer, encoded[first..]);
+}
+
+/// Number of bytes in the minimal big-endian representation; 0 only for 0.
+pub fn significantBytes(comptime T: type, value: T) usize {
+    if (value == 0) return 0;
+    const bits = @as(usize, @bitSizeOf(T)) - @clz(value);
+    return (bits + 7) / 8;
 }
 
 pub fn writeListPayload(writer: anytype, payload: []const u8) !void {
@@ -73,14 +79,9 @@ pub fn assertUnsignedInt(comptime T: type) void {
 }
 
 pub fn intBytes(comptime T: type, value: T) [byteLen(T)]u8 {
+    const Wide = std.meta.Int(.unsigned, byteLen(T) * 8);
     var bytes: [byteLen(T)]u8 = undefined;
-    var remaining: u256 = @intCast(value);
-    var index = bytes.len;
-    while (index > 0) {
-        index -= 1;
-        bytes[index] = @truncate(remaining);
-        remaining >>= 8;
-    }
+    std.mem.writeInt(Wide, &bytes, value, .big);
     return bytes;
 }
 

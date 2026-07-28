@@ -93,9 +93,8 @@ test "micro/code/raw-masks" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
 
-    try bench.add("raw-masks/simd-16", benchRawSimdMasks16, .{});
-    try bench.add("raw-masks/scalar-16", benchRawScalarMasks16, .{});
-    try bench.add("raw-masks/scalar-15", benchRawScalarMasks15, .{});
+    try bench.add("raw-masks/16", benchRawMasks16, .{});
+    try bench.add("raw-masks/15", benchRawMasks15, .{});
 
     try bench.run(std.testing.io, .stdout());
 }
@@ -107,10 +106,8 @@ test "micro/code/jumpdest-map" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
 
-    try bench.add("jumpdest-map/scalar-64b", benchJumpDestMapScalarSmall, .{});
-    try bench.add("jumpdest-map/simd-64b", benchJumpDestMapSimdSmall, .{});
-    try bench.add("jumpdest-map/scalar-4096b", benchJumpDestMapScalarLarge, .{});
-    try bench.add("jumpdest-map/simd-4096b", benchJumpDestMapSimdLarge, .{});
+    try bench.add("jumpdest-map/64b", benchJumpDestMapSmall, .{});
+    try bench.add("jumpdest-map/4096b", benchJumpDestMapLarge, .{});
 
     try bench.run(std.testing.io, .stdout());
 }
@@ -346,37 +343,18 @@ fn initJumpDestInput(bytes: []u8) void {
     std.mem.doNotOptimizeAway(bytes[0]);
 }
 
-fn benchRawSimdMasks16(_: std.mem.Allocator) void {
-    var acc: u64 = 0;
-    for (0..raw_mask_ops_per_run) |i| {
-        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
-        std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawSimdMasks(raw_mask_bytes[index..][0..scanner.lanes]);
-        acc +%= masks.push ^ (masks.jumpdest << 1);
-    }
-    std.mem.doNotOptimizeAway(acc);
+fn benchJumpDestMapSmall(allocator: std.mem.Allocator) void {
+    benchJumpDestMap(allocator, &jumpdest_small_bytes);
 }
 
-fn benchJumpDestMapScalarSmall(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_small_bytes, .scalar_bitmask);
+fn benchJumpDestMapLarge(allocator: std.mem.Allocator) void {
+    benchJumpDestMap(allocator, &jumpdest_large_bytes);
 }
 
-fn benchJumpDestMapSimdSmall(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_small_bytes, .simd_bitmask);
-}
-
-fn benchJumpDestMapScalarLarge(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_large_bytes, .scalar_bitmask);
-}
-
-fn benchJumpDestMapSimdLarge(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_large_bytes, .simd_bitmask);
-}
-
-fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8, strategy: evmz.ExecutionConfig.JumpDestStrategy) void {
+fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8) void {
     var accepted: usize = 0;
     for (0..jumpdest_map_ops_per_run) |_| {
-        var map = evmz.code.JumpDestMap.initWithStrategy(strategy);
+        var map = evmz.code.JumpDestMap.empty;
         map.analyze(allocator, bytes) catch unreachable;
         accepted +%= @intFromBool(map.isValid(allocator, bytes, bytes.len - 1) catch unreachable);
         map.deinit(allocator);
@@ -384,23 +362,23 @@ fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8, strategy: e
     std.mem.doNotOptimizeAway(accepted);
 }
 
-fn benchRawScalarMasks16(_: std.mem.Allocator) void {
+fn benchRawMasks16(_: std.mem.Allocator) void {
     var acc: u64 = 0;
     for (0..raw_mask_ops_per_run) |i| {
         const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
         std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0..scanner.lanes]);
+        const masks = scanner.rawMasks(raw_mask_bytes[index..][0..scanner.lanes]);
         acc +%= masks.push ^ (masks.jumpdest << 1);
     }
     std.mem.doNotOptimizeAway(acc);
 }
 
-fn benchRawScalarMasks15(_: std.mem.Allocator) void {
+fn benchRawMasks15(_: std.mem.Allocator) void {
     var acc: u64 = 0;
     for (0..raw_mask_ops_per_run) |i| {
         const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
         std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0 .. scanner.lanes - 1]);
+        const masks = scanner.rawMasks(raw_mask_bytes[index..][0 .. scanner.lanes - 1]);
         acc +%= masks.push ^ (masks.jumpdest << 1);
     }
     std.mem.doNotOptimizeAway(acc);

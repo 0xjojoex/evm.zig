@@ -24,6 +24,7 @@
 const std = @import("std");
 
 const evmz = @import("./evm.zig");
+const zisk_profile = @import("stateless_profile");
 pub const errors = @import("./executor/error.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
@@ -106,7 +107,6 @@ const InitOptions = struct {
     prepared_code_backend: ?prepared_code.Backend = null,
     block_hash_source: ?BlockHashSource = null,
     precompile_runtime: ?execution_values.PrecompileRuntime = null,
-    config: evmz.ExecutionConfig = .base,
 };
 
 /// A top-level call whose bytecode has already been prepared by the caller.
@@ -180,7 +180,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
         next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
         precompile_runtime: ?execution_values.PrecompileRuntime = null,
-        config: evmz.ExecutionConfig,
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
@@ -413,7 +412,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
                 .block_hash_source = options.block_hash_source,
                 .precompile_runtime = options.precompile_runtime,
-                .config = options.config,
                 .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
             };
@@ -452,7 +450,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
             self.manual_state_attempt = null;
             self.block_hash_source = options.block_hash_source;
             self.precompile_runtime = options.precompile_runtime;
-            self.config = options.config;
             self.prepared_code_backend = options.prepared_code_backend;
             self.clearLastOutput();
         }
@@ -464,7 +461,6 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 self.prepared_code_execution = prepared_code.Execution.init(
                     self.prepared_code_scratch.allocator(),
                     self.prepared_code_backend,
-                    self.config.jumpdest_strategy,
                 );
             }
             std.debug.assert(self.prepared_code_execution_depth < std.math.maxInt(usize));
@@ -917,7 +913,7 @@ pub fn Executor(comptime spec: ExactSpec) type {
 
         /// Prepare code according to the executor preprocessing configuration.
         pub fn prepareBytecode(self: *const Self, code: []const u8) !Bytecode {
-            return runtime.prepareBytecodeAlloc(self, self.allocator, code);
+            return Bytecode.prepare(self.allocator, code);
         }
 
         /// Duplicate the effective execution code for an address.
@@ -1234,22 +1230,38 @@ pub fn Executor(comptime spec: ExactSpec) type {
             mode: ExecutionMode,
             observer: anytype,
         ) !Interpreter.Result {
+            zisk_profile.begin(.system_call_prepared_setup);
             self.beginPreparedCodeExecution();
-            defer self.endPreparedCodeExecution();
+            zisk_profile.end(.system_call_prepared_setup);
+            defer {
+                zisk_profile.begin(.system_call_prepared_teardown);
+                self.endPreparedCodeExecution();
+                zisk_profile.end(.system_call_prepared_teardown);
+            }
 
+            zisk_profile.begin(.system_call_scope_setup);
             try self.beginSystemCall(context, mode);
             errdefer self.discardStateTransition();
 
             self.clearLastOutput();
             const checkpoint_state = self.state.checkpoint();
+            zisk_profile.end(.system_call_scope_setup);
             var checkpoint_open = true;
             errdefer {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state);
             }
 
+            zisk_profile.begin(.system_call_code_resolution);
+            zisk_profile.begin(.system_call_tracked_code_view);
             const resolved = try runtime.resolveCode(self, recipient);
-            const bytecode = try runtime.resolveExecutionCodeView(self, try runtime.resolvedCodeView(self, resolved));
+            const resolved_view = try runtime.resolvedCodeView(self, resolved);
+            zisk_profile.end(.system_call_tracked_code_view);
+            zisk_profile.begin(.system_call_prepare_code);
+            const bytecode = try runtime.resolveExecutionCodeView(self, resolved_view);
+            zisk_profile.end(.system_call_prepare_code);
+            zisk_profile.begin(.system_call_trace_recipient);
             try self.traceAccountAccess(recipient);
+            zisk_profile.end(.system_call_trace_recipient);
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
@@ -1261,11 +1273,14 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 .value = 0,
                 .code_address = recipient,
             };
+            zisk_profile.end(.system_call_code_resolution);
 
+            zisk_profile.begin(.system_call_root_execute);
             const call_result = (try switch (mode) {
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
             }).expectCall();
+            zisk_profile.end(.system_call_root_execute);
             const result = Interpreter.Result{
                 .status = call_result.status,
                 .cause = call_result.cause,
@@ -1277,14 +1292,21 @@ pub fn Executor(comptime spec: ExactSpec) type {
                 .output_data = self.lastOutputData(),
             };
 
+            zisk_profile.begin(.system_call_checkpoint_resolution);
             if (executionRolledBack(result.status)) {
                 self.state.revertToCheckpoint(checkpoint_state);
                 checkpoint_open = false;
+                zisk_profile.end(.system_call_checkpoint_resolution);
+                zisk_profile.begin(.system_call_state_resolution);
                 try self.retainStateTransitionObserved(observer);
+                zisk_profile.end(.system_call_state_resolution);
             } else {
                 self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
+                zisk_profile.end(.system_call_checkpoint_resolution);
+                zisk_profile.begin(.system_call_state_resolution);
                 try self.commitTransactionObserved(observer);
+                zisk_profile.end(.system_call_state_resolution);
             }
 
             return .{
@@ -1354,18 +1376,17 @@ const Osaka = evmz.Vm(evmz.eth.osaka);
 const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
 const testExecutionContext = evmz.t.defaultExecutionContext;
 
-test "executor prepareBytecode honors jumpdest strategy config" {
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{
-        .config = .{ .jumpdest_strategy = .simd_bitmask },
-    });
+test "executor prepareBytecode eagerly analyzes jumpdests" {
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     const code = evmz.t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(evmz.ExecutionConfig.JumpDestStrategy.simd_bitmask, bytecode.jumpdests.strategy);
     try std.testing.expect(bytecode.jumpdests.analyzed);
+    try std.testing.expect(bytecode.isValidJumpDest(2));
+    try std.testing.expect(!bytecode.isValidJumpDest(1));
 }
 
 test "executor executes prepared bytecode call transaction" {
@@ -1499,7 +1520,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     const code_view = try executor.state.getCodeView(contract);
-    _ = try pool.getOrPrepare(code_view.code_hash, code_view.bytes, executor.config.jumpdest_strategy);
+    _ = try pool.getOrPrepare(code_view.code_hash, code_view.bytes);
 
     var recorder = CacheInvalidatingTrace{ .pool = &pool };
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -1538,23 +1559,20 @@ test "reset retains caller backend and prepared artifacts" {
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .config = .base,
         .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
 
-    const prepared = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    const prepared = try pool.getOrPrepare(code_hash, &code);
     try executor.reset(.{
-        .config = .base,
         .prepared_code_backend = pool.backend(),
     });
     try std.testing.expectEqual(prepared.bytes.ptr, pool.get(code_hash).?.bytes.ptr);
 
     try executor.reset(.{
-        .config = .{ .jumpdest_strategy = .simd_bitmask },
         .prepared_code_backend = pool.backend(),
     });
-    const reset_prepared = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    const reset_prepared = try pool.getOrPrepare(code_hash, &code);
     try std.testing.expectEqual(prepared.bytes.ptr, reset_prepared.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
@@ -1644,7 +1662,7 @@ test "prepared cache cannot satisfy code omitted from the active witness" {
     });
     defer executor.deinit();
 
-    _ = try pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    _ = try pool.getOrPrepare(code_hash, &code);
     try std.testing.expect(pool.get(code_hash) != null);
     try std.testing.expectError(
         error.InvalidWitness,

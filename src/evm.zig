@@ -7,7 +7,6 @@ pub const crypto = @import("./crypto.zig");
 pub const eth = @import("./eth.zig");
 pub const execution = @import("./execution.zig");
 pub const execution_resources = execution.resources;
-pub const ExecutionConfig = code.Config;
 pub const executor = @import("./executor.zig");
 pub const fixed_buffer_meter = @import("./fixed_buffer_meter.zig");
 pub const Host = @import("./Host.zig");

@@ -10,7 +10,6 @@
 //! An implementation shared by concurrent VMs must synchronize its own state.
 
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 
 const Backend = @This();
 
@@ -28,9 +27,8 @@ pub const VTable = struct {
     /// been admitted.
     lookup: *const fn (ptr: *anyopaque, code_hash: [32]u8) anyerror!?Bytecode.View,
     /// Prepare and retain `raw_code`, returning the artifact, or `null` when
-    /// backend policy declines it. `strategy` chooses only the miss-time
-    /// builder; it is not artifact identity.
-    admit: *const fn (ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) anyerror!?Bytecode.View,
+    /// backend policy declines it.
+    admit: *const fn (ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8) anyerror!?Bytecode.View,
 };
 
 pub fn beginExecution(self: Backend) !void {
@@ -46,6 +44,6 @@ pub fn lookup(self: Backend, code_hash: [32]u8) !?Bytecode.View {
 }
 
 /// Return a retained artifact, or `null` when backend policy declines it.
-pub fn admit(self: Backend, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) !?Bytecode.View {
-    return self.vtable.admit(self.ptr, code_hash, raw_code, strategy);
+pub fn admit(self: Backend, code_hash: [32]u8, raw_code: []const u8) !?Bytecode.View {
+    return self.vtable.admit(self.ptr, code_hash, raw_code);
 }

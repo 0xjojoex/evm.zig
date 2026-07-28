@@ -7,6 +7,7 @@
 //! transaction sidecar; normal execution does not allocate or journal them.
 
 const std = @import("std");
+const zisk_profile = @import("stateless_profile");
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
@@ -2329,7 +2330,13 @@ fn codeByHash(self: *TrackedState, code_hash: CodeHash) ![]const u8 {
     if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
     if (self.code.entries.get(code_hash)) |entry| return entry.slice(&self.code);
     const reader = self.reader orelse return error.CodeUnavailable;
-    return self.cacheCode(code_hash, try reader.loadCode(code_hash), false);
+    zisk_profile.begin(.state_code_reader_load);
+    const code = try reader.loadCode(code_hash);
+    zisk_profile.end(.state_code_reader_load);
+    zisk_profile.begin(.state_code_cache_insert);
+    const cached = try self.cacheCode(code_hash, code, false);
+    zisk_profile.end(.state_code_cache_insert);
+    return cached;
 }
 
 fn cacheCode(

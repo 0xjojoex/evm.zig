@@ -1,6 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 const block_program = @import("../block_program.zig");
+const zisk_profile = @import("stateless_profile");
 
 const Address = evmz.Address;
 const ExecutionContext = evmz.execution.ExecutionContext;
@@ -148,6 +149,7 @@ fn applyFinalizeBlockMode(
 
     for (calls.slice()) |*finalize_call| {
         const call = &finalize_call.call;
+        beginFinalizeRequestProfile(finalize_call.output_prefix);
         const request = try callRequestSystemContract(
             executor,
             execution_context,
@@ -162,6 +164,7 @@ fn applyFinalizeBlockMode(
             mode,
             observer,
         );
+        endFinalizeRequestProfile(finalize_call.output_prefix);
         if (request) |typed_request| out.appendAssumeCapacity(typed_request);
     }
 
@@ -171,6 +174,28 @@ fn applyFinalizeBlockMode(
         allocator.free(owned);
     }
     return owned;
+}
+
+inline fn beginFinalizeRequestProfile(request_type: u8) void {
+    if (comptime !zisk_profile.enabled) return;
+    switch (request_type) {
+        0x01 => zisk_profile.begin(.finalize_request_01),
+        0x02 => zisk_profile.begin(.finalize_request_02),
+        0x03 => zisk_profile.begin(.finalize_request_03),
+        0x04 => zisk_profile.begin(.finalize_request_04),
+        else => {},
+    }
+}
+
+inline fn endFinalizeRequestProfile(request_type: u8) void {
+    if (comptime !zisk_profile.enabled) return;
+    switch (request_type) {
+        0x01 => zisk_profile.end(.finalize_request_01),
+        0x02 => zisk_profile.end(.finalize_request_02),
+        0x03 => zisk_profile.end(.finalize_request_03),
+        0x04 => zisk_profile.end(.finalize_request_04),
+        else => {},
+    }
 }
 
 fn applySystemCalls(
@@ -217,7 +242,9 @@ fn callSystemContract(
     mode: SystemCallMode,
     observer: anytype,
 ) !void {
+    zisk_profile.begin(.system_call_precheck_code);
     const has_code = try executor.accountHasCode(recipient);
+    zisk_profile.end(.system_call_precheck_code);
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
@@ -290,7 +317,9 @@ fn callRequestSystemContract(
     mode: SystemCallMode,
     observer: anytype,
 ) !?[]const u8 {
+    zisk_profile.begin(.system_call_precheck_code);
     const has_code = try executor.accountHasCode(recipient);
+    zisk_profile.end(.system_call_precheck_code);
     if (!has_code and require_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(

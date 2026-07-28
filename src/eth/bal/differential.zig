@@ -11,7 +11,6 @@
 
 const std = @import("std");
 
-const Config = @import("../../code/Config.zig");
 const Executor = @import("../../executor.zig");
 const Host = @import("../../Host.zig");
 const bal = @import("model.zig");
@@ -127,7 +126,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        config: Config,
         env: vm.Env,
         lifecycle_execution_context: execution_values.ExecutionContext,
         base_reader: Reader,
@@ -234,7 +232,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
         pub fn init(
             allocator: std.mem.Allocator,
-            config: Config,
             env: vm.Env,
             lifecycle_execution_context: execution_values.ExecutionContext,
             base_reader: Reader,
@@ -246,7 +243,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         ) Self {
             var self: Self = .{
                 .allocator = allocator,
-                .config = config,
                 .env = env,
                 .lifecycle_execution_context = lifecycle_execution_context,
                 .base_reader = base_reader,
@@ -309,7 +305,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .state_reader = self.base_reader,
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
-                .config = self.config,
             });
             defer execution.deinit();
 
@@ -622,7 +617,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .state_reader = claim_reader.reader(),
                 .prepared_code_backend = candidate_prepared_code_backend,
                 .block_hash_source = candidate_block_hash_source,
-                .config = self.config,
             });
             defer execution.deinit();
 
@@ -785,7 +779,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .state_reader = claim_reader.reader(),
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
-                .config = self.config,
             };
             self.verifyRejectedAgainstClaim(rejected, executor_options) catch |err| {
                 self.stopForRejectedError(err, rejected.tx_index, claim_reader.strategy_failure);
@@ -901,7 +894,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .state_reader = transaction_reader.reader(),
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
-                .config = self.config,
             });
             defer execution.deinit();
 

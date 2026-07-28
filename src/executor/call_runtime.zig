@@ -1100,10 +1100,6 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        pub fn prepareBytecodeAlloc(self: *const Executor, allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-            return Bytecode.prepare(allocator, code, self.config.jumpdest_strategy);
-        }
-
         pub const ResolvedCode = struct {
             address: Address,
             delegated: bool,

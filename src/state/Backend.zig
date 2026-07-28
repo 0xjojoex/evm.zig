@@ -8,6 +8,7 @@ const TrackedState = @import("TrackedState.zig");
 const WitnessStateReader = @import("WitnessStateReader.zig");
 const trie = @import("../eth/trie.zig");
 const ChangesView = TrackedState.ChangesView;
+const zisk_profile = @import("stateless_profile");
 
 pub const RootProvider = struct {
     ptr: *anyopaque,
@@ -113,12 +114,16 @@ fn witnessRootAfterChanges(
 ) ![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    return trie.stateRootAfterChangesIndexed(
-        arena.allocator(),
-        witness.state_root,
-        witness.indexed,
-        &witness.accounts,
-        changes,
+    zisk_profile.begin(.mpt_state_root);
+    return zisk_profile.finish(
+        .mpt_state_root,
+        trie.stateRootAfterChangesIndexed(
+            arena.allocator(),
+            witness.state_root,
+            witness.indexed,
+            &witness.accounts,
+            changes,
+        ),
     );
 }
 

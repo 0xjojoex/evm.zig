@@ -366,10 +366,9 @@ fn Uint(comptime T: type) type {
 
         pub fn encodedLen(value: T) EncodeError!usize {
             if (value == 0) return 1;
-            const encoded = encoding.intBytes(T, value);
-            var first: usize = 0;
-            while (encoded[first] == 0) : (first += 1) {}
-            return bytesEncodedLen(encoded[first..]);
+            const count = encoding.significantBytes(T, value);
+            if (count == 1 and value < 0x80) return 1;
+            return checkedAdd(try lengthPrefixLen(count), count);
         }
 
         pub fn encodeTo(encoder: *Encoder, value: T) EncodeError!void {

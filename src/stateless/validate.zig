@@ -2,7 +2,6 @@
 
 const std = @import("std");
 
-const Config = @import("../code/Config.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const eth_spec = @import("../eth/spec.zig");
 const Vm = @import("../vm.zig");
@@ -106,7 +105,6 @@ fn validateExact(
 ) Error!block_stf.Result {
     const block = input.block;
     return block_stf.Exact(revision).applyAssumeDecoded(allocator, .{
-        .config = Config.base,
         .env = .{
             .chain_id = input.chain_id,
             .coinbase = block.fee_recipient,

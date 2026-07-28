@@ -3,7 +3,6 @@
 const std = @import("std");
 const Backend = @import("Backend.zig");
 const Bytecode = @import("../code/Bytecode.zig");
-const JumpDestStrategy = @import("../code/Config.zig").JumpDestStrategy;
 
 const Execution = @This();
 
@@ -13,13 +12,12 @@ pub const ResolvePolicy = struct {
 };
 
 backend: ?Backend,
-strategy: JumpDestStrategy,
 scratch_allocator: std.mem.Allocator,
 transient_entries: std.AutoHashMap([32]u8, Bytecode.View),
 owned_entries: std.ArrayList(Bytecode),
 
 /// Backend startup failure disables only the optimization for this execution.
-pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend, strategy: JumpDestStrategy) Execution {
+pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend) Execution {
     const active_backend = if (maybe_backend) |backend| active: {
         backend.beginExecution() catch break :active null;
         break :active backend;
@@ -27,7 +25,6 @@ pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend, strat
 
     return .{
         .backend = active_backend,
-        .strategy = strategy,
         .scratch_allocator = scratch_allocator,
         .transient_entries = std.AutoHashMap([32]u8, Bytecode.View).init(scratch_allocator),
         .owned_entries = .empty,
@@ -66,7 +63,7 @@ pub fn resolve(
 
     if (policy.admit) {
         if (self.backend) |backend| {
-            const admitted = backend.admit(code_hash, raw_code, self.strategy) catch |err| switch (err) {
+            const admitted = backend.admit(code_hash, raw_code) catch |err| switch (err) {
                 error.CodeHashMismatch => return err,
                 else => null,
             };
@@ -84,11 +81,7 @@ pub fn resolve(
 pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
     if (raw_code.len == 0) return .empty;
 
-    var bytecode = Bytecode.prepare(
-        self.scratch_allocator,
-        raw_code,
-        self.strategy,
-    ) catch |err| switch (err) {
+    var bytecode = Bytecode.prepare(self.scratch_allocator, raw_code) catch |err| switch (err) {
         error.OutOfMemory => return error.PreparedCodeCapacityExceeded,
     };
     errdefer bytecode.deinit(self.scratch_allocator);
@@ -124,17 +117,16 @@ test "backend failure falls back to one transient artifact" {
             unreachable;
         }
 
-        fn admit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8, strategy: JumpDestStrategy) !?Bytecode.View {
+        fn admit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8) !?Bytecode.View {
             _ = ptr;
             _ = code_hash;
             _ = raw_code;
-            _ = strategy;
             unreachable;
         }
     };
 
     var failing = FailingBackend{};
-    var execution = Execution.init(std.testing.allocator, failing.backend(), .scalar_bitmask);
+    var execution = Execution.init(std.testing.allocator, failing.backend());
     defer execution.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
@@ -147,7 +139,7 @@ test "backend failure falls back to one transient artifact" {
 test "bounded preparation reports capacity exhaustion without raw fallback" {
     var storage: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var execution = Execution.init(fixed.allocator(), null, .scalar_bitmask);
+    var execution = Execution.init(fixed.allocator(), null);
     defer execution.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
