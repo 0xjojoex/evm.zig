@@ -11,6 +11,7 @@ const union_codec = @import("union.zig");
 const container = @import("container.zig");
 const merkle = @import("merkle.zig");
 const allocated = @import("allocated.zig");
+const borrowed = @import("borrowed.zig");
 const mapped = @import("mapped.zig");
 const bitfield = @import("bitfield.zig");
 const codec = @import("codec.zig");
@@ -29,6 +30,7 @@ pub const VectorOf = vector.VectorOf;
 pub const VectorSliceOf = vector.VectorSliceOf;
 
 pub const Alloc = allocated.Alloc;
+pub const Borrowed = borrowed.Borrowed;
 pub const Mapped = mapped.Mapped;
 
 pub const ByteList = list.ByteList;

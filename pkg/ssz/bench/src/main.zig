@@ -12,6 +12,8 @@ const HeaderSsz = Header.Ssz;
 const U64List = ssz.List(u64, list_limit);
 const ByteLists1k = ssz.ListOf(ssz.ByteList(32), 1_000);
 const ByteLists100k = ssz.ListOf(ssz.ByteList(32), 100_000);
+const BorrowedByteLists1k = ssz.ListOf(ssz.Borrowed(ssz.ByteList(32)), 1_000);
+const BorrowedByteLists100k = ssz.ListOf(ssz.Borrowed(ssz.ByteList(32)), 100_000);
 const Bitvector4096 = ssz.Bitvector(4_096);
 const PackedBitvector4096 = ssz.PackedBitvector(4_096);
 const Bitlist4096 = ssz.Bitlist(4_096);
@@ -45,9 +47,9 @@ const Case = enum {
     decode_list_u64_1k,
     decode_list_u64_100k,
     decode_list_bytelist32_1k_owned,
-    decode_list_bytelist32_1k_view,
+    decode_list_bytelist32_1k_borrowed,
     decode_list_bytelist32_100k_owned,
-    decode_list_bytelist32_100k_view,
+    decode_list_bytelist32_100k_borrowed,
     decode_bitvector_4096_bool,
     decode_bitvector_4096_packed,
     decode_bitlist_4096_bool,
@@ -294,8 +296,9 @@ const CaseContext = struct {
                 fixtures.encoded_byte_lists_1k,
                 self.batch_ops,
             ),
-            .decode_list_bytelist32_1k_view => benchDecodeView(
-                ByteLists1k,
+            .decode_list_bytelist32_1k_borrowed => benchDecode(
+                BorrowedByteLists1k,
+                allocator,
                 fixtures.encoded_byte_lists_1k,
                 self.batch_ops,
             ),
@@ -305,8 +308,9 @@ const CaseContext = struct {
                 fixtures.encoded_byte_lists_100k,
                 self.batch_ops,
             ),
-            .decode_list_bytelist32_100k_view => benchDecodeView(
-                ByteLists100k,
+            .decode_list_bytelist32_100k_borrowed => benchDecode(
+                BorrowedByteLists100k,
+                allocator,
                 fixtures.encoded_byte_lists_100k,
                 self.batch_ops,
             ),
@@ -510,18 +514,6 @@ fn benchDecode(
     }
 }
 
-fn benchDecodeView(
-    comptime Codec: type,
-    bytes: []const u8,
-    operations: usize,
-) !void {
-    for (0..operations) |_| {
-        std.mem.doNotOptimizeAway(bytes.ptr);
-        var decoded = try Codec.decodeView(bytes);
-        std.mem.doNotOptimizeAway(&decoded);
-    }
-}
-
 fn benchRoot(comptime Codec: type, value: Codec.Value, operations: usize) !void {
     var input = value;
     for (0..operations) |_| {
@@ -549,10 +541,10 @@ fn caseEncodedBytes(case: Case, fixtures: *const Fixtures) usize {
         .decode_beacon_state_100k,
         => fixtures.encoded_beacon_state_100k.len,
         .decode_list_bytelist32_1k_owned,
-        .decode_list_bytelist32_1k_view,
+        .decode_list_bytelist32_1k_borrowed,
         => fixtures.encoded_byte_lists_1k.len,
         .decode_list_bytelist32_100k_owned,
-        .decode_list_bytelist32_100k_view,
+        .decode_list_bytelist32_100k_borrowed,
         => fixtures.encoded_byte_lists_100k.len,
         else => caseInfo(case).encoded_bytes,
     };
@@ -631,9 +623,9 @@ fn caseInfo(case: Case) CaseInfo {
         .decode_list_u64_1k => .{ .operation = .decode, .name = "list_u64_1k", .boundary = "owned_alloc", .batch_ops = 256, .items = 1_000, .encoded_bytes = 8_000 },
         .decode_list_u64_100k => .{ .operation = .decode, .name = "list_u64_100k", .boundary = "owned_alloc", .batch_ops = 4, .items = 100_000, .encoded_bytes = 800_000 },
         .decode_list_bytelist32_1k_owned => .{ .operation = .decode, .name = "list_bytelist32_1k", .boundary = "owned_alloc", .batch_ops = 8, .items = 1_000, .encoded_bytes = 0 },
-        .decode_list_bytelist32_1k_view => .{ .operation = .decode, .name = "list_bytelist32_1k", .boundary = "borrowed_view", .batch_ops = 8, .items = 1_000, .encoded_bytes = 0 },
+        .decode_list_bytelist32_1k_borrowed => .{ .operation = .decode, .name = "list_bytelist32_1k", .boundary = "owned_index_borrowed_items", .batch_ops = 8, .items = 1_000, .encoded_bytes = 0 },
         .decode_list_bytelist32_100k_owned => .{ .operation = .decode, .name = "list_bytelist32_100k", .boundary = "owned_alloc", .batch_ops = 1, .items = 100_000, .encoded_bytes = 0 },
-        .decode_list_bytelist32_100k_view => .{ .operation = .decode, .name = "list_bytelist32_100k", .boundary = "borrowed_view", .batch_ops = 1, .items = 100_000, .encoded_bytes = 0 },
+        .decode_list_bytelist32_100k_borrowed => .{ .operation = .decode, .name = "list_bytelist32_100k", .boundary = "owned_index_borrowed_items", .batch_ops = 1, .items = 100_000, .encoded_bytes = 0 },
         .decode_bitvector_4096_bool => .{ .operation = .decode, .name = "bitvector_4096_bool", .boundary = "inline_bool", .batch_ops = 32, .items = 4_096, .encoded_bytes = 512 },
         .decode_bitvector_4096_packed => .{ .operation = .decode, .name = "bitvector_4096_packed", .boundary = "borrowed_packed", .batch_ops = 8_192, .items = 4_096, .encoded_bytes = 512 },
         .decode_bitlist_4096_bool => .{ .operation = .decode, .name = "bitlist_4096_bool", .boundary = "owned_bool", .batch_ops = 32, .items = 4_096, .encoded_bytes = 513 },
@@ -701,20 +693,20 @@ test "case batch sizes match benchmark functions" {
     try std.testing.expectEqual(@as(usize, 64), caseInfo(.hash_tree_root_header).batch_ops);
 }
 
-test "additive view benchmark lanes keep comparable boundaries" {
+test "borrowed-element benchmark lanes keep comparable boundaries" {
     const list_1k_owned = caseInfo(.decode_list_bytelist32_1k_owned);
-    const list_1k_view = caseInfo(.decode_list_bytelist32_1k_view);
-    try std.testing.expectEqualStrings(list_1k_owned.name, list_1k_view.name);
-    try std.testing.expectEqual(list_1k_owned.items, list_1k_view.items);
-    try std.testing.expectEqual(list_1k_owned.batch_ops, list_1k_view.batch_ops);
+    const list_1k_borrowed = caseInfo(.decode_list_bytelist32_1k_borrowed);
+    try std.testing.expectEqualStrings(list_1k_owned.name, list_1k_borrowed.name);
+    try std.testing.expectEqual(list_1k_owned.items, list_1k_borrowed.items);
+    try std.testing.expectEqual(list_1k_owned.batch_ops, list_1k_borrowed.batch_ops);
     try std.testing.expectEqualStrings("owned_alloc", list_1k_owned.boundary);
-    try std.testing.expectEqualStrings("borrowed_view", list_1k_view.boundary);
+    try std.testing.expectEqualStrings("owned_index_borrowed_items", list_1k_borrowed.boundary);
 
     const list_100k_owned = caseInfo(.decode_list_bytelist32_100k_owned);
-    const list_100k_view = caseInfo(.decode_list_bytelist32_100k_view);
-    try std.testing.expectEqualStrings(list_100k_owned.name, list_100k_view.name);
-    try std.testing.expectEqual(list_100k_owned.items, list_100k_view.items);
-    try std.testing.expectEqual(list_100k_owned.batch_ops, list_100k_view.batch_ops);
+    const list_100k_borrowed = caseInfo(.decode_list_bytelist32_100k_borrowed);
+    try std.testing.expectEqualStrings(list_100k_owned.name, list_100k_borrowed.name);
+    try std.testing.expectEqual(list_100k_owned.items, list_100k_borrowed.items);
+    try std.testing.expectEqual(list_100k_owned.batch_ops, list_100k_borrowed.batch_ops);
 
     try std.testing.expectEqualStrings("inline_bool", caseInfo(.decode_bitvector_4096_bool).boundary);
     try std.testing.expectEqualStrings("owned_bool", caseInfo(.decode_bitlist_4096_bool).boundary);

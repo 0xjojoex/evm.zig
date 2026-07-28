@@ -239,6 +239,8 @@ bare enum.
   `deinit(allocator, value)`.
 - Generic callers can use `ssz.decodeOwned` / `ssz.deinitOwned`, which dispatch
   at comptime and no-op for non-owning codecs.
+- `ssz.Borrowed(Codec)` selects an allocating codec's input-backed `decode`
+  capability while preserving its ordinary value shape and SSZ schema.
 - `ssz.encodeAlloc(Codec, allocator, value)` is the convenience adapter when you
   want an exact-size owned buffer; otherwise `Codec.encode(out, value)` writes
   into storage you provide. Input and output must not overlap.
@@ -247,19 +249,25 @@ Note that a value's wire layout and its Zig representation are independent: a
 131072-byte `Vector` is fixed-size on the wire yet can still be decoded into an
 allocated slice via `Alloc`.
 
-### Borrowed views
+### Borrowed decoding
 
 Borrowed decoding is opt-in when the input buffer already has a stable lifetime.
-`ListOf(ByteList(...), ...).decodeView` validates the complete offset table and
-every child, then provides allocation-free `get` and iterator access. The
-`PackedBitvector`, `PackedBitlist`, and `ProgressivePackedBitlist` codecs retain
-canonical packed bytes and expose semantic bits through `PackedBitsView`:
+`Borrowed(ByteList(...))` keeps the normal `[]const u8` value shape while
+selecting `ByteList.decode`, so it composes inside ordinary lists and containers.
+A containing `ListOf` still materializes its element slice, but each byte payload
+borrows directly from the encoded input:
 
 ```zig
-const Items = ssz.ListOf(ssz.ByteList(32), 1_000);
-const items = try Items.decodeView(encoded_items);
-const first = items.get(0).?; // borrows encoded_items
+const Items = ssz.ListOf(ssz.Borrowed(ssz.ByteList(32)), 1_000);
+var items = try ssz.decodeOwned(Items, allocator, encoded_items);
+defer ssz.deinitOwned(Items, allocator, &items);
+const first = items[0]; // borrows encoded_items
+```
 
+The `PackedBitvector`, `PackedBitlist`, and `ProgressivePackedBitlist` codecs
+retain canonical packed bytes and expose semantic bits through `PackedBitsView`:
+
+```zig
 const Flags = ssz.PackedBitlist(4_096);
 const flags = try Flags.decode(encoded_flags);
 if (flags.isSet(7)) {
@@ -267,15 +275,10 @@ if (flags.isSet(7)) {
 }
 ```
 
-Keep the backing bytes alive and unchanged for the entire view lifetime. Views
-are immutable: packed views support reading, hashing, and re-encoding, while a
-lazy list view is a read-only access projection. Use owned list decoding or the
-boolean bitfield codecs for retention and mutation. A lazy list view differs
-from the list codec's ordinary `Value`, so it does not automatically compose
-inside an existing typed `Container` or pass to that codec's `hashTreeRoot`.
-Callers must carry the view-shaped representation end to end. The package-level
-speedup does not imply an application speedup until that integration exists;
-the current evmz stateless wire adapter still uses owned decoding.
+Keep the backing bytes alive and unchanged for the complete borrowed-value
+lifetime. Use the base codec's owned decoding when the value must outlive its
+encoded input. Packed views are immutable and support reading, hashing, and
+re-encoding; use the boolean bitfield codecs for mutation.
 
 ## Custom hashing provider
 
@@ -336,9 +339,9 @@ Criterion estimate):
 | Encode `List[u64, 100K]`, caller buffer                       |      12.8 us |        - |
 | Decode `List[u64, 100K]`, owned                               |      13.5 us |  13.4 us |
 | Decode `List[ByteList[32], 1K]`, owned                        |      28.7 us |        - |
-| Decode `List[ByteList[32], 1K]`, borrowed view                |      1.09 us |        - |
+| Decode `List[ByteList[32], 1K]`, borrowed items               |      1.14 us |        - |
 | Decode `List[ByteList[32], 100K]`, owned                      |      2.88 ms |        - |
-| Decode `List[ByteList[32], 100K]`, borrowed view              |       107 us |        - |
+| Decode `List[ByteList[32], 100K]`, borrowed items             |       105 us |        - |
 | Encode `Bitvector[4096]`, expanded bools, caller buffer       |      3.50 us |        - |
 | Encode `Bitvector[4096]`, packed view, caller buffer          |      8.26 ns |        - |
 | Decode `Bitvector[4096]`, inline bools                        |      2.62 us |        - |
@@ -363,9 +366,9 @@ also do not exercise the offset-bearing `List[ByteList]` shape, and its bitfield
 benchmarks decode to owned packed storage rather than either representation
 shown here. The paired byte-list and bitfield rows therefore compare only this
 package's representations, using identical encoded bytes and semantic values.
-Borrowed list decoding validates every offset and child before returning the
-lazy view; it does not consume the child payload bytes. Owned decoding includes
-destruction and freeing.
+Borrowed-item decoding allocates and frees the outer list index while retaining
+each validated payload in the encoded input. Owned decoding also copies and
+frees every payload.
 
 In the directly comparable owned decode lanes, large `u64` lists are at parity;
 `BeaconState` is at parity at 16K validators and about 1.1x faster at 100K.

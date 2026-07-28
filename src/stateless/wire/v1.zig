@@ -784,29 +784,14 @@ const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
 const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
 const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
 
-fn BorrowedByteList(comptime limit: comptime_int) type {
-    const Base = ssz.ByteList(limit);
-    return struct {
-        pub const Value = Base.Value;
-        pub const kind = Base.kind;
-        pub const element_codec = Base.element_codec;
-        pub const max_length = Base.max_length;
-        pub const is_progressive = Base.is_progressive;
-        pub const is_variable_size = Base.is_variable_size;
-        pub const fixed_size = Base.fixed_size;
-        pub const requires_allocator = false;
-        pub const encodedLen = Base.encodedLen;
-        pub const encode = Base.encode;
-        pub const decode = Base.decode;
-        pub const validate = Base.validate;
-    };
-}
-
-const BorrowedTransactionsSsz = ssz.ListOf(BorrowedByteList(max_bytes_per_transaction), max_transactions_per_payload);
+const BorrowedTransactionsSsz = ssz.ListOf(
+    ssz.Borrowed(ssz.ByteList(max_bytes_per_transaction)),
+    max_transactions_per_payload,
+);
 const BorrowedExecutionWitnessSsz = ssz.Container(ExecutionWitness, .{
-    .state = ssz.ListOf(BorrowedByteList(max_bytes_per_witness_node), max_witness_nodes),
-    .codes = ssz.ListOf(BorrowedByteList(max_bytes_per_code), max_witness_codes),
-    .headers = ssz.ListOf(BorrowedByteList(max_bytes_per_header), max_witness_headers),
+    .state = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_witness_node)), max_witness_nodes),
+    .codes = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_code)), max_witness_codes),
+    .headers = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_header)), max_witness_headers),
 });
 
 const ExecutionPayloadV2Wire = struct {
@@ -958,10 +943,10 @@ const StatelessInputWire = struct {
 };
 
 const BorrowedExecutionPayloadV4Ssz = ssz.Container(ExecutionPayloadV4Wire, .{
-    .extra_data = BorrowedByteList(max_extra_data_bytes),
+    .extra_data = ssz.Borrowed(ssz.ByteList(max_extra_data_bytes)),
     .transactions = BorrowedTransactionsSsz,
     .withdrawals = WithdrawalsSsz,
-    .block_access_list = BorrowedByteList(max_block_access_list_bytes),
+    .block_access_list = ssz.Borrowed(ssz.ByteList(max_block_access_list_bytes)),
 });
 const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAmsterdamWire, .{
     .execution_payload = BorrowedExecutionPayloadV4Ssz,
