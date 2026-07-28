@@ -62,6 +62,12 @@ pub fn validateWithCaptureOptions(
     return validateWithScratch(arena.allocator(), input, capture, options);
 }
 
+/// Reuses a caller-owned one-shot scratch lifetime instead of nesting another
+/// arena. The caller must release every allocation together after validation.
+pub fn validateOneShot(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
+    return validateWithScratch(allocator, input, null, .{});
+}
+
 fn validateWithScratch(
     allocator: std.mem.Allocator,
     input: input_mod.Input,

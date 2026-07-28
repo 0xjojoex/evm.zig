@@ -44,7 +44,7 @@ fn ziskMain() callconv(.c) void {
 }
 
 pub fn runStatelessEreInput(allocator: std.mem.Allocator, input: []const u8) evmz.stateless.wire.Error![]u8 {
-    return evmz.stateless.wire.validateStatelessBytes(allocator, input);
+    return evmz.stateless.wire.v1.validateStatelessBytesOneShot(allocator, input);
 }
 
 fn writeError(err: anyerror) void {

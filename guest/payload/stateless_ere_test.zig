@@ -6,9 +6,26 @@ test "stateless ERE payload emits canonical SSZ output" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
 
-    const actual = try payload.runStatelessEreInput(std.testing.allocator, input);
-    defer std.testing.allocator.free(actual);
     const expected = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
     defer std.testing.allocator.free(expected);
-    try std.testing.expectEqualSlices(u8, expected, actual);
+
+    for (0..2) |_| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const actual = try payload.runStatelessEreInput(arena.allocator(), input);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
+}
+
+test "stateless ERE guest path releases malformed-input scratch" {
+    const malformed = [_]u8{0};
+    const expected = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, &malformed);
+    defer std.testing.allocator.free(expected);
+
+    for (0..2) |_| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const actual = try payload.runStatelessEreInput(arena.allocator(), &malformed);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
 }

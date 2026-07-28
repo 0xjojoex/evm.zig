@@ -1172,22 +1172,36 @@ pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) E
 pub fn validateStatelessBytesWithOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ValidationOptions) Error![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const scratch = arena.allocator();
+    return validateStatelessBytesUsingScratch(false, arena.allocator(), allocator, bytes, options);
+}
 
+/// Validates one invocation whose scratch and result allocations share a
+/// caller-owned lifetime. Reusable callers must use `validateStatelessBytes`.
+pub fn validateStatelessBytesOneShot(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
+    return validateStatelessBytesUsingScratch(true, allocator, allocator, bytes, .{});
+}
+
+fn validateStatelessBytesUsingScratch(
+    comptime reuse_scratch: bool,
+    scratch: std.mem.Allocator,
+    result_allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ValidationOptions,
+) Error![]u8 {
     zisk_profile.begin(.ssz_decode);
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(allocator),
+        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
     };
     zisk_profile.end(.ssz_decode);
-    const result = try validateStatelessWithOptions(scratch, input, options);
+    const result = try validateStatelessWithOptionsImpl(reuse_scratch, scratch, input, options);
     if (comptime zisk_profile.enabled) {
         zisk_profile.begin(.result_encode);
-        const encoded = try result.encode(allocator);
+        const encoded = try result.encode(result_allocator);
         zisk_profile.end(.result_encode);
         return encoded;
     }
-    return result.encode(allocator);
+    return result.encode(result_allocator);
 }
 
 pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Status {
@@ -1240,6 +1254,15 @@ pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Er
 }
 
 pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: StatelessInput, options: ValidationOptions) Error!StatelessValidationResult {
+    return validateStatelessWithOptionsImpl(false, allocator, input, options);
+}
+
+fn validateStatelessWithOptionsImpl(
+    comptime reuse_scratch: bool,
+    allocator: std.mem.Allocator,
+    input: StatelessInput,
+    options: ValidationOptions,
+) Error!StatelessValidationResult {
     zisk_profile.begin(.request_root);
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1254,7 +1277,10 @@ pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: Statele
     };
     zisk_profile.end(.normalize);
     zisk_profile.begin(.execute);
-    const native_result = stateless_validate.validate(allocator, normalized) catch |err| switch (err) {
+    const native_result = (if (comptime reuse_scratch)
+        stateless_validate.validateOneShot(allocator, normalized)
+    else
+        stateless_validate.validate(allocator, normalized)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
