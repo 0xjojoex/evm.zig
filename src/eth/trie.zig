@@ -13,7 +13,6 @@ const TrackedState = @import("../state/TrackedState.zig");
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
 const ChangesView = TrackedState.ChangesView;
-const zisk_profile = @import("stateless_profile");
 
 const Allocator = std.mem.Allocator;
 
@@ -90,11 +89,10 @@ pub const Proof = struct {
     cache: ?*ProofCache = null,
 
     pub fn get(self: Proof, key: []const u8) (Allocator.Error || ProofLookupError)!?[]const u8 {
-        zisk_profile.begin(.mpt_proof_lookup);
         const result = if (self.cache) |cache|
-            try zisk_profile.finish(.mpt_proof_lookup, mpt.lookupCached(self.root_hash, self.index, key, cache))
+            try mpt.lookupCached(self.root_hash, self.index, key, cache)
         else
-            try zisk_profile.finish(.mpt_proof_lookup, mpt.lookup(self.root_hash, self.index, key));
+            try mpt.lookup(self.root_hash, self.index, key);
         return switch (result) {
             .present => |value| value,
             .absent => null,
@@ -107,11 +105,7 @@ pub fn root(allocator: Allocator, pairs: []const Pair) Error![32]u8 {
 }
 
 pub fn indexNodes(allocator: Allocator, nodes: []const []const u8) Error!*IndexedNodes {
-    zisk_profile.begin(.mpt_index_witness);
-    return zisk_profile.finish(
-        .mpt_index_witness,
-        structuralTrie(allocator).indexNodes(nodes),
-    );
+    return structuralTrie(allocator).indexNodes(nodes);
 }
 
 pub fn proof(root_hash: [32]u8, indexed: *const IndexedNodes) Proof {
@@ -140,25 +134,15 @@ pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8)
 }
 
 pub fn transactionRoot(allocator: Allocator, encoded_transactions: []const []const u8) Error![32]u8 {
-    zisk_profile.begin(.mpt_transaction_root);
-    return zisk_profile.finish(
-        .mpt_transaction_root,
-        orderedTrieRoot(allocator, encoded_transactions),
-    );
+    return orderedTrieRoot(allocator, encoded_transactions);
 }
 
 pub fn receiptRoot(allocator: Allocator, encoded_receipts: []const []const u8) Error![32]u8 {
-    zisk_profile.begin(.mpt_receipt_root);
-    return zisk_profile.finish(
-        .mpt_receipt_root,
-        orderedTrieRoot(allocator, encoded_receipts),
-    );
+    return orderedTrieRoot(allocator, encoded_receipts);
 }
 
 pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Error![32]u8 {
-    zisk_profile.begin(.mpt_withdrawals_root);
-    if (withdrawals.len == 0)
-        return zisk_profile.finish(.mpt_withdrawals_root, empty_root_hash);
+    if (withdrawals.len == 0) return empty_root_hash;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -168,10 +152,7 @@ pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Er
     for (values, withdrawals) |*value, withdrawal| {
         value.* = try withdrawalValue(scratch, withdrawal);
     }
-    return zisk_profile.finish(
-        .mpt_withdrawals_root,
-        orderedTrieRoot(allocator, values),
-    );
+    return orderedTrieRoot(allocator, values);
 }
 
 pub fn updateRoot(allocator: Allocator, root_hash: [32]u8, nodes: []const []const u8, updates: []const Update) UpdateError![32]u8 {
@@ -221,11 +202,7 @@ fn storageRootAfterChangesIndexed(
         empty_root_hash
     else
         root_hash;
-    zisk_profile.begin(.mpt_storage_update);
-    return zisk_profile.finish(
-        .mpt_storage_update,
-        storageTrie(allocator).update(base_root, indexed.index(), updates.items),
-    );
+    return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
 }
 
 pub fn stateRootAfterChanges(
@@ -323,11 +300,7 @@ pub fn stateRootAfterChangesIndexed(
         try updates.append(scratch, .{ .key = change.address, .value = null });
     }
 
-    zisk_profile.begin(.mpt_account_update);
-    return zisk_profile.finish(
-        .mpt_account_update,
-        accounts.update(root_hash, indexed.index(), updates.items),
-    );
+    return accounts.update(root_hash, indexed.index(), updates.items);
 }
 
 pub fn hashedAddressKey(target: address.Address) [32]u8 {

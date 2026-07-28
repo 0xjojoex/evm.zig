@@ -15,7 +15,6 @@ const block_stf = @import("../../eth/block_stf.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
 const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
-const zisk_profile = @import("stateless_profile");
 
 pub const revision: Revision = .amsterdam;
 const AmsterdamValidator = stateless_validate.Exact(revision);
@@ -1179,22 +1178,14 @@ fn validateStatelessBytesUsingScratch(
     bytes: []const u8,
     options: ValidationOptions,
 ) Error![]u8 {
-    zisk_profile.begin(.ssz_decode);
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
     };
-    zisk_profile.end(.ssz_decode);
     const result = if (comptime reuse_scratch)
         try validateStatelessWithOptionsImpl(AmsterdamOneShotValidator, true, scratch, input, options)
     else
         try validateStatelessWithOptionsImpl(AmsterdamValidator, false, scratch, input, options);
-    if (comptime zisk_profile.enabled) {
-        zisk_profile.begin(.result_encode);
-        const encoded = try result.encode(result_allocator);
-        zisk_profile.end(.result_encode);
-        return encoded;
-    }
     return result.encode(result_allocator);
 }
 
@@ -1258,20 +1249,15 @@ fn validateStatelessWithOptionsImpl(
     input: StatelessInput,
     options: ValidationOptions,
 ) Error!StatelessValidationResult {
-    zisk_profile.begin(.request_root);
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, [_]u8{0} ** 32),
     };
-    zisk_profile.end(.request_root);
     _ = options;
-    zisk_profile.begin(.normalize);
     const normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, request_root),
     };
-    zisk_profile.end(.normalize);
-    zisk_profile.begin(.execute);
     const native_result = (if (comptime reuse_scratch)
         Validator.validateOneShot(allocator, normalized)
     else
@@ -1279,7 +1265,6 @@ fn validateStatelessWithOptionsImpl(
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
-    zisk_profile.end(.execute);
     return .{
         .new_payload_request_root = request_root,
         .successful_validation = native_result.status == .valid,

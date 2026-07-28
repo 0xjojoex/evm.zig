@@ -24,7 +24,6 @@
 const std = @import("std");
 
 const evmz = @import("./evm.zig");
-const zisk_profile = @import("stateless_profile");
 pub const errors = @import("./executor/error.zig");
 const Address = evmz.Address;
 const AccountState = evmz.state.Account;
@@ -1245,43 +1244,28 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             mode: ExecutionMode,
             observer: anytype,
         ) !Interpreter.Result {
-            zisk_profile.begin(.system_call_prepared_setup);
             self.beginPreparedCodeExecution();
-            zisk_profile.end(.system_call_prepared_setup);
-            defer {
-                zisk_profile.begin(.system_call_prepared_teardown);
-                self.endPreparedCodeExecution();
-                zisk_profile.end(.system_call_prepared_teardown);
-            }
+            defer self.endPreparedCodeExecution();
 
-            zisk_profile.begin(.system_call_scope_setup);
             try self.beginSystemCall(context, mode);
             errdefer self.discardStateTransition();
 
             self.clearLastOutput();
             const checkpoint_state = self.state.checkpoint();
-            zisk_profile.end(.system_call_scope_setup);
             var checkpoint_open = true;
             errdefer {
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state);
             }
 
-            zisk_profile.begin(.system_call_code_resolution);
-            zisk_profile.begin(.system_call_tracked_code_view);
             const code_hash = try self.state.getCodeHashForCodeRead(recipient);
             const authenticated_code = runtime.lookupAuthenticatedExecutionCode(self, code_hash);
             const resolved_view = if (authenticated_code == null) blk: {
                 const resolved = try runtime.resolveCode(self, recipient);
                 break :blk try runtime.resolvedCodeView(self, resolved);
             } else null;
-            zisk_profile.end(.system_call_tracked_code_view);
-            zisk_profile.begin(.system_call_prepare_code);
             const bytecode = authenticated_code orelse
                 try runtime.resolveExecutionCodeView(self, resolved_view.?);
-            zisk_profile.end(.system_call_prepare_code);
-            zisk_profile.begin(.system_call_trace_recipient);
             try self.traceAccountAccess(recipient);
-            zisk_profile.end(.system_call_trace_recipient);
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
@@ -1293,14 +1277,11 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 .value = 0,
                 .code_address = recipient,
             };
-            zisk_profile.end(.system_call_code_resolution);
 
-            zisk_profile.begin(.system_call_root_execute);
             const call_result = (try switch (mode) {
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
             }).expectCall();
-            zisk_profile.end(.system_call_root_execute);
             const result = Interpreter.Result{
                 .status = call_result.status,
                 .cause = call_result.cause,
@@ -1312,21 +1293,14 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 .output_data = self.lastOutputData(),
             };
 
-            zisk_profile.begin(.system_call_checkpoint_resolution);
             if (executionRolledBack(result.status)) {
                 self.state.revertToCheckpoint(checkpoint_state);
                 checkpoint_open = false;
-                zisk_profile.end(.system_call_checkpoint_resolution);
-                zisk_profile.begin(.system_call_state_resolution);
                 try self.retainStateTransitionObserved(observer);
-                zisk_profile.end(.system_call_state_resolution);
             } else {
                 self.state.commitCheckpoint(checkpoint_state);
                 checkpoint_open = false;
-                zisk_profile.end(.system_call_checkpoint_resolution);
-                zisk_profile.begin(.system_call_state_resolution);
                 try self.commitTransactionObserved(observer);
-                zisk_profile.end(.system_call_state_resolution);
             }
 
             return .{

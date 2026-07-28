@@ -5,7 +5,6 @@
 //! `View`; mutation is limited to owner-side construction/teardown.
 
 const std = @import("std");
-const zisk_profile = @import("stateless_profile");
 const JumpDestMap = @import("JumpDestMap.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
@@ -71,9 +70,7 @@ pub const empty = Bytecode{
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
-    zisk_profile.begin(.prepared_code_padding);
     const padded = try ZeroPaddedCode.init(allocator, bytes);
-    zisk_profile.end(.prepared_code_padding);
     var self = Bytecode{
         .bytes = padded.bytes,
         .read_bytes = padded.read_bytes,
@@ -81,9 +78,7 @@ pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
         .needs_action_loop = false,
     };
     errdefer self.deinit(allocator);
-    zisk_profile.begin(.prepared_code_jumpdest);
     self.needs_action_loop = try self.jumpdests.analyzeAndClassifyActions(allocator, self.bytes);
-    zisk_profile.end(.prepared_code_jumpdest);
 
     return self;
 }

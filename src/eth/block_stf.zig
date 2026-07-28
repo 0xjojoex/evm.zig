@@ -39,7 +39,6 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
-const zisk_profile = @import("stateless_profile");
 
 fn BalDifferentialOperations(
     comptime revision: Revision,
@@ -976,7 +975,6 @@ fn serialFold(
 ) !Result {
     const DifferentialRunner = BalDifferentialRunner(revision, Engine);
 
-    zisk_profile.begin(.stf_setup);
     var state_backend = input.state_backend;
     defer state_backend.deinit();
 
@@ -1120,9 +1118,7 @@ fn serialFold(
         input.env,
     );
     defer block.discardIfUnfinished();
-    zisk_profile.end(.stf_setup);
 
-    zisk_profile.begin(.before_block);
     if (input.block_header) |header| {
         observation_collector.block_access_index = 0;
         const context: Executor.system_contracts.BeforeBlockContext = .{
@@ -1153,9 +1149,7 @@ fn serialFold(
     if (differential_runner) |*runner| {
         runner.verifyBeforeBlock(input.block_header);
     }
-    zisk_profile.end(.before_block);
 
-    zisk_profile.begin(.transactions);
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     defer {
         for (encoded_receipts.items) |encoded_receipt| allocator.free(encoded_receipt);
@@ -1347,10 +1341,7 @@ fn serialFold(
         }
     }
     if (differential_runner) |*runner| try runner.finish();
-    zisk_profile.end(.transactions);
 
-    zisk_profile.begin(.post_execution);
-    zisk_profile.begin(.blob_accounting);
     const effective_parent_blob_gas = if (revision.isImpl(.cancun))
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
     else
@@ -1362,9 +1353,7 @@ fn serialFold(
             calcProtocolExcessBlobGas(Engine, parent_blob_gas) orelse return error.BlobGasOverflow
     else
         null;
-    zisk_profile.end(.blob_accounting);
 
-    zisk_profile.begin(.withdrawals);
     observation_collector.block_access_index =
         try eth_bal.postExecutionSystemIndex(block_access_transaction_count);
     const withdrawals_result = if (observe_state)
@@ -1384,9 +1373,7 @@ fn serialFold(
         error.InvalidWitness => return .{ .status = .invalid_witness },
         else => return err,
     };
-    zisk_profile.end(.withdrawals);
 
-    zisk_profile.begin(.derive_requests);
     const derived_requests_result = deriveRequestsMode(
         allocator,
         &executor,
@@ -1402,17 +1389,12 @@ fn serialFold(
         else => return err,
     };
     defer freeRequests(allocator, derived_requests);
-    zisk_profile.end(.derive_requests);
 
-    zisk_profile.begin(.requests_hash);
     computed_requests_hash = requestsHash(allocator, derived_requests) catch |err| switch (err) {
         error.InvalidRequest => return .{ .status = .invalid_requests },
         else => return err,
     };
-    zisk_profile.end(.requests_hash);
-    zisk_profile.end(.post_execution);
 
-    zisk_profile.begin(.bal_reconstruct);
     if (capture_steps) {
         _ = try capture_context.finish();
         capture_open = false;
@@ -1448,9 +1430,7 @@ fn serialFold(
     if (differential_runner) |*runner| {
         differential_candidate = runner.finishCandidate(input.withdrawals);
     }
-    zisk_profile.end(.bal_reconstruct);
 
-    zisk_profile.begin(.roots);
     const block_result = block.finish();
     const changes = executor.acceptedChanges();
 
@@ -1472,9 +1452,7 @@ fn serialFold(
         .requests_hash = computed_requests_hash,
         .block_access_list_hash = computed_block_access_list_hash,
     };
-    zisk_profile.end(.roots);
 
-    zisk_profile.begin(.final_checks);
     if (differential_candidate) |*candidate| {
         const report = input.bal_differential.?;
         if (!try candidate.state.matchesChanges(
@@ -1548,7 +1526,6 @@ fn serialFold(
             observed_block_access_list_encoded = null;
         }
     }
-    zisk_profile.end(.final_checks);
     return result;
 }
 
