@@ -37,10 +37,20 @@ test "micro/state/sparse-hash-map/hash" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
 
-    var hash_context = StorageKeyHashBench{ .keys = &keys };
+    var auto_hash_context = StorageKeyHashBench(std.hash_map.AutoContext(StorageKey)){
+        .keys = &keys,
+    };
     try bench.addParam(
-        "sparse-hash-map/storage-key/hash/1024x",
-        @as(*const StorageKeyHashBench, &hash_context),
+        "sparse-hash-map/storage-key/hash/auto/1024x",
+        @as(*const @TypeOf(auto_hash_context), &auto_hash_context),
+        .{},
+    );
+    var fixed_hash_context = StorageKeyHashBench(evmz.state.storage.TransactionKeyContext){
+        .keys = &keys,
+    };
+    try bench.addParam(
+        "sparse-hash-map/storage-key/hash/fixed/1024x",
+        @as(*const @TypeOf(fixed_hash_context), &fixed_hash_context),
         .{},
     );
 
@@ -405,12 +415,12 @@ test "micro/state/sparse-hash-map/clear-retaining-capacity" {
 
     for (&sparse_small) |*map| {
         try std.testing.expectEqual(@as(u32, 0), map.count());
-        try std.testing.expectEqual(@as(usize, 0), map.debugOccupiedSlots());
+        for (keys) |key| try std.testing.expect(!map.contains(key));
     }
     for (&std_small) |*map| try std.testing.expectEqual(@as(usize, 0), map.count());
     for (&sparse_broad) |*map| {
         try std.testing.expectEqual(@as(u32, 0), map.count());
-        try std.testing.expectEqual(@as(usize, 0), map.debugOccupiedSlots());
+        for (keys) |key| try std.testing.expect(!map.contains(key));
     }
     for (&std_broad) |*map| try std.testing.expectEqual(@as(usize, 0), map.count());
 }
@@ -420,16 +430,18 @@ const StateMapCase = struct {
     live: usize,
 };
 
-const StorageKeyHashBench = struct {
-    keys: []const StorageKey,
+fn StorageKeyHashBench(comptime Context: type) type {
+    return struct {
+        keys: []const StorageKey,
 
-    pub fn run(self: *StorageKeyHashBench, _: std.mem.Allocator) void {
-        const context: std.hash_map.AutoContext(StorageKey) = .{};
-        var acc: u64 = 0;
-        for (self.keys) |key| acc +%= context.hash(key);
-        std.mem.doNotOptimizeAway(acc);
-    }
-};
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
+            const context = Context{};
+            var acc: u64 = 0;
+            for (self.keys) |key| acc +%= context.hash(key);
+            std.mem.doNotOptimizeAway(acc);
+        }
+    };
+}
 
 fn ContainsBench(comptime Map: type, comptime Key: type) type {
     return struct {

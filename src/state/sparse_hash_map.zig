@@ -572,6 +572,43 @@ test "sparse hash map removal preserves probe clusters" {
     try std.testing.expectEqual(@as(?u64, 106), map.get(6));
 }
 
+test "transaction storage map matches std under adversarial collisions" {
+    const storage = @import("storage.zig");
+    const SparseMap = WithContext(storage.Key, u64, storage.TransactionKeyContext);
+    const keyFor = struct {
+        fn at(index: usize) storage.Key {
+            const low: u64 = @intCast(index + 1);
+            return .{
+                .address = std.mem.zeroes(storage.Key).address,
+                .key = @as(u256, low) |
+                    (@as(u256, std.math.rotr(u64, low, 13)) << 64),
+            };
+        }
+    }.at;
+
+    var sparse = SparseMap.init(std.testing.allocator);
+    defer sparse.deinit();
+    var standard = std.AutoHashMap(storage.Key, u64).init(std.testing.allocator);
+    defer standard.deinit();
+
+    for (0..128) |index| {
+        const key = keyFor(index);
+        try std.testing.expectEqual(@as(u64, 0), (storage.TransactionKeyContext{}).hash(key));
+        try sparse.put(key, @intCast(index));
+        try standard.put(key, @intCast(index));
+    }
+    for (0..128) |index|
+        try std.testing.expectEqual(standard.get(keyFor(index)), sparse.get(keyFor(index)));
+
+    for (0..128) |index| {
+        if (index % 3 != 0) continue;
+        try std.testing.expectEqual(standard.remove(keyFor(index)), sparse.remove(keyFor(index)));
+    }
+    try std.testing.expectEqual(@as(u32, @intCast(standard.count())), sparse.count());
+    for (0..128) |index|
+        try std.testing.expectEqual(standard.get(keyFor(index)), sparse.get(keyFor(index)));
+}
+
 test "sparse hash map removeIf checks moved tail rows" {
     const Context = struct {
         threshold: u64,
