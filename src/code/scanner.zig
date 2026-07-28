@@ -198,7 +198,7 @@ fn rawMasksClassified(bytes: []const u8, comptime classify_actions: bool) Classi
     };
 }
 
-inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
+pub inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
     // Wrapping subtraction folds "is it in 0xf0..0xf5" into one unsigned
     // compare: anything below 0xf0 wraps up past the bound instead of going
     // negative, so no second `>= 0xf0` test is needed.

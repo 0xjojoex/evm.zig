@@ -1,6 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 const block_program = @import("../block_program.zig");
+const system_prepared_code = @import("../eth/system_prepared_code.zig");
 const zisk_profile = @import("stateless_profile");
 
 const Address = evmz.Address;
@@ -369,17 +370,11 @@ test "before block calls Prague and Cancun system contracts" {
         &history_code_buf,
         "3373fffffffffffffffffffffffffffffffffffffffe14604657602036036042575f35600143038111604257611fff81430311604257611fff9006545f5260205ff35b5f5ffd5b5f35611fff60014303065500",
     );
-    var beacon_code_buf: [97]u8 = undefined;
-    const beacon_code = try std.fmt.hexToBytes(
-        &beacon_code_buf,
-        "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500",
-    );
-
     var history_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try history_account.setCode(history_code);
     try executor.state.seedAccount(ethereum.history_storage_address, history_account);
     var beacon_account = evmz.state.MemoryAccount.init(std.testing.allocator);
-    try beacon_account.setCode(beacon_code);
+    try beacon_account.setCode(&system_prepared_code.beacon_roots_code);
     try executor.state.seedAccount(ethereum.beacon_roots_address, beacon_account);
 
     var parent_hash = [_]u8{0} ** 32;

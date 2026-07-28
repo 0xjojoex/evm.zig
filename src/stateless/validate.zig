@@ -4,6 +4,7 @@ const std = @import("std");
 
 const Revision = @import("../eth/revision.zig").Revision;
 const eth_spec = @import("../eth/spec.zig");
+const system_prepared_code = @import("../eth/system_prepared_code.zig");
 const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
@@ -125,6 +126,7 @@ fn validateExact(
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
         .state_backend = try state.Backend.fromWitness(allocator, parent_header.state_root, input.witness.state, codes),
+        .prepared_code_backend = system_prepared_code.backend(),
         .transactions = block.transactions,
         .withdrawals = block.withdrawals,
         .parent_header = .{
