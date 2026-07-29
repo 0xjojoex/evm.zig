@@ -12,10 +12,16 @@ Options:
   --remote <name>          Git remote used by --publish (default: origin)
   --fetch-url <git-url>    Public Zig fetch URL without #tag; required to publish
   --github-output <path>   Append package, branch, tag, commit, and hash outputs
+  --notes-out <path>       Write the release notes taken from the changelog
   -h, --help               Show this help
 
 Without --publish the command is a no-push dry run. It still creates and tests
 the exact deterministic split commit selected by --ref.
+
+The package's CHANGELOG.md must already carry a released section for --version
+in Keep a Changelog form, dated:
+
+  ## [1.2.3] - 2026-07-29
 EOF
 }
 
@@ -35,6 +41,7 @@ publish=false
 remote="origin"
 fetch_url=""
 github_output=""
+notes_out=""
 release_ref=""
 
 while (( $# > 0 )); do
@@ -73,6 +80,11 @@ while (( $# > 0 )); do
             github_output="$2"
             shift 2
             ;;
+        --notes-out)
+            (( $# >= 2 )) || fail "--notes-out requires a value"
+            notes_out="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -93,6 +105,10 @@ case "$package" in
     ssz|rlp|mpt) ;;
     *) fail "unsupported package: $package" ;;
 esac
+
+if [[ -n "$notes_out" && "$notes_out" != /* ]]; then
+    notes_out="$PWD/$notes_out"
+fi
 
 command -v git >/dev/null || fail "git is required"
 command -v zig >/dev/null || fail "zig is required"
@@ -143,6 +159,28 @@ manifest_version=$(awk -F'"' '/^[[:space:]]*\.version = "/ { print $2; exit }' "
 [[ -n "$manifest_version" ]] || fail "unable to read package version from $prefix/build.zig.zon"
 [[ "$manifest_version" == "$version" ]] ||
     fail "requested version $version does not match manifest version $manifest_version"
+
+changelog="$source_dir/$prefix/CHANGELOG.md"
+[[ -f "$changelog" ]] || fail "missing $prefix/CHANGELOG.md at $source_commit"
+release_notes=$(
+    awk -v want="## [$version] - " '
+        /^## / {
+            if (found) exit
+            found = (index($0, want) == 1 && length($0) > length(want))
+            next
+        }
+        found && /^\[[^]]+\]: / { next }
+        found { print }
+    ' "$changelog"
+)
+release_notes=$(printf '%s\n' "$release_notes" | sed -e '/./,$!d')
+[[ -n "$release_notes" ]] ||
+    fail "$prefix/CHANGELOG.md has no dated '## [$version] - <date>' section with content"
+
+if [[ -n "$notes_out" ]]; then
+    printf '%s\n' "$release_notes" >"$notes_out"
+    log "wrote $version release notes to $notes_out"
+fi
 
 if [[ "$package" == "mpt" ]]; then
     log "testing MPT against the source commit's local RLP"

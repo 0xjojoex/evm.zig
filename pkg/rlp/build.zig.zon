@@ -4,6 +4,7 @@
     .fingerprint = 0x317930bb55c3554a,
     .minimum_zig_version = "0.16.0",
     .paths = .{
+        "CHANGELOG.md",
         "README.md",
         "LICENSE",
         "build.zig",
