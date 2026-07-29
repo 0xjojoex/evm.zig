@@ -114,7 +114,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         .address = contract,
         .code_hash = code_hash,
     };
-    const prepared = try prepared_pool.getOrPrepare(code_hash, &code, executor.config.jumpdest_strategy);
+    const prepared = try prepared_pool.getOrPrepare(code_hash, &code);
     try executor.beginObservedStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
     const view = try executor.getCode(contract);

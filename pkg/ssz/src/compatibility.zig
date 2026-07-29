@@ -108,3 +108,26 @@ test "SSZ schema compatibility rejects incompatible Merkle shapes" {
     try std.testing.expect(!compatibility.compatible(ssz.List(u16, 2), ssz.List(u16, 3)));
     try std.testing.expect(!compatibility.compatible(ssz.Bitvector(4), @import("basic/fixed.zig").Fixed([4]bool)));
 }
+
+test "SSZ packed bitfield codecs preserve boolean schema compatibility" {
+    try std.testing.expect(compatibility.compatible(
+        ssz.Bitvector(10),
+        ssz.PackedBitvector(10),
+    ));
+    try std.testing.expect(compatibility.compatible(
+        ssz.Bitlist(16),
+        ssz.PackedBitlist(16),
+    ));
+    try std.testing.expect(compatibility.compatible(
+        ssz.ProgressiveBitlist,
+        ssz.ProgressivePackedBitlist,
+    ));
+    try std.testing.expect(!compatibility.compatible(
+        ssz.Bitvector(9),
+        ssz.PackedBitvector(10),
+    ));
+    try std.testing.expect(!compatibility.compatible(
+        ssz.Bitlist(15),
+        ssz.PackedBitlist(16),
+    ));
+}

@@ -1,5 +1,4 @@
 const std = @import("std");
-const JumpDestStrategy = @import("Config.zig").JumpDestStrategy;
 const scanner = @import("scanner.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
@@ -8,43 +7,20 @@ const JumpDestMap = @This();
 
 bits: std.DynamicBitSetUnmanaged,
 analyzed: bool,
-strategy: JumpDestStrategy,
 
 pub const empty = JumpDestMap{
     .bits = .{},
     .analyzed = false,
-    .strategy = .scalar_bitmask,
 };
 
 pub const prepared_empty = JumpDestMap{
     .bits = .{},
     .analyzed = true,
-    .strategy = .scalar_bitmask,
 };
-
-pub fn init() JumpDestMap {
-    return empty;
-}
-
-pub fn initWithStrategy(strategy: JumpDestStrategy) JumpDestMap {
-    var self = empty;
-    self.strategy = strategy;
-    return self;
-}
 
 pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
     self.bits.deinit(allocator);
     self.* = empty;
-}
-
-pub fn isValid(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8, target: usize) !bool {
-    if (target >= bytes.len) return false;
-
-    const opcode: Opcode = @enumFromInt(bytes[target]);
-    if (opcode != .JUMPDEST) return false;
-
-    try self.ensureValidBytes(allocator, bytes);
-    return self.bits.isSet(target);
 }
 
 /// Query an eagerly analyzed map without mutation or allocation.
@@ -55,58 +31,20 @@ pub fn isValidPrepared(self: *const JumpDestMap, bytes: []const u8, target: usiz
     return self.bits.isSet(target);
 }
 
-pub fn analyze(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !void {
-    try self.ensureValidBytes(allocator, bytes);
-}
-
-fn ensureValidBytes(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !void {
-    if (self.analyzed) return;
+/// Analyze and report whether `bytes` contains an action-boundary opcode, both
+/// from the single scan. Only valid on a not-yet-analyzed map.
+pub fn analyzeAndClassifyActions(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const u8) !bool {
+    std.debug.assert(!self.analyzed);
 
     if (bytes.len == 0) {
         self.analyzed = true;
-        return;
+        return false;
     }
 
     self.bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, bytes.len);
-
-    switch (self.strategy) {
-        .legacy => self.markValidJumpdestBytesLinear(bytes),
-        .scalar_bitmask => self.markValidJumpdestBytesScalarBitmask(bytes),
-        .simd_bitmask => self.markValidJumpdestBytesSimdBitmask(bytes),
-    }
+    const needs_action_loop = scanner.markJumpDestsAndClassifyActions(&self.bits, bytes);
     self.analyzed = true;
-}
-
-fn markValidJumpdestBytesLinear(self: *JumpDestMap, bytes: []const u8) void {
-    var pc: usize = 0;
-    while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
-        if (opcode == .JUMPDEST) {
-            self.bits.set(pc);
-        }
-
-        pc = nextInstructionPc(bytes.len, pc, opcode);
-    }
-}
-
-fn markValidJumpdestBytesSimdBitmask(self: *JumpDestMap, bytes: []const u8) void {
-    scanner.markJumpDests(&self.bits, bytes);
-}
-
-fn markValidJumpdestBytesScalarBitmask(self: *JumpDestMap, bytes: []const u8) void {
-    scanner.markJumpDestsScalar(&self.bits, bytes);
-}
-
-fn hasPushPayload(opcode: Opcode) bool {
-    return opcode.isPushN();
-}
-
-fn nextInstructionPc(bytes_len: usize, pc: usize, opcode: Opcode) usize {
-    var next = pc + 1;
-    if (hasPushPayload(opcode)) {
-        next += opcode.toByte() - Opcode.PUSH0.toByte();
-    }
-    return @min(bytes_len, next);
+    return needs_action_loop;
 }
 
 test "jumpdest map skips PUSH data" {
@@ -114,9 +52,10 @@ test "jumpdest map skips PUSH data" {
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 1));
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 2));
+    try std.testing.expect(!map.isValidPrepared(&bytecode, 1));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 2));
 }
 
 test "jumpdest map accepts destinations after push-looking data" {
@@ -124,18 +63,20 @@ test "jumpdest map accepts destinations after push-looking data" {
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .PUSH2, 0x00, .PUSH1, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 3));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 3));
 }
 
-test "jumpdest map rejects non-destinations without analysis" {
+test "jumpdest map rejects non-destinations after analysis" {
     var map = JumpDestMap.empty;
     defer map.deinit(std.testing.allocator);
 
     const bytecode = t.bytecode(.{ .STOP, .JUMPDEST });
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 0));
-    try std.testing.expect(!map.analyzed);
+    try std.testing.expect(!map.isValidPrepared(&bytecode, 0));
+    try std.testing.expect(map.analyzed);
 }
 
 test "jumpdest map handles sparse long bytecode" {
@@ -148,40 +89,40 @@ test "jumpdest map handles sparse long bytecode" {
     bytecode[2] = 127;
     bytecode[3] = Opcode.JUMP.toByte();
     bytecode[127] = Opcode.JUMPDEST.toByte();
+    _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-    try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 127));
+    try std.testing.expect(map.isValidPrepared(&bytecode, 127));
 }
 
-test "configured jumpdest maps ignore fake push in PUSH payload" {
+test "jumpdest map ignores fake push in PUSH payload" {
     const bytecode = t.bytecode(.{ .PUSH1, .PUSH32, .JUMPDEST });
 
-    try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
-    try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
+    try expectMatchesLinear(&bytecode);
 }
 
 test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
     {
         const bytecode = t.bytecode(.{ .DUPN, .JUMPDEST });
-        var map = JumpDestMap.init();
+        var map = JumpDestMap.empty;
         defer map.deinit(std.testing.allocator);
+        _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-        try std.testing.expect(try map.isValid(std.testing.allocator, &bytecode, 1));
-        try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
-        try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
+        try std.testing.expect(map.isValidPrepared(&bytecode, 1));
+        try expectMatchesLinear(&bytecode);
     }
 
     {
         const bytecode = t.bytecode(.{ .DUPN, .PUSH1, .JUMPDEST });
-        var map = JumpDestMap.init();
+        var map = JumpDestMap.empty;
         defer map.deinit(std.testing.allocator);
+        _ = try map.analyzeAndClassifyActions(std.testing.allocator, &bytecode);
 
-        try std.testing.expect(!try map.isValid(std.testing.allocator, &bytecode, 2));
-        try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
-        try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
+        try std.testing.expect(!map.isValidPrepared(&bytecode, 2));
+        try expectMatchesLinear(&bytecode);
     }
 }
 
-test "configured jumpdest maps carry PUSH payload across chunks" {
+test "jumpdest map carries PUSH payload across chunks" {
     var bytecode = [_]u8{0} ** 48;
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
@@ -192,31 +133,31 @@ test "configured jumpdest maps carry PUSH payload across chunks" {
     bytecode[35] = Opcode.JUMPDEST.toByte();
     bytecode[36] = Opcode.JUMPDEST.toByte();
 
-    try expectStrategyMatchesLinear(&bytecode, .scalar_bitmask);
-    try expectStrategyMatchesLinear(&bytecode, .simd_bitmask);
+    try expectMatchesLinear(&bytecode);
 }
 
-fn expectStrategyMatchesLinear(bytes: []const u8, strategy: JumpDestStrategy) !void {
-    var linear = JumpDestMap{
-        .bits = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len),
-        .analyzed = true,
-        .strategy = .legacy,
-    };
-    defer linear.deinit(std.testing.allocator);
+/// Obviously-correct reference scan: walk instruction by instruction, stepping
+/// over PUSH immediates. The bitmask scanner must agree with it exactly.
+fn markLinear(bits: *std.DynamicBitSetUnmanaged, bytes: []const u8) void {
+    var pc: usize = 0;
+    while (pc < bytes.len) {
+        const opcode: Opcode = @enumFromInt(bytes[pc]);
+        if (opcode == .JUMPDEST) bits.set(pc);
 
-    var configured = JumpDestMap{
-        .bits = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len),
-        .analyzed = true,
-        .strategy = strategy,
-    };
-    defer configured.deinit(std.testing.allocator);
-
-    linear.markValidJumpdestBytesLinear(bytes);
-    switch (strategy) {
-        .legacy => configured.markValidJumpdestBytesLinear(bytes),
-        .scalar_bitmask => configured.markValidJumpdestBytesScalarBitmask(bytes),
-        .simd_bitmask => configured.markValidJumpdestBytesSimdBitmask(bytes),
+        var next = pc + 1;
+        if (opcode.isPushN()) next += opcode.toByte() - Opcode.PUSH0.toByte();
+        pc = @min(bytes.len, next);
     }
+}
 
-    try std.testing.expect(linear.bits.eql(configured.bits));
+fn expectMatchesLinear(bytes: []const u8) !void {
+    var linear = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len);
+    defer linear.deinit(std.testing.allocator);
+    markLinear(&linear, bytes);
+
+    var scanned = JumpDestMap.empty;
+    defer scanned.deinit(std.testing.allocator);
+    _ = try scanned.analyzeAndClassifyActions(std.testing.allocator, bytes);
+
+    try std.testing.expect(linear.eql(scanned.bits));
 }

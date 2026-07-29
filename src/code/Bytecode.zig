@@ -5,7 +5,6 @@
 //! `View`; mutation is limited to owner-side construction/teardown.
 
 const std = @import("std");
-const JumpDestStrategy = @import("Config.zig").JumpDestStrategy;
 const JumpDestMap = @import("JumpDestMap.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
@@ -71,19 +70,15 @@ pub const empty = Bytecode{
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
-    return prepare(allocator, bytes, .scalar_bitmask);
-}
-
-pub fn prepare(allocator: std.mem.Allocator, bytes: []const u8, strategy: JumpDestStrategy) !Bytecode {
     const padded = try ZeroPaddedCode.init(allocator, bytes);
     var self = Bytecode{
         .bytes = padded.bytes,
         .read_bytes = padded.read_bytes,
-        .jumpdests = JumpDestMap.initWithStrategy(strategy),
-        .needs_action_loop = needsActionLoop(padded.bytes),
+        .jumpdests = .empty,
+        .needs_action_loop = false,
     };
     errdefer self.deinit(allocator);
-    try self.jumpdests.analyze(allocator, self.bytes);
+    self.needs_action_loop = try self.jumpdests.analyzeAndClassifyActions(allocator, self.bytes);
 
     return self;
 }
@@ -94,28 +89,6 @@ pub fn view(self: *const Bytecode) View {
         .jumpdest_masks = self.jumpdests.bits.masks,
         .needs_action_loop = self.needs_action_loop,
     };
-}
-
-pub fn needsActionLoop(code: []const u8) bool {
-    var pc: usize = 0;
-    while (pc < code.len) {
-        const opcode_byte = code[pc];
-        pc += 1;
-        if (isActionBoundaryOpcode(opcode_byte)) return true;
-        pc += @min(pushDataLen(opcode_byte), code.len - pc);
-    }
-    return false;
-}
-
-inline fn isActionBoundaryOpcode(opcode_byte: u8) bool {
-    const system_offset = opcode_byte -% @intFromEnum(Opcode.CREATE);
-    return (system_offset <= @intFromEnum(Opcode.CREATE2) - @intFromEnum(Opcode.CREATE) and opcode_byte != @intFromEnum(Opcode.RETURN)) or
-        opcode_byte == @intFromEnum(Opcode.STATICCALL);
-}
-
-inline fn pushDataLen(opcode_byte: u8) usize {
-    if (opcode_byte < @intFromEnum(Opcode.PUSH1) or opcode_byte > @intFromEnum(Opcode.PUSH32)) return 0;
-    return @as(usize, opcode_byte - @intFromEnum(Opcode.PUSH1)) + 1;
 }
 
 pub fn deinit(self: *Bytecode, allocator: std.mem.Allocator) void {
@@ -157,14 +130,14 @@ test "bytecode caches action-loop classification while ignoring push data" {
     try std.testing.expect(!data_bytecode.needs_action_loop);
 }
 
-test "bytecode can opt into SIMD jumpdest map" {
+test "bytecode eagerly completes jumpdest analysis" {
     const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
-    var bytecode = try Bytecode.prepare(std.testing.allocator, &raw, .simd_bitmask);
+    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
     defer bytecode.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(JumpDestStrategy.simd_bitmask, bytecode.jumpdests.strategy);
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expect(bytecode.isValidJumpDest(2));
+    try std.testing.expect(!bytecode.isValidJumpDest(1));
 }
 
 test "bytecode keeps semantic bytes separate from padded read bytes" {

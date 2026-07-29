@@ -93,6 +93,8 @@ next_attempt_id: u64,
 accepted: Accepted,
 code: CodeCache,
 tx: ?Transaction,
+cached_tx: ?Transaction,
+transaction_reuse_active: bool,
 retained_logs: LogBuffer,
 
 pub const AttemptId = enum(u64) { _ };
@@ -954,6 +956,15 @@ pub const Journal = struct {
         self.* = undefined;
     }
 
+    fn clearRetainingCapacity(self: *Journal) void {
+        self.entries.clearRetainingCapacity();
+        self.account_undo.clearRetainingCapacity();
+        self.storage_undo.clearRetainingCapacity();
+        self.account_observation_undo.clearRetainingCapacity();
+        self.storage_observation_undo.clearRetainingCapacity();
+        self.transient_undo.clearRetainingCapacity();
+    }
+
     fn len(self: *const Journal) u32 {
         return index32(self.entries.items.len);
     }
@@ -1222,6 +1233,25 @@ pub const Transaction = struct {
         self.logs.deinit(allocator);
         self.* = undefined;
     }
+
+    fn reset(self: *Transaction, id: AttemptId, observe: bool) void {
+        self.accounts.clearRetainingCapacity();
+        self.storage.clearRetainingCapacity();
+        self.observed_accounts.clearRetainingCapacity();
+        self.observed_storage.clearRetainingCapacity();
+        self.changed_accounts.clearRetainingCapacity();
+        self.changed_storage.clearRetainingCapacity();
+        self.storage_wipes.clearRetainingCapacity();
+        self.lifecycle_accounts.clearRetainingCapacity();
+        self.introduced_code.clearRetainingCapacity();
+        self.scope.clearRetainingCapacity();
+        self.scope.generation = 0;
+        self.undo.clearRetainingCapacity();
+        self.logs.clearRetainingCapacity();
+        self.id = id;
+        self.observe = observe;
+        self.sealed = false;
+    }
 };
 
 pub fn init(allocator: std.mem.Allocator) TrackedState {
@@ -1238,12 +1268,15 @@ pub fn initWithStateReader(allocator: std.mem.Allocator, reader: ?StateReader) T
         .accepted = Accepted.init(allocator),
         .code = CodeCache.init(allocator),
         .tx = null,
+        .cached_tx = null,
+        .transaction_reuse_active = false,
         .retained_logs = LogBuffer.init(),
     };
 }
 
 pub fn deinit(self: *TrackedState) void {
-    self.discardActive();
+    if (self.tx) |*tx| tx.deinit(self.allocator);
+    if (self.cached_tx) |*tx| tx.deinit(self.allocator);
     self.accepted.deinit(self.allocator);
     self.code.deinit(self.allocator);
     self.retained_logs.deinit(self.allocator);
@@ -1296,12 +1329,24 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
     }
 }
 
-pub fn reserveAccessHint(self: *TrackedState, hint: anytype) !void {
+/// Advisory presize for access maps; never affects execution semantics.
+pub const AccessHint = struct {
+    accounts: usize,
+    storage_keys: usize,
+};
+
+pub fn reserveAccessHint(self: *TrackedState, hint: AccessHint) !void {
     const tx = self.mutableTransaction();
     try tx.scope.warm_accounts.ensureUnusedCapacity(@intCast(hint.accounts));
     try tx.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
     try tx.scope.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
     try tx.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
+}
+
+pub fn reserveAcceptedAccessHint(self: *TrackedState, hint: AccessHint) !void {
+    std.debug.assert(self.tx == null);
+    try self.accepted.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
+    try self.accepted.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
 }
 
 pub fn beginTransaction(self: *TrackedState) AttemptId {
@@ -1312,12 +1357,33 @@ pub fn beginObservedTransaction(self: *TrackedState) AttemptId {
     return self.beginTransactionMode(true);
 }
 
+pub fn beginTransactionCapacityReuse(self: *TrackedState) void {
+    std.debug.assert(self.tx == null);
+    std.debug.assert(self.cached_tx == null);
+    std.debug.assert(!self.transaction_reuse_active);
+    self.transaction_reuse_active = true;
+}
+
+pub fn endTransactionCapacityReuse(self: *TrackedState) void {
+    std.debug.assert(self.tx == null);
+    std.debug.assert(self.transaction_reuse_active);
+    if (self.cached_tx) |*tx| tx.deinit(self.allocator);
+    self.cached_tx = null;
+    self.transaction_reuse_active = false;
+}
+
 fn beginTransactionMode(self: *TrackedState, observe: bool) AttemptId {
     std.debug.assert(self.tx == null);
     std.debug.assert(self.next_attempt_id != std.math.maxInt(u64));
     self.next_attempt_id += 1;
     const id: AttemptId = @enumFromInt(self.next_attempt_id);
-    var tx = Transaction.init(self.allocator, id, observe);
+    var tx = if (self.cached_tx) |cached| blk: {
+        std.debug.assert(self.transaction_reuse_active);
+        var reusable = cached;
+        reusable.reset(id, observe);
+        break :blk reusable;
+    } else Transaction.init(self.allocator, id, observe);
+    self.cached_tx = null;
     std.mem.swap(LogBuffer, &tx.logs, &self.retained_logs);
     tx.logs.clearRetainingCapacity();
     self.tx = tx;
@@ -1523,7 +1589,16 @@ fn assertCurrent(self: *TrackedState, id: AttemptId) *Transaction {
 }
 
 fn discardActive(self: *TrackedState) void {
-    if (self.tx) |*tx| tx.deinit(self.allocator);
+    if (self.tx) |tx| {
+        var resolved = tx;
+        if (self.transaction_reuse_active) {
+            std.debug.assert(self.cached_tx == null);
+            resolved.reset(resolved.id, resolved.observe);
+            self.cached_tx = resolved;
+        } else {
+            resolved.deinit(self.allocator);
+        }
+    }
     self.tx = null;
 }
 
@@ -2068,6 +2143,7 @@ pub fn wasSelfdestructed(self: *const TrackedState, address: Address) bool {
 pub fn finalize(self: *TrackedState, rules: FinalizationRules) !void {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
+    if (tx.lifecycle_accounts.items.len == 0) return;
 
     const lifecycle_count = index32(tx.lifecycle_accounts.items.len);
     const pending_accounts = tx.changed_accounts.items.len + @as(usize, lifecycle_count);
@@ -2265,7 +2341,9 @@ fn codeByHash(self: *TrackedState, code_hash: CodeHash) ![]const u8 {
     if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
     if (self.code.entries.get(code_hash)) |entry| return entry.slice(&self.code);
     const reader = self.reader orelse return error.CodeUnavailable;
-    return self.cacheCode(code_hash, try reader.loadCode(code_hash), false);
+    const code = try reader.loadCode(code_hash);
+    const cached = try self.cacheCode(code_hash, code, false);
+    return cached;
 }
 
 fn cacheCode(

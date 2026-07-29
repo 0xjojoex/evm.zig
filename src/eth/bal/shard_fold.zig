@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const bal = @import("model.zig");
+const observation = @import("observation.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -52,6 +53,26 @@ pub const ShardFold = struct {
             .finished => return error.FoldAlreadyFinished,
         }
         self.appendFallible(shard) catch |err| {
+            self.lifecycle = .failed;
+            return err;
+        };
+    }
+
+    pub fn appendObservation(
+        self: *ShardFold,
+        account: observation.AccountObservation,
+        block_access_index: bal.BlockAccessIndex,
+    ) Error!void {
+        switch (self.lifecycle) {
+            .building => {},
+            .failed => return error.FoldFailed,
+            .finished => return error.FoldAlreadyFinished,
+        }
+        const target = self.accountFor(account.address) catch |err| {
+            self.lifecycle = .failed;
+            return err;
+        };
+        target.appendObservation(self.allocator, account, block_access_index) catch |err| {
             self.lifecycle = .failed;
             return err;
         };
@@ -150,6 +171,45 @@ const FoldAccount = struct {
                 .new_code = new_code,
             });
         }
+    }
+
+    fn appendObservation(
+        self: *FoldAccount,
+        allocator: Allocator,
+        account: observation.AccountObservation,
+        block_access_index: bal.BlockAccessIndex,
+    ) Allocator.Error!void {
+        for (account.storage) |slot| {
+            if (account.storage_wiped or slot.original == slot.current) {
+                try self.storage_reads.append(allocator, slot.slot);
+            } else {
+                try self.storage_changes.append(allocator, .{
+                    .slot = slot.slot,
+                    .block_access_index = block_access_index,
+                    .new_value = slot.current,
+                });
+            }
+        }
+        if (account.balance) |balance| if (balance.original != balance.current) {
+            try self.balance_changes.append(allocator, .{
+                .block_access_index = block_access_index,
+                .post_balance = balance.current,
+            });
+        };
+        if (account.nonce) |nonce| if (nonce.original != nonce.current) {
+            try self.nonce_changes.append(allocator, .{
+                .block_access_index = block_access_index,
+                .new_nonce = nonce.current,
+            });
+        };
+        if (account.code) |code| if (!std.mem.eql(u8, &code.original_hash, &code.current_hash)) {
+            const new_code = try allocator.dupe(u8, code.current_code);
+            errdefer allocator.free(new_code);
+            try self.code_changes.append(allocator, .{
+                .block_access_index = block_access_index,
+                .new_code = new_code,
+            });
+        };
     }
 
     fn toOwnedAccount(self: *FoldAccount, allocator: Allocator) ShardFold.Error!bal.AccountChanges {
@@ -283,4 +343,48 @@ fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void 
     if (account.nonce_changes.len > 0) allocator.free(account.nonce_changes);
     for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
     if (account.code_changes.len > 0) allocator.free(account.code_changes);
+}
+
+test "direct observation append matches owned shard conversion" {
+    const allocator = std.testing.allocator;
+    var target: bal.Address = @splat(0);
+    target[target.len - 1] = 1;
+    const code = [_]u8{ 0x60, 0x00 };
+    var storage = [_]observation.StorageObservation{
+        .{ .slot = 1, .original = 5, .current = 5 },
+        .{ .slot = 2, .original = 7, .current = 9, .written = true },
+    };
+    const observed = observation.AccountObservation{
+        .address = target,
+        .storage = &storage,
+        .balance = .{ .original = 10, .current = 11 },
+        .nonce = .{ .original = 2, .current = 3 },
+        .code = .{
+            .original_hash = @splat(0),
+            .current_hash = @splat(1),
+            .current_code = &code,
+        },
+    };
+
+    var direct = ShardFold.init(allocator);
+    defer direct.deinit();
+    try direct.appendObservation(observed, 4);
+    var direct_result = try direct.finish();
+    defer direct_result.deinit(allocator);
+
+    var accounts = [_]observation.AccountObservation{observed};
+    const transition = observation.LaneTransition{ .accounts = &accounts };
+    var shard = try transition.toOwnedBlockAccessList(allocator, 4);
+    defer shard.deinit(allocator);
+    var converted = ShardFold.init(allocator);
+    defer converted.deinit();
+    try converted.append(shard.accounts);
+    var converted_result = try converted.finish();
+    defer converted_result.deinit(allocator);
+
+    const direct_encoded = try bal.encodeAlloc(allocator, direct_result.accounts);
+    defer allocator.free(direct_encoded);
+    const converted_encoded = try bal.encodeAlloc(allocator, converted_result.accounts);
+    defer allocator.free(converted_encoded);
+    try std.testing.expectEqualSlices(u8, converted_encoded, direct_encoded);
 }

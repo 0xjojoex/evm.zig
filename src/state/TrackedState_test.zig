@@ -165,6 +165,45 @@ test "discard drops account writes without advancing accepted generation" {
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(addr(1)));
 }
 
+test "transaction capacity reuse clears rows and releases its cache" {
+    var backing = TestReader{};
+    var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
+    defer state.deinit();
+
+    state.beginTransactionCapacityReuse();
+    const first = state.beginObservedTransaction();
+    state.beginScope();
+    _ = try state.loadStorage(addr(1), 2);
+    try std.testing.expectEqual(.modified, try state.setStorage(addr(1), 2, 9));
+    state.closeScope();
+    state.seal(first);
+    state.discard(first);
+    try std.testing.expect(state.cached_tx != null);
+
+    const second = state.beginObservedTransaction();
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(@as(u32, 0), state.tx.?.accounts.count());
+    try std.testing.expectEqual(@as(u32, 0), state.tx.?.storage.count());
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.observed_accounts.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.observed_storage.items.len);
+    state.seal(second);
+    state.discard(second);
+    state.endTransactionCapacityReuse();
+
+    try std.testing.expect(state.cached_tx == null);
+    try std.testing.expect(!state.transaction_reuse_active);
+}
+
+test "accepted access hint reserves account and storage maps" {
+    var state = TrackedState.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.reserveAcceptedAccessHint(.{ .accounts = 9, .storage_keys = 17 });
+
+    try std.testing.expect(state.accepted.accounts.capacity() >= 9);
+    try std.testing.expect(state.accepted.storage.capacity() >= 17);
+}
+
 test "retained account writes advance accepted state" {
     var backing = TestReader{};
     var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());

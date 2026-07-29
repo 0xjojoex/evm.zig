@@ -5,7 +5,6 @@ const Memory = @import("./Memory.zig");
 const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
 const Spec = @import("./spec.zig").Spec;
-const ExecutionConfig = @import("./code/Config.zig");
 const evmz = @import("./evm.zig");
 const Stack = @import("./Stack.zig");
 const frame_io = @import("./frame_io.zig");
@@ -1139,7 +1138,6 @@ pub const OwnedInit = struct {
     code: ?[]const u8 = null,
     /// Borrow an already prepared artifact instead of owning a temporary one.
     bytecode: ?Bytecode.View = null,
-    config: ExecutionConfig = .base,
     memory_allocator: ?std.mem.Allocator = null,
     memory_retain_capacity: bool = false,
 };
@@ -1165,7 +1163,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             const bytecode = options.bytecode orelse prepared: {
                 const code = options.code orelse &.{};
                 if (code.len == 0) break :prepared Bytecode.View.empty;
-                const prepared = try Bytecode.prepare(allocator, code, options.config.jumpdest_strategy);
+                const prepared = try Bytecode.init(allocator, code);
                 owned_bytecode = prepared;
                 break :prepared prepared.view();
             };

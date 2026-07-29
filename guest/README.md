@@ -8,6 +8,12 @@ zig build guest-zisk -Dguest-payload=basic -Doptimize=ReleaseFast \
   -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 ```
 
+The `stateless-ere` payload uses the unmetered fixed-buffer allocator by
+default. Add `-Dguest-heap-metrics=true` to meter peak heap usage and export
+the `evmz_guest_heap_capacity_bytes` and `evmz_guest_heap_peak_used_bytes`
+diagnostic symbols. Heap metering is independent of profile tags and changes
+the guest execution-step count.
+
 ## Host semantic gate
 
 Run the full root suite through the zkVM adapters without building an RV64
@@ -45,7 +51,7 @@ zig build guest-zisk-ab -- \
   --ziskos-staticlib /path/to/libziskos_staticlib.a
 ```
 
-The default canaries are `basic` and `stateless-smoke`. Override them with one
+The default canary is `basic`. Override it with one
 or more `--payload` arguments. `--report-only` prints regressions without
 failing while exploring a spike. `--global-cache-dir` and
 `--system-package-dir` let both trees share an offline Zig package cache.
@@ -59,15 +65,20 @@ hidden behind a host-only improvement.
 
 ## Pinned stateless fixture report
 
-The manual `ZisK execution-step A/B` workflow compares two source refs on a
-representative stateless suite. Run it from the candidate branch and leave
-`candidate_ref` blank to compare that selected commit against `main`; both refs
-can be overridden with pushed branch names or commit hashes for an archived
-comparison.
+The `ZisK execution steps` workflow measures one ref on a representative
+stateless suite and compares it against the rows archived by the last
+successful `main` run. Step counts are deterministic and host-independent, so a
+stored baseline is as good as a same-runner rebuild — the workflow builds one
+guest instead of two. It runs on every push to `main`, which refreshes the
+stored baseline, and on manual dispatch from any branch. `baseline_run_id`
+overrides which run is used as the reference point.
 
-The workflow is intentionally an Ubuntu-only, manually dispatched lab because
-it provisions and builds the pinned ZisK toolchain before running the fixture
-suite. 
+Baselines are carried by the `zisk-step-results` artifact (90-day retention).
+When no successful `main` run is reachable, the workflow reports absolute step
+counts instead of failing.
+
+The workflow is intentionally Ubuntu-only because it provisions and builds the
+pinned ZisK toolchain before running the fixture suite.
 
 The workflow's intentional pins are:
 
@@ -77,14 +88,16 @@ The workflow's intentional pins are:
 - Zig `0.16.0` with ReleaseFast guests.
 
 Both upstream pins have breaking changes relative to the archived runner. The
-workflow applies the same compatibility surface to both refs: the v0.6.2
-Amsterdam SSZ wire adapter and ZisK's matching `zisk-1.0.0` Rust toolchain. 
-The selected corpus is in
+compatibility surface is the v0.6.2 Amsterdam SSZ wire adapter and ZisK's
+matching `zisk-1.0.0` Rust toolchain. Because the baseline is a stored artifact
+rather than a rebuild, a change to either pin invalidates comparison against
+older runs; land it on `main` first so the next baseline is measured under the
+new pins. The selected corpus is in
 [`../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt`](../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt).
 
 The workflow reports aggregate and per-fixture execution-step deltas. A step
 increase is data, not a failure. Only an incomplete run, emulator crash, or
-baseline/candidate public-output mismatch fails the comparison. Upstream
+baseline/current public-output mismatch fails the comparison. Upstream
 expected-output matches are shown separately because existing Amsterdam
 semantic gaps are outside this performance comparison. No proof generation is
 part of this workflow.

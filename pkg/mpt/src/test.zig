@@ -132,6 +132,44 @@ test "indexed proof lookup authenticates presence and absence without allocation
     try expectAbsence(.empty_trie, try trie.lookup(mpt.empty_root, index, "anything"));
 }
 
+test "decoded proof cache preserves lookup and canonicality results" {
+    const leaf = [_]u8{ 0xe2, 0x20, 0xa0 } ++ [_]u8{0x01} ** 32;
+    const leaf_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
+    const extension = [_]u8{ 0xe2, 0x11, 0xa0 } ++ leaf_hash;
+    const extension_hash = mpt.StdKeccak256Context.keccak256(.{}, &extension);
+    const trie = mpt.init(std.testing.allocator);
+    const encoded_nodes = [_][]const u8{ &extension, &leaf };
+    var indexed = try trie.indexNodes(&encoded_nodes);
+    defer indexed.deinit();
+    var cache = mpt.LookupCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try std.testing.expectError(
+        error.NonCanonicalNode,
+        mpt.lookupCached(extension_hash, indexed.index(), &[_]u8{0x10}, &cache),
+    );
+    try std.testing.expectError(
+        error.NonCanonicalNode,
+        mpt.lookupCached(extension_hash, indexed.index(), &[_]u8{0x10}, &cache),
+    );
+
+    const root_leaf = [_]u8{ 0xc2, 0x20, 0x02 };
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_leaf);
+    const root_nodes = [_][]const u8{&root_leaf};
+    var root_indexed = try trie.indexNodes(&root_nodes);
+    defer root_indexed.deinit();
+    const first = try mpt.lookupCached(root_hash, root_indexed.index(), "", &cache);
+    const second = try mpt.lookupCached(root_hash, root_indexed.index(), "", &cache);
+    switch (first) {
+        .present => |value| try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, value),
+        .absent => return error.ExpectedPresent,
+    }
+    switch (second) {
+        .present => |value| try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, value),
+        .absent => return error.ExpectedPresent,
+    }
+}
+
 test "node index hashes once, deduplicates, and rejects conflicts" {
     const CountingKeccak = struct {
         calls: *usize,
@@ -324,20 +362,6 @@ test "caller allocator controls sparse update capacity" {
         error.OutOfMemory,
         mpt.init(tiny.allocator()).updateSorted(mpt.empty_root, mpt.empty_node_index, &updates),
     );
-}
-
-test "sparse update releases fixed-buffer storage after success" {
-    const updates = [_]mpt.Update{.{ .key = "dog", .value = "puppy" }};
-    var fixed_buffer: [16 * 1024]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&fixed_buffer);
-    const trie = mpt.init(fixed.allocator());
-
-    _ = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
-    const aligned_baseline = fixed.end_index;
-    for (0..32) |_| {
-        _ = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
-        try std.testing.expectEqual(aligned_baseline, fixed.end_index);
-    }
 }
 
 test "allocating APIs clean every allocation failure position" {

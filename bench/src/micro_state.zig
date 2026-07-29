@@ -405,12 +405,12 @@ test "micro/state/sparse-hash-map/clear-retaining-capacity" {
 
     for (&sparse_small) |*map| {
         try std.testing.expectEqual(@as(u32, 0), map.count());
-        try std.testing.expectEqual(@as(usize, 0), map.debugOccupiedSlots());
+        for (keys) |key| try std.testing.expect(!map.contains(key));
     }
     for (&std_small) |*map| try std.testing.expectEqual(@as(usize, 0), map.count());
     for (&sparse_broad) |*map| {
         try std.testing.expectEqual(@as(u32, 0), map.count());
-        try std.testing.expectEqual(@as(usize, 0), map.debugOccupiedSlots());
+        for (keys) |key| try std.testing.expect(!map.contains(key));
     }
     for (&std_broad) |*map| try std.testing.expectEqual(@as(usize, 0), map.count());
 }

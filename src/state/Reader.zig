@@ -19,6 +19,7 @@ pub const VTable = struct {
     loadAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?Account,
     /// Returns bytes whose hash is `code_hash`. The reader owns the slice.
     loadCode: *const fn (ptr: *anyopaque, code_hash: [32]u8) anyerror![]const u8,
+    loadCodeValidatesHash: bool = false,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
     accountHasStorage: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
 };
@@ -33,7 +34,11 @@ pub fn loadAccount(self: Reader, address: Address) !?Account {
 
 pub fn loadCode(self: Reader, code_hash: [32]u8) ![]const u8 {
     const code = try self.vtable.loadCode(self.ptr, code_hash);
-    if (!std.mem.eql(u8, &crypto.keccak256(code), &code_hash)) return error.CodeHashMismatch;
+    if (!self.vtable.loadCodeValidatesHash and
+        !std.mem.eql(u8, &crypto.keccak256(code), &code_hash))
+    {
+        return error.CodeHashMismatch;
+    }
     return code;
 }
 

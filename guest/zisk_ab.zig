@@ -75,7 +75,6 @@ pub fn main(init: std.process.Init) !void {
     }
     if (payloads.items.len == 0) {
         try payloads.append(allocator, "basic");
-        try payloads.append(allocator, "stateless-smoke");
     }
 
     const baseline_tree = try std.fs.path.resolve(arena, &.{options.baseline_tree.?});
@@ -308,10 +307,7 @@ fn stepGatePasses(baseline: u64, candidate: u64) bool {
 }
 
 fn isSelfContainedPayload(payload: []const u8) bool {
-    return std.mem.eql(u8, payload, "basic") or
-        std.mem.eql(u8, payload, "stateless-smoke") or
-        std.mem.eql(u8, payload, "stateless-ssz-smoke") or
-        std.mem.eql(u8, payload, "stateless-ere-smoke");
+    return std.mem.eql(u8, payload, "basic");
 }
 
 fn termOk(term: std.process.Child.Term) bool {
@@ -327,8 +323,7 @@ fn printUsage() void {
         \\
         \\Builds identical self-contained ZisK payloads from baseline and candidate
         \\source trees, verifies byte-identical public output, and fails when the
-        \\candidate executes more ZisK steps. Defaults to `basic` and
-        \\`stateless-smoke` in ReleaseFast.
+        \\candidate executes more ZisK steps. Defaults to `basic` in ReleaseFast.
         \\
         \\options:
         \\  --candidate-tree PATH       default: current directory
@@ -356,7 +351,6 @@ test "guest step gate accepts equal or improved candidates only" {
 
 test "guest A/B accepts only self-contained payloads" {
     try std.testing.expect(isSelfContainedPayload("basic"));
-    try std.testing.expect(isSelfContainedPayload("stateless-smoke"));
     try std.testing.expect(!isSelfContainedPayload("stateless-ere"));
     try std.testing.expect(!isSelfContainedPayload("../basic"));
 }

@@ -7,11 +7,8 @@ test {
 }
 
 const uint256 = evmz.uint256;
-const scanner = evmz.code.scanner;
 
 const ops_per_run = 256;
-const raw_mask_ops_per_run = 256;
-const raw_mask_sample_len = 4096;
 const jumpdest_map_ops_per_run = 64;
 const jumpdest_small_len = 64;
 const jumpdest_large_len = 4096;
@@ -39,7 +36,6 @@ var ecrecover_s = [_]u8{
     0x87, 0x56, 0xb7, 0xd7, 0x5a, 0x9c, 0x45, 0x49,
 };
 
-var raw_mask_bytes: [raw_mask_sample_len]u8 = undefined;
 var jumpdest_small_bytes: [jumpdest_small_len]u8 = undefined;
 var jumpdest_large_bytes: [jumpdest_large_len]u8 = undefined;
 
@@ -87,19 +83,6 @@ test "micro/arithmetic/addmod" {
     try bench.run(std.testing.io, .stdout());
 }
 
-test "micro/code/raw-masks" {
-    initRawMaskInput();
-
-    var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
-    defer bench.deinit();
-
-    try bench.add("raw-masks/simd-16", benchRawSimdMasks16, .{});
-    try bench.add("raw-masks/scalar-16", benchRawScalarMasks16, .{});
-    try bench.add("raw-masks/scalar-15", benchRawScalarMasks15, .{});
-
-    try bench.run(std.testing.io, .stdout());
-}
-
 test "micro/code/jumpdest-map" {
     initJumpDestInput(&jumpdest_small_bytes);
     initJumpDestInput(&jumpdest_large_bytes);
@@ -107,10 +90,8 @@ test "micro/code/jumpdest-map" {
     var bench = zbench.Benchmark.init(std.testing.allocator, bench_config);
     defer bench.deinit();
 
-    try bench.add("jumpdest-map/scalar-64b", benchJumpDestMapScalarSmall, .{});
-    try bench.add("jumpdest-map/simd-64b", benchJumpDestMapSimdSmall, .{});
-    try bench.add("jumpdest-map/scalar-4096b", benchJumpDestMapScalarLarge, .{});
-    try bench.add("jumpdest-map/simd-4096b", benchJumpDestMapSimdLarge, .{});
+    try bench.add("jumpdest-map/64b", benchJumpDestMapSmall, .{});
+    try bench.add("jumpdest-map/4096b", benchJumpDestMapLarge, .{});
 
     try bench.run(std.testing.io, .stdout());
 }
@@ -324,17 +305,6 @@ fn benchAddmodWide(_: std.mem.Allocator) void {
     std.mem.doNotOptimizeAway(&acc);
 }
 
-fn initRawMaskInput() void {
-    var seed: u64 = 0x9e37_79b9_7f4a_7c15;
-    for (&raw_mask_bytes, 0..) |*byte, index| {
-        seed = seed *% 6364136223846793005 +% 1442695040888963407;
-        byte.* = @truncate(seed >> 24);
-        if (index % 53 == 0) byte.* = @intFromEnum(evmz.Opcode.JUMPDEST);
-        if (index % 47 == 0) byte.* = @intFromEnum(evmz.Opcode.PUSH1) + @as(u8, @truncate(index % 32));
-    }
-    std.mem.doNotOptimizeAway(raw_mask_bytes[0]);
-}
-
 fn initJumpDestInput(bytes: []u8) void {
     for (bytes, 0..) |*byte, index| {
         byte.* = @intFromEnum(evmz.Opcode.ADD);
@@ -346,62 +316,22 @@ fn initJumpDestInput(bytes: []u8) void {
     std.mem.doNotOptimizeAway(bytes[0]);
 }
 
-fn benchRawSimdMasks16(_: std.mem.Allocator) void {
-    var acc: u64 = 0;
-    for (0..raw_mask_ops_per_run) |i| {
-        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
-        std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawSimdMasks(raw_mask_bytes[index..][0..scanner.lanes]);
-        acc +%= masks.push ^ (masks.jumpdest << 1);
-    }
-    std.mem.doNotOptimizeAway(acc);
+fn benchJumpDestMapSmall(allocator: std.mem.Allocator) void {
+    benchJumpDestMap(allocator, &jumpdest_small_bytes);
 }
 
-fn benchJumpDestMapScalarSmall(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_small_bytes, .scalar_bitmask);
+fn benchJumpDestMapLarge(allocator: std.mem.Allocator) void {
+    benchJumpDestMap(allocator, &jumpdest_large_bytes);
 }
 
-fn benchJumpDestMapSimdSmall(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_small_bytes, .simd_bitmask);
-}
-
-fn benchJumpDestMapScalarLarge(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_large_bytes, .scalar_bitmask);
-}
-
-fn benchJumpDestMapSimdLarge(allocator: std.mem.Allocator) void {
-    benchJumpDestMap(allocator, &jumpdest_large_bytes, .simd_bitmask);
-}
-
-fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8, strategy: evmz.ExecutionConfig.JumpDestStrategy) void {
+fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8) void {
     var accepted: usize = 0;
     for (0..jumpdest_map_ops_per_run) |_| {
-        var map = evmz.code.JumpDestMap.initWithStrategy(strategy);
-        map.analyze(allocator, bytes) catch unreachable;
-        accepted +%= @intFromBool(map.isValid(allocator, bytes, bytes.len - 1) catch unreachable);
+        var map = evmz.code.JumpDestMap.empty;
+        const needs_action_loop = map.analyzeAndClassifyActions(allocator, bytes) catch unreachable;
+        accepted +%= @intFromBool(map.isValidPrepared(bytes, bytes.len - 1));
+        accepted +%= @intFromBool(needs_action_loop);
         map.deinit(allocator);
     }
     std.mem.doNotOptimizeAway(accepted);
-}
-
-fn benchRawScalarMasks16(_: std.mem.Allocator) void {
-    var acc: u64 = 0;
-    for (0..raw_mask_ops_per_run) |i| {
-        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
-        std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0..scanner.lanes]);
-        acc +%= masks.push ^ (masks.jumpdest << 1);
-    }
-    std.mem.doNotOptimizeAway(acc);
-}
-
-fn benchRawScalarMasks15(_: std.mem.Allocator) void {
-    var acc: u64 = 0;
-    for (0..raw_mask_ops_per_run) |i| {
-        const index = (i * scanner.lanes) & (raw_mask_sample_len - scanner.lanes);
-        std.mem.doNotOptimizeAway(index);
-        const masks = scanner.rawScalarMasks(raw_mask_bytes[index..][0 .. scanner.lanes - 1]);
-        acc +%= masks.push ^ (masks.jumpdest << 1);
-    }
-    std.mem.doNotOptimizeAway(acc);
 }

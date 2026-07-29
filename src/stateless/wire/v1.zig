@@ -12,9 +12,17 @@ const input_mod = @import("../input.zig");
 const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
+const eth_spec = @import("../../eth/spec.zig");
+const vm = @import("../../vm.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
 const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
+
+pub const revision: Revision = .amsterdam;
+const AmsterdamValidator = stateless_validate.Exact(revision);
+/// The guest engine: identical consensus spec, no step-capture dispatch.
+const SlimVm = vm.VmWithOptions(eth_spec.specAt(revision), .{ .step_capture = false });
+const AmsterdamOneShotValidator = stateless_validate.Bind(block_stf.Bind(revision, SlimVm));
 
 pub const schema_id: u16 = 0x1501;
 pub const schema_id_size = 2;
@@ -707,6 +715,13 @@ pub const StatelessInput = struct {
         return decode(allocator, bytes[schema_id_size..]);
     }
 
+    fn decodeSchemaPrefixedBorrowed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
+        if (bytes.len < schema_id_size) return error.MissingSchemaId;
+        const actual_schema_id = std.mem.readInt(u16, bytes[0..schema_id_size], .big);
+        if (actual_schema_id != schema_id) return error.UnsupportedSchemaId;
+        return decodeBorrowed(allocator, bytes[schema_id_size..]);
+    }
+
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
         var value = try decodeWire(StatelessInputWire.Ssz, allocator, bytes);
         var owns_value = true;
@@ -719,6 +734,16 @@ pub const StatelessInput = struct {
             .new_payload_request = new_payload_request,
             .witness = value.witness,
             .chain_config = chain_config,
+            .public_keys = value.public_keys,
+        };
+    }
+
+    fn decodeBorrowed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
+        const value = try decodeWire(BorrowedStatelessInputSsz, allocator, bytes);
+        return .{
+            .new_payload_request = .{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) },
+            .witness = value.witness,
+            .chain_config = value.chain_config,
             .public_keys = value.public_keys,
         };
     }
@@ -759,6 +784,16 @@ const TransactionsSsz = ssz.ListOf(ssz.ByteList(max_bytes_per_transaction), max_
 const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
 const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
 const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
+
+const BorrowedTransactionsSsz = ssz.ListOf(
+    ssz.Borrowed(ssz.ByteList(max_bytes_per_transaction)),
+    max_transactions_per_payload,
+);
+const BorrowedExecutionWitnessSsz = ssz.Container(ExecutionWitness, .{
+    .state = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_witness_node)), max_witness_nodes),
+    .codes = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_code)), max_witness_codes),
+    .headers = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_header)), max_witness_headers),
+});
 
 const ExecutionPayloadV2Wire = struct {
     parent_hash: [32]u8,
@@ -907,6 +942,22 @@ const StatelessInputWire = struct {
         .public_keys = PublicKeysSsz,
     });
 };
+
+const BorrowedExecutionPayloadV4Ssz = ssz.Container(ExecutionPayloadV4Wire, .{
+    .extra_data = ssz.Borrowed(ssz.ByteList(max_extra_data_bytes)),
+    .transactions = BorrowedTransactionsSsz,
+    .withdrawals = WithdrawalsSsz,
+    .block_access_list = ssz.Borrowed(ssz.ByteList(max_block_access_list_bytes)),
+});
+const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAmsterdamWire, .{
+    .execution_payload = BorrowedExecutionPayloadV4Ssz,
+    .versioned_hashes = VersionedHashesSsz,
+});
+const BorrowedStatelessInputSsz = ssz.Container(StatelessInputWire, .{
+    .new_payload_request = BorrowedNewPayloadRequestAmsterdamSsz,
+    .witness = BorrowedExecutionWitnessSsz,
+    .public_keys = PublicKeysSsz,
+});
 
 const StatelessValidationResultWire = struct {
     new_payload_request_root: [32]u8,
@@ -1113,14 +1164,31 @@ pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) E
 pub fn validateStatelessBytesWithOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ValidationOptions) Error![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const scratch = arena.allocator();
+    return validateStatelessBytesUsingScratch(false, arena.allocator(), allocator, bytes, options);
+}
 
-    const input = StatelessInput.decodeSchemaPrefixed(scratch, bytes) catch |err| switch (err) {
+/// Validates one invocation whose scratch and result allocations share a
+/// caller-owned lifetime. Reusable callers must use `validateStatelessBytes`.
+pub fn validateStatelessBytesOneShot(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
+    return validateStatelessBytesUsingScratch(true, allocator, allocator, bytes, .{});
+}
+
+fn validateStatelessBytesUsingScratch(
+    comptime reuse_scratch: bool,
+    scratch: std.mem.Allocator,
+    result_allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ValidationOptions,
+) Error![]u8 {
+    const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(allocator),
+        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
     };
-    const result = try validateStatelessWithOptions(scratch, input, options);
-    return result.encode(allocator);
+    const result = if (comptime reuse_scratch)
+        try validateStatelessWithOptionsImpl(AmsterdamOneShotValidator, true, scratch, input, options)
+    else
+        try validateStatelessWithOptionsImpl(AmsterdamValidator, false, scratch, input, options);
+    return result.encode(result_allocator);
 }
 
 pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Status {
@@ -1161,7 +1229,7 @@ pub fn validateStatelessResultBytesWithCaptureAndOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    return stateless_validate.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
+    return AmsterdamValidator.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
         else => .{ .status = .invalid_witness },
@@ -1173,6 +1241,16 @@ pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Er
 }
 
 pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: StatelessInput, options: ValidationOptions) Error!StatelessValidationResult {
+    return validateStatelessWithOptionsImpl(AmsterdamValidator, false, allocator, input, options);
+}
+
+fn validateStatelessWithOptionsImpl(
+    comptime Validator: type,
+    comptime reuse_scratch: bool,
+    allocator: std.mem.Allocator,
+    input: StatelessInput,
+    options: ValidationOptions,
+) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, [_]u8{0} ** 32),
@@ -1182,7 +1260,10 @@ pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: Statele
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, request_root),
     };
-    const native_result = stateless_validate.validate(allocator, normalized) catch |err| switch (err) {
+    const native_result = (if (comptime reuse_scratch)
+        Validator.validateOneShot(allocator, normalized)
+    else
+        Validator.validate(allocator, normalized)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
@@ -1204,7 +1285,6 @@ pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: Statele
 /// callers should use one block-lifetime arena.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
-    const revision: Revision = .amsterdam;
     const payload = input.new_payload_request.payloadView();
     const transactions = try normalizeTransactions(
         allocator,
@@ -1217,7 +1297,6 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
     else
         &.{};
     return .{
-        .revision = revision,
         .chain_id = input.chain_config.chain_id,
         .blob_schedule = null,
         .block = .{
@@ -1327,4 +1406,20 @@ fn sszUint256FromBytes(bytes: [32]u8) u256 {
 
 fn evmWordFromBytes32(bytes: [32]u8) u256 {
     return uint256.fromBytes32(&bytes);
+}
+
+test "borrowed witness decoding keeps byte lists in the wire input" {
+    const state = [_][]const u8{"node"};
+    const encoded = try encodeWire(ExecutionWitness.Ssz, std.testing.allocator, .{ .state = &state });
+    defer std.testing.allocator.free(encoded);
+
+    var decoded = try decodeWire(BorrowedExecutionWitnessSsz, std.testing.allocator, encoded);
+    defer BorrowedExecutionWitnessSsz.deinit(std.testing.allocator, &decoded);
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.state.len);
+    try std.testing.expectEqualSlices(u8, "node", decoded.state[0]);
+    const borrowed_start = @intFromPtr(decoded.state[0].ptr);
+    const input_start = @intFromPtr(encoded.ptr);
+    try std.testing.expect(borrowed_start >= input_start);
+    try std.testing.expect(borrowed_start + decoded.state[0].len <= input_start + encoded.len);
 }

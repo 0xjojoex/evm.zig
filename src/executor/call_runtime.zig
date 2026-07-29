@@ -262,17 +262,20 @@ pub fn bind(comptime Executor: type) type {
                     const call_frame = self.frames.frame(index);
                     var interpreter = BoundInterpreter.init(call_frame);
                     const depth = call_frame.msg.depth;
-                    const run_result: Interpreter.RunResult = if (self.stepCaptureContext()) |context|
-                        try executeCapturedInterpreterUntilAction(
-                            self.executor,
-                            &interpreter,
-                            depth,
-                            context.currentFrame(),
-                        )
-                    else if (call_frame.needs_action_loop)
-                        try executeInterpreterUntilAction(self.executor, &interpreter, depth)
-                    else
-                        .{ .finished = try executeInterpreter(self.executor, &interpreter, depth) };
+                    const previous_depth = self.executor.trace_depth;
+                    self.executor.trace_depth = depth;
+                    const run_result: Interpreter.RunResult = result: {
+                        defer self.executor.trace_depth = previous_depth;
+                        if (comptime Executor.compile_options.step_capture) {
+                            if (self.stepCaptureContext()) |context| {
+                                break :result try interpreter.executeCapturedUntilAction(context.currentFrame());
+                            }
+                        }
+                        if (call_frame.needs_action_loop) {
+                            break :result try interpreter.executeUntilAction();
+                        }
+                        break :result .{ .finished = try interpreter.execute() };
+                    };
                     switch (run_result) {
                         .action => |action| try self.handleAction(index, action),
                         .finished => |result| {
@@ -973,6 +976,41 @@ pub fn bind(comptime Executor: type) type {
             return runtime.run();
         }
 
+        /// Execute a root call without entering the iterative frame store.
+        /// Nested CALL/CREATE actions promote through `resolveHostCall`.
+        pub fn executePreparedCallMessageDirect(
+            self: *Executor,
+            message: Host.Message,
+            bytecode: Bytecode.View,
+        ) !Host.Result {
+            std.debug.assert(self.currentCaptureContext() == null);
+            std.debug.assert(self.prepared_code_execution != null);
+            var host_iface = self.host();
+            var slot: Interpreter.CallFrameSlot = undefined;
+            try slot.init(self.allocator, .{
+                .host = &host_iface,
+                .msg = &message,
+                .bytecode = bytecode,
+            });
+            defer slot.deinit();
+
+            var interpreter = slot.interpreter(spec);
+            const previous_depth = self.trace_depth;
+            self.trace_depth = message.depth;
+            defer self.trace_depth = previous_depth;
+            const result = try interpreter.execute();
+            return stabilizeFinalResult(self, Host.Result.fromCall(.{
+                .status = result.status,
+                .cause = result.cause,
+                .output_data = result.output_data,
+                .gas_left = result.gas_left,
+                .gas_refund = result.gas_refund,
+                .gas_reservoir = result.gas_reservoir,
+                .state_gas_spent = result.state_gas_spent,
+                .state_gas_from_gas_left = result.state_gas_from_gas_left,
+            }));
+        }
+
         pub fn executeCreateTransaction(
             self: *Executor,
             sender: Address,
@@ -1064,10 +1102,6 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        pub fn prepareBytecodeAlloc(self: *const Executor, allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-            return Bytecode.prepare(allocator, code, self.config.jumpdest_strategy);
-        }
-
         pub const ResolvedCode = struct {
             address: Address,
             delegated: bool,
@@ -1119,21 +1153,6 @@ pub fn bind(comptime Executor: type) type {
             self.trace_depth = depth;
             defer self.trace_depth = previous_depth;
             return interpreter.executeUntilAction();
-        }
-
-        fn executeCapturedInterpreterUntilAction(
-            self: *Executor,
-            interpreter: *BoundInterpreter,
-            depth: u16,
-            capture: *evmz.trace.TraceCapture,
-        ) !Interpreter.RunResult {
-            self.beginPreparedCodeExecution();
-            defer self.endPreparedCodeExecution();
-
-            const previous_depth = self.trace_depth;
-            self.trace_depth = depth;
-            defer self.trace_depth = previous_depth;
-            return interpreter.executeCapturedUntilAction(capture);
         }
 
         pub fn currentExecutionContext(self: *const Executor) ExecutionContext {

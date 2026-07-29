@@ -12,7 +12,7 @@ on:
           - rlp
           - mpt
       version:
-        description: Semantic version without a leading v
+        description: Semantic version without a leading v; must match the package manifest and a dated CHANGELOG.md section
         required: true
         type: string
       ref:
@@ -89,6 +89,7 @@ jobs:
             --version "${VERSION}"
             --ref "${SOURCE_REF}"
             --github-output "${GITHUB_OUTPUT}"
+            --notes-out "${RUNNER_TEMP}/release-notes.md"
           )
           if [[ "${PUBLISH}" == true ]]; then
             args+=(--publish --fetch-url "${FETCH_URL}")
@@ -111,11 +112,21 @@ jobs:
             echo "Release ${TAG} already exists"
             exit 0
           fi
+          notes="${RUNNER_TEMP}/release-body.md"
+          cat "${RUNNER_TEMP}/release-notes.md" >"${notes}"
+          cat >>"${notes}" <<EOF
+
+          ---
+
+          \`\`\`sh
+          zig fetch --save=${PACKAGE} git+https://github.com/${{ github.repository }}.git#${TAG}
+          \`\`\`
+
+          - Source commit: ${SOURCE_COMMIT}
+          - Split commit: ${SPLIT_COMMIT}
+          - Zig package hash: \`${PACKAGE_HASH}\`
+          EOF
           gh release create "${TAG}" \
             --verify-tag \
             --title "${PACKAGE} v${VERSION}" \
-            --notes "Source commit: ${SOURCE_COMMIT}
-
-          Split commit: ${SPLIT_COMMIT}
-
-          Zig package hash: \`${PACKAGE_HASH}\`"
+            --notes-file "${notes}"

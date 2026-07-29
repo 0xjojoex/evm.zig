@@ -91,6 +91,7 @@ pub const AccountView = struct {
 pub const Call = executor_module.Call;
 pub const Create = executor_module.Create;
 pub const EvmResult = executor_module.EvmResult;
+pub const CompileOptions = executor_module.CompileOptions;
 
 /// Explicit non-transaction system call for block-hook style operations.
 pub const SystemCall = struct {
@@ -111,8 +112,12 @@ pub const FinalizeBlockContext = block_program_module.FinalizeBlockContext;
 /// Compile one complete exact specification into its concrete VM type.
 /// Runtime fork selection belongs outside this boundary.
 pub fn Vm(comptime spec: engine_spec.Spec) type {
+    return VmWithOptions(spec, .{});
+}
+
+pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: CompileOptions) type {
     const InstructionType = instruction_module.Instruction(spec);
-    const ExecutorType = executor_module.Executor(spec);
+    const ExecutorType = executor_module.ExecutorWithOptions(spec, options_value);
     const InterpreterType = interpreter_module.Interpreter(spec);
     const PublicTransactInput = struct {
         env: Env,
@@ -122,6 +127,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
     const PublicContext = transaction_program.Context(ExecutorType, PublicTransactInput);
     const EthereumTransition = ethereum_transition.bind(
         spec,
+        ExecutorType,
         PublicContext,
         TxExecutionResult,
     );
@@ -168,6 +174,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
         };
 
         pub const specification = spec;
+        pub const compile_options = options_value;
         pub const Instruction = InstructionType;
         pub const Executor = ExecutorType;
         pub const Interpreter = InterpreterType;
@@ -233,6 +240,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
         pub fn Transition(comptime Input: type) type {
             return ethereum_transition.bind(
                 spec,
+                ExecutorType,
                 Context(Input),
                 TxExecutionResult,
             );

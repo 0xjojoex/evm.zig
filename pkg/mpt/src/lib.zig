@@ -29,6 +29,7 @@ pub const Entry = root_mod.Entry;
 pub const rootWorkspaceSize = root_mod.workspaceSize;
 pub const Absence = proof.Absence;
 pub const Lookup = proof.Lookup;
+pub const LookupCache = proof.LookupCache;
 pub const NodeIndex = proof.NodeIndex;
 pub const Update = sparse.Update;
 
@@ -319,6 +320,15 @@ pub fn init(allocator: std.mem.Allocator) DefaultTrie {
 /// remain alive for the duration of the call.
 pub fn lookup(root_hash: Root, index: *const NodeIndex, key: []const u8) LookupError!Lookup {
     return proof.lookup(root_hash, index, key);
+}
+
+pub fn lookupCached(
+    root_hash: Root,
+    index: *const NodeIndex,
+    key: []const u8,
+    cache: *LookupCache,
+) (std.mem.Allocator.Error || LookupError)!Lookup {
+    return proof.lookupCached(root_hash, index, key, cache);
 }
 
 /// Advanced fixed-scratch `rootSorted` using the default Keccak context.

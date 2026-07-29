@@ -17,6 +17,7 @@ const ShardFold = @import("shard_fold.zig").ShardFold;
 
 const Address = address.Address;
 const Allocator = std.mem.Allocator;
+const linear_index_limit = 8;
 
 pub fn materialize(
     view: State.ObservationsView,
@@ -104,9 +105,8 @@ pub const BlockBuilder = struct {
         view: State.ObservationsView,
         block_access_index: bal.BlockAccessIndex,
     ) !void {
-        var transition = try materialize(view, self.allocator);
-        defer transition.deinit(self.allocator);
-        try self.appendTransition(transition, block_access_index);
+        const active = try self.activeFold(block_access_index);
+        try active.appendView(view);
     }
 
     pub fn appendTransition(
@@ -114,16 +114,8 @@ pub const BlockBuilder = struct {
         transition: observation.LaneTransition,
         block_access_index: bal.BlockAccessIndex,
     ) !void {
-        std.debug.assert(!self.finished);
-        if (self.active_index) |current| {
-            std.debug.assert(block_access_index >= current);
-            if (block_access_index != current) try self.flush();
-        }
-        if (self.active == null) {
-            self.active = ObservationFold.init(self.allocator);
-            self.active_index = block_access_index;
-        }
-        try self.active.?.append(transition);
+        const active = try self.activeFold(block_access_index);
+        try active.append(transition);
     }
 
     pub fn finish(self: *BlockBuilder) !bal.Decoded {
@@ -139,15 +131,29 @@ pub const BlockBuilder = struct {
         self.active = null;
         defer active.deinit();
 
-        var delta = try active.finish();
-        defer delta.deinit(self.allocator);
-        var shard = try delta.toOwnedBlockAccessList(
-            self.allocator,
-            self.active_index.?,
-        );
-        defer shard.deinit(self.allocator);
-        try self.shards.append(shard.accounts);
+        for (active.accounts.items) |*account| {
+            try self.shards.appendObservation(
+                account.asObservation(),
+                self.active_index.?,
+            );
+        }
         self.active_index = null;
+    }
+
+    fn activeFold(
+        self: *BlockBuilder,
+        block_access_index: bal.BlockAccessIndex,
+    ) !*ObservationFold {
+        std.debug.assert(!self.finished);
+        if (self.active_index) |current| {
+            std.debug.assert(block_access_index >= current);
+            if (block_access_index != current) try self.flush();
+        }
+        if (self.active == null) {
+            self.active = ObservationFold.init(self.allocator);
+            self.active_index = block_access_index;
+        }
+        return &self.active.?;
     }
 };
 
@@ -180,26 +186,56 @@ const ObservationFold = struct {
         }
     }
 
-    fn finish(self: *ObservationFold) !observation.LaneTransition {
-        std.mem.sort(FoldAccount, self.accounts.items, {}, foldAccountLessThan);
-        const accounts = try self.allocator.alloc(
-            observation.AccountObservation,
-            self.accounts.items.len,
-        );
-        errdefer self.allocator.free(accounts);
-
-        var initialized: usize = 0;
-        errdefer for (accounts[0..initialized]) |account|
-            deinitAccountObservation(self.allocator, account);
-        for (self.accounts.items, 0..) |*account, index| {
-            accounts[index] = try account.takeObservation(self.allocator);
-            initialized += 1;
+    fn appendView(self: *ObservationFold, view: State.ObservationsView) !void {
+        var account_index: u32 = 0;
+        while (account_index < view.accounts.len()) : (account_index += 1) {
+            const fact = view.accounts.at(account_index);
+            if (!fact.observation.semantic_access and !fact.effect.any()) continue;
+            const target = try self.accountFor(fact.address);
+            try target.appendAccountFact(self.allocator, view, fact);
         }
-        return .{ .accounts = accounts };
+
+        var storage_index: u32 = 0;
+        var previous_address: ?Address = null;
+        var previous_account_index: usize = undefined;
+        while (storage_index < view.storage.len()) : (storage_index += 1) {
+            const metadata = view.storage.metadataAt(storage_index);
+            if (!metadata.observation.value_read and !metadata.effect.written) continue;
+            const fact = view.storage.at(storage_index) orelse
+                return error.IncompleteStorageObservation;
+            if (previous_address == null or
+                !std.mem.eql(u8, &previous_address.?, &fact.address))
+            {
+                previous_address = fact.address;
+                previous_account_index = try self.accountIndexFor(fact.address);
+            }
+            const target = &self.accounts.items[previous_account_index];
+            try target.appendStorage(self.allocator, .{
+                .slot = fact.key,
+                .original = fact.original,
+                .current = fact.current,
+                .written = fact.effect.written,
+            });
+        }
     }
 
     fn accountFor(self: *ObservationFold, target: Address) !*FoldAccount {
-        if (self.indices.get(target)) |index| return &self.accounts.items[index];
+        return &self.accounts.items[try self.accountIndexFor(target)];
+    }
+
+    fn accountIndexFor(self: *ObservationFold, target: Address) !usize {
+        if (self.indices.count() == 0) {
+            for (self.accounts.items, 0..) |account, index| {
+                if (std.mem.eql(u8, &account.address, &target)) return index;
+            }
+            if (self.accounts.items.len == linear_index_limit) {
+                try self.indices.ensureTotalCapacity(linear_index_limit + 1);
+                for (self.accounts.items, 0..) |account, index| {
+                    self.indices.putAssumeCapacity(account.address, index);
+                }
+            }
+        }
+        if (self.indices.get(target)) |index| return index;
         const index = self.accounts.items.len;
         try self.accounts.append(self.allocator, .{
             .address = target,
@@ -209,8 +245,8 @@ const ObservationFold = struct {
             var removed = self.accounts.pop().?;
             removed.deinit(self.allocator);
         }
-        try self.indices.put(target, index);
-        return &self.accounts.items[index];
+        if (self.indices.count() != 0) try self.indices.put(target, index);
+        return index;
     }
 };
 
@@ -240,82 +276,158 @@ const FoldAccount = struct {
         account: observation.AccountObservation,
     ) !void {
         for (account.storage) |slot| {
-            if (self.storage_indices.get(slot.slot)) |index| {
-                self.storage.items[index].current = slot.current;
-            } else {
-                const index = self.storage.items.len;
-                try self.storage.append(allocator, slot);
-                errdefer _ = self.storage.pop();
-                try self.storage_indices.put(slot.slot, index);
-            }
+            try self.appendStorage(allocator, slot);
         }
-        if (account.balance) |balance| {
-            if (self.balance) |*current| {
-                current.current = balance.current;
-            } else {
-                self.balance = balance;
-            }
-        }
-        if (account.nonce) |nonce| {
-            if (self.nonce) |*current| {
-                current.current = nonce.current;
-            } else {
-                self.nonce = nonce;
-            }
-        }
-        if (account.code) |code| {
-            const current_code = try allocator.dupe(u8, code.current_code);
-            if (self.code) |*current| {
-                allocator.free(@constCast(current.current_code));
-                current.current_hash = code.current_hash;
-                current.current_code = current_code;
-            } else {
-                self.code = .{
-                    .original_hash = code.original_hash,
-                    .current_hash = code.current_hash,
-                    .current_code = current_code,
-                };
-            }
-        }
+        if (account.balance) |balance| self.appendBalance(balance);
+        if (account.nonce) |nonce| self.appendNonce(nonce);
+        if (account.code) |code| try self.appendCode(allocator, code);
         try self.lifecycle.appendSlice(allocator, account.lifecycle);
-        self.account_reset = self.account_reset or account.account_reset;
-        if (account.account_reset) self.account_deleted = false;
-        if (account.account_deleted) self.account_deleted = true;
-        self.storage_wiped = self.storage_wiped or account.storage_wiped;
+        self.appendFlags(account.account_reset, account.account_deleted, account.storage_wiped);
     }
 
-    fn takeObservation(
+    fn appendStorage(
         self: *FoldAccount,
         allocator: Allocator,
-    ) !observation.AccountObservation {
-        std.mem.sort(
-            observation.StorageObservation,
-            self.storage.items,
-            {},
-            storageObservationLessThan,
+        slot: observation.StorageObservation,
+    ) !void {
+        if (try self.storageIndex(slot.slot)) |index| {
+            self.storage.items[index].current = slot.current;
+            return;
+        }
+        const index = self.storage.items.len;
+        try self.storage.append(allocator, slot);
+        errdefer _ = self.storage.pop();
+        if (self.storage_indices.count() != 0)
+            try self.storage_indices.put(slot.slot, index);
+    }
+
+    fn storageIndex(self: *FoldAccount, slot: u256) !?usize {
+        if (self.storage_indices.count() == 0) {
+            for (self.storage.items, 0..) |entry, index| {
+                if (entry.slot == slot) return index;
+            }
+            if (self.storage.items.len < linear_index_limit) return null;
+            try self.storage_indices.ensureTotalCapacity(linear_index_limit + 1);
+            for (self.storage.items, 0..) |entry, index| {
+                self.storage_indices.putAssumeCapacity(entry.slot, index);
+            }
+        }
+        return self.storage_indices.get(slot);
+    }
+
+    fn appendAccountFact(
+        self: *FoldAccount,
+        allocator: Allocator,
+        view: State.ObservationsView,
+        fact: State.AccountObservationFact,
+    ) !void {
+        if (fact.effect.balance_written or
+            (!fact.effect.storage_wiped and
+                (fact.effect.nonce_written or fact.effect.code_written)))
+        {
+            const original = accountOrZero(fact.original);
+            const current = accountOrZero(fact.current);
+            if (fact.effect.balance_written) {
+                self.appendBalance(.{
+                    .original = original.balance,
+                    .current = current.balance,
+                });
+            }
+            if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
+                self.appendNonce(.{
+                    .original = original.nonce,
+                    .current = current.nonce,
+                });
+            }
+            if (fact.effect.code_written and !fact.effect.storage_wiped) {
+                const code = view.code(current.code_hash) orelse
+                    return error.ObservationCodeUnavailable;
+                try self.appendCode(allocator, .{
+                    .original_hash = original.code_hash,
+                    .current_hash = current.code_hash,
+                    .current_code = code.bytes,
+                });
+            }
+        }
+
+        const lifecycle_len: usize =
+            @as(usize, @intFromBool(fact.effect.created_contract)) +
+            @as(usize, @intFromBool(fact.effect.selfdestruct)) +
+            @as(usize, @intFromBool(fact.effect.account_deleted));
+        try self.lifecycle.ensureUnusedCapacity(allocator, lifecycle_len);
+        if (fact.effect.created_contract) self.lifecycle.appendAssumeCapacity(.created_contract);
+        if (fact.effect.selfdestruct) self.lifecycle.appendAssumeCapacity(.selfdestruct);
+        if (fact.effect.account_deleted) self.lifecycle.appendAssumeCapacity(.account_deleted);
+
+        self.appendFlags(
+            accountAbsent(fact.original) and
+                (!accountAbsent(fact.current) or fact.effect.created_contract),
+            fact.effect.account_deleted,
+            fact.effect.storage_wiped,
         );
-        var result = observation.AccountObservation{
+    }
+
+    fn appendBalance(self: *FoldAccount, balance: observation.ValueObservation) void {
+        if (self.balance) |*current| {
+            current.current = balance.current;
+        } else {
+            self.balance = balance;
+        }
+    }
+
+    fn appendNonce(self: *FoldAccount, nonce: observation.NonceObservation) void {
+        if (self.nonce) |*current| {
+            current.current = nonce.current;
+        } else {
+            self.nonce = nonce;
+        }
+    }
+
+    fn appendCode(
+        self: *FoldAccount,
+        allocator: Allocator,
+        code: observation.CodeObservation,
+    ) !void {
+        const current_code = try allocator.dupe(u8, code.current_code);
+        if (self.code) |*current| {
+            allocator.free(@constCast(current.current_code));
+            current.current_hash = code.current_hash;
+            current.current_code = current_code;
+        } else {
+            self.code = .{
+                .original_hash = code.original_hash,
+                .current_hash = code.current_hash,
+                .current_code = current_code,
+            };
+        }
+    }
+
+    fn appendFlags(
+        self: *FoldAccount,
+        account_reset: bool,
+        account_deleted: bool,
+        storage_wiped: bool,
+    ) void {
+        self.account_reset = self.account_reset or account_reset;
+        if (account_reset) self.account_deleted = false;
+        if (account_deleted) self.account_deleted = true;
+        self.storage_wiped = self.storage_wiped or storage_wiped;
+    }
+
+    fn asObservation(self: *const FoldAccount) observation.AccountObservation {
+        return .{
             .address = self.address,
+            .storage = self.storage.items,
             .balance = self.balance,
             .nonce = self.nonce,
+            .code = self.code,
+            .lifecycle = self.lifecycle.items,
             .account_reset = self.account_reset,
             .account_deleted = self.account_deleted,
             .storage_wiped = self.storage_wiped,
         };
-        errdefer deinitAccountObservation(allocator, result);
-        result.storage = try self.storage.toOwnedSlice(allocator);
-        if (self.code) |code| {
-            result.code = code;
-            self.code = null;
-        }
-        result.lifecycle = try self.lifecycle.toOwnedSlice(allocator);
-        return result;
     }
 };
-
-fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
-}
 
 const AccountBuilder = struct {
     address: Address,
@@ -616,6 +728,13 @@ test "tracked observations match recorder after inner rollback" {
     defer delta.deinit(allocator);
     var actual = try delta.toOwnedBlockAccessList(allocator, 1);
     defer actual.deinit(allocator);
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, actual, direct);
+
     var expected = try oracle.toOwnedBlockAccessList(allocator);
     defer expected.deinit(allocator);
     try expectEqualEncoded(allocator, expected, actual);
@@ -683,6 +802,59 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var expected = try oracle.toOwnedBlockAccessList(allocator);
     defer expected.deinit(allocator);
     try expectEqualEncoded(allocator, expected, actual);
+
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, expected, direct);
+}
+
+test "small observation indices promote and preserve duplicate merges" {
+    const allocator = std.testing.allocator;
+    var fold = ObservationFold.init(allocator);
+    defer fold.deinit();
+
+    for (0..linear_index_limit + 1) |index| {
+        _ = try fold.accountFor(address.addr(@as(u64, @intCast(index + 1))));
+    }
+    try std.testing.expectEqual(linear_index_limit + 1, fold.accounts.items.len);
+    try std.testing.expectEqual(linear_index_limit + 1, fold.indices.count());
+    const duplicate = address.addr(@as(u64, 4));
+    _ = try fold.accountFor(duplicate);
+    try std.testing.expectEqual(linear_index_limit + 1, fold.accounts.items.len);
+
+    var account = FoldAccount{
+        .address = address.addr(1),
+        .storage_indices = .init(allocator),
+    };
+    defer account.deinit(allocator);
+    for (0..linear_index_limit + 1) |index| {
+        const slot: u256 = @intCast(index);
+        try account.append(allocator, .{
+            .address = account.address,
+            .storage = &.{.{
+                .slot = slot,
+                .original = slot,
+                .current = slot + 1,
+                .written = true,
+            }},
+        });
+    }
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage.items.len);
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage_indices.count());
+    try account.append(allocator, .{
+        .address = account.address,
+        .storage = &.{.{
+            .slot = 3,
+            .original = 3,
+            .current = 99,
+            .written = true,
+        }},
+    });
+    try std.testing.expectEqual(linear_index_limit + 1, account.storage.items.len);
+    try std.testing.expectEqual(@as(u256, 99), account.storage.items[3].current);
 }
 
 test "block builder coalesces transitions at one access index" {
@@ -697,6 +869,8 @@ test "block builder coalesces transitions at one access index" {
 
     var builder = BlockBuilder.init(allocator);
     defer builder.deinit();
+    var reference_builder = BlockBuilder.init(allocator);
+    defer reference_builder.deinit();
 
     const first = state.beginObservedTransaction();
     state.beginScope();
@@ -704,6 +878,9 @@ test "block builder coalesces transitions at one access index" {
     state.closeScope();
     state.seal(first);
     try builder.append(state.pendingView().observations(), 3);
+    var first_transition = try materialize(state.pendingView().observations(), allocator);
+    defer first_transition.deinit(allocator);
+    try reference_builder.appendTransition(first_transition, 3);
     state.retain(first);
 
     const second = state.beginObservedTransaction();
@@ -712,10 +889,16 @@ test "block builder coalesces transitions at one access index" {
     state.closeScope();
     state.seal(second);
     try builder.append(state.pendingView().observations(), 3);
+    var second_transition = try materialize(state.pendingView().observations(), allocator);
+    defer second_transition.deinit(allocator);
+    try reference_builder.appendTransition(second_transition, 3);
     state.retain(second);
 
     var result = try builder.finish();
     defer result.deinit(allocator);
+    var reference = try reference_builder.finish();
+    defer reference.deinit(allocator);
+    try expectEqualEncoded(allocator, reference, result);
     try std.testing.expectEqual(@as(usize, 1), result.accounts.len);
     try std.testing.expectEqualSlices(u8, &target, &result.accounts[0].address);
     try std.testing.expectEqual(@as(usize, 1), result.accounts[0].balance_changes.len);

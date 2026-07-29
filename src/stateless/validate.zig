@@ -2,9 +2,9 @@
 
 const std = @import("std");
 
-const Config = @import("../code/Config.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const eth_spec = @import("../eth/spec.zig");
+const system_prepared_code = @import("../eth/system_prepared_code.zig");
 const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
@@ -31,45 +31,85 @@ pub const Options = struct {
     bal_differential: ?*block_stf.BalDifferentialReport = null,
 };
 
-pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
-    return validateWithOptions(allocator, input, .{});
+/// Exact stateless validator for one Ethereum revision.
+///
+/// Callers supporting multiple revisions dispatch to these types themselves;
+/// this library never compiles or loops over a runtime fork set.
+pub fn Exact(comptime revision: Revision) type {
+    return Bind(block_stf.Exact(revision));
 }
 
-pub fn validateWithOptions(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    options: Options,
-) Error!block_stf.Result {
-    return validateWithCaptureOptions(allocator, input, null, options);
+/// Bind the validator to an already-compiled exact block STF. Fork identity
+/// and compile options are read from the type, never threaded as parameters.
+pub fn Bind(comptime ExactBlockStf: type) type {
+    return struct {
+        pub const fork = ExactBlockStf.fork;
+        pub const compile_options = ExactBlockStf.compile_options;
+        pub const BlockStf = ExactBlockStf;
+
+        pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
+            return validateWithOptions(allocator, input, .{});
+        }
+
+        pub fn validateWithOptions(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            validation_options: Options,
+        ) Error!block_stf.Result {
+            return validateWithCaptureOptions(allocator, input, null, validation_options);
+        }
+
+        pub fn validateWithCapture(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            capture: ?block_stf.ExecutionCapture,
+        ) Error!block_stf.Result {
+            return validateWithCaptureOptions(allocator, input, capture, .{});
+        }
+
+        pub fn validateWithCaptureOptions(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            capture: ?block_stf.ExecutionCapture,
+            validation_options: Options,
+        ) Error!block_stf.Result {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            return validateWithScratchExact(
+                ExactBlockStf,
+                arena.allocator(),
+                input,
+                capture,
+                validation_options,
+            );
+        }
+
+        /// Reuses a caller-owned one-shot scratch lifetime instead of nesting
+        /// another arena. The caller releases all allocations together.
+        pub fn validateOneShot(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+        ) Error!block_stf.Result {
+            return validateWithScratchExact(
+                ExactBlockStf,
+                allocator,
+                input,
+                null,
+                .{},
+            );
+        }
+    };
 }
 
-pub fn validateWithCapture(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    capture: ?block_stf.ExecutionCapture,
-) Error!block_stf.Result {
-    return validateWithCaptureOptions(allocator, input, capture, .{});
-}
-
-pub fn validateWithCaptureOptions(
-    allocator: std.mem.Allocator,
-    input: input_mod.Input,
-    capture: ?block_stf.ExecutionCapture,
-    options: Options,
-) Error!block_stf.Result {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    return validateWithScratch(arena.allocator(), input, capture, options);
-}
-
-fn validateWithScratch(
+fn validateWithScratchExact(
+    comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
     options: Options,
 ) Error!block_stf.Result {
     const block = input.block;
-    if (!blockShapeValid(input.revision, block)) return .{ .status = .invalid_block_body };
+    if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     var header_chain = try HeaderChain.init(
         allocator,
         input.witness.headers,
@@ -80,22 +120,20 @@ fn validateWithScratch(
     const parent_header = header_chain.parent();
     const codes = try witnessCodes(allocator, input.witness.codes);
 
-    return switch (input.revision) {
-        inline else => |revision| validateExact(
-            revision,
-            allocator,
-            input,
-            capture,
-            options,
-            &header_chain,
-            parent_header,
-            codes,
-        ),
-    };
+    return validateExact(
+        ExactBlockStf,
+        allocator,
+        input,
+        capture,
+        options,
+        &header_chain,
+        parent_header,
+        codes,
+    );
 }
 
 fn validateExact(
-    comptime revision: Revision,
+    comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
@@ -104,9 +142,9 @@ fn validateExact(
     parent_header: ParsedHeader,
     codes: []const state.WitnessStateReader.Code,
 ) Error!block_stf.Result {
+    const revision = ExactBlockStf.fork;
     const block = input.block;
-    return block_stf.Exact(revision).applyAssumeDecoded(allocator, .{
-        .config = Config.base,
+    return ExactBlockStf.applyAssumeDecoded(allocator, .{
         .env = .{
             .chain_id = input.chain_id,
             .coinbase = block.fee_recipient,
@@ -127,6 +165,7 @@ fn validateExact(
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
         .state_backend = try state.Backend.fromWitness(allocator, parent_header.state_root, input.witness.state, codes),
+        .prepared_code_backend = system_prepared_code.backend(),
         .transactions = block.transactions,
         .withdrawals = block.withdrawals,
         .parent_header = .{

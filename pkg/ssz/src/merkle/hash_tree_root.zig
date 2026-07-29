@@ -220,6 +220,11 @@ fn hashBitvector(
     comptime Codec: type,
     value: Codec.Value,
 ) Walker.WalkError!Root {
+    if (comptime std.meta.hasFn(Codec, "packedBits")) {
+        const bits = try Codec.packedBits(value);
+        const source = PackedBitSource(Walker, @TypeOf(bits)){ .walker = walker, .bits = bits };
+        return walker.merkleizeSource(source, declaredBitChunkLimit(Codec.length), path);
+    }
     const source = BitSource(Walker, Codec.Value){ .walker = walker, .values = &value };
     return walker.merkleizeSource(source, declaredBitChunkLimit(Codec.length), path);
 }
@@ -232,6 +237,13 @@ fn hashBitlist(
     value: Codec.Value,
 ) Walker.WalkError!Root {
     const limit = Codec.max_length.?;
+    if (comptime std.meta.hasFn(Codec, "packedBits")) {
+        const bits = try Codec.packedBits(value);
+        var data_path = path.child(.left);
+        const source = PackedBitSource(Walker, @TypeOf(bits)){ .walker = walker, .bits = bits };
+        const root = try walker.merkleizeSource(source, declaredBitChunkLimit(limit), &data_path);
+        return walker.mixInLength(path, root, bits.len());
+    }
     if (schema_limit.exceededBy(value.len, limit)) return error.ListLimitExceeded;
     var data_path = path.child(.left);
     const source = BitSource(Walker, Codec.Value){ .walker = walker, .values = &value };
@@ -246,6 +258,13 @@ fn hashProgressiveBitlist(
     comptime Codec: type,
     value: Codec.Value,
 ) Walker.WalkError!Root {
+    if (comptime std.meta.hasFn(Codec, "packedBits")) {
+        const bits = try Codec.packedBits(value);
+        var data_path = path.child(.left);
+        const source = PackedBitSource(Walker, @TypeOf(bits)){ .walker = walker, .bits = bits };
+        const root = try walker.merkleizeProgressiveSource(source, &data_path);
+        return walker.mixInLength(path, root, bits.len());
+    }
     var data_path = path.child(.left);
     const source = BitSource(Walker, @TypeOf(value)){ .walker = walker, .values = &value };
     const root = try walker.merkleizeProgressiveSource(source, &data_path);
@@ -421,6 +440,36 @@ fn BitSource(comptime Walker: type, comptime Values: type) type {
     };
 }
 
+fn PackedBitSource(comptime Walker: type, comptime Bits: type) type {
+    return struct {
+        walker: *Walker,
+        bits: Bits,
+
+        pub fn count(self: @This()) Walker.WalkError!usize {
+            return bitChunkCount(self.bits.len());
+        }
+
+        pub fn leaf(self: @This(), chunk_index: usize, path: *const TreePath) Walker.WalkError!Root {
+            var root = merkle.zero;
+            const semantic_bytes = if (self.bits.len() == 0)
+                0
+            else
+                (self.bits.len() - 1) / 8 + 1;
+            const first = chunk_index * root.len;
+            std.debug.assert(first < semantic_bytes);
+            const copy_len = @min(root.len, semantic_bytes - first);
+            @memcpy(root[0..copy_len], self.bits.serialized[first .. first + copy_len]);
+
+            const trailing_bits = self.bits.len() % 8;
+            if (trailing_bits != 0 and first + copy_len == semantic_bytes) {
+                const valid_mask = (@as(u8, 1) << @intCast(trailing_bits)) - 1;
+                root[copy_len - 1] &= valid_mask;
+            }
+            return self.walker.leaf(path, root);
+        }
+    };
+}
+
 fn CompositeSource(comptime Walker: type, comptime ElementCodec: type, comptime Values: type) type {
     return struct {
         walker: *Walker,
@@ -516,6 +565,143 @@ test "SSZ ByteList HTR preserves an abstract schema capacity" {
     expected = merkle.mixInLength(expected, value.len);
 
     try std.testing.expectEqual(expected, try ssz.hashTreeRoot(Bytes, value));
+}
+
+test "SSZ packed bitfield HTR matches boolean codecs across chunk boundaries" {
+    const BoolVector = ssz.Bitvector(257);
+    const PackedVector = ssz.PackedBitvector(257);
+    var vector_bits = [_]bool{false} ** 257;
+    vector_bits[0] = true;
+    vector_bits[255] = true;
+    vector_bits[256] = true;
+    var vector_bytes = [_]u8{0} ** 33;
+    vector_bytes[0] = 0x01;
+    vector_bytes[31] = 0x80;
+    vector_bytes[32] = 0x01;
+    const packed_vector = try PackedVector.decode(&vector_bytes);
+
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(BoolVector, vector_bits),
+        try ssz.hashTreeRoot(PackedVector, packed_vector),
+    );
+
+    const BoolList = ssz.Bitlist(512);
+    const PackedList = ssz.PackedBitlist(512);
+    var list_bits = [_]bool{false} ** 256;
+    list_bits[0] = true;
+    list_bits[255] = true;
+    var list_bytes = [_]u8{0} ** 33;
+    list_bytes[0] = 0x01;
+    list_bytes[31] = 0x80;
+    list_bytes[32] = 0x01;
+    const packed_list = try PackedList.decode(&list_bytes);
+
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(BoolList, &list_bits),
+        try ssz.hashTreeRoot(PackedList, packed_list),
+    );
+}
+
+test "SSZ packed bitlist HTR excludes an in-byte delimiter" {
+    const BoolList = ssz.Bitlist(16);
+    const PackedList = ssz.PackedBitlist(16);
+    const bits = [_]bool{ true, false, true, false, true };
+    const packed_view = try PackedList.decode(&.{0x35});
+
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(BoolList, &bits),
+        try ssz.hashTreeRoot(PackedList, packed_view),
+    );
+
+    const empty = [_]bool{};
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(BoolList, &empty),
+        try ssz.hashTreeRoot(PackedList, try PackedList.decode(&.{0x01})),
+    );
+}
+
+test "SSZ packed bitfield HTR revalidates manually constructed views" {
+    try std.testing.expectError(
+        error.InvalidBitvectorPadding,
+        ssz.hashTreeRoot(
+            ssz.PackedBitvector(1),
+            .{ .serialized = &.{0x02}, .bit_length = 1 },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidByteLength,
+        ssz.hashTreeRoot(
+            ssz.PackedBitlist(8),
+            .{ .serialized = &.{0x0d}, .bit_length = 2 },
+        ),
+    );
+}
+
+test "SSZ packed bitfield walkTree matches boolean traversal roots" {
+    const Record = struct {
+        generalized_index: u256,
+        node: TreeNode,
+    };
+    const Visitor = struct {
+        pub const Error = error{ PathTooDeep, TooManyNodes };
+
+        records: [64]Record = undefined,
+        len: usize = 0,
+
+        pub fn visit(self: *@This(), path: *const TreePath, node: TreeNode) @This().Error!void {
+            if (self.len == self.records.len) return error.TooManyNodes;
+            self.records[self.len] = .{
+                .generalized_index = path.generalizedIndex() orelse return error.PathTooDeep,
+                .node = node,
+            };
+            self.len += 1;
+        }
+    };
+
+    const vector_bits = [_]bool{ true, false, false, true, false, false, false, false, true, true };
+    const PackedVector = ssz.PackedBitvector(10);
+    const packed_vector = try PackedVector.decode(&.{ 0x09, 0x03 });
+    var bool_vector_visitor = Visitor{};
+    var packed_vector_visitor = Visitor{};
+    try std.testing.expectEqual(
+        try ssz.walkTree(ssz.Bitvector(10), vector_bits, &bool_vector_visitor),
+        try ssz.walkTree(PackedVector, packed_vector, &packed_vector_visitor),
+    );
+    try std.testing.expectEqualDeep(
+        bool_vector_visitor.records[0..bool_vector_visitor.len],
+        packed_vector_visitor.records[0..packed_vector_visitor.len],
+    );
+
+    const list_bits = [_]bool{ true, false, true, false, true };
+    const PackedList = ssz.PackedBitlist(16);
+    const packed_list = try PackedList.decode(&.{0x35});
+    var bool_list_visitor = Visitor{};
+    var packed_list_visitor = Visitor{};
+    try std.testing.expectEqual(
+        try ssz.walkTree(ssz.Bitlist(16), &list_bits, &bool_list_visitor),
+        try ssz.walkTree(PackedList, packed_list, &packed_list_visitor),
+    );
+    try std.testing.expectEqualDeep(
+        bool_list_visitor.records[0..bool_list_visitor.len],
+        packed_list_visitor.records[0..packed_list_visitor.len],
+    );
+
+    const progressive_bits = [_]bool{ true, false, true, false, true };
+    const progressive_packed = try ssz.ProgressivePackedBitlist.decode(&.{0x35});
+    var bool_progressive_visitor = Visitor{};
+    var packed_progressive_visitor = Visitor{};
+    try std.testing.expectEqual(
+        try ssz.walkTree(ssz.ProgressiveBitlist, &progressive_bits, &bool_progressive_visitor),
+        try ssz.walkTree(
+            ssz.ProgressivePackedBitlist,
+            progressive_packed,
+            &packed_progressive_visitor,
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        bool_progressive_visitor.records[0..bool_progressive_visitor.len],
+        packed_progressive_visitor.records[0..packed_progressive_visitor.len],
+    );
 }
 
 test "SSZ hashTreeRoot mixes ordinary union selectors" {

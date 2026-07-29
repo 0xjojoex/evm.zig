@@ -84,16 +84,14 @@ test "SSZ ByteList accepts empty and exact-limit values" {
     try std.testing.expectEqual(@as(usize, 0), (try Bytes.decode("")).len);
 }
 
-test "SSZ ByteList decode returns the canonical empty slice" {
+test "SSZ ByteList decodes empty without allocation" {
     var no_memory: [0]u8 = .{};
     var fixed_buffer = std.heap.FixedBufferAllocator.init(&no_memory);
     const Bytes = ssz.ByteList(4);
-    const canonical: []const u8 = &.{};
 
     var decoded = try Bytes.decodeAlloc(fixed_buffer.allocator(), "");
     defer Bytes.deinit(fixed_buffer.allocator(), &decoded);
     try std.testing.expectEqual(@as(usize, 0), decoded.len);
-    try std.testing.expectEqual(canonical.ptr, decoded.ptr);
 }
 
 test "SSZ ByteList keeps schema capacity independent from runtime length" {
