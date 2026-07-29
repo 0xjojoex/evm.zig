@@ -1403,7 +1403,8 @@ fn serialFold(
             error.OutOfMemory => return error.OutOfMemory,
             else => return err,
         };
-        _ = validateBlockAccessList(observed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
+        // BlockBuilder emits canonical structure; only its consensus item budget remains.
+        validateBlockAccessCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return err,
         };
@@ -1706,9 +1707,13 @@ fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessInd
 fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!eth_bal.Counts {
     try eth_bal.validate(block_access_list, .{ .transaction_count = transaction_count });
     const counts = eth_bal.count(block_access_list);
+    try validateBlockAccessCounts(counts, gas_limit);
+    return counts;
+}
+
+fn validateBlockAccessCounts(counts: eth_bal.Counts, gas_limit: u64) eth_bal.ValidationError!void {
     if (gas_limit != 0 and counts.blockAccessItems() > gas_limit / eth_bal.item_cost)
         return error.BlockAccessListGasLimitExceeded;
-    return counts;
 }
 
 fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
