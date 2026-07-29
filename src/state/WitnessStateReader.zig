@@ -25,7 +25,7 @@ allocator: std.mem.Allocator,
 state_root: [32]u8,
 indexed: *trie.IndexedNodes,
 codes: []CodeEntry = &.{},
-accounts: trie.AccountFacts = .empty,
+accounts: trie.AccountFacts,
 proof_cache: trie.ProofCache,
 
 pub fn init(
@@ -40,13 +40,14 @@ pub fn init(
         .state_root = state_root,
         .indexed = indexed,
         .codes = try indexCodes(allocator, codes),
+        .accounts = trie.AccountFacts.init(allocator),
         .proof_cache = .init(allocator),
     };
 }
 
 pub fn deinit(self: *WitnessStateReader) void {
     self.proof_cache.deinit();
-    self.accounts.deinit(self.allocator);
+    self.accounts.deinit();
     if (self.codes.len != 0) self.allocator.free(self.codes);
     self.indexed.deinit();
     self.* = undefined;
@@ -71,7 +72,7 @@ pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
 fn loadMptAccount(self: *WitnessStateReader, target: Address) !?trie.Account {
     if (self.accounts.get(target)) |account| return account;
     const account = try self.loadMptAccountFrom(target, &self.proof_cache);
-    try self.accounts.put(self.allocator, target, account);
+    try self.accounts.put(target, account);
     return account;
 }
 

@@ -9,6 +9,7 @@ const crypto = @import("../crypto.zig");
 const rlp = @import("rlp");
 const mpt = @import("mpt");
 const uint256 = @import("../uint256.zig");
+const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
 const TrackedState = @import("../state/TrackedState.zig");
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
@@ -76,7 +77,7 @@ pub const Account = struct {
     }
 };
 
-pub const AccountFacts = std.AutoHashMapUnmanaged(address.Address, ?Account);
+pub const AccountFacts = SparseHashMap(address.Address, ?Account);
 
 pub const Update = mpt.Update;
 
@@ -259,8 +260,8 @@ pub fn stateRootAfterChangesIndexed(
     const accounts = accountTrie(scratch);
     for (addresses.items) |target| {
         const previous = if (authenticated_accounts) |facts| previous: {
-            if (facts.getEntry(target)) |entry| {
-                break :previous entry.value_ptr.* orelse Account{};
+            if (facts.get(target)) |account| {
+                break :previous account orelse Account{};
             }
             break :previous try loadAccountOrEmpty(
                 accounts,
@@ -1066,9 +1067,9 @@ test "MPT state root reuses authenticated present account" {
     state.retain(attempt);
     const changes = state.acceptedView().changes();
 
-    var facts: AccountFacts = .empty;
-    defer facts.deinit(scratch);
-    try facts.put(scratch, target, previous);
+    var facts = AccountFacts.init(scratch);
+    defer facts.deinit();
+    try facts.put(target, previous);
     const cached = try stateRootAfterChangesIndexed(
         scratch,
         root_hash,
@@ -1084,6 +1085,17 @@ test "MPT state root reuses authenticated present account" {
         changes,
     );
     try std.testing.expectEqualSlices(u8, &fallback, &cached);
+}
+
+test "authenticated account facts preserve cached absence" {
+    var facts = AccountFacts.init(std.testing.allocator);
+    defer facts.deinit();
+
+    try facts.put(address.addr(1), null);
+    const cached = facts.get(address.addr(1));
+    try std.testing.expect(cached != null);
+    try std.testing.expect(cached.? == null);
+    try std.testing.expect(facts.get(address.addr(2)) == null);
 }
 
 fn sortedPairsForTest(allocator: Allocator, pairs: []const Pair) ![]Pair {
