@@ -1454,13 +1454,10 @@ fn serialFold(
 
     if (differential_candidate) |*candidate| {
         const report = input.bal_differential.?;
-        if (!try candidate.state.matchesChanges(
-            state_backend.reader(),
-            executor.acceptedChanges(),
-        )) {
-            report.status = .candidate_artifact_mismatch;
-            report.tx_index = input.transactions.len;
-        } else {
+        {
+            // Exact observed-versus-canonical BAL bytes already pin every write
+            // the candidate made, and the block's own commitments pin the rest,
+            // so the candidate no longer rebuilds a whole state to compare.
             const candidate_matches = candidateArtifactsEqual(
                 candidate,
                 result,
@@ -1565,7 +1562,6 @@ test "candidate artifact equality checks every nonzero field" {
     const receipts = [_][]const u8{&receipt};
     const requests = [_][]const u8{&request};
     var candidate = DifferentialRunner.Artifacts{
-        .state = candidate_transition.CandidateState.init(),
         .gas_used = 1,
         .block_gas_used = 2,
         .block_state_gas_used = 3,

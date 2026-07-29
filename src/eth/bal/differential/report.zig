@@ -22,7 +22,6 @@ pub const Status = enum {
     claim_storage_not_covered,
     claim_import_failed,
     outcome_mismatch,
-    transition_fold_mismatch,
     candidate_artifact_mismatch,
     candidate_rejection_mismatch,
     unsupported_before_transaction_hooks,
@@ -44,7 +43,6 @@ pub const Status = enum {
             .claim_storage_not_covered,
             .claim_import_failed,
             .outcome_mismatch,
-            .transition_fold_mismatch,
             .candidate_artifact_mismatch,
             .candidate_rejection_mismatch,
             .diagnostic_failure,
@@ -143,7 +141,6 @@ test "BAL differential status classifies whole-lane fallback and mismatch" {
     try std.testing.expect(Status.claim_account_not_covered.isMismatch());
     try std.testing.expect(Status.claim_storage_not_covered.isMismatch());
     try std.testing.expect(Status.outcome_mismatch.isMismatch());
-    try std.testing.expect(Status.transition_fold_mismatch.isMismatch());
     try std.testing.expect(Status.candidate_artifact_mismatch.isMismatch());
     try std.testing.expect(Status.candidate_rejection_mismatch.isMismatch());
     try std.testing.expect(!Status.matched.isFallback());

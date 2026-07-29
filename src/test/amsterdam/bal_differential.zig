@@ -205,7 +205,11 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         expected_roots,
         &lied_report,
     ));
-    try expectContainedMismatch(baseline, lied, lied_report, .transition_fold_mismatch);
+    // The claim lies, so the block is rejected by exact observed-versus-claimed
+    // BAL bytes - the first assertion above. The candidate itself still agrees
+    // with canonical execution, because the lie is in what was declared rather
+    // than in what executing produced.
+    try expectContainedMismatch(baseline, lied, lied_report, .candidate_matched);
 
     const lied_storage_value_changes = [_]bal.StorageChange{
         .{ .block_access_index = 1, .new_value = 7 },
@@ -237,7 +241,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         baseline,
         lied_storage,
         lied_storage_report,
-        .transition_fold_mismatch,
+        .candidate_matched,
     );
 
     // Fold verification is intentionally claim-subset-only: omitting target

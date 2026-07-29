@@ -53,13 +53,11 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         claim: *const ClaimView,
         report: *Report,
         accumulator: Accumulator,
-        pre_state: ?candidate_transition.CandidateState = null,
         claim_executor: ?Engine.Executor = null,
         parallel_batch: ?Schedule = null,
         active: bool = true,
 
         pub const Artifacts = struct {
-            state: candidate_transition.CandidateState,
             gas_used: u64,
             block_gas_used: u64,
             block_state_gas_used: u64,
@@ -73,7 +71,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             encoded_block_access_list: []u8,
 
             pub fn deinit(self: *Artifacts, allocator: std.mem.Allocator) void {
-                self.state.deinit(allocator);
                 Operations.freeCandidateRequests(allocator, self.requests);
                 allocator.free(self.encoded_block_access_list);
                 self.* = undefined;
@@ -120,7 +117,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self.discardPending();
             if (self.parallel_batch) |*batch| batch.deinit();
             if (self.claim_executor) |*executor| executor.deinit();
-            if (self.pre_state) |*candidate| candidate.deinit(self.allocator);
             self.accumulator.deinit();
             self.claim_executor = null;
         }
@@ -154,12 +150,9 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
             var observation_builder = tracked_state_projector.BlockBuilder.init(self.allocator);
             defer observation_builder.deinit();
-            var state_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
-            defer state_fold.deinit();
             var observation_collector = Lane.ObservationCollector{
                 .allocator = self.allocator,
                 .builder = &observation_builder,
-                .state_fold = &state_fold,
                 .block_access_index = 0,
             };
             if (header) |context| {
@@ -173,10 +166,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             var shard = try observation_builder.finish();
             defer shard.deinit(self.allocator);
             try self.accumulator.appendShard(shard.accounts);
-
-            try state_fold.finish();
-            std.debug.assert(self.pre_state == null);
-            self.pre_state = state_fold.takeOwned();
         }
 
         pub fn verifyIncluded(self: *Self, included: Included) std.Io.Cancelable!void {
@@ -406,17 +395,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             try self.flushPending();
             if (self.active) {
                 const transaction_count = self.accumulator.transactionCount();
-                self.accumulator.finishTransactions(self.claim) catch |err| {
-                    self.stop(
-                        if (err == error.TransitionFoldMismatch)
-                            .transition_fold_mismatch
-                        else
-                            .diagnostic_failure,
-                        transaction_count,
-                        if (err == error.TransitionFoldMismatch) null else err,
-                    );
-                    return;
-                };
+                _ = transaction_count;
                 self.report.status = .outcomes_matched;
             }
             self.active = false;
@@ -441,21 +420,21 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self: *Self,
             withdrawals: []const Operations.Withdrawal,
         ) !Artifacts {
-            const pre_state = if (self.pre_state) |*candidate|
-                candidate
-            else
-                return error.CandidateBeforeBlockNotRun;
-
-            var pre_reader = pre_state.readerOver(self.base_reader);
-            var transaction_reader = self.accumulator.transactionState().readerOver(pre_reader.reader());
             const transaction_count = std.math.cast(
                 bal.BlockAccessIndex,
                 self.accumulator.transactionCount(),
             ) orelse return error.BlockAccessIndexOverflow;
             const post_execution_index = try bal.postExecutionSystemIndex(transaction_count);
+
+            // Reading the claim through the last transaction index already means
+            // parent state, plus the block-start writes at index zero, plus every
+            // transaction write. Rebuilding that view by folding observed
+            // transitions produced the same thing at the cost of a whole
+            // candidate-state layer.
+            var post_reader = BalClaimReader.init(self.base_reader, self.claim, transaction_count);
             var execution: Lane.CapturedExecution = undefined;
             try execution.init(self.allocator, .{
-                .state_reader = transaction_reader.reader(),
+                .state_reader = post_reader.reader(),
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             });
@@ -463,12 +442,9 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
             var observation_builder = tracked_state_projector.BlockBuilder.init(self.allocator);
             defer observation_builder.deinit();
-            var post_state_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
-            defer post_state_fold.deinit();
             var observation_collector = Lane.ObservationCollector{
                 .allocator = self.allocator,
                 .builder = &observation_builder,
-                .state_fold = &post_state_fold,
                 .block_access_index = post_execution_index,
             };
             try Operations.applyCandidateWithdrawals(
@@ -492,16 +468,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             defer post_shard.deinit(self.allocator);
             try self.accumulator.appendShard(post_shard.accounts);
 
-            try post_state_fold.finish();
-            var full_fold = candidate_transition.OrderedTransitionFold.init(self.allocator);
-            defer full_fold.deinit();
-            try full_fold.appendState(pre_state);
-            try full_fold.appendState(self.accumulator.transactionState());
-            try full_fold.appendState(post_state_fold.view());
-            try full_fold.finish();
-            var full_state = full_fold.takeOwned();
-            errdefer full_state.deinit(self.allocator);
-
             var decoded_bal = try self.accumulator.bal_shard_fold.finish();
             defer decoded_bal.deinit(self.allocator);
             const encoded_bal = try bal.encodeAlloc(self.allocator, decoded_bal.accounts);
@@ -509,7 +475,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
             const progress = self.accumulator.progress;
             return .{
-                .state = full_state,
                 .gas_used = progress.gas_used,
                 .block_gas_used = progress.block_gas.total,
                 .block_state_gas_used = progress.block_gas.state,

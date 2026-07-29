@@ -149,7 +149,6 @@ pub fn Lane(comptime Engine: type) type {
         pub const ObservationCollector = struct {
             allocator: std.mem.Allocator,
             builder: *tracked_state_projector.BlockBuilder,
-            state_fold: ?*candidate_transition.OrderedTransitionFold = null,
             block_access_index: bal.BlockAccessIndex,
 
             pub fn observe(
@@ -162,7 +161,6 @@ pub fn Lane(comptime Engine: type) type {
                 );
                 defer transition.deinit(self.allocator);
                 try self.builder.appendTransition(transition, self.block_access_index);
-                if (self.state_fold) |fold| try fold.appendNext(&transition);
             }
         };
 

@@ -10,7 +10,6 @@ const std = @import("std");
 
 const Host = @import("../../../Host.zig");
 const bal = @import("../model.zig");
-const ClaimView = @import("../ClaimView.zig");
 const ShardFold = @import("../shard_fold.zig").ShardFold;
 const candidate_transition = @import("../candidate_transition.zig");
 const lane = @import("lane.zig");
@@ -27,8 +26,8 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
         env: vm.Env,
         progress: vm.BlockResult = .{},
         blob_gas_used: u64 = 0,
-        transition_fold: candidate_transition.OrderedTransitionFold,
         bal_shard_fold: ShardFold,
+        transaction_count: usize = 0,
         encoded_receipts: std.ArrayList([]const u8) = .empty,
         deposit_request_data: std.ArrayList(u8) = .empty,
         block_logs_bloom: [256]u8 = [_]u8{0} ** 256,
@@ -42,7 +41,6 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             return .{
                 .allocator = allocator,
                 .env = env,
-                .transition_fold = candidate_transition.OrderedTransitionFold.init(allocator),
                 .bal_shard_fold = ShardFold.init(allocator),
             };
         }
@@ -52,11 +50,10 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             self.encoded_receipts.deinit(self.allocator);
             self.deposit_request_data.deinit(self.allocator);
             self.bal_shard_fold.deinit();
-            self.transition_fold.deinit();
         }
 
         pub fn transactionCount(self: *const Self) usize {
-            return self.transition_fold.transactionCount();
+            return self.transaction_count;
         }
 
         /// Fold one already-built BAL shard from a serial block phase.
@@ -103,7 +100,8 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             if (after_calls.slice().len != 0) {
                 return error.UnsupportedAfterTransactionHooks;
             }
-            try self.transition_fold.append(included.tx_index, &effects.transition);
+            if (included.tx_index != self.transaction_count) return error.OutOfOrderTransaction;
+            self.transaction_count += 1;
 
             const write_index = std.math.add(usize, included.tx_index, 1) catch
                 return error.BlockAccessIndexOverflow;
@@ -153,25 +151,6 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             const limit = try Operations.candidateBlockBlobGasLimit(self.env.blob_schedule);
             return .{ .next = next, .exceeds_limit = next > limit };
         }
-
-        /// Seal the transaction-phase folds and confirm the candidate's own
-        /// field-level state agrees with what the claim attributes to
-        /// transaction indices. Exact observed-versus-claimed BAL bytes remain
-        /// the soundness gate in both directions; this is one-sided.
-        pub fn finishTransactions(self: *Self, claim: *const ClaimView) !void {
-            try self.transition_fold.finish();
-            const transaction_count = std.math.cast(
-                bal.BlockAccessIndex,
-                self.transactionCount(),
-            ) orelse return error.BlockAccessIndexOverflow;
-            if (!matchesTransactionDelta(self.transition_fold.view(), claim, transaction_count)) {
-                return error.TransitionFoldMismatch;
-            }
-        }
-
-        pub fn transactionState(self: *const Self) *const candidate_transition.CandidateState {
-            return self.transition_fold.view();
-        }
     };
 }
 
@@ -194,61 +173,6 @@ fn logsEqual(expected: []const Host.Log, actual: state.TrackedState.LogView) boo
         }
     }
     return true;
-}
-
-fn matchesTransactionDelta(
-    candidate: *const candidate_transition.CandidateState,
-    claim: *const ClaimView,
-    transaction_count: bal.BlockAccessIndex,
-) bool {
-    var account_index: usize = 0;
-    var account_fields = claim.transactionDelta(transaction_count).accountFields();
-    while (account_fields.next()) |expected| {
-        while (account_index < candidate.accounts.items.len and
-            std.mem.order(u8, &candidate.accounts.items[account_index].address, &expected.address) == .lt)
-        {
-            account_index += 1;
-        }
-        if (account_index == candidate.accounts.items.len) return false;
-        const actual = candidate.accounts.items[account_index];
-        if (!std.mem.eql(u8, &actual.address, &expected.address)) return false;
-        if (expected.balance) |balance| if (actual.balance == null or actual.balance.? != balance) return false;
-        if (expected.nonce) |nonce| if (actual.nonce == null or actual.nonce.? != nonce) return false;
-        if (expected.code) |code| {
-            if (actual.code_hash == null or
-                !std.mem.eql(u8, &actual.code_hash.?, &code.hash))
-            {
-                return false;
-            }
-        }
-    }
-
-    var storage_index: usize = 0;
-    var storage_writes = claim.transactionDelta(transaction_count).storageWrites();
-    while (storage_writes.next()) |expected| {
-        while (storage_index < candidate.storage.items.len and
-            storageWriteBefore(candidate.storage.items[storage_index], expected))
-        {
-            storage_index += 1;
-        }
-        if (storage_index == candidate.storage.items.len) return false;
-        const actual = candidate.storage.items[storage_index];
-        if (!std.mem.eql(u8, &actual.address, &expected.address) or
-            actual.key != expected.slot or actual.value != expected.value)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn storageWriteBefore(
-    actual: candidate_transition.StorageDelta,
-    expected: ClaimView.FinalStorageWrite,
-) bool {
-    const address_order = std.mem.order(u8, &actual.address, &expected.address);
-    if (address_order != .eq) return address_order == .lt;
-    return actual.key < expected.slot;
 }
 
 /// Match the authoritative block program: either receipt-gas or dimensional
