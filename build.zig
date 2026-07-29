@@ -510,7 +510,7 @@ const GuestBackend = enum {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
-                .target_features = "generic_rv64+m+a",
+                .target_features = "generic_rv64+m+a+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",
@@ -522,7 +522,7 @@ const GuestBackend = enum {
                 .missing_provider = "guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a",
             },
             .sp1 => .{
-                .target_features = "generic_rv64+m",
+                .target_features = "generic_rv64+m+relax",
                 .runtime_root = "guest/runtime/sp1/root.zig",
                 .linker_script = "guest/runtime/sp1/sp1-rv64.ld",
                 .artifact_name = "evmz-guest-sp1",
