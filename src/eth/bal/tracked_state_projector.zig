@@ -351,9 +351,9 @@ const FoldAccount = struct {
         }
 
         const lifecycle_len: usize =
-            @intFromBool(fact.effect.created_contract) +
-            @intFromBool(fact.effect.selfdestruct) +
-            @intFromBool(fact.effect.account_deleted);
+            @as(usize, @intFromBool(fact.effect.created_contract)) +
+            @as(usize, @intFromBool(fact.effect.selfdestruct)) +
+            @as(usize, @intFromBool(fact.effect.account_deleted));
         try self.lifecycle.ensureUnusedCapacity(allocator, lifecycle_len);
         if (fact.effect.created_contract) self.lifecycle.appendAssumeCapacity(.created_contract);
         if (fact.effect.selfdestruct) self.lifecycle.appendAssumeCapacity(.selfdestruct);
@@ -802,6 +802,13 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var expected = try oracle.toOwnedBlockAccessList(allocator);
     defer expected.deinit(allocator);
     try expectEqualEncoded(allocator, expected, actual);
+
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, expected, direct);
 }
 
 test "small observation indices promote and preserve duplicate merges" {
