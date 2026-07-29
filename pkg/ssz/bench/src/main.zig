@@ -32,10 +32,14 @@ const Case = enum {
     encode_header,
     encode_list_u64_1k,
     encode_list_u64_100k,
+    encode_alloc_list_u64_1k,
+    encode_alloc_list_u64_100k,
     encode_bitvector_4096_bool,
     encode_bitvector_4096_packed,
+    encode_alloc_bitvector_4096_packed,
     encode_bitlist_4096_bool,
     encode_bitlist_4096_packed,
+    encode_alloc_bitlist_4096_packed,
     encode_alloc_beacon_state_16k,
     encode_reuse_beacon_state_16k,
     encode_alloc_beacon_state_100k,
@@ -138,9 +142,9 @@ const Fixtures = struct {
         errdefer allocator.free(encoded_byte_lists_100k);
         const bitlist_4096 = try allocator.alloc(bool, 4_096);
         errdefer allocator.free(bitlist_4096);
-        fillBits(bitlist_4096);
+        fillBitsEvery(bitlist_4096, 3);
         var bitvector_4096: [4_096]bool = undefined;
-        fillBits(&bitvector_4096);
+        fillBitsEvery(&bitvector_4096, 2);
         const encoded_bitvector_4096 = try allocator.alloc(u8, 512);
         errdefer allocator.free(encoded_bitvector_4096);
         _ = try Bitvector4096.encode(encoded_bitvector_4096, bitvector_4096);
@@ -246,6 +250,8 @@ const CaseContext = struct {
             .encode_header => benchEncode(HeaderSsz, fixtures.encode_out, headerValue(), self.batch_ops),
             .encode_list_u64_1k => benchEncode(U64List, fixtures.encode_out, fixtures.list_1k, self.batch_ops),
             .encode_list_u64_100k => benchEncode(U64List, fixtures.encode_out, fixtures.list_100k, self.batch_ops),
+            .encode_alloc_list_u64_1k => benchEncodeAlloc(U64List, allocator, fixtures.list_1k, self.batch_ops),
+            .encode_alloc_list_u64_100k => benchEncodeAlloc(U64List, allocator, fixtures.list_100k, self.batch_ops),
             .encode_bitvector_4096_bool => benchEncode(Bitvector4096, fixtures.encode_out, fixtures.bitvector_4096, self.batch_ops),
             .encode_bitvector_4096_packed => benchEncode(
                 PackedBitvector4096,
@@ -253,10 +259,22 @@ const CaseContext = struct {
                 fixtures.packed_bitvector_4096,
                 self.batch_ops,
             ),
+            .encode_alloc_bitvector_4096_packed => benchEncodeAlloc(
+                PackedBitvector4096,
+                allocator,
+                fixtures.packed_bitvector_4096,
+                self.batch_ops,
+            ),
             .encode_bitlist_4096_bool => benchEncode(Bitlist4096, fixtures.encode_out, fixtures.bitlist_4096, self.batch_ops),
             .encode_bitlist_4096_packed => benchEncode(
                 PackedBitlist4096,
                 fixtures.encode_out,
+                fixtures.packed_bitlist_4096,
+                self.batch_ops,
+            ),
+            .encode_alloc_bitlist_4096_packed => benchEncodeAlloc(
+                PackedBitlist4096,
+                allocator,
                 fixtures.packed_bitlist_4096,
                 self.batch_ops,
             ),
@@ -608,10 +626,14 @@ fn caseInfo(case: Case) CaseInfo {
         .encode_header => .{ .operation = .encode, .name = "beacon_block_header", .boundary = "caller_buffer", .batch_ops = 1_024, .items = 1, .encoded_bytes = 112 },
         .encode_list_u64_1k => .{ .operation = .encode, .name = "list_u64_1k", .boundary = "caller_buffer", .batch_ops = 256, .items = 1_000, .encoded_bytes = 8_000 },
         .encode_list_u64_100k => .{ .operation = .encode, .name = "list_u64_100k", .boundary = "caller_buffer", .batch_ops = 4, .items = 100_000, .encoded_bytes = 800_000 },
+        .encode_alloc_list_u64_1k => .{ .operation = .encode, .name = "list_u64_1k", .boundary = "allocated_output", .batch_ops = 256, .items = 1_000, .encoded_bytes = 8_000 },
+        .encode_alloc_list_u64_100k => .{ .operation = .encode, .name = "list_u64_100k", .boundary = "allocated_output", .batch_ops = 4, .items = 100_000, .encoded_bytes = 800_000 },
         .encode_bitvector_4096_bool => .{ .operation = .encode, .name = "bitvector_4096_bool", .boundary = "caller_buffer", .batch_ops = 32, .items = 4_096, .encoded_bytes = 512 },
         .encode_bitvector_4096_packed => .{ .operation = .encode, .name = "bitvector_4096_packed", .boundary = "caller_buffer", .batch_ops = 1_024, .items = 4_096, .encoded_bytes = 512 },
+        .encode_alloc_bitvector_4096_packed => .{ .operation = .encode, .name = "bitvector_4096_packed", .boundary = "allocated_output", .batch_ops = 256, .items = 4_096, .encoded_bytes = 512 },
         .encode_bitlist_4096_bool => .{ .operation = .encode, .name = "bitlist_4096_bool", .boundary = "caller_buffer", .batch_ops = 32, .items = 4_096, .encoded_bytes = 513 },
         .encode_bitlist_4096_packed => .{ .operation = .encode, .name = "bitlist_4096_packed", .boundary = "caller_buffer", .batch_ops = 1_024, .items = 4_096, .encoded_bytes = 513 },
+        .encode_alloc_bitlist_4096_packed => .{ .operation = .encode, .name = "bitlist_4096_packed", .boundary = "allocated_output", .batch_ops = 256, .items = 4_096, .encoded_bytes = 513 },
         .encode_alloc_beacon_state_16k => .{ .operation = .encode, .name = "beacon_state_phase0_16k", .boundary = "allocated_output", .batch_ops = 1, .items = 16_384, .encoded_bytes = 0 },
         .encode_reuse_beacon_state_16k => .{ .operation = .encode, .name = "beacon_state_phase0_16k", .boundary = "caller_buffer", .batch_ops = 1, .items = 16_384, .encoded_bytes = 0 },
         .encode_alloc_beacon_state_100k => .{ .operation = .encode, .name = "beacon_state_phase0_100k", .boundary = "allocated_output", .batch_ops = 1, .items = 100_000, .encoded_bytes = 0 },
@@ -649,10 +671,10 @@ fn listValues(allocator: std.mem.Allocator, count: usize) ![]u64 {
     return values;
 }
 
-fn fillBits(bits: []bool) void {
-    for (bits, 0..) |*bit, index| {
-        bit.* = index % 3 == 0 or index % 11 == 0;
-    }
+fn fillBitsEvery(bits: []bool, step: usize) void {
+    @memset(bits, false);
+    var index: usize = 0;
+    while (index < bits.len) : (index += step) bits[index] = true;
 }
 
 fn bytes32Value() [32]u8 {
@@ -691,6 +713,38 @@ test "case batch sizes match benchmark functions" {
     try std.testing.expectEqual(@as(usize, 4_096), caseInfo(.encode_u64).batch_ops);
     try std.testing.expectEqual(@as(usize, 4), caseInfo(.decode_list_u64_100k).batch_ops);
     try std.testing.expectEqual(@as(usize, 64), caseInfo(.hash_tree_root_header).batch_ops);
+}
+
+test "bitfield fixtures match libssz benchmark values" {
+    var bitvector: [8]bool = undefined;
+    var bitlist: [8]bool = undefined;
+    fillBitsEvery(&bitvector, 2);
+    fillBitsEvery(&bitlist, 3);
+    try std.testing.expectEqualDeep(
+        [_]bool{ true, false, true, false, true, false, true, false },
+        bitvector,
+    );
+    try std.testing.expectEqualDeep(
+        [_]bool{ true, false, false, true, false, false, true, false },
+        bitlist,
+    );
+}
+
+test "encode comparison lanes distinguish caller and allocated output" {
+    inline for (.{
+        .{ .encode_list_u64_1k, .encode_alloc_list_u64_1k },
+        .{ .encode_list_u64_100k, .encode_alloc_list_u64_100k },
+        .{ .encode_bitvector_4096_packed, .encode_alloc_bitvector_4096_packed },
+        .{ .encode_bitlist_4096_packed, .encode_alloc_bitlist_4096_packed },
+    }) |pair| {
+        const caller = caseInfo(pair[0]);
+        const allocated = caseInfo(pair[1]);
+        try std.testing.expectEqualStrings(caller.name, allocated.name);
+        try std.testing.expectEqual(caller.items, allocated.items);
+        try std.testing.expectEqual(caller.encoded_bytes, allocated.encoded_bytes);
+        try std.testing.expectEqualStrings("caller_buffer", caller.boundary);
+        try std.testing.expectEqualStrings("allocated_output", allocated.boundary);
+    }
 }
 
 test "borrowed-element benchmark lanes keep comparable boundaries" {

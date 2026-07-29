@@ -19,9 +19,8 @@ the generated `release/ssz` branch. Add a tagged package root with:
 zig fetch --save=ssz git+https://github.com/0xjojoex/evm.zig#ssz-v0.1.0
 ```
 
-Then import the dependency's `ssz` module from your `build.zig`. Development
-and pull requests belong on evmz `main`; the release branch is generated and
-must not be edited directly.
+Then import the dependency's `ssz` module from your `build.zig`. Contribute on
+evmz `main` — `release/ssz` is generated and must not be edited directly.
 
 ## Why this one
 
@@ -35,14 +34,14 @@ must not be edited directly.
 - **You own the memory.** Encoding writes directly into caller-provided storage;
   borrowing codecs return validated views into the input. Owned decoding allocates
   only when the host representation requires it, and only for the exact length.
-- **Fast.** Early same-machine benchmarks put owned decoding at parity with or
-  ahead of LambdaClass Rust [`libssz`](https://github.com/lambdaclass/libssz),
-  while caller-buffer encoding provides a dedicated zero-allocation lane. See
-  [Performance notes](#performance-notes).
+- **Fast.** Owned decoding matches or beats LambdaClass Rust
+  [`libssz`](https://github.com/lambdaclass/libssz) on the same boundary, and
+  packed one-shot `hash_tree_root` runs about 5x faster end to end. Where the
+  representation is yours to choose, borrowed and packed lanes are 25x to
+  ~2300x over their expanded equivalents. See [Performance](#performance).
 - **Unopinionated backing.** The core stays flat and cache-free, but `walkTree`
-  replays the exact canonical Merkleization node by node — so you can build a
-  persistent tree, leaf cache, or incremental re-hashing on top without forking the
-  codec. Flat by default; any backing you need above it.
+  replays the exact canonical Merkleization node by node — so a persistent tree,
+  leaf cache, or incremental re-hashing goes on top without forking the codec.
 
 ## Quick start
 
@@ -86,7 +85,7 @@ you list only the fields whose Zig type doesn't pin down the SSZ schema.
 ## What it supports
 
 Every SSZ shape and the codec that produces it. Shapes the host-type mapping
-below can infer come for free; the rest you name explicitly.
+below can infer are free; the rest you name explicitly.
 
 | SSZ type                         | Codec                                                                               |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
@@ -112,26 +111,23 @@ would otherwise be megabytes on the stack.
 `hashTreeRoot` covers every shape above, including sparse progressive containers
 and both union forms, without allocating intermediate roots.
 
-Bounded variable-size codecs (`ByteList`, `List`, `ListOf`, and `Bitlist`) keep
-their declared capacity as an arbitrary-precision `comptime_int`. A schema such
-as `ByteList(1 << 120)` can therefore encode and hash a small runtime slice
-without narrowing its Merkle tree to `usize`. Only actual element counts,
-serialized byte lengths, and allocator operations use machine-sized integers.
+Bounded variable-size codecs (`ByteList`, `List`, `ListOf`, `Bitlist`) hold
+their capacity as an arbitrary-precision `comptime_int`, so `ByteList(1 << 120)`
+encodes and hashes a small runtime slice without narrowing its Merkle tree to
+`usize`. Only element counts, byte lengths, and allocations are machine-sized.
 
 ## Host-type mapping
 
-Everything above is the "what"; this is the "how it's chosen." When a field has
-no explicit codec, the schema is inferred from its Zig type.
-
+When a field has no explicit codec, its schema is inferred from its Zig type.
 `Container(T, overrides)` resolves each field codec in this order:
 
 1. An explicit entry in `overrides`.
 2. The field type's `pub const Ssz` declaration.
 3. The package's `codecFor(FieldType)` default.
 
-There is no global codec registry. A field override is needed only when the Zig
-type does not fully express the intended SSZ schema, or when an external wire
-format deliberately uses a non-default representation.
+There is no global codec registry. Override a field only when its Zig type does
+not fully express the intended SSZ schema, or when an external wire format
+deliberately uses a non-default representation.
 
 | Zig host type                             | Default SSZ schema | Notes                                                                                               |
 | ----------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------- |
@@ -158,28 +154,25 @@ a type-owned `Ssz` declaration. Inference never invents a collection bound.
 ### Schema overrides
 
 The default mappings are conventions, not requirements imposed on external
-schemas. Use a field override when the Zig host type is still appropriate but
-the protocol assigns that field a different SSZ type. The override selects the
-complete field codec used for encoding, decoding, validation, and
-hash-tree-root calculation.
+schemas. Use a field override when the Zig host type is still right but the
+protocol assigns that field a different SSZ type. The override supplies the
+complete field codec — encoding, decoding, validation, and hash-tree-root.
 
-Optional values are a useful example. The package maps `?T` to
-`Union[None, T]` by default:
+Optionals are the common case. `?T` maps to `Union[None, T]`:
 
 ```text
 null     -> 0x00
 value T  -> 0x01 || encode(T, value)
 ```
 
-Instead you can represent some domain-level optional values as `List[T, 1]`:
+Some protocols use `List[T, 1]` instead:
 
 ```text
 null     -> empty list
 value T  -> one-element list containing T
 ```
 
-Even though `?T` remains the natural Zig representation, state the difference at the field with
-`OptionalList(T)`:
+`?T` is still the natural Zig type; state the difference at the field:
 
 ```zig
 const ForkActivation = struct {
@@ -220,17 +213,16 @@ const Slot = struct {
 
 Mappings must be infallible, lossless, and ownership-preserving: both
 `fromWire(toWire(host))` and `toWire(fromWire(wire))` must retain their input
-value. Allocator-backed mappings must retain the decoded allocations so the
-wire codec can release them through `deinit`. Mappings are for representational
-differences, not custom validation or non-SSZ serialization.
+value, and an allocator-backed mapping must keep the decoded allocations
+reachable for `deinit`. They express representational differences, not custom
+validation or non-SSZ serialization.
 
 ### Enums
 
-SSZ has no enum basic type; a Zig `enum(uN)` is an application representation
-over `uintN`. It maps automatically (row above), keeping that integer schema
-while rejecting unknown tags on decode. Use `IntEnum(E)` when you need the same
-mapping stated explicitly — as a field override, or as a standalone codec for a
-bare enum.
+SSZ has no enum type; a Zig `enum(uN)` is an application representation over
+`uintN`. It maps automatically, keeping that integer schema and rejecting
+unknown tags on decode. `IntEnum(E)` states the same mapping explicitly — as a
+field override, or as a standalone codec for a bare enum.
 
 ## Owning vs. non-owning
 
@@ -251,11 +243,10 @@ allocated slice via `Alloc`.
 
 ### Borrowed decoding
 
-Borrowed decoding is opt-in when the input buffer already has a stable lifetime.
-`Borrowed(Codec)` is not a universal zero-copy switch. It accepts only an
+Borrowed decoding is opt-in, for inputs that already have a stable lifetime.
+`Borrowed(Codec)` is not a universal zero-copy switch: it accepts only an
 allocating codec that also exposes an input-backed `decode(bytes)` with the same
-`Value`. The package currently provides that dual owned/borrowed capability
-directly for:
+`Value`. Today that means:
 
 - `ByteList(limit)`
 - `ProgressiveByteList`
@@ -275,11 +266,11 @@ only the byte payloads borrow from the input. Containers, inline vectors,
 optionals, unions, and mapped host representations compose transitively and
 allocate according to their remaining field codecs.
 
-Do not wrap codecs that already decode without allocation, such as basic
-values, `ByteVector`, `Bitvector`, and `OptionalList`; use them directly.
-Slice-backed vectors, fixed-element lists, expanded `Bitlist` values, and outer
-`ListOf` storage have no input-backed representation with the same `Value`, so
-`Borrowed` intentionally rejects them.
+Codecs that already decode without allocation — basic values, `ByteVector`,
+`Bitvector`, `OptionalList` — should be used directly. Slice-backed vectors,
+fixed-element lists, expanded `Bitlist` values, and outer `ListOf` storage have
+no input-backed representation with the same `Value`, so `Borrowed` rejects
+them.
 
 The `PackedBitvector`, `PackedBitlist`, and `ProgressivePackedBitlist` codecs
 are already borrowed codecs; do not wrap them in `Borrowed`. They retain
@@ -293,10 +284,10 @@ if (flags.isSet(7)) {
 }
 ```
 
-Keep the backing bytes alive and unchanged for the complete borrowed-value
-lifetime. Use the base codec's owned decoding when the value must outlive its
-encoded input. Packed views are immutable and support reading, hashing, and
-re-encoding; use the boolean bitfield codecs for mutation.
+Keep the backing bytes alive and unchanged for the borrowed value's whole
+lifetime; use the base codec's owned decoding when the value must outlive its
+input. Packed views are immutable — read, hash, and re-encode; use the boolean
+bitfield codecs to mutate.
 
 ## Custom hashing provider
 
@@ -318,11 +309,10 @@ const root = try merkleizer.hashTreeRoot(Payload.Ssz, payload);
 ```
 
 The context attaches only to Merkleization; encoding, decoding, and schemas stay
-provider-independent. Contexts must implement canonical SHA-256 as a pure result
-provider. Zero-subtree roots through depth 255 are generated ahead of time and
-embedded as canonical constants, so those operations do not call `hash64`;
-deeper schemas extend the same sequence through the supplied context. The
-256-root table is an 8 KiB speed prefix, not a schema-depth limit.
+provider-independent. It must implement canonical SHA-256 as a pure function.
+Zero-subtree roots through depth 255 ship as embedded constants and never call
+`hash64`; deeper schemas extend the same sequence through your context, so the
+8 KiB table is a speed prefix, not a schema-depth limit.
 
 ## Testing & benchmarks
 
@@ -345,59 +335,90 @@ cover primitives, vectors, containers, large `u64` and nested byte lists,
 expanded and packed bitfields, and a Phase 0 `BeaconState` at 16K/100K
 validators, reporting median time and throughput.
 
-### Performance notes
+## Performance
 
-Local Apple M1 Max results (`ReleaseFast`; this-package median, `libssz`
-Criterion estimate):
+- Parity to 1.14x against Rust `libssz` on the directly comparable lanes, with
+  one loss: 16K `BeaconState` decode at 0.88x.
+- About 5x on packed one-shot `hash_tree_root`, end to end.
+- 25x to ~2300x where the host representation is yours to choose — borrowed
+  payloads and packed bitfields against their expanded, owned equivalents.
 
-| Workload                                                      | This package | `libssz` |
-| ------------------------------------------------------------- | -----------: | -------: |
-| Encode `List[u64, 1K]`, caller buffer                         |       102 ns |        - |
-| Decode `List[u64, 1K]`, owned                                 |       140 ns |   134 ns |
-| Encode `List[u64, 100K]`, caller buffer                       |      12.8 us |        - |
-| Decode `List[u64, 100K]`, owned                               |      13.5 us |  13.4 us |
-| Decode `List[ByteList[32], 1K]`, owned                        |      28.7 us |        - |
-| Decode `List[ByteList[32], 1K]`, borrowed items               |      1.14 us |        - |
-| Decode `List[ByteList[32], 100K]`, owned                      |      2.88 ms |        - |
-| Decode `List[ByteList[32], 100K]`, borrowed items             |       105 us |        - |
-| Encode `Bitvector[4096]`, expanded bools, caller buffer       |      3.50 us |        - |
-| Encode `Bitvector[4096]`, packed view, caller buffer          |      8.26 ns |        - |
-| Decode `Bitvector[4096]`, inline bools                        |      2.62 us |        - |
-| Decode `Bitvector[4096]`, borrowed packed view                |      1.14 ns |        - |
-| HTR `Bitvector[4096]`, expanded bools, stdlib SHA-256         |      4.38 us |        - |
-| HTR `Bitvector[4096]`, packed view, stdlib SHA-256            |      1.12 us |        - |
-| Encode `Bitlist[4096]`, expanded bools, caller buffer         |      3.45 us |        - |
-| Encode `Bitlist[4096]`, packed view, caller buffer            |      8.79 ns |        - |
-| Decode `Bitlist[4096]`, owned bools                           |      2.57 us |        - |
-| Decode `Bitlist[4096]`, borrowed packed view                  |      1.32 ns |        - |
-| HTR `Bitlist[4096]`, expanded bools, stdlib SHA-256           |      4.33 us |        - |
-| HTR `Bitlist[4096]`, packed view, stdlib SHA-256              |      1.20 us |        - |
-| Encode `BeaconState`, 16K validators, caller buffer           |       149 us |        - |
-| Decode `BeaconState`, 16K validators, owned                   |       168 us |   166 us |
-| Encode `BeaconState`, 100K validators, caller buffer          |       555 us |        - |
-| Decode `BeaconState`, 100K validators, owned                  |       564 us |   620 us |
+### Cross-library lanes
 
-`-` means `libssz` has no upstream benchmark lane with the same ownership,
-output, and hashing boundary. Its `ssz_append` API can retain `Vec` capacity,
-which differs from an arbitrary caller buffer. Its byte-array/vector benchmarks
-also do not exercise the offset-bearing `List[ByteList]` shape, and its bitfield
-benchmarks decode to owned packed storage rather than either representation
-shown here. The paired byte-list and bitfield rows therefore compare only this
-package's representations, using identical encoded bytes and semantic values.
-Borrowed-item decoding allocates and frees the outer list index while retaining
-each validated payload in the encoded input. Owned decoding also copies and
-frees every payload.
+Local Apple M1 Max results (Zig 0.16.0 `ReleaseFast` median; Rust 1.96.0
+Criterion estimate against `libssz`
+[`f4d682b`](https://github.com/lambdaclass/libssz/commit/f4d682b238f565c098d6fc43852c7534840328c9)).
+Both sides use the same ownership and output boundary. `vs` is the `libssz`
+time divided by this package's; above 1.00x is faster here.
 
-In the directly comparable owned decode lanes, large `u64` lists are at parity;
-`BeaconState` is at parity at 16K validators and about 1.1x faster at 100K.
-HTR rows compare expanded and packed values under the same stdlib SHA-256
-provider; no cross-library HTR number is shown because provider choice can
-dominate the result. These are local measurements, not a performance guarantee.
+| Workload                                        | This package | `libssz` |    vs |
+| ----------------------------------------------- | -----------: | -------: | ----: |
+| Encode `List[u64, 1K]`, reused output           |       102 ns |   111 ns | 1.09x |
+| Encode `List[u64, 1K]`, fresh exact output      |       138 ns |   154 ns | 1.12x |
+| Decode `List[u64, 1K]`, owned                   |       137 ns |   156 ns | 1.14x |
+| Encode `List[u64, 100K]`, reused output         |      14.3 us |  14.1 us | 0.99x |
+| Encode `List[u64, 100K]`, fresh exact output    |      14.1 us |  14.6 us | 1.04x |
+| Decode `List[u64, 100K]`, owned                 |      14.2 us |  14.7 us | 1.04x |
+| Encode `Bitvector[4096]`, packed, fresh output  |      40.0 ns |  41.5 ns | 1.04x |
+| Encode `Bitlist[4096]`, packed, fresh output    |      41.8 ns |  44.6 ns | 1.07x |
+| Encode `BeaconState`, 16K validators, reused    |       154 us |        — |     — |
+| Decode `BeaconState`, 16K validators, owned     |       170 us |   149 us | 0.88x |
+| Encode `BeaconState`, 100K validators, reused   |       553 us |        — |     — |
+| Decode `BeaconState`, 100K validators, owned    |       580 us |   619 us | 1.07x |
+
+Reused-output rows time steady-state work with no allocation in the loop: this
+package writes into an arbitrary caller slice, `libssz` clears a pre-sized `Vec`
+before `ssz_append`. The allocation behavior is comparable, the output API is
+not identical. Fresh-output rows allocate and free an exact-size result for
+every operation on both sides.
+
+`—` marks a lane with no comparable upstream measurement: the `BeaconState`
+fresh-`Vec` encode run was order-sensitive locally. The caller-buffer lane still
+reads on its own — a full `BeaconState` serializes into caller memory for less
+than the cost of decoding one, with no allocation in the timed path.
+
+### Packed one-shot hash_tree_root
+
+| Workload                      | This package | `libssz` |    vs |
+| ----------------------------- | -----------: | -------: | ----: |
+| HTR `Bitvector[4096]`, packed |      1.09 us |  5.83 us | 5.3x  |
+| HTR `Bitlist[4096]`, packed   |      1.16 us |  6.45 us | 5.6x  |
+
+These are end-to-end operations under each library's default SHA-256 provider
+(stdlib here, `Sha2Hasher` upstream). Provider choice can dominate an HTR
+result, so read these as default-path numbers rather than codec-only ones.
+
+### Representation lanes
+
+Where a value has more than one host representation, that choice is worth more
+than any codec-level margin. Each pair below uses identical encoded bytes and
+identical semantic values; only the representation differs.
+
+| Workload                                | Expanded / owned | Packed / borrowed | Speedup |
+| --------------------------------------- | ---------------: | ----------------: | ------: |
+| Decode `List[ByteList[32], 1K]`         |          28.7 us |           1.14 us |     25x |
+| Decode `List[ByteList[32], 100K]`       |          2.88 ms |            105 us |     27x |
+| Encode `Bitvector[4096]`, caller buffer |          4.24 us |           7.65 ns |    554x |
+| Decode `Bitvector[4096]`                |          2.48 us |           1.09 ns |  ~2300x |
+| HTR `Bitvector[4096]`, stdlib SHA-256   |          5.12 us |           1.09 us |    4.7x |
+| Encode `Bitlist[4096]`, caller buffer   |          2.75 us |           8.51 ns |    323x |
+| Decode `Bitlist[4096]`                  |          2.45 us |           1.25 ns |  ~1960x |
+| HTR `Bitlist[4096]`, stdlib SHA-256     |          3.77 us |           1.16 us |    3.3x |
+
+Borrowed byte-list decoding allocates and frees the outer list index while
+retaining each validated payload in the encoded input. Owned decoding also
+copies and frees every payload. `libssz` bitfield decoding returns owned packed
+storage, which is neither representation above, so these pairs have no upstream
+counterpart.
+
+**Method.** One machine, one run each; this package's medians against Criterion
+point estimates, with no cross-machine or cross-run normalization. These are
+local measurements, not a performance guarantee.
 
 ### Tradeoff
 
-This package does not optimize for a long-lived mutable state that is re-rooted
-after every update. We keep caching _out_ of the codec on purpose. Because
+This package does not optimize for long-lived mutable state that is re-rooted
+after every update; caching stays _out_ of the codec on purpose. Because
 `hashTreeRoot` is a pure function over `(schema, value)`, a caller can back it
 with a persistent tree, a leaf cache, or incremental re-hashing.
 `Merkleizer(HashContext).walkTree` exposes the same visitor with a custom
