@@ -1,4 +1,4 @@
-`evmz` is a composable EVM-family execution engine written in Zig.
+`evmz` is a composable EVM execution engine written in Zig.
 
 Leverage comptime build for specialized purpose EVM.
 

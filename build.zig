@@ -389,6 +389,7 @@ pub fn build(b: *std.Build) void {
     const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .basic;
     const guest_zisk_strip = b.option(bool, "guest-zisk-strip", "Strip symbols from the ZisK guest ELF") orelse true;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
+    const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
     addGuestZiskAb(b, optimize);
     addGuestZisk(
         b,
@@ -399,6 +400,7 @@ pub fn build(b: *std.Build) void {
         guest_output_path,
         guest_zisk_strip,
         guest_zisk_profile_tags,
+        guest_heap_metrics,
     );
 
     // examples
@@ -470,9 +472,10 @@ fn buildOptions(
     return options;
 }
 
-fn guestOptions(b: *std.Build, use_ziskos_staticlib: bool) *std.Build.Step.Options {
+fn guestOptions(b: *std.Build, use_ziskos_staticlib: bool, heap_metrics: bool) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(bool, "use_ziskos_staticlib", use_ziskos_staticlib);
+    options.addOption(bool, "heap_metrics", heap_metrics);
     return options;
 }
 
@@ -486,17 +489,11 @@ fn guestZiskTarget(b: *std.Build) std.Build.ResolvedTarget {
 
 const GuestPayload = enum {
     basic,
-    @"stateless-smoke",
-    @"stateless-ssz-smoke",
-    @"stateless-ere-smoke",
     @"stateless-ere",
 
     fn source(self: GuestPayload) []const u8 {
         return switch (self) {
             .basic => "guest/payload/basic.zig",
-            .@"stateless-smoke" => "guest/payload/stateless_smoke.zig",
-            .@"stateless-ssz-smoke" => "guest/payload/stateless_ssz_smoke.zig",
-            .@"stateless-ere-smoke" => "guest/payload/stateless_ere_smoke.zig",
             .@"stateless-ere" => "guest/payload/stateless_ere.zig",
         };
     }
@@ -508,7 +505,7 @@ fn addGuestPayloadTest(
     optimize: std.builtin.OptimizeMode,
     evmz_mod: *std.Build.Module,
 ) void {
-    const guest_options = guestOptions(b, false);
+    const guest_options = guestOptions(b, false, false);
     const guest_options_mod = guest_options.createModule();
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -542,72 +539,6 @@ fn addGuestPayloadTest(
         .root_module = guest_payload_tests_mod,
     });
 
-    const stateless_smoke_payload_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_smoke.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "evmz", .module = evmz_mod },
-            .{ .name = "guest_options", .module = guest_options_mod },
-            .{ .name = "guest_allocator", .module = guest_allocator_mod },
-        },
-    });
-    const stateless_smoke_tests_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_smoke_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "guest_payload_stateless_smoke", .module = stateless_smoke_payload_mod },
-        },
-    });
-    const stateless_smoke_tests = b.addTest(.{
-        .name = "guest-payload-stateless-smoke",
-        .root_module = stateless_smoke_tests_mod,
-    });
-    const stateless_ssz_smoke_payload_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_ssz_smoke.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "evmz", .module = evmz_mod },
-            .{ .name = "guest_options", .module = guest_options_mod },
-            .{ .name = "guest_allocator", .module = guest_allocator_mod },
-        },
-    });
-    const stateless_ssz_smoke_tests_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_ssz_smoke_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "guest_payload_stateless_ssz_smoke", .module = stateless_ssz_smoke_payload_mod },
-        },
-    });
-    const stateless_ssz_smoke_tests = b.addTest(.{
-        .name = "guest-payload-stateless-ssz-smoke",
-        .root_module = stateless_ssz_smoke_tests_mod,
-    });
-    const stateless_ere_smoke_payload_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_ere_smoke.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "evmz", .module = evmz_mod },
-            .{ .name = "guest_options", .module = guest_options_mod },
-            .{ .name = "guest_allocator", .module = guest_allocator_mod },
-        },
-    });
-    const stateless_ere_smoke_tests_mod = b.createModule(.{
-        .root_source_file = b.path("guest/payload/stateless_ere_smoke_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "guest_payload_stateless_ere_smoke", .module = stateless_ere_smoke_payload_mod },
-        },
-    });
-    const stateless_ere_smoke_tests = b.addTest(.{
-        .name = "guest-payload-stateless-ere-smoke",
-        .root_module = stateless_ere_smoke_tests_mod,
-    });
     const guest_io_mod = b.createModule(.{
         .root_source_file = b.path("guest/io.zig"),
         .target = target,
@@ -644,9 +575,6 @@ fn addGuestPayloadTest(
 
     const guest_payload_test_step = b.step("guest-payload-test", "Run native tests for guest payload fixtures");
     guest_payload_test_step.dependOn(&b.addRunArtifact(guest_payload_tests).step);
-    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_smoke_tests).step);
-    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ssz_smoke_tests).step);
-    guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ere_smoke_tests).step);
     guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ere_tests).step);
 }
 
@@ -659,6 +587,7 @@ fn addGuestZisk(
     guest_output_path: ?[]const u8,
     strip: bool,
     profile_tags: bool,
+    heap_metrics: bool,
 ) void {
     const provider_path = ziskos_staticlib_path orelse {
         const fail = b.addFail("guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a");
@@ -671,7 +600,7 @@ fn addGuestZisk(
 
     const target = guestZiskTarget(b);
     const build_options = buildOptions(b, .zkvm, .std, .std);
-    const guest_options = guestOptions(b, true);
+    const guest_options = guestOptions(b, true, heap_metrics);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();
     const stateless_profile_mod = b.createModule(.{
