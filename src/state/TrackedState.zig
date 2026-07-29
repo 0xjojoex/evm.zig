@@ -87,6 +87,9 @@ pub const TopicRange = struct {
 
 allocator: std.mem.Allocator,
 reader: ?StateReader,
+/// Pre-Spurious-Dragon only. See `Spec.retains_empty_accounts`; the executor
+/// sets this from its compiled spec.
+retains_empty_accounts: bool = false,
 epoch: u64,
 generation: u64,
 next_attempt_id: u64,
@@ -1285,10 +1288,12 @@ pub fn deinit(self: *TrackedState) void {
 
 pub fn reset(self: *TrackedState, reader: ?StateReader) void {
     const allocator = self.allocator;
+    const retains_empty_accounts = self.retains_empty_accounts;
     std.debug.assert(self.epoch != std.math.maxInt(u64));
     const next_epoch = self.epoch + 1;
     self.deinit();
     self.* = initWithStateReader(allocator, reader);
+    self.retains_empty_accounts = retains_empty_accounts;
     self.epoch = next_epoch;
 }
 
@@ -1314,11 +1319,16 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
         _ = self.accepted.storage.remove(key);
     }
 
-    try self.accepted.accounts.put(address, .{ .value = .{ .loaded = .{
+    // Seeding is the other way base state arrives, so it normalizes like a
+    // reader load: on a fork without empty accounts, seeding one seeds nothing.
+    const seeded = Account{
         .nonce = account.nonce,
         .balance = account.balance,
         .code_hash = code_hash,
-    } } });
+    };
+    try self.accepted.accounts.put(address, .{
+        .value = if (self.dropsEmptyAccount(seeded)) .absent else .{ .loaded = seeded },
+    });
     try self.accepted.storage.ensureUnusedCapacity(@intCast(account.storage.count()));
     var storage_it = account.storage.iterator();
     while (storage_it.next()) |entry| {
@@ -2232,10 +2242,28 @@ fn mutableTransaction(self: *TrackedState) *Transaction {
 
 fn acceptedAccountExistence(self: *TrackedState, address: Address) !AccountValue {
     if (self.accepted.accounts.get(address)) |row| return row.value;
+    // When the fork has no empty accounts, existence is aliveness, which the
+    // fields decide. Readers answer both questions from the same trie leaf, so
+    // resolving the account here costs nothing over asking for a bare bool.
+    if (!self.retains_empty_accounts) return self.loadAcceptedAccount(address);
+
     const exists = if (self.reader) |reader| try reader.accountExists(address) else false;
     const value: AccountValue = if (exists) .exists_only else .absent;
     try self.accepted.accounts.put(address, .{ .value = value });
     return value;
+}
+
+/// EIP-161 emptiness: nonce, balance, and code only.
+///
+/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`. That gap
+/// is the EIP-7610 residue, so a caller that needs leaf presence rather than
+/// liveness - `createCollision` is the only one - has to ask `accountHasStorage`
+/// separately instead of reading absence as "nothing is there".
+fn dropsEmptyAccount(self: *const TrackedState, account: Account) bool {
+    if (self.retains_empty_accounts) return false;
+    return account.nonce == 0 and
+        account.balance == 0 and
+        std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
 }
 
 fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {
@@ -2246,7 +2274,10 @@ fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {
         }
     }
     const loaded = if (self.reader) |reader| try reader.loadAccount(address) else null;
-    const value: AccountValue = if (loaded) |account| .{ .loaded = account } else .absent;
+    const value: AccountValue = if (loaded) |account|
+        if (self.dropsEmptyAccount(account)) .absent else .{ .loaded = account }
+    else
+        .absent;
     if (self.accepted.accounts.getPtr(address)) |row| {
         row.value = value;
     } else {

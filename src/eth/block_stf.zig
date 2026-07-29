@@ -176,6 +176,10 @@ pub const ParallelResources = struct {
 /// Scheduling the whole `run` call through another task is valid, but the
 /// caller must join or cancel that task before calling `deinit`.
 fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
+    if (!Engine.specification.block.block_access_list) {
+        @compileError("BalExecutor requires a fork that commits to an EIP-7928 block access list; " ++
+            @tagName(revision) ++ " does not");
+    }
     return struct {
         const Self = @This();
 
@@ -725,11 +729,17 @@ pub fn Exact(comptime revision: Revision) type {
 /// Compile options never thread through this layer; they are closed inside
 /// `ExactVm` and only read back as `compile_options`.
 pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
+    // Header shape is revision-owned while execution reads the spec, so the two
+    // must agree or a block would record no access list yet still owe the
+    // header an access-list hash. Catch that when the engine is bound.
+    if (ExactVm.specification.block.block_access_list != revision.isImpl(.amsterdam)) {
+        @compileError("engine spec block_access_list disagrees with the " ++
+            @tagName(revision) ++ " header lineage");
+    }
     const BlockInputAlias = BlockInput;
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
-    const BalExecutorAlias = BalExecutorType(revision, ExactVm);
 
     return struct {
         pub const fork = revision;
@@ -740,7 +750,9 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
         pub const ProduceInput = ProduceInputAlias;
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
-        pub const BalExecutor = BalExecutorAlias;
+        /// Lazily instantiated: referencing this on a fork without a block
+        /// access list is a compile error, not a silently idle executor.
+        pub const BalExecutor = BalExecutorType(revision, ExactVm);
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
             try requireStepCaptureSupport(compile_options, input.capture);
@@ -961,6 +973,9 @@ fn serialFold(
     parallel_execution: ?bal_differential.ParallelExecution,
 ) !Result {
     const DifferentialRunner = BalDifferentialRunner(revision, Engine);
+    // One spec fact gates the header field, observation recording, claim
+    // verification, and the candidate lane.
+    const record_block_access_list = Engine.specification.block.block_access_list;
 
     var state_backend = input.state_backend;
     defer state_backend.deinit();
@@ -972,18 +987,15 @@ fn serialFold(
         std.debug.assert(input.header_hash_claim == null);
         std.debug.assert(input.bal_differential == null);
         std.debug.assert(parallel_execution == null);
-        if (!revision.isImpl(.amsterdam)) return .{ .status = .invalid_block_body };
+        if (!record_block_access_list) return .{ .status = .invalid_block_body };
     }
-    if (!blockBodyValid(revision, input)) return .{ .status = .invalid_block_body };
+    if (!blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
     if (parentHeaderStatus(revision, input)) |status| return .{ .status = status };
     if (!blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
     var block_access_list_mismatch = false;
-    const record_block_access_list = mode == .produce or input.block_access_list != null or
-        input.header_claims.block_access_list_hash != null or
-        revision.isImpl(.amsterdam);
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
     var claimed_block_access_list: ?eth_bal.Decoded = null;
@@ -1682,7 +1694,12 @@ fn transactPayload(
     };
 }
 
-fn blockBodyValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
+fn blockBodyValid(
+    comptime revision: Revision,
+    comptime block_access_list: bool,
+    input: AssumeDecodedBlockInput,
+) bool {
+    // TODO: spec-icfy after moving block_stf out of eth
     if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
     if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
     if (!revision.isImpl(.cancun)) {
@@ -1700,8 +1717,12 @@ fn blockBodyValid(comptime revision: Revision, input: AssumeDecodedBlockInput) b
         }
     }
     if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
-    if (!revision.isImpl(.amsterdam) and
-        (input.block_access_list != null or input.header_claims.block_access_list_hash != null))
+    // Only payload and header fields decide validity. `bal_differential` is a
+    // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
+    // every block and reads `.not_run` back on the forks that have no list.
+    if (!block_access_list and
+        (input.block_access_list != null or
+            input.header_claims.block_access_list_hash != null))
     {
         return false;
     }

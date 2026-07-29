@@ -68,7 +68,14 @@ pub const Account = struct {
     storage_root: [32]u8 = empty_root_hash,
     code_hash: [32]u8 = crypto.keccak256_empty,
 
-    pub fn isEmpty(self: Account) bool {
+    /// The account holds no state at all, so the trie stores no leaf for it.
+    ///
+    /// Deliberately not named `isEmpty`: this is stricter than EIP-161
+    /// emptiness, which ignores storage. An EIP-7610 storage-only account is
+    /// EIP-161-empty yet still keeps a leaf here, which is exactly why
+    /// creation has to collide with one. The EIP-161 predicate lives at the
+    /// execution layer instead - see `Spec.retains_empty_accounts`.
+    pub fn hasNoState(self: Account) bool {
         return self.nonce == 0 and
             self.balance == 0 and
             std.mem.eql(u8, &self.storage_root, &empty_root_hash) and
@@ -286,7 +293,7 @@ pub fn stateRootAfterChangesIndexed(
         }
         next_account.storage_root = storage_root;
 
-        const value: ?[]const u8 = if (next_account.isEmpty())
+        const value: ?[]const u8 = if (next_account.hasNoState())
             null
         else
             try accountValueFrom(scratch, next_account);

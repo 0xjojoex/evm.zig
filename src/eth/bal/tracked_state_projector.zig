@@ -12,67 +12,35 @@ const MemoryAccount = @import("../../state/MemoryAccount.zig");
 const StateReader = @import("../../state/Reader.zig");
 const bal = @import("model.zig");
 const observation = @import("observation.zig");
-const oracle_recorder = @import("recorder.zig");
-const ShardFold = @import("shard_fold.zig").ShardFold;
+const shard_fold = @import("shard_fold.zig");
+const ShardFold = shard_fold.ShardFold;
 
 const Address = address.Address;
 const Allocator = std.mem.Allocator;
 const linear_index_limit = 8;
 
+/// Detach one sealed observation view as an owned, sorted transition.
+///
+/// This shares `ObservationFold` with the block builder so the fact-to-
+/// observation mapping - notably the rule that a storage wipe suppresses the
+/// implied nonce and code finalization writes - exists exactly once.
 pub fn materialize(
     view: State.ObservationsView,
     allocator: Allocator,
 ) !observation.LaneTransition {
-    var builders: std.ArrayList(AccountBuilder) = .empty;
-    defer {
-        for (builders.items) |*builder| builder.deinit(allocator);
-        builders.deinit(allocator);
-    }
-    var indices = std.AutoHashMap(Address, usize).init(allocator);
-    defer indices.deinit();
+    var fold = ObservationFold.init(allocator);
+    defer fold.deinit();
+    try fold.appendView(view);
 
-    var account_index: u32 = 0;
-    while (account_index < view.accounts.len()) : (account_index += 1) {
-        const fact = view.accounts.at(account_index);
-        if (!fact.observation.semantic_access and !fact.effect.any()) continue;
-        const builder = try accountBuilderFor(
-            allocator,
-            &builders,
-            &indices,
-            fact.address,
-        );
-        builder.account = fact;
-    }
-
-    var storage_index: u32 = 0;
-    while (storage_index < view.storage.len()) : (storage_index += 1) {
-        const metadata = view.storage.metadataAt(storage_index);
-        if (!metadata.observation.value_read and !metadata.effect.written) continue;
-        const fact = view.storage.at(storage_index) orelse
-            return error.IncompleteStorageObservation;
-        const builder = try accountBuilderFor(
-            allocator,
-            &builders,
-            &indices,
-            fact.address,
-        );
-        try builder.storage.append(allocator, .{
-            .slot = fact.key,
-            .original = fact.original,
-            .current = fact.current,
-            .written = fact.effect.written,
-        });
-    }
-
-    std.mem.sort(AccountBuilder, builders.items, {}, accountBuilderLessThan);
+    std.mem.sort(FoldAccount, fold.accounts.items, {}, foldAccountLessThan);
     var accounts: std.ArrayList(observation.AccountObservation) = .empty;
     errdefer {
         for (accounts.items) |account| deinitAccountObservation(allocator, account);
         accounts.deinit(allocator);
     }
-    try accounts.ensureTotalCapacity(allocator, builders.items.len);
-    for (builders.items) |*builder| {
-        accounts.appendAssumeCapacity(try builder.toOwnedObservation(view, allocator));
+    try accounts.ensureTotalCapacity(allocator, fold.accounts.items.len);
+    for (fold.accounts.items) |*account| {
+        accounts.appendAssumeCapacity(try account.toOwnedObservation(allocator));
     }
     return .{ .accounts = try accounts.toOwnedSlice(allocator) };
 }
@@ -414,6 +382,23 @@ const FoldAccount = struct {
         self.storage_wiped = self.storage_wiped or storage_wiped;
     }
 
+    /// Hand the folded rows to the caller. The code body is already owned; the
+    /// slot and lifecycle lists transfer as-is.
+    fn toOwnedObservation(self: *FoldAccount, allocator: Allocator) !observation.AccountObservation {
+        std.mem.sort(
+            observation.StorageObservation,
+            self.storage.items,
+            {},
+            storageObservationLessThan,
+        );
+        var result = self.asObservation();
+        result.storage = try self.storage.toOwnedSlice(allocator);
+        errdefer allocator.free(@constCast(result.storage));
+        result.lifecycle = try self.lifecycle.toOwnedSlice(allocator);
+        self.code = null;
+        return result;
+    }
+
     fn asObservation(self: *const FoldAccount) observation.AccountObservation {
         return .{
             .address = self.address,
@@ -428,105 +413,6 @@ const FoldAccount = struct {
         };
     }
 };
-
-const AccountBuilder = struct {
-    address: Address,
-    account: ?State.AccountObservationFact = null,
-    storage: std.ArrayList(observation.StorageObservation) = .empty,
-
-    fn deinit(self: *AccountBuilder, allocator: Allocator) void {
-        self.storage.deinit(allocator);
-        self.* = undefined;
-    }
-
-    fn toOwnedObservation(
-        self: *AccountBuilder,
-        view: State.ObservationsView,
-        allocator: Allocator,
-    ) !observation.AccountObservation {
-        var result = observation.AccountObservation{ .address = self.address };
-        errdefer deinitAccountObservation(allocator, result);
-
-        std.mem.sort(
-            observation.StorageObservation,
-            self.storage.items,
-            {},
-            storageObservationLessThan,
-        );
-        result.storage = try self.storage.toOwnedSlice(allocator);
-
-        const fact = self.account orelse return result;
-        result.account_reset = accountAbsent(fact.original) and
-            (!accountAbsent(fact.current) or fact.effect.created_contract);
-        result.account_deleted = fact.effect.account_deleted;
-        result.storage_wiped = fact.effect.storage_wiped;
-        if (fact.effect.balance_written) {
-            result.balance = .{
-                .original = accountOrZero(fact.original).balance,
-                .current = accountOrZero(fact.current).balance,
-            };
-        }
-        // A wipe only ever accompanies a same-transaction creation, so the
-        // account is already reset for the consumer; the zeroed nonce and code
-        // finalization writes are implied and must not reappear as changes.
-        if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
-            result.nonce = .{
-                .original = accountOrZero(fact.original).nonce,
-                .current = accountOrZero(fact.current).nonce,
-            };
-        }
-        if (fact.effect.code_written and !fact.effect.storage_wiped) {
-            const original = accountOrZero(fact.original);
-            const current = accountOrZero(fact.current);
-            const code = view.code(current.code_hash) orelse
-                return error.ObservationCodeUnavailable;
-            result.code = .{
-                .original_hash = original.code_hash,
-                .current_hash = current.code_hash,
-                .current_code = try allocator.dupe(u8, code.bytes),
-            };
-        }
-
-        const lifecycle_len =
-            @as(usize, @intFromBool(fact.effect.created_contract)) +
-            @as(usize, @intFromBool(fact.effect.selfdestruct)) +
-            @as(usize, @intFromBool(fact.effect.account_deleted));
-        if (lifecycle_len != 0) {
-            const lifecycle = try allocator.alloc(
-                observation.LifecycleKind,
-                lifecycle_len,
-            );
-            var index: usize = 0;
-            if (fact.effect.created_contract) {
-                lifecycle[index] = .created_contract;
-                index += 1;
-            }
-            if (fact.effect.selfdestruct) {
-                lifecycle[index] = .selfdestruct;
-                index += 1;
-            }
-            if (fact.effect.account_deleted) {
-                lifecycle[index] = .account_deleted;
-            }
-            result.lifecycle = lifecycle;
-        }
-        return result;
-    }
-};
-
-fn accountBuilderFor(
-    allocator: Allocator,
-    builders: *std.ArrayList(AccountBuilder),
-    indices: *std.AutoHashMap(Address, usize),
-    account_address: Address,
-) !*AccountBuilder {
-    if (indices.get(account_address)) |index| return &builders.items[index];
-    const index = builders.items.len;
-    try builders.append(allocator, .{ .address = account_address });
-    errdefer _ = builders.pop();
-    try indices.put(account_address, index);
-    return &builders.items[index];
-}
 
 fn accountOrZero(value: ?State.AccountValue) Account {
     return switch (value orelse .absent) {
@@ -543,7 +429,7 @@ fn accountAbsent(value: ?State.AccountValue) bool {
     };
 }
 
-fn accountBuilderLessThan(_: void, lhs: AccountBuilder, rhs: AccountBuilder) bool {
+fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
     return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
 }
 
@@ -583,7 +469,9 @@ test "existence-only semantic access does not require account fields" {
         }
 
         fn loadAccount(_: *anyopaque, _: Address) !?Account {
-            return .{};
+            // Alive: an EIP-161-empty account resolves to absent, which would
+            // make this an existence test rather than an observation test.
+            return .{ .balance = 1 };
         }
 
         fn loadCode(_: *anyopaque, _: [32]u8) ![]const u8 {
@@ -630,185 +518,6 @@ test "gas-only storage access does not require storage values" {
     var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
     defer transition.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), transition.accounts.len);
-}
-
-test "tracked observations match recorder after inner rollback" {
-    const allocator = std.testing.allocator;
-    const target = address.addr(1);
-    const accessed = address.addr(2);
-    const reverted = address.addr(3);
-    const original_code = [_]u8{ 0x60, 0x01 };
-    const replacement_code = [_]u8{ 0x60, 0x02 };
-
-    var state = State.init(allocator);
-    defer state.deinit();
-    var seeded = MemoryAccount.init(allocator);
-    seeded.balance = 10;
-    seeded.nonce = 3;
-    try seeded.setCode(&original_code);
-    try seeded.storage.put(7, 11);
-    try state.seedAccount(target, seeded);
-
-    var oracle = oracle_recorder.Recorder.init(allocator);
-    defer oracle.deinit();
-    oracle.setBlockAccessIndex(1);
-
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
-    try state.observeAccountAccess(accessed);
-    try oracle.recordAccountAccess(accessed);
-
-    try state.setBalance(target, 12);
-    try oracle.recordBalanceWrite(.{
-        .address = target,
-        .previous = 10,
-        .value = 12,
-    });
-    try state.setNonce(target, 4);
-    try oracle.recordNonceWrite(.{
-        .address = target,
-        .previous = 3,
-        .value = 4,
-    });
-    try state.setCode(target, &replacement_code);
-    try oracle.recordCodeWrite(.{
-        .address = target,
-        .previous_hash = crypto.keccak256(&original_code),
-        .size = replacement_code.len,
-        .code = &replacement_code,
-    });
-    _ = try state.setStorage(target, 7, 13);
-    try oracle.recordStorageWrite(.{
-        .address = target,
-        .key = 7,
-        .previous = 11,
-        .value = 13,
-    });
-    _ = try state.getStorage(target, 8);
-    try oracle.recordStorageRead(.{
-        .address = target,
-        .key = 8,
-        .value = 0,
-    });
-
-    const checkpoint = state.checkpoint();
-    try oracle.checkpoint(.{
-        .kind = .checkpoint,
-        .depth = 1,
-        .journal_len = 0,
-        .logs_len = 0,
-    });
-    try state.setBalance(reverted, 9);
-    try oracle.recordBalanceWrite(.{
-        .address = reverted,
-        .previous = 0,
-        .value = 9,
-    });
-    _ = try state.setStorage(target, 7, 15);
-    try oracle.recordStorageWrite(.{
-        .address = target,
-        .key = 7,
-        .previous = 13,
-        .value = 15,
-    });
-    try state.markCreatedContract(reverted);
-    try oracle.recordLifecycle(.created_contract, reverted);
-    state.revertToCheckpoint(checkpoint);
-    try oracle.checkpoint(.{
-        .kind = .revert,
-        .depth = 1,
-        .journal_len = 0,
-        .logs_len = 0,
-    });
-
-    state.closeScope();
-    state.seal(attempt);
-
-    var delta = try materialize(state.pendingView().observations(), allocator);
-    defer delta.deinit(allocator);
-    var actual = try delta.toOwnedBlockAccessList(allocator, 1);
-    defer actual.deinit(allocator);
-    var direct_builder = BlockBuilder.init(allocator);
-    defer direct_builder.deinit();
-    try direct_builder.append(state.pendingView().observations(), 1);
-    var direct = try direct_builder.finish();
-    defer direct.deinit(allocator);
-    try expectEqualEncoded(allocator, actual, direct);
-
-    var expected = try oracle.toOwnedBlockAccessList(allocator);
-    defer expected.deinit(allocator);
-    try expectEqualEncoded(allocator, expected, actual);
-}
-
-test "selfdestruct finalization projects post-transaction BAL state" {
-    const allocator = std.testing.allocator;
-    const target = address.addr(1);
-    const original_code = [_]u8{ 0x60, 0x01 };
-    const replacement_code = [_]u8{ 0x60, 0x02 };
-
-    var state = State.init(allocator);
-    defer state.deinit();
-    var seeded = MemoryAccount.init(allocator);
-    seeded.balance = 10;
-    seeded.nonce = 3;
-    try seeded.setCode(&original_code);
-    try seeded.storage.put(7, 11);
-    try state.seedAccount(target, seeded);
-
-    var oracle = oracle_recorder.Recorder.init(allocator);
-    defer oracle.deinit();
-    oracle.setBlockAccessIndex(1);
-
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
-    try state.setBalance(target, 12);
-    try oracle.recordBalanceWrite(.{
-        .address = target,
-        .previous = 10,
-        .value = 0,
-    });
-    try state.setNonce(target, 4);
-    try state.setCode(target, &replacement_code);
-    _ = try state.setStorage(target, 7, 13);
-    try oracle.recordStorageRead(.{
-        .address = target,
-        .key = 7,
-        .value = 11,
-    });
-    try state.markSelfdestructed(target);
-    try oracle.recordLifecycle(.selfdestruct, target);
-    try state.finalize(.{ .existing_account = .{
-        .delete_account = true,
-        .clear_storage = true,
-    } });
-    try oracle.recordLifecycle(.account_deleted, target);
-    state.closeScope();
-    state.seal(attempt);
-
-    var delta = try materialize(state.pendingView().observations(), allocator);
-    defer delta.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), delta.accounts.len);
-    try std.testing.expectEqualSlices(
-        observation.LifecycleKind,
-        &.{ .selfdestruct, .account_deleted },
-        delta.accounts[0].lifecycle,
-    );
-    try std.testing.expect(delta.accounts[0].account_deleted);
-    try std.testing.expect(delta.accounts[0].storage_wiped);
-    try std.testing.expect(delta.accounts[0].storage[0].written);
-
-    var actual = try delta.toOwnedBlockAccessList(allocator, 1);
-    defer actual.deinit(allocator);
-    var expected = try oracle.toOwnedBlockAccessList(allocator);
-    defer expected.deinit(allocator);
-    try expectEqualEncoded(allocator, expected, actual);
-
-    var direct_builder = BlockBuilder.init(allocator);
-    defer direct_builder.deinit();
-    try direct_builder.append(state.pendingView().observations(), 1);
-    var direct = try direct_builder.finish();
-    defer direct.deinit(allocator);
-    try expectEqualEncoded(allocator, expected, direct);
 }
 
 test "small observation indices promote and preserve duplicate merges" {

@@ -4,15 +4,23 @@
 //! `block_access_index`, falling back to authenticated pre-state when no claim
 //! write applies yet. Reads outside claim coverage fail closed.
 //!
-//! BAL does not inventory untouched storage. When a positioned write clears a
-//! pre-state nonzero slot, a boolean pre-state `accountHasStorage` result cannot
-//! prove whether another untouched slot remains. That case is reported as
-//! `PositionedStorageUnknown`; callers must leave the BAL path rather than
-//! guess.
+//! Positioned fields are exactly parent state overridden by the latest claim
+//! post-value at or before the index. Presence follows EIP-161 aliveness -
+//! nonzero nonce, nonzero balance, or non-empty code - because from Amsterdam
+//! no legacy empty account survives and none can be created. `EXTCODEHASH` and
+//! `EXTCODESIZE` already treat absent and EIP-161-empty accounts identically,
+//! so the claim never needs an indexed lifecycle fact to separate them.
 //!
-//! BAL reads also lack position indices. A legacy empty base account can be
-//! touched and deleted without a net claim mutation, so its later presence is
-//! reported as `PositionedAccountUnknown`. Index zero remains exact pre-state.
+//! Aliveness has no storage exception. EIP-7523 retires the empty account, and
+//! EIP-161 emptiness ignores storage, so the residual EIP-7610 storage-only
+//! accounts must be alive through another field - on Mainnet, balance - and
+//! already satisfy the rule. Whole-storage presence stays parent-stable while
+//! an address remains eligible for the EIP-7610 predicate, so
+//! `accountHasStorage` delegates to the authenticated base reader.
+//!
+//! This lane is speculative: its output is gated by exact observed-versus-
+//! claimed BAL bytes and by the block's roots. A claim that violates these
+//! Amsterdam invariants can only produce a mismatch, never a false accept.
 
 const std = @import("std");
 
@@ -29,22 +37,12 @@ const BalClaimReader = @This();
 pub const Error = error{
     BlockAccessListAccountNotCovered,
     BlockAccessListStorageNotCovered,
-    PositionedAccountUnknown,
-    PositionedStorageUnknown,
-};
-
-pub const StoragePresence = enum {
-    empty,
-    nonempty,
-    unknown,
 };
 
 /// Detailed cause retained beside the generic executor strategy failure.
 pub const StrategyFailure = enum {
     account_not_covered,
     storage_not_covered,
-    positioned_account_unknown,
-    positioned_storage_unknown,
 };
 
 base: Reader,
@@ -62,32 +60,6 @@ pub fn init(base: Reader, claim: *const ClaimView, block_access_index: bal.Block
 
 pub fn reader(self: *BalClaimReader) Reader {
     return .{ .ptr = self, .vtable = &vtable };
-}
-
-/// Exact when possible; `.unknown` is the conservative result when the BAL and
-/// the base reader's boolean storage summary cannot identify the last slot.
-pub fn storagePresence(self: *BalClaimReader, target: Address) !StoragePresence {
-    const account_cursor = self.claim.account(target) orelse return self.fail(.account_not_covered);
-    if (try self.loadPositionedAccountFor(target, account_cursor) == null) return .empty;
-    return self.storagePresenceFor(target, account_cursor);
-}
-
-fn storagePresenceFor(self: *BalClaimReader, target: Address, account_cursor: ClaimView.AccountCursor) !StoragePresence {
-    var positioned_writes = account_cursor.storageWritesAt(self.block_access_index);
-    while (positioned_writes.next()) |write| {
-        if (write.value != 0) return .nonempty;
-    }
-
-    if (!try self.base.accountHasStorage(target)) return .empty;
-    positioned_writes = account_cursor.storageWritesAt(self.block_access_index);
-    while (positioned_writes.next()) |write| {
-        std.debug.assert(write.value == 0);
-        if (try self.base.getStorage(target, write.slot) != 0) {
-            return .unknown;
-        }
-    }
-
-    return .nonempty;
 }
 
 const vtable = Reader.VTable{
@@ -119,8 +91,6 @@ fn loadPositionedAccountFor(self: *BalClaimReader, target: Address, account_curs
     const balance = account_cursor.balanceAt(self.block_access_index);
     const nonce = account_cursor.nonceAt(self.block_access_index);
     const code = account_cursor.codeAt(self.block_access_index);
-    const has_positioned_storage_write = account_cursor.hasStorageWriteAt(self.block_access_index);
-    const has_positioned_mutation = balance != null or nonce != null or code != null or has_positioned_storage_write;
 
     const base_account = if (balance != null and nonce != null and code != null)
         null
@@ -131,14 +101,11 @@ fn loadPositionedAccountFor(self: *BalClaimReader, target: Address, account_curs
     if (nonce) |value| positioned_account.nonce = value;
     if (code) |value| positioned_account.code_hash = value.hash;
 
-    if (!accountFieldsEmpty(positioned_account)) return positioned_account;
-    if (!has_positioned_mutation and base_account == null) return null;
-    if (!has_positioned_mutation and self.block_access_index == 0) return base_account;
-
-    // BAL has no indexed account-access/deletion fact. At later positions an
-    // empty base leaf may have survived untouched or been removed by EIP-161;
-    // an applicable mutation ending empty has the same missing lifecycle bit.
-    return self.fail(.positioned_account_unknown);
+    // EIP-161 emptiness is the whole rule, and storage plays no part in it. It
+    // holds whether the claim drove the fields to zero or parent state was
+    // already that way, because the executor resolves an empty account to
+    // absent on every fork that has no empty accounts.
+    return if (accountAlive(positioned_account)) positioned_account else null;
 }
 
 fn loadCode(ptr: *anyopaque, code_hash: [32]u8) ![]const u8 {
@@ -166,12 +133,15 @@ fn getStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
     };
 }
 
+/// Only `createCollision` consults whole-storage presence, and only for an
+/// address whose nonce is zero and whose code is empty. Such an address cannot
+/// have executed `SSTORE`, cannot have been delegated to without a nonce bump,
+/// and cannot have been created over, so no earlier block position can have
+/// changed its storage. Parent state is therefore already exact.
 fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
-    return switch (try context(ptr).storagePresence(target)) {
-        .empty => false,
-        .nonempty => true,
-        .unknown => context(ptr).fail(.positioned_storage_unknown),
-    };
+    const self = context(ptr);
+    _ = self.claim.account(target) orelse return self.fail(.account_not_covered);
+    return self.base.accountHasStorage(target);
 }
 
 fn fail(self: *BalClaimReader, failure: StrategyFailure) Error {
@@ -179,15 +149,13 @@ fn fail(self: *BalClaimReader, failure: StrategyFailure) Error {
     return switch (failure) {
         .account_not_covered => error.BlockAccessListAccountNotCovered,
         .storage_not_covered => error.BlockAccessListStorageNotCovered,
-        .positioned_account_unknown => error.PositionedAccountUnknown,
-        .positioned_storage_unknown => error.PositionedStorageUnknown,
     };
 }
 
-fn accountFieldsEmpty(account: Account) bool {
-    return account.nonce == 0 and
-        account.balance == 0 and
-        std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
+fn accountAlive(account: Account) bool {
+    return account.nonce != 0 or
+        account.balance != 0 or
+        !std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
 }
 
 const TestStorage = struct {
@@ -337,7 +305,7 @@ test "BalClaimReader fails closed outside claim coverage" {
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 3));
 }
 
-test "BalClaimReader preserves index-zero base presence and verifies delegated code" {
+test "BalClaimReader keeps an untouched base leaf and verifies delegated code" {
     const target = address.addr(1);
     const reads = [_]u256{3};
     const future_balance = [_]bal.BalanceChange{.{ .block_access_index = 2, .post_balance = 1 }};
@@ -355,7 +323,7 @@ test "BalClaimReader preserves index-zero base presence and verifies delegated c
     const expected_hash = crypto.keccak256(&expected_code);
     var base = TestBase{
         .target = target,
-        .account = .{},
+        .account = .{ .balance = 5 },
         .code = &corrupt_code,
         .code_key = expected_hash,
     };
@@ -363,67 +331,99 @@ test "BalClaimReader preserves index-zero base presence and verifies delegated c
     const state_reader = positioned.reader();
 
     try std.testing.expect(try state_reader.accountExists(target));
-    try std.testing.expect((try state_reader.loadAccount(target)) != null);
+    try std.testing.expectEqual(@as(u256, 5), (try state_reader.loadAccount(target)).?.balance);
     try std.testing.expectError(error.CodeHashMismatch, state_reader.loadCode(expected_hash));
 
+    // No claim field applies before index 2, so the base leaf stays visible
+    // instead of becoming an unresolvable lifecycle question.
     var later = BalClaimReader.init(base.reader(), &view, 1);
-    try std.testing.expectError(error.PositionedAccountUnknown, later.reader().loadAccount(target));
-    try std.testing.expectError(error.PositionedAccountUnknown, later.reader().accountExists(target));
-    try std.testing.expectError(error.PositionedAccountUnknown, later.reader().getStorage(target, 3));
+    try std.testing.expectEqual(@as(u256, 5), (try later.reader().loadAccount(target)).?.balance);
+    try std.testing.expect(try later.reader().accountExists(target));
+    try std.testing.expectEqual(@as(u256, 0), try later.reader().getStorage(target, 3));
 }
 
-test "BalClaimReader storage presence is exact or explicitly unknown" {
+test "BalClaimReader resolves an emptied account to absent" {
     const target = address.addr(1);
-    const clear_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 0 }};
-    const set_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 12 }};
-    const clear_only_slots = [_]bal.SlotChanges{.{ .slot = 1, .changes = &clear_changes }};
-    const clear_and_set_slots = [_]bal.SlotChanges{
-        .{ .slot = 1, .changes = &clear_changes },
-        .{ .slot = 2, .changes = &set_changes },
-    };
-    const nonce_changes = [_]bal.NonceChange{.{ .block_access_index = 1, .new_nonce = 1 }};
-    const clear_only_claim = [_]bal.AccountChanges{.{ .address = target, .storage_changes = &clear_only_slots }};
-    const clear_and_set_claim = [_]bal.AccountChanges{.{
+    const balance_changes = [_]bal.BalanceChange{.{ .block_access_index = 1, .post_balance = 0 }};
+    const nonce_changes = [_]bal.NonceChange{.{ .block_access_index = 1, .new_nonce = 0 }};
+    const code_changes = [_]bal.CodeChange{.{ .block_access_index = 1, .new_code = &.{} }};
+    const claim = [_]bal.AccountChanges{.{
         .address = target,
-        .storage_changes = &clear_and_set_slots,
+        .balance_changes = &balance_changes,
         .nonce_changes = &nonce_changes,
+        .code_changes = &code_changes,
     }};
-    try bal.validate(&clear_only_claim, .{});
-    try bal.validate(&clear_and_set_claim, .{});
+    try bal.validate(&claim, .{});
 
-    var clear_only_view = try ClaimView.initAssumeValidated(std.testing.allocator, &clear_only_claim);
-    defer clear_only_view.deinit(std.testing.allocator);
-    var clear_and_set_view = try ClaimView.initAssumeValidated(std.testing.allocator, &clear_and_set_claim);
-    defer clear_and_set_view.deinit(std.testing.allocator);
-
-    const base_storage = [_]TestStorage{
-        .{ .key = 1, .value = 9 },
-        .{ .key = 8, .value = 10 },
-    };
+    var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
+    defer view.deinit(std.testing.allocator);
     var base = TestBase{
         .target = target,
-        .account = .{ .nonce = 1 },
-        .storage = &base_storage,
+        .account = .{ .nonce = 3, .balance = 10 },
     };
 
-    var before_clear = BalClaimReader.init(base.reader(), &clear_only_view, 0);
-    try std.testing.expectEqual(StoragePresence.nonempty, try before_clear.storagePresence(target));
+    var before = BalClaimReader.init(base.reader(), &view, 0);
+    try std.testing.expect(try before.reader().accountExists(target));
 
-    var after_clear = BalClaimReader.init(base.reader(), &clear_only_view, 1);
-    try std.testing.expectEqual(StoragePresence.unknown, try after_clear.storagePresence(target));
-    try std.testing.expectError(error.PositionedStorageUnknown, after_clear.reader().accountHasStorage(target));
-    try std.testing.expect((try after_clear.reader().loadAccount(target)) != null);
+    var after = BalClaimReader.init(base.reader(), &view, 1);
+    try std.testing.expect(!(try after.reader().accountExists(target)));
+    try std.testing.expectEqual(@as(?Account, null), try after.reader().loadAccount(target));
+}
 
-    var after_clear_and_set = BalClaimReader.init(base.reader(), &clear_and_set_view, 1);
-    try std.testing.expectEqual(StoragePresence.nonempty, try after_clear_and_set.storagePresence(target));
-    try std.testing.expect(try after_clear_and_set.reader().accountExists(target));
+test "BalClaimReader answers whole-storage presence from parent state" {
+    const target = address.addr(1);
+    const clear_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 0 }};
+    const clear_only_slots = [_]bal.SlotChanges{.{ .slot = 1, .changes = &clear_changes }};
+    const claim = [_]bal.AccountChanges{.{ .address = target, .storage_changes = &clear_only_slots }};
+    try bal.validate(&claim, .{});
+
+    var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
+    defer view.deinit(std.testing.allocator);
+
+    // An EIP-7610 leaf: no nonce, no code, storage present. It must also carry
+    // a balance, because EIP-7523 forbids an EIP-161-empty account in
+    // post-merge state and EIP-161 emptiness ignores storage.
+    const base_storage = [_]TestStorage{.{ .key = 8, .value = 10 }};
+    var storage_only = TestBase{
+        .target = target,
+        .account = .{ .balance = 1 },
+        .storage = &base_storage,
+    };
+    var positioned = BalClaimReader.init(storage_only.reader(), &view, 1);
+    try std.testing.expect(try positioned.reader().accountHasStorage(target));
+    // Alive through balance, so `createCollision` still reaches the storage
+    // predicate without an aliveness exception.
+    try std.testing.expect(try positioned.reader().accountExists(target));
 
     var empty_base = TestBase{ .target = target };
-    var before_set = BalClaimReader.init(empty_base.reader(), &clear_and_set_view, 0);
-    try std.testing.expectEqual(StoragePresence.empty, try before_set.storagePresence(target));
-    try std.testing.expect(!(try before_set.reader().accountExists(target)));
+    var absent = BalClaimReader.init(empty_base.reader(), &view, 1);
+    try std.testing.expect(!(try absent.reader().accountHasStorage(target)));
 
-    var after_set = BalClaimReader.init(empty_base.reader(), &clear_and_set_view, 1);
-    try std.testing.expectEqual(StoragePresence.nonempty, try after_set.storagePresence(target));
-    try std.testing.expect(try after_set.reader().accountExists(target));
+    var uncovered = BalClaimReader.init(storage_only.reader(), &view, 1);
+    try std.testing.expectError(
+        error.BlockAccessListAccountNotCovered,
+        uncovered.reader().accountHasStorage(address.addr(2)),
+    );
+}
+
+test "BalClaimReader resolves an untouched empty leaf to absent" {
+    const target = address.addr(1);
+    const reads = [_]u256{3};
+    const claim = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &reads }};
+    try bal.validate(&claim, .{});
+
+    var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
+    defer view.deinit(std.testing.allocator);
+
+    // A seeded EIP-161-empty leaf reads as absent here for the same reason it
+    // does through `TrackedState`: from Spurious Dragon on there is no such
+    // account. The two must agree, because `account_exists` drives new-account
+    // gas and a disagreement would surface as a lane mismatch on gas alone.
+    var empty_leaf = TestBase{ .target = target, .account = .{} };
+    var over_empty = BalClaimReader.init(empty_leaf.reader(), &view, 1);
+    try std.testing.expect(!(try over_empty.reader().accountExists(target)));
+
+    var absent = TestBase{ .target = target };
+    var over_absent = BalClaimReader.init(absent.reader(), &view, 1);
+    try std.testing.expect(!(try over_absent.reader().accountExists(target)));
 }

@@ -31,9 +31,6 @@ pub fn normalize(err: anyerror) Error {
 
         error.BlockAccessListAccountNotCovered,
         error.BlockAccessListStorageNotCovered,
-        error.FoldedStateStorageUnknown,
-        error.PositionedAccountUnknown,
-        error.PositionedStorageUnknown,
         => error.StateReaderStrategyFailure,
 
         error.TraceCapacityExceeded => error.TraceCapacityExceeded,
@@ -63,9 +60,6 @@ test "normalization preserves bounded capture failures and contains provider err
     const state_reader_strategy_failures = [_]anyerror{
         error.BlockAccessListAccountNotCovered,
         error.BlockAccessListStorageNotCovered,
-        error.FoldedStateStorageUnknown,
-        error.PositionedAccountUnknown,
-        error.PositionedStorageUnknown,
     };
     for (state_reader_strategy_failures) |failure| {
         try testing.expectEqual(error.StateReaderStrategyFailure, normalize(failure));

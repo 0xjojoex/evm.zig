@@ -12,6 +12,7 @@ const Address = @import("../../address.zig").Address;
 const Host = @import("../../Host.zig");
 const crypto = @import("../../crypto.zig");
 const observation = @import("observation.zig");
+const shard_fold = @import("shard_fold.zig");
 const state = @import("../../state.zig");
 const tracked_state_projector = @import("tracked_state_projector.zig");
 const vm = @import("../../vm.zig");
@@ -489,21 +490,8 @@ pub const OrderedTransitionFold = struct {
 
 /// Read-only candidate post-state layered over an authenticated base.
 pub const FoldedStateReader = struct {
-    pub const Error = error{FoldedStateStorageUnknown};
-
-    pub const StoragePresence = enum {
-        empty,
-        nonempty,
-        unknown,
-    };
-
-    pub const StrategyFailure = enum {
-        storage_presence_unknown,
-    };
-
     base: state.Reader,
     candidate: *const CandidateState,
-    strategy_failure: ?StrategyFailure = null,
 
     pub fn initAssumeCanonical(base: state.Reader, candidate: *const CandidateState) FoldedStateReader {
         return .{ .base = base, .candidate = candidate };
@@ -511,28 +499,6 @@ pub const FoldedStateReader = struct {
 
     pub fn reader(self: *FoldedStateReader) state.Reader {
         return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    pub fn storagePresence(self: *FoldedStateReader, target: Address) !StoragePresence {
-        const account = self.candidate.account(target);
-        if (account) |delta| {
-            if (delta.deleted) return .empty;
-        }
-
-        const writes = self.candidate.storageWrites(target);
-        for (writes) |write| {
-            if (write.value != 0) return .nonempty;
-        }
-        if (account) |delta| {
-            if (delta.reset or delta.storage_wiped) return .empty;
-        }
-
-        if (!try self.base.accountHasStorage(target)) return .empty;
-        for (writes) |write| {
-            std.debug.assert(write.value == 0);
-            if (try self.base.getStorage(target, write.key) != 0) return .unknown;
-        }
-        return .nonempty;
     }
 
     const vtable = state.Reader.VTable{
@@ -594,18 +560,19 @@ pub const FoldedStateReader = struct {
         return self.base.getStorage(target, key);
     }
 
+    /// See `BalClaimReader.accountHasStorage`: `createCollision` is the only
+    /// caller, and it only asks about a zero-nonce, code-empty address whose
+    /// storage no earlier block position can have touched. A candidate reset or
+    /// wipe is the one local fact that can contradict parent state.
     fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
         const self = context(ptr);
-        return switch (try self.storagePresence(target)) {
-            .empty => false,
-            .nonempty => true,
-            .unknown => self.fail(.storage_presence_unknown),
-        };
-    }
-
-    fn fail(self: *FoldedStateReader, failure: StrategyFailure) Error {
-        self.strategy_failure = failure;
-        return error.FoldedStateStorageUnknown;
+        for (self.candidate.storageWrites(target)) |write| {
+            if (write.value != 0) return true;
+        }
+        if (self.candidate.account(target)) |delta| {
+            if (delta.deleted or delta.reset or delta.storage_wiped) return false;
+        }
+        return self.base.accountHasStorage(target);
     }
 };
 
@@ -672,16 +639,6 @@ pub const TransactionEffects = struct {
         deinitLogs(self.allocator, self.logs);
         self.transition.deinit(self.allocator);
         self.* = undefined;
-    }
-
-    pub fn toOwnedBalShard(
-        self: *const TransactionEffects,
-        block_access_index: @import("model.zig").BlockAccessIndex,
-    ) !@import("model.zig").Decoded {
-        return self.transition.toOwnedBlockAccessList(
-            self.allocator,
-            block_access_index,
-        );
     }
 };
 
@@ -770,7 +727,7 @@ test "one lane transition drives BAL and candidate state" {
     );
     defer transition.deinit(std.testing.allocator);
 
-    var shard = try transition.toOwnedBlockAccessList(std.testing.allocator, 1);
+    var shard = try shard_fold.shardAlloc(std.testing.allocator, transition, 1);
     defer shard.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), shard.accounts.len);
 

@@ -128,6 +128,24 @@ pub const ShardFold = struct {
     }
 };
 
+/// Fold one detached transition into a standalone BAL at one access index.
+///
+/// Block assembly appends transitions directly into a shared fold; this is the
+/// single-shard form used by fixtures and cross-checks against an independent
+/// BAL source.
+pub fn shardAlloc(
+    allocator: Allocator,
+    transition: observation.LaneTransition,
+    block_access_index: bal.BlockAccessIndex,
+) ShardFold.Error!bal.Decoded {
+    var fold = ShardFold.init(allocator);
+    defer fold.deinit();
+    for (transition.accounts) |account| {
+        try fold.appendObservation(account, block_access_index);
+    }
+    return fold.finish();
+}
+
 const FoldStorageChange = struct {
     slot: u256,
     block_access_index: bal.BlockAccessIndex,
@@ -345,7 +363,7 @@ fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void 
     if (account.code_changes.len > 0) allocator.free(account.code_changes);
 }
 
-test "direct observation append matches owned shard conversion" {
+test "observation append projects reads writes and code at one index" {
     const allocator = std.testing.allocator;
     var target: bal.Address = @splat(0);
     target[target.len - 1] = 1;
@@ -354,7 +372,7 @@ test "direct observation append matches owned shard conversion" {
         .{ .slot = 1, .original = 5, .current = 5 },
         .{ .slot = 2, .original = 7, .current = 9, .written = true },
     };
-    const observed = observation.AccountObservation{
+    var accounts = [_]observation.AccountObservation{.{
         .address = target,
         .storage = &storage,
         .balance = .{ .original = 10, .current = 11 },
@@ -364,27 +382,28 @@ test "direct observation append matches owned shard conversion" {
             .current_hash = @splat(1),
             .current_code = &code,
         },
-    };
+    }};
 
-    var direct = ShardFold.init(allocator);
-    defer direct.deinit();
-    try direct.appendObservation(observed, 4);
-    var direct_result = try direct.finish();
-    defer direct_result.deinit(allocator);
+    var result = try shardAlloc(allocator, .{ .accounts = &accounts }, 4);
+    defer result.deinit(allocator);
 
-    var accounts = [_]observation.AccountObservation{observed};
-    const transition = observation.LaneTransition{ .accounts = &accounts };
-    var shard = try transition.toOwnedBlockAccessList(allocator, 4);
-    defer shard.deinit(allocator);
-    var converted = ShardFold.init(allocator);
-    defer converted.deinit();
-    try converted.append(shard.accounts);
-    var converted_result = try converted.finish();
-    defer converted_result.deinit(allocator);
-
-    const direct_encoded = try bal.encodeAlloc(allocator, direct_result.accounts);
-    defer allocator.free(direct_encoded);
-    const converted_encoded = try bal.encodeAlloc(allocator, converted_result.accounts);
-    defer allocator.free(converted_encoded);
-    try std.testing.expectEqualSlices(u8, converted_encoded, direct_encoded);
+    try std.testing.expectEqual(@as(usize, 1), result.accounts.len);
+    const account = result.accounts[0];
+    // An unchanged slot is a read; a changed slot is a positioned write.
+    try std.testing.expectEqualSlices(u256, &.{1}, account.storage_reads);
+    try std.testing.expectEqual(@as(usize, 1), account.storage_changes.len);
+    try std.testing.expectEqual(@as(u256, 2), account.storage_changes[0].slot);
+    try std.testing.expectEqual(
+        bal.StorageChange{ .block_access_index = 4, .new_value = 9 },
+        account.storage_changes[0].changes[0],
+    );
+    try std.testing.expectEqual(
+        bal.BalanceChange{ .block_access_index = 4, .post_balance = 11 },
+        account.balance_changes[0],
+    );
+    try std.testing.expectEqual(
+        bal.NonceChange{ .block_access_index = 4, .new_nonce = 3 },
+        account.nonce_changes[0],
+    );
+    try std.testing.expectEqualSlices(u8, &code, account.code_changes[0].new_code);
 }

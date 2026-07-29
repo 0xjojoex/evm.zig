@@ -22,16 +22,12 @@ pub const BlockAccessList = model.BlockAccessList;
 pub const ValidationOptions = model.ValidationOptions;
 pub const ValidationError = model.ValidationError;
 pub const Counts = model.Counts;
-pub const IndexResources = model.IndexResources;
-pub const IndexResourceMaxima = model.IndexResourceMaxima;
-pub const IndexResourcePlan = model.IndexResourcePlan;
 pub const Decoded = model.Decoded;
 pub const IndexError = model.IndexError;
 
 pub const transactionIndex = model.transactionIndex;
 pub const postExecutionSystemIndex = model.postExecutionSystemIndex;
 pub const count = model.count;
-pub const planIndexResources = model.planIndexResources;
 pub const validate = model.validate;
 pub const validateGasLimit = model.validateGasLimit;
 pub const encodeAlloc = model.encodeAlloc;

@@ -176,7 +176,11 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     sender_account.balance = decoded.value +
         @as(u256, decoded.gas_limit) * decoded.gas_price + 1;
     const target = decoded.to.?;
-    _ = try memory.getOrCreateAccount(target);
+    // Alive, not merely present. A bare 21000-gas transfer only fits when the
+    // recipient already exists, and from EIP-161 on a zero-nonce, zero-balance,
+    // codeless account is not an account at all.
+    const target_seed_balance: u256 = 1;
+    (try memory.getOrCreateAccount(target)).balance = target_seed_balance;
     var verifier_state = try memory.clone(std.testing.allocator);
     defer verifier_state.deinit();
     var parallel_verifier_state = try memory.clone(std.testing.allocator);
@@ -204,7 +208,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     );
     try std.testing.expectEqualSlices(u8, &expected_root, &produced.output.transactions_root);
     try std.testing.expectEqual(@as(u64, 10), memory.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(decoded.value, memory.getAccount(target).?.balance);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, memory.getAccount(target).?.balance);
 
     const verified = try block_stf.Exact(.amsterdam).apply(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
@@ -218,7 +222,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     try std.testing.expectEqual(block_stf.Status.valid, verified.status);
     try std.testing.expectEqualSlices(u8, &expected_root, &verified.transactions_root);
     try std.testing.expectEqual(@as(u64, 10), verifier_state.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(decoded.value, verifier_state.getAccount(target).?.balance);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, verifier_state.getAccount(target).?.balance);
 
     const parallel_reader = parallel_verifier_state.concurrentReader();
     var parallel_report = bal.Report{};
@@ -246,7 +250,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     try std.testing.expectEqual(@as(usize, 1), parallel_report.parallel_submitted_lanes);
     try std.testing.expectEqualSlices(u8, &expected_root, &parallel_verified.transactions_root);
     try std.testing.expectEqual(@as(u64, 10), parallel_verifier_state.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(decoded.value, parallel_verifier_state.getAccount(target).?.balance);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, parallel_verifier_state.getAccount(target).?.balance);
 }
 
 test "BlockSTF parallel raw API owns decode failure cleanup" {

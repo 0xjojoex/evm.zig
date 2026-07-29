@@ -693,8 +693,10 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
         }
 
         fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
+            // Same fork boundary the executor reads for account existence, so
+            // take it from the same fact rather than restating the revision.
             return self.store.stateRootAfterChangesWithOptions(allocator, self.executor.acceptedChanges(), .{
-                .empty_accounts = if (revision.isImpl(.spurious_dragon)) .omit else .include,
+                .empty_accounts = if (ExactVm.specification.retains_empty_accounts) .include else .omit,
             });
         }
     };

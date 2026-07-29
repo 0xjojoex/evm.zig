@@ -77,7 +77,6 @@ const CodeChange = struct {
 const AccountView = struct {
     claim: *const bal.AccountChanges,
     code_changes: []const CodeChange,
-    first_storage_change_index: ?bal.BlockAccessIndex,
 };
 
 accounts: []AccountView = &.{},
@@ -113,7 +112,6 @@ pub fn initAssumeValidated(allocator: Allocator, block_access_list: bal.BlockAcc
         accounts[account_index] = .{
             .claim = account_claim,
             .code_changes = code_changes[first_code_index..code_index],
-            .first_storage_change_index = firstStorageChangeIndex(account_claim.storage_changes),
         };
     }
 
@@ -217,24 +215,10 @@ pub const AccountCursor = struct {
         };
     }
 
-    pub fn hasStorageWriteAt(self: AccountCursor, index: bal.BlockAccessIndex) bool {
-        const first = self.accountView().first_storage_change_index orelse return false;
-        return first <= index;
-    }
-
     fn accountView(self: AccountCursor) *const AccountView {
         return &self.view.accounts[self.account_index];
     }
 };
-
-fn firstStorageChangeIndex(storage_changes: []const bal.SlotChanges) ?bal.BlockAccessIndex {
-    var first: ?bal.BlockAccessIndex = null;
-    for (storage_changes) |slot| {
-        const index = slot.changes[0].block_access_index;
-        first = if (first) |current| @min(current, index) else index;
-    }
-    return first;
-}
 
 pub const PositionedStorageWriteIterator = struct {
     storage_changes: []const bal.SlotChanges,
@@ -260,15 +244,6 @@ pub fn readSet(self: *const ClaimView) ReadSetIterator {
 /// without importing positioned account fields or classifying code changes.
 pub fn readSetAssumeValidated(block_access_list: bal.BlockAccessList) ReadSetIterator {
     return .{ .block_access_list = block_access_list };
-}
-
-/// Zero-allocation final field projection over a BAL claim.
-///
-/// BAL account changes are field-partial, so completing an account update or
-/// deciding account deletion still requires authenticated pre-state and final
-/// storage-root truth. Code bytes remain borrowed from the source claim.
-pub fn finalDelta(self: *const ClaimView) FinalDelta {
-    return .{ .view = self };
 }
 
 /// Zero-allocation projection of writes attributed to transaction indices
@@ -337,72 +312,6 @@ pub const TransactionStorageWriteIterator = struct {
                     .address = account_claim.address,
                     .slot = slot_changes.slot,
                     .value = change.new_value,
-                };
-            }
-            self.account_index += 1;
-            self.slot_index = 0;
-        }
-        return null;
-    }
-};
-
-pub const FinalDelta = struct {
-    view: *const ClaimView,
-
-    pub fn accountFields(self: FinalDelta) FinalAccountFieldsIterator {
-        return .{ .view = self.view };
-    }
-
-    pub fn storageWrites(self: FinalDelta) FinalStorageWriteIterator {
-        return .{ .view = self.view };
-    }
-};
-
-pub const FinalAccountFieldsIterator = struct {
-    view: *const ClaimView,
-    account_index: usize = 0,
-
-    pub fn next(self: *FinalAccountFieldsIterator) ?FinalAccountFields {
-        while (self.account_index < self.view.accounts.len) {
-            const account_view = self.view.accounts[self.account_index];
-            self.account_index += 1;
-            const account_claim = account_view.claim;
-            if (!hasAccountFieldChanges(account_claim)) continue;
-            return .{
-                .address = account_claim.address,
-                .balance = if (account_claim.balance_changes.len != 0)
-                    account_claim.balance_changes[account_claim.balance_changes.len - 1].post_balance
-                else
-                    null,
-                .nonce = if (account_claim.nonce_changes.len != 0)
-                    account_claim.nonce_changes[account_claim.nonce_changes.len - 1].new_nonce
-                else
-                    null,
-                .code = if (account_view.code_changes.len != 0)
-                    account_view.code_changes[account_view.code_changes.len - 1].code
-                else
-                    null,
-            };
-        }
-        return null;
-    }
-};
-
-pub const FinalStorageWriteIterator = struct {
-    view: *const ClaimView,
-    account_index: usize = 0,
-    slot_index: usize = 0,
-
-    pub fn next(self: *FinalStorageWriteIterator) ?FinalStorageWrite {
-        while (self.account_index < self.view.accounts.len) {
-            const account_claim = self.view.accounts[self.account_index].claim;
-            if (self.slot_index < account_claim.storage_changes.len) {
-                const slot_changes = account_claim.storage_changes[self.slot_index];
-                self.slot_index += 1;
-                return .{
-                    .address = account_claim.address,
-                    .slot = slot_changes.slot,
-                    .value = slot_changes.changes[slot_changes.changes.len - 1].new_value,
                 };
             }
             self.account_index += 1;
@@ -515,12 +424,6 @@ fn codeHashLessThan(_: void, left: *const CodeChange, right: *const CodeChange) 
 
 fn compareCodeHash(context: [32]u8, item: *const CodeChange) std.math.Order {
     return std.mem.order(u8, &context, &item.code.hash);
-}
-
-fn hasAccountFieldChanges(account_claim: *const bal.AccountChanges) bool {
-    return account_claim.balance_changes.len != 0 or
-        account_claim.nonce_changes.len != 0 or
-        account_claim.code_changes.len != 0;
 }
 
 test "ClaimView resolves latest declared values and coverage" {
@@ -657,7 +560,7 @@ test "ClaimView readSet merges canonical account and storage coverage" {
     try std.testing.expectEqual(@as(?ReadSetEntry, null), iterator.next());
 }
 
-test "ClaimView finalDelta iterates only final claim-native field values" {
+test "ClaimView transactionDelta iterates claim-native field values through an index" {
     const first_storage_changes = [_]bal.StorageChange{
         .{ .block_access_index = 1, .new_value = 10 },
         .{ .block_access_index = 2, .new_value = 20 },
@@ -690,15 +593,17 @@ test "ClaimView finalDelta iterates only final claim-native field values" {
 
     var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
     defer view.deinit(std.testing.allocator);
-    const final = view.finalDelta();
-    var account_fields = final.accountFields();
+    // Index 3 covers every change here; index-zero setup writes stay excluded
+    // because the detached transaction fold does not own them.
+    const through_all = view.transactionDelta(3);
+    var account_fields = through_all.accountFields();
     const first_account = account_fields.next().?;
     try std.testing.expectEqual(address.addr(1), first_account.address);
     try std.testing.expectEqual(@as(?u256, 30), first_account.balance);
-    try std.testing.expectEqual(@as(?u64, 7), first_account.nonce);
+    try std.testing.expectEqual(@as(?u64, null), first_account.nonce);
     try std.testing.expectEqual(@as(?FinalAccountFields, null), account_fields.next());
 
-    var storage_writes = final.storageWrites();
+    var storage_writes = through_all.storageWrites();
     try std.testing.expectEqualDeep(
         FinalStorageWrite{ .address = address.addr(1), .slot = 1, .value = 20 },
         storage_writes.next().?,
@@ -745,7 +650,7 @@ test "ClaimView cleans every allocation failure position" {
             }};
             var view = try ClaimView.initAssumeValidated(allocator, &claim);
             defer view.deinit(allocator);
-            _ = view.finalDelta();
+            _ = view.transactionDelta(1);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});

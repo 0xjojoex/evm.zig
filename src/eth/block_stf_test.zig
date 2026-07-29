@@ -1108,6 +1108,19 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
         .root_checks = roots,
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_amsterdam.status);
+
+    // A differential request is diagnostic, not a body field. A mixed-fork
+    // verifier supplies one for every block, so a pre-Amsterdam block must stay
+    // valid and simply report `.not_run`.
+    var report = block_stf.BalDifferentialReport{};
+    const pre_amsterdam_differential = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
+        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .transactions = &.{},
+        .bal_differential = &report,
+        .root_checks = roots,
+    });
+    try std.testing.expectEqual(Status.valid, pre_amsterdam_differential.status);
+    try std.testing.expectEqual(block_stf.BalDifferentialStatus.not_run, report.status);
 }
 
 test "stateless receipt encoder writes consensus receipt rlp" {

@@ -16,6 +16,7 @@ test {
     _ = @import("./test/amsterdam/bal_fixtures.zig");
     _ = @import("./test/amsterdam/bal_differential.zig");
     _ = @import("./test/amsterdam/bal_witness.zig");
+    _ = @import("./test/amsterdam/bal_recorder_oracle.zig");
     _ = @import("./test/amsterdam/block_stf_produce.zig");
     _ = @import("./test/amsterdam/eip8037.zig");
     _ = @import("./test/amsterdam/eip8038.zig");

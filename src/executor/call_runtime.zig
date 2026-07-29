@@ -1696,12 +1696,16 @@ pub fn bind(comptime Executor: type) type {
 
         fn createCollision(self: *Executor, address: Address) !bool {
             if (spec.precompile.active(address)) return true;
-            const account = try self.state.getAccountOrLoad(address) orelse return false;
+            if (try self.state.getAccountOrLoad(address)) |account| {
+                if (account.nonce != 0) return true;
+            }
             // EIP-7610 clarifies this rule retroactively for every Ethereum
-            // revision: storage-only destinations also collide.
-            return account.nonce != 0 or
-                try self.state.accountHasCode(address) or
-                try self.state.accountHasStorage(address);
+            // revision: storage-only destinations also collide. Absence cannot
+            // short-circuit that. EIP-161 deadness ignores storage, so a
+            // storage-bearing account reads as absent, yet the state trie keeps
+            // its leaf and creating over it would strand the storage.
+            return (try self.state.accountHasCode(address)) or
+                (try self.state.accountHasStorage(address));
         }
     };
 }
