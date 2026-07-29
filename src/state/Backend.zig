@@ -37,10 +37,10 @@ pub const Backend = union(enum) {
         allocator: std.mem.Allocator,
         state_root: [32]u8,
         nodes: []const []const u8,
-        codes: []const WitnessStateReader.Code,
+        codes: []const []const u8,
     ) !Backend {
         const indexed = try trie.indexNodes(allocator, nodes);
-        return .{ .witness = WitnessStateReader.init(allocator, state_root, indexed, codes) };
+        return .{ .witness = try WitnessStateReader.init(allocator, state_root, indexed, codes) };
     }
 
     pub fn fromExternal(reader_value: Reader, root_provider: RootProvider, committer: ?Committer) Backend {

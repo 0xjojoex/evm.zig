@@ -118,7 +118,6 @@ fn validateWithScratchExact(
     );
     defer header_chain.deinit(allocator);
     const parent_header = header_chain.parent();
-    const codes = try witnessCodes(allocator, input.witness.codes);
 
     return validateExact(
         ExactBlockStf,
@@ -128,7 +127,6 @@ fn validateWithScratchExact(
         options,
         &header_chain,
         parent_header,
-        codes,
     );
 }
 
@@ -140,7 +138,6 @@ fn validateExact(
     options: Options,
     header_chain: *HeaderChain,
     parent_header: ParsedHeader,
-    codes: []const state.WitnessStateReader.Code,
 ) Error!block_stf.Result {
     const revision = ExactBlockStf.fork;
     const block = input.block;
@@ -164,7 +161,12 @@ fn validateExact(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = try state.Backend.fromWitness(allocator, parent_header.state_root, input.witness.state, codes),
+        .state_backend = try state.Backend.fromWitness(
+            allocator,
+            parent_header.state_root,
+            input.witness.state,
+            input.witness.codes,
+        ),
         .prepared_code_backend = system_prepared_code.backend(),
         .transactions = block.transactions,
         .withdrawals = block.withdrawals,
@@ -378,14 +380,6 @@ fn parseHeader(encoded_header: []const u8) Error!ParsedHeader {
         .blob_gas_used = blob_gas_used,
         .excess_blob_gas = excess_blob_gas,
     };
-}
-
-fn witnessCodes(allocator: std.mem.Allocator, codes: []const []const u8) std.mem.Allocator.Error![]const state.WitnessStateReader.Code {
-    const out = try allocator.alloc(state.WitnessStateReader.Code, codes.len);
-    for (out, codes) |*item, code| {
-        item.* = .{ .hash = crypto.keccak256(code), .bytes = code };
-    }
-    return out;
 }
 
 test "normalized stateless block shape uses actual fields" {
