@@ -38,7 +38,14 @@ pub fn runWorkers(
     var worker_group: std.Io.Group = .init;
     defer worker_group.cancel(io);
     for (workers) |*worker| {
-        worker_group.async(io, workerFn, .{ worker, io, &queue });
+        // `async` is permitted to run the worker inline, which collapses the
+        // whole pool onto the caller's thread and leaves `--jobs` doing
+        // nothing. Fixture tracks run to five figures, so ask for real
+        // concurrency and only accept inline execution when the runtime
+        // genuinely cannot provide it.
+        worker_group.concurrent(io, workerFn, .{ worker, io, &queue }) catch {
+            worker_group.async(io, workerFn, .{ worker, io, &queue });
+        };
     }
 
     worker_group.await(io) catch |err| {

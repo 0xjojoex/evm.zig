@@ -185,22 +185,48 @@ fn runFixture(
         };
         for (payloads.items, 0..) |entry_value, block_index| {
             if (options.limit > 0 and summary.fixtures >= options.limit) return;
-            try runPayloadEntry(allocator, path, test_name, block_index, revision, &fixture_object, entry_value, options, summary, &store, &block_hashes, &parent);
+            try runBlockEntry(allocator, path, test_name, block_index, revision, .payload, &fixture_object, entry_value, options, summary, &store, &block_hashes, &parent);
         }
     }
 
     if (fixture_object.get("syncPayload")) |sync_value| {
         if (options.limit > 0 and summary.fixtures >= options.limit) return;
-        try runPayloadEntry(allocator, path, test_name, summary.fixtures, revision, &fixture_object, sync_value, options, summary, &store, &block_hashes, &parent);
+        try runBlockEntry(allocator, path, test_name, summary.fixtures, revision, .payload, &fixture_object, sync_value, options, summary, &store, &block_hashes, &parent);
+    }
+
+    // Regular `blockchain_tests` carry consensus blocks rather than engine
+    // payloads. Without this the whole track fell through both branches above
+    // and was counted nowhere, so a green run proved nothing at block level.
+    if (fixture_object.get("blocks")) |blocks_value| {
+        const blocks = asArray(blocks_value) orelse {
+            summary.countFail(.malformed_fixture);
+            return;
+        };
+        for (blocks.items, 0..) |entry_value, block_index| {
+            if (options.limit > 0 and summary.fixtures >= options.limit) return;
+            try runBlockEntry(allocator, path, test_name, block_index, revision, .block_body, &fixture_object, entry_value, options, summary, &store, &block_hashes, &parent);
+        }
     }
 }
 
-fn runPayloadEntry(
+/// Which body shape a fixture presents one block in.
+///
+/// `engineNewPayloads` and `syncPayload` carry an engine execution payload with
+/// its fields already decomposed. Regular `blockchain_tests` carry the consensus
+/// block instead: a decomposed `blockHeader` beside the block's own RLP, which
+/// is the only place the raw transactions exist.
+const BlockSource = enum {
+    payload,
+    block_body,
+};
+
+fn runBlockEntry(
     allocator: std.mem.Allocator,
     path: []const u8,
     test_name: []const u8,
     block_index: usize,
     revision: evmz.eth.Revision,
+    source: BlockSource,
     fixture: *const JsonObject,
     entry_value: JsonValue,
     options: Options,
@@ -224,9 +250,10 @@ fn runPayloadEntry(
     var bal_report = block_stf.BalDifferentialReport{
         .mismatch_writer = if (options.bal_differential) &bal_diff_writer else null,
     };
-    const result = runPayload(
+    const result = runBlock(
         allocator,
         revision,
+        source,
         fixture,
         &entry,
         store,
@@ -312,9 +339,10 @@ fn runPayloadEntry(
     summary.passed += 1;
 }
 
-fn runPayload(
+fn runBlock(
     allocator: std.mem.Allocator,
     revision: evmz.eth.Revision,
+    source: BlockSource,
     fixture: *const JsonObject,
     entry: *const JsonObject,
     store: *evmz.state.MemoryStore,
@@ -323,16 +351,28 @@ fn runPayload(
     bal_report: ?*block_stf.BalDifferentialReport,
 ) !block_stf.Result {
     return switch (revision) {
-        inline else => |exact_revision| runPayloadExact(
-            exact_revision,
-            allocator,
-            fixture,
-            entry,
-            store,
-            block_hashes,
-            parent,
-            bal_report,
-        ),
+        inline else => |exact_revision| switch (source) {
+            .payload => runPayloadExact(
+                exact_revision,
+                allocator,
+                fixture,
+                entry,
+                store,
+                block_hashes,
+                parent,
+                bal_report,
+            ),
+            .block_body => runBlockBodyExact(
+                exact_revision,
+                allocator,
+                fixture,
+                entry,
+                store,
+                block_hashes,
+                parent,
+                bal_report,
+            ),
+        },
     };
 }
 
@@ -430,6 +470,165 @@ fn runPayloadExact(
     }
 
     return result;
+}
+
+/// Run one consensus block from a regular `blockchain_tests` fixture.
+///
+/// Every header field is read from the fixture's decomposed `blockHeader`
+/// rather than re-derived, so this mirrors `runPayloadExact` field for field.
+/// Only the transactions come from the block's RLP, because that is the sole
+/// place a regular fixture carries them in canonical encoded form.
+fn runBlockBodyExact(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    fixture: *const JsonObject,
+    entry: *const JsonObject,
+    store: *evmz.state.MemoryStore,
+    block_hashes: *FixtureBlockHashes,
+    parent: *ParentContext,
+    bal_report: ?*block_stf.BalDifferentialReport,
+) !block_stf.Result {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const header = asObject(entry.get("blockHeader") orelse return error.UnsupportedPayloadShape) orelse
+        return error.MalformedFixture;
+    const header_parent_hash = try hashField(&header, "parentHash");
+    if (!std.mem.eql(u8, &header_parent_hash, &parent.hash)) return error.ParentHashMismatch;
+    const block_number = try u64Field(&header, "number");
+    try validateChildNumber(parent.number, block_number);
+
+    const fixture_config = try parseFixtureConfig(fixture, revision);
+    const block_rlp = try parseBytesFromValue(scratch, entry.get("rlp") orelse return error.MalformedFixture);
+    const transactions = try parseBlockBodyTransactions(scratch, block_rlp);
+    const withdrawals = if (revision.isImpl(.shanghai))
+        try parseWithdrawals(scratch, asArray(entry.get("withdrawals") orelse return error.MalformedFixture) orelse return error.MalformedFixture)
+    else
+        &.{};
+    // A regular fixture carries `blockAccessList` decomposed into JSON rather
+    // than as the encoded list an engine payload holds, and the consensus block
+    // body does not carry it either. Supplying no claim makes BlockSTF build
+    // the list itself and check it against the header commitment, so this track
+    // validates BAL construction by hash. Consuming a claimed list stays the
+    // sync track's job.
+    const excess_blob_gas = try optionalU256Field(&header, "excessBlobGas");
+    const parent_beacon_block_root = if (header.get("parentBeaconBlockRoot") != null)
+        try hashField(&header, "parentBeaconBlockRoot")
+    else
+        null;
+
+    const block_header = block_stf.BlockHeader{
+        .number = block_number,
+        .timestamp = try u64Field(&header, "timestamp"),
+        .parent_hash = header_parent_hash,
+        .parent_beacon_block_root = parent_beacon_block_root,
+    };
+
+    const block_hash_source = block_hashes.source();
+    const result = try block_stf.Exact(revision).applyAssumeDecoded(scratch, .{
+        .env = .{
+            .chain_id = fixture_config.chain_id,
+            .coinbase = try addressField(&header, "coinbase"),
+            .number = block_number,
+            .slot_number = try optionalU64Field(&header, "slotNumber") orelse 0,
+            .timestamp = try u64Field(&header, "timestamp"),
+            .gas_limit = try u64Field(&header, "gasLimit"),
+            .prev_randao = try u256HashField(&header, "mixHash"),
+            .base_fee = try optionalU256Field(&header, "baseFeePerGas") orelse 0,
+            .blob_base_fee = try blobBaseFee(revision, fixture_config.blob_schedule, excess_blob_gas),
+            .blob_schedule = fixture_config.blob_schedule,
+        },
+        .block_hash_source = block_hash_source,
+        .block_header = block_header,
+        .state_backend = store.backend(),
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+        .parent_header = parent.headerContext(),
+        .root_checks = .{
+            .payload_header = .{
+                .state = .fromHash(try hashField(&header, "stateRoot")),
+                .receipts = .fromHash(try hashField(&header, "receiptTrie")),
+            },
+        },
+        .header_claims = .{
+            .gas_used = if (revision.isImpl(.amsterdam)) null else try optionalU64Field(&header, "gasUsed"),
+            .block_gas_used = if (revision.isImpl(.amsterdam)) try optionalU64Field(&header, "gasUsed") else null,
+            .logs_bloom = try bloomField(scratch, &header, "bloom"),
+            .blob_gas_used = try optionalU64Field(&header, "blobGasUsed"),
+            .excess_blob_gas = excess_blob_gas,
+            .requests_hash = if (header.get("requestsHash") != null)
+                try hashField(&header, "requestsHash")
+            else
+                null,
+            .block_access_list_hash = if (header.get("blockAccessListHash") != null)
+                try hashField(&header, "blockAccessListHash")
+            else
+                null,
+        },
+        .header_hash_claim = if (revision.isImpl(.merge)) .{
+            .block_hash = try hashField(&header, "hash"),
+            .parent_hash = header_parent_hash,
+            .parent_beacon_block_root = parent_beacon_block_root,
+            .extra_data = try parseBytesFromValue(scratch, header.get("extraData") orelse return error.MalformedFixture),
+        } else null,
+        .bal_differential = bal_report,
+    });
+
+    if (result.status == .valid) {
+        parent.* = try parentFromBlockHeader(&header);
+        parent.hash = result.block_hash;
+        try block_hashes.put(parent.number, parent.hash);
+    }
+
+    return result;
+}
+
+/// Slice the canonical transaction encodings out of a consensus block.
+///
+/// A block body is `[header, transactions, uncles, ...]`. Inside the
+/// transaction list a legacy transaction is itself a list, so its encoding is
+/// the item; an EIP-2718 typed transaction is a byte string whose contents are
+/// already `type || payload`.
+fn parseBlockBodyTransactions(
+    allocator: std.mem.Allocator,
+    block_rlp: []const u8,
+) ![]const block_stf.TransactionInput {
+    var block_cursor = evmz.rlp.Cursor.init(block_rlp);
+    var body = try block_cursor.nextList();
+    _ = try body.next(); // header
+    var list = try body.nextList();
+
+    var out: std.ArrayList(block_stf.TransactionInput) = .empty;
+    errdefer out.deinit(allocator);
+    while (!list.isDone()) {
+        const item = try list.next();
+        const raw = switch (item.kind()) {
+            .list => item.encoded(),
+            .bytes => try item.asBytes(),
+        };
+        try out.append(allocator, .{
+            .tx = evmz.stateless.tx.decodeRaw(allocator, raw) catch |err| switch (err) {
+                error.UnsupportedTransactionType => return error.UnsupportedTransactionType,
+                else => return err,
+            },
+            .encoded = raw,
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn parentFromBlockHeader(header: *const JsonObject) !ParentContext {
+    return .{
+        .number = try u64Field(header, "number"),
+        .hash = try hashField(header, "hash"),
+        .timestamp = try u64Field(header, "timestamp"),
+        .gas_limit = try u64Field(header, "gasLimit"),
+        .gas_used = try u64Field(header, "gasUsed"),
+        .excess_blob_gas = try optionalU64Field(header, "excessBlobGas") orelse 0,
+        .blob_gas_used = try optionalU64Field(header, "blobGasUsed") orelse 0,
+        .base_fee_per_gas = try optionalU256Field(header, "baseFeePerGas") orelse 0,
+    };
 }
 
 const ParentContext = struct {
