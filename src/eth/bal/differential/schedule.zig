@@ -32,7 +32,8 @@ pub fn Schedule(comptime Engine: type, comptime Owner: type) type {
             outcome: ?Lane.Outcome = null,
 
             fn reset(self: *Slot) void {
-                if (self.outcome) |*outcome| outcome.deinit();
+                // Evidence is arena-allocated, so the reset below reclaims it.
+                if (self.outcome) |*outcome| outcome.deinit(self.task_arena.allocator());
                 self.outcome = null;
                 self.expected = null;
                 _ = self.task_arena.reset(.retain_capacity);
@@ -40,7 +41,7 @@ pub fn Schedule(comptime Engine: type, comptime Owner: type) type {
             }
 
             fn deinit(self: *Slot) void {
-                if (self.outcome) |*outcome| outcome.deinit();
+                if (self.outcome) |*outcome| outcome.deinit(self.task_arena.allocator());
                 self.task_arena.deinit();
                 self.input_arena.deinit();
                 self.* = undefined;

@@ -3,8 +3,9 @@
 //! This lane never owns canonical block state. Block-start work runs serially
 //! over the authenticated base, each transaction runs in an isolated `lane`
 //! over `BalClaimReader(base, claim, tx_index)`, and block-final work runs
-//! serially over the folded candidate post-state. Only the coordinator mutates
-//! `accumulator` state. The first coverage failure or mismatch disables the
+//! serially over `BalClaimReader(base, claim, transaction_count)`, which is
+//! already parent state plus every write through the last transaction. Only
+//! the coordinator mutates `accumulator` state. The first coverage failure or mismatch disables the
 //! complete claim lane; callers continue on their independently owned canonical
 //! reader.
 //!
@@ -17,7 +18,6 @@ const std = @import("std");
 const Executor = @import("../../../executor.zig");
 const bal = @import("../model.zig");
 const ClaimView = @import("../ClaimView.zig");
-const candidate_transition = @import("../candidate_transition.zig");
 const tracked_state_projector = @import("../tracked_state_projector.zig");
 const accumulator_types = @import("accumulator.zig");
 const lane_types = @import("lane.zig");
@@ -196,7 +196,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 self.base_reader,
                 included,
             );
-            defer outcome.deinit();
+            defer outcome.deinit(self.allocator);
             self.acceptOutcome(included, &outcome);
         }
 
@@ -256,11 +256,11 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn acceptOutcome(self: *Self, included: Included, outcome: *Lane.Outcome) void {
             if (!self.active) return;
             switch (outcome.*) {
-                .effects => |*effects| self.accumulator.accept(included, effects) catch |err| {
+                .evidence => |*transition| self.accumulator.accept(included, transition) catch |err| {
                     self.stopForCandidateError(err, included.tx_index);
                     return;
                 },
-                .rejected => return self.stop(.outcome_mismatch, included.tx_index, null),
+                .outcome_mismatch, .rejected => return self.stop(.outcome_mismatch, included.tx_index, null),
                 .failed => |failure| return self.stopForError(
                     failure.err,
                     included.tx_index,
@@ -394,8 +394,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         pub fn finish(self: *Self) std.Io.Cancelable!void {
             try self.flushPending();
             if (self.active) {
-                const transaction_count = self.accumulator.transactionCount();
-                _ = transaction_count;
                 self.report.status = .outcomes_matched;
             }
             self.active = false;

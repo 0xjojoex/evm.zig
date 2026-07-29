@@ -2,16 +2,16 @@
 //!
 //! Lanes may finish in any order, but they are accepted here strictly in
 //! transaction order, so this is the one place that advances block progress and
-//! appends to the receipt, bloom, request, BAL, and candidate-state folds. It
-//! decides only whether a lane agrees with the authoritative fold; what a
-//! disagreement means to the block is `runner`'s call.
+//! appends to the receipt, bloom, request, and BAL folds. A lane has already
+//! established that its result and logs match canonical, so the canonical ones
+//! are used here; what remains to check is the block-level accounting.
 
 const std = @import("std");
 
 const Host = @import("../../../Host.zig");
 const bal = @import("../model.zig");
 const ShardFold = @import("../shard_fold.zig").ShardFold;
-const candidate_transition = @import("../candidate_transition.zig");
+const observation = @import("../observation.zig");
 const lane = @import("lane.zig");
 const state = @import("../../../state.zig");
 const vm = @import("../../../vm.zig");
@@ -67,14 +67,9 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
         pub fn accept(
             self: *Self,
             included: Lane.Included,
-            effects: *const candidate_transition.TransactionEffects,
+            transition: *const observation.LaneTransition,
         ) !void {
-            if (!executionResultEqual(effects.result, included.result.*) or
-                !logsEqual(effects.logs, included.logs))
-            {
-                return error.OutcomeMismatch;
-            }
-            const next_progress = advanceProgress(self.env, self.progress, effects.result) catch {
+            const next_progress = advanceProgress(self.env, self.progress, included.result.*) catch {
                 return error.CandidateArtifactMismatch;
             };
             const blob_admission = self.blobGasAdmission(included.transaction) catch |err| switch (err) {
@@ -91,8 +86,8 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = next_progress.tx_count - 1,
-                .status = effects.result.status,
-                .gas_used = effects.result.gas.used,
+                .status = included.result.status,
+                .gas_used = included.result.gas.used,
                 .cumulative_gas_used = next_progress.gas_used,
                 .cumulative_block_gas = next_progress.block_gas.total,
                 .cumulative_state_gas = next_progress.block_gas.state,
@@ -110,21 +105,21 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             // Fold the detached observations straight into the block shard.
             // Materializing an intermediate per-transaction BAL only to append
             // and free it duplicated every code body a second time.
-            for (effects.transition.accounts) |account| {
+            for (transition.accounts) |account| {
                 try self.bal_shard_fold.appendObservation(account, transaction_write_index);
             }
 
             const receipt: vm.TxReceiptView = .{
-                .status = effects.result.status,
-                .gas_used = effects.result.gas.used,
+                .status = included.result.status,
+                .gas_used = included.result.gas.used,
                 .cumulative_gas_used = next_progress.gas_used,
-                .created_address = effects.result.created_address,
-                .logs = .fromSlice(effects.logs),
+                .created_address = included.result.created_address,
+                .logs = included.logs,
             };
             try Operations.appendCandidateDepositRequestData(
                 self.allocator,
                 &self.deposit_request_data,
-                effects.logs,
+                included.logs,
             );
             const encoded_receipt = try Operations.encodeCandidateReceipt(
                 self.allocator,
@@ -135,7 +130,7 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             try self.encoded_receipts.append(self.allocator, encoded_receipt);
             Operations.mergeCandidateLogsBloom(
                 &self.block_logs_bloom,
-                Operations.candidateLogsBloom(effects.logs),
+                Operations.candidateLogsBloom(included.logs),
             );
             self.progress = next_progress;
             self.blob_gas_used = blob_admission.next;

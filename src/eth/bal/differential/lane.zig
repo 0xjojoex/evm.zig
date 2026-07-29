@@ -2,16 +2,20 @@
 //!
 //! A lane owns nothing the coordinator owns. It takes an immutable block
 //! context plus a transaction the authoritative fold already executed, runs it
-//! over `BalClaimReader(base, claim, tx_index)`, and hands back a detached
-//! `TransactionEffects`. Lanes may therefore run concurrently; deciding what a
-//! result means belongs to `accumulator` and `runner`.
+//! over `BalClaimReader(base, claim, tx_index)`, and hands back BAL evidence.
+//!
+//! The lane compares its own result and logs against the canonical ones while
+//! its executor is still alive, so a disagreement never travels. What comes
+//! back is only the observed transition, which the coordinator cannot obtain
+//! any other way. Lanes may therefore run concurrently; deciding what an
+//! outcome means to the block belongs to `accumulator` and `runner`.
 
 const std = @import("std");
 
 const Host = @import("../../../Host.zig");
 const bal = @import("../model.zig");
+const observation = @import("../observation.zig");
 const ClaimView = @import("../ClaimView.zig");
-const candidate_transition = @import("../candidate_transition.zig");
 const tracked_state_projector = @import("../tracked_state_projector.zig");
 const prepared_code = @import("../../../prepared_code.zig");
 const BalClaimReader = @import("../../../state/BalClaimReader.zig");
@@ -72,7 +76,7 @@ pub fn Lane(comptime Engine: type) type {
             pub fn init(allocator: std.mem.Allocator, included: Included) !OwnedIncluded {
                 const output = try allocator.dupe(u8, included.result.output);
                 errdefer allocator.free(output);
-                const logs = try candidate_transition.cloneLogs(allocator, included.logs);
+                const logs = try cloneLogs(allocator, included.logs);
                 var result = included.result.*;
                 result.output = output;
                 return .{
@@ -107,14 +111,20 @@ pub fn Lane(comptime Engine: type) type {
         };
 
         pub const Outcome = union(enum) {
-            effects: candidate_transition.TransactionEffects,
+            /// The lane agreed with canonical execution. Only the observed
+            /// transition travels, because the coordinator already holds the
+            /// canonical result and logs it was compared against.
+            evidence: observation.LaneTransition,
+            /// The lane executed but disagreed on result or logs.
+            outcome_mismatch,
+            /// The lane refused the transaction the canonical fold included.
             rejected,
             failed: Failure,
 
-            pub fn deinit(self: *Outcome) void {
+            pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
                 switch (self.*) {
-                    .effects => |*effects| effects.deinit(),
-                    .rejected, .failed => {},
+                    .evidence => |*transition| transition.deinit(allocator),
+                    .outcome_mismatch, .rejected, .failed => {},
                 }
             }
 
@@ -178,12 +188,11 @@ pub fn Lane(comptime Engine: type) type {
                     .strategy_failure = null,
                 } };
             var claim_reader = BalClaimReader.init(base_reader, context.claim, block_access_index);
-            const effects = runFallible(context, allocator, &claim_reader, included) catch |err|
-                return .{ .failed = .{
+            return runFallible(context, allocator, &claim_reader, included) catch |err|
+                .{ .failed = .{
                     .err = err,
                     .strategy_failure = claim_reader.strategy_failure,
                 } };
-            return if (effects) |owned| .{ .effects = owned } else .rejected;
         }
 
         fn runFallible(
@@ -191,7 +200,7 @@ pub fn Lane(comptime Engine: type) type {
             allocator: std.mem.Allocator,
             claim_reader: *BalClaimReader,
             included: Included,
-        ) !?candidate_transition.TransactionEffects {
+        ) !Outcome {
             var execution: CapturedExecution = undefined;
             try execution.init(allocator, .{
                 .state_reader = claim_reader.reader(),
@@ -210,22 +219,76 @@ pub fn Lane(comptime Engine: type) type {
                 },
             });
             switch (outcome) {
-                .rejected => return null,
+                .rejected => return .rejected,
                 .executed => |executed_value| {
                     var executed = executed_value;
+                    // The lane's executor is torn down either way; nothing here
+                    // needs the transaction retained past this scope.
                     defer executed.discardIfCurrent();
-                    var effects_builder = try candidate_transition.TransactionEffects.Builder.init(
-                        executed,
-                        try tracked_state_projector.materialize(
-                            executed.observations(),
-                            allocator,
-                        ),
-                    );
-                    defer effects_builder.discardIfUnfinished();
-                    executed.retain();
-                    return effects_builder.finish();
+                    const view = executed.view();
+                    if (!executionResultEqual(view.output.*, included.result.*) or
+                        !logsEqual(view.logs, included.logs))
+                    {
+                        return .outcome_mismatch;
+                    }
+                    return .{ .evidence = try tracked_state_projector.materialize(
+                        executed.observations(),
+                        allocator,
+                    ) };
                 },
             }
         }
     };
+}
+
+fn executionResultEqual(expected: vm.TxExecutionResult, actual: vm.TxExecutionResult) bool {
+    return expected.status == actual.status and
+        std.meta.eql(expected.gas, actual.gas) and
+        std.mem.eql(u8, expected.output, actual.output) and
+        std.meta.eql(expected.created_address, actual.created_address);
+}
+
+fn logsEqual(expected: state.TrackedState.LogView, actual: state.TrackedState.LogView) bool {
+    if (expected.len() != actual.len()) return false;
+    for (0..expected.len()) |index| {
+        const left = expected.get(index);
+        const right = actual.get(index);
+        if (!std.mem.eql(u8, &left.address, &right.address) or
+            !std.mem.eql(u256, left.topics, right.topics) or
+            !std.mem.eql(u8, left.data, right.data))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Detach the canonical logs so a staged lane survives the authoritative
+/// executor moving on.
+pub fn cloneLogs(allocator: std.mem.Allocator, source: state.TrackedState.LogView) ![]Host.Log {
+    const logs = try allocator.alloc(Host.Log, source.len());
+    errdefer allocator.free(logs);
+
+    var initialized: usize = 0;
+    errdefer deinitLogItems(allocator, logs[0..initialized]);
+    for (logs, 0..) |*target, index| {
+        const event_log = source.get(index);
+        const topics = try allocator.dupe(u256, event_log.topics);
+        errdefer allocator.free(topics);
+        const data = try allocator.dupe(u8, event_log.data);
+        target.* = .{
+            .address = event_log.address,
+            .topics = topics,
+            .data = data,
+        };
+        initialized += 1;
+    }
+    return logs;
+}
+
+fn deinitLogItems(allocator: std.mem.Allocator, logs: []Host.Log) void {
+    for (logs) |event_log| {
+        allocator.free(@constCast(event_log.topics));
+        allocator.free(@constCast(event_log.data));
+    }
 }

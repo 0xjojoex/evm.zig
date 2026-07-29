@@ -46,10 +46,10 @@ fn BalDifferentialOperations(
         pub fn appendCandidateDepositRequestData(
             allocator: std.mem.Allocator,
             output: *std.ArrayList(u8),
-            logs: []const Host.Log,
+            logs: state.TrackedState.LogView,
         ) !void {
             if (revision.isImpl(.prague))
-                try eip6110.appendRequestDataFromLogs(allocator, output, .fromSlice(logs));
+                try eip6110.appendRequestDataFromLogs(allocator, output, logs);
         }
 
         pub fn encodeCandidateReceipt(
@@ -60,8 +60,8 @@ fn BalDifferentialOperations(
             return encodeReceipt(allocator, kind, receipt);
         }
 
-        pub fn candidateLogsBloom(logs: []const Host.Log) [256]u8 {
-            return logsBloom(.fromSlice(logs));
+        pub fn candidateLogsBloom(logs: state.TrackedState.LogView) [256]u8 {
+            return logsBloom(logs);
         }
 
         pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
