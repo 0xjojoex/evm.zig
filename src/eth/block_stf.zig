@@ -126,7 +126,7 @@ fn BalDifferentialOperations(
 /// default, and the BAL candidate lane is the only real implementation - it
 /// lives outside this file so the serial fold carries no knowledge of
 /// positioned reads, lanes, or concurrency.
-pub const NoBlockObserver = struct {
+const NoBlockObserver = struct {
     pub fn claimDecoded(_: *NoBlockObserver, _: anytype, _: anytype) void {}
     pub fn isActive(_: *const NoBlockObserver) bool {
         return false;

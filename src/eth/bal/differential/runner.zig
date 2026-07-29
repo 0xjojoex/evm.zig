@@ -399,10 +399,9 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self.active = false;
         }
 
-        /// Reconstitute the complete candidate state, run block-final work
-        /// serially over it, and return independently assembled artifacts.
-        /// The caller remains responsible for exact comparison with canonical
-        /// serial output; this method never commits candidate state.
+        /// Run block-final work over the claim-positioned view and return the
+        /// independently assembled block artifacts. The caller remains
+        /// responsible for exact comparison with canonical serial output.
         pub fn finishCandidate(
             self: *Self,
             withdrawals: []const Operations.Withdrawal,

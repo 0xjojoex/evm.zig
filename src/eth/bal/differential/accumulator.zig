@@ -8,12 +8,10 @@
 
 const std = @import("std");
 
-const Host = @import("../../../Host.zig");
 const bal = @import("../model.zig");
 const ShardFold = @import("../shard_fold.zig").ShardFold;
 const observation = @import("../observation.zig");
 const lane = @import("lane.zig");
-const state = @import("../../../state.zig");
 const vm = @import("../../../vm.zig");
 
 pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
@@ -147,27 +145,6 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             return .{ .next = next, .exceeds_limit = next > limit };
         }
     };
-}
-
-fn executionResultEqual(expected: vm.TxExecutionResult, actual: vm.TxExecutionResult) bool {
-    return expected.status == actual.status and
-        std.meta.eql(expected.gas, actual.gas) and
-        std.mem.eql(u8, expected.output, actual.output) and
-        std.meta.eql(expected.created_address, actual.created_address);
-}
-
-fn logsEqual(expected: []const Host.Log, actual: state.TrackedState.LogView) bool {
-    if (expected.len != actual.len()) return false;
-    for (expected, 0..) |expected_log, index| {
-        const actual_log = actual.get(index);
-        if (!std.mem.eql(u8, &expected_log.address, &actual_log.address) or
-            !std.mem.eql(u256, expected_log.topics, actual_log.topics) or
-            !std.mem.eql(u8, expected_log.data, actual_log.data))
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 /// Match the authoritative block program: either receipt-gas or dimensional

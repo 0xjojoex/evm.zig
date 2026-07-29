@@ -265,7 +265,7 @@ fn logsEqual(expected: state.TrackedState.LogView, actual: state.TrackedState.Lo
 
 /// Detach the canonical logs so a staged lane survives the authoritative
 /// executor moving on.
-pub fn cloneLogs(allocator: std.mem.Allocator, source: state.TrackedState.LogView) ![]Host.Log {
+fn cloneLogs(allocator: std.mem.Allocator, source: state.TrackedState.LogView) ![]Host.Log {
     const logs = try allocator.alloc(Host.Log, source.len());
     errdefer allocator.free(logs);
 

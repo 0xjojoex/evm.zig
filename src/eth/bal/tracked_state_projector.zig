@@ -351,7 +351,7 @@ const FoldAccount = struct {
     }
 
     /// Hand the folded rows to the caller. The code body is already owned; the
-    /// slot and lifecycle lists transfer as-is.
+    /// slot list transfers as-is.
     fn toOwnedObservation(self: *FoldAccount, allocator: Allocator) !observation.AccountObservation {
         std.mem.sort(
             observation.StorageObservation,
@@ -383,13 +383,6 @@ fn accountOrZero(value: ?State.AccountValue) Account {
         .loaded => |account| account,
         .absent => .{},
         .exists_only => unreachable,
-    };
-}
-
-fn accountAbsent(value: ?State.AccountValue) bool {
-    return switch (value orelse .absent) {
-        .absent => true,
-        .loaded, .exists_only => false,
     };
 }
 

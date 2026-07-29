@@ -244,10 +244,10 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         .candidate_matched,
     );
 
-    // Fold verification is intentionally claim-subset-only: omitting target
-    // balance changes does not affect outputs/logs and passes that local
-    // check. Whole-candidate reconstruction is two-sided, so the missing
-    // intermediate balance makes its final candidate state diverge from serial.
+    // Outcome verification is intentionally claim-subset-only: omitting target
+    // balance changes does not affect outputs/logs and passes that local check.
+    // Candidate BAL reconstruction is two-sided, so the missing balance write
+    // still diverges from the canonical observed BAL.
     const underdeclared_claim = [_]bal.AccountChanges{
         correct_claim[0],
         correct_claim[1],

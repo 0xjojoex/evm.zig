@@ -18,6 +18,7 @@ const Reader = @import("../../../state/Reader.zig");
 const vm = @import("../../../vm.zig");
 
 const Report = report_types.Report;
+const Status = report_types.Status;
 const ParallelExecution = report_types.ParallelExecution;
 
 pub fn Observer(comptime Engine: type, comptime Operations: type) type {
@@ -25,7 +26,7 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
         const Self = @This();
         const Runner = runner_types.Runner(Engine, Operations);
 
-        pub const Artifacts = Runner.Artifacts;
+        const Artifacts = Runner.Artifacts;
 
         allocator: std.mem.Allocator,
         env: vm.Env,
@@ -94,7 +95,7 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
         }
 
         pub fn isActive(self: *const Self) bool {
-            const runner = self.runner orelse return false;
+            const runner = if (self.runner) |*value| value else return false;
             return runner.active;
         }
 
@@ -128,23 +129,10 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
         /// already pin every write, so this checks the derived commitments.
         pub fn compareBlock(self: *Self, canonical: Comparison) void {
             const candidate = if (self.candidate) |*value| value else return;
-            const matched = candidate.gas_used == canonical.gas_used and
-                candidate.block_gas_used == canonical.block_gas_used and
-                candidate.block_state_gas_used == canonical.block_state_gas_used and
-                candidate.blob_gas_used == canonical.blob_gas_used and
-                std.mem.eql(u8, &candidate.receipts_root, &canonical.receipts_root) and
-                std.mem.eql(u8, &candidate.logs_bloom, &canonical.logs_bloom) and
-                std.mem.eql(u8, &candidate.requests_hash, &canonical.requests_hash) and
-                byteSlicesEqual(candidate.encoded_receipts, canonical.encoded_receipts) and
-                byteSlicesEqual(candidate.requests, canonical.requests) and
-                std.mem.eql(u8, candidate.encoded_block_access_list, canonical.encoded_block_access_list);
-
-            self.report.status = if (matched) .candidate_matched else .candidate_artifact_mismatch;
-            if (!matched) {
+            self.report.status = comparisonStatus(candidate.*, canonical);
+            if (self.report.status == .candidate_artifact_mismatch) {
                 self.report.tx_index = canonical.transaction_count;
-                return;
             }
-            if (canonical.block_access_list_matched) self.report.status = .matched;
         }
 
         pub const Comparison = struct {
@@ -164,10 +152,127 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
     };
 }
 
+fn comparisonStatus(candidate: anytype, canonical: anytype) Status {
+    const matched = candidate.gas_used == canonical.gas_used and
+        candidate.block_gas_used == canonical.block_gas_used and
+        candidate.block_state_gas_used == canonical.block_state_gas_used and
+        candidate.blob_gas_used == canonical.blob_gas_used and
+        std.mem.eql(u8, &candidate.receipts_root, &canonical.receipts_root) and
+        std.mem.eql(u8, &candidate.logs_bloom, &canonical.logs_bloom) and
+        std.mem.eql(u8, &candidate.requests_hash, &canonical.requests_hash) and
+        byteSlicesEqual(candidate.encoded_receipts, canonical.encoded_receipts) and
+        byteSlicesEqual(candidate.requests, canonical.requests) and
+        std.mem.eql(u8, candidate.encoded_block_access_list, canonical.encoded_block_access_list);
+    if (!matched) return .candidate_artifact_mismatch;
+    return if (canonical.block_access_list_matched) .matched else .candidate_matched;
+}
+
 fn byteSlicesEqual(left: []const []const u8, right: []const []const u8) bool {
     if (left.len != right.len) return false;
     for (left, right) |left_item, right_item| {
         if (!std.mem.eql(u8, left_item, right_item)) return false;
     }
     return true;
+}
+
+test "candidate comparison checks every artifact field" {
+    const Candidate = struct {
+        gas_used: u64,
+        block_gas_used: u64,
+        block_state_gas_used: u64,
+        blob_gas_used: u64,
+        receipts_root: [32]u8,
+        logs_bloom: [256]u8,
+        requests_hash: [32]u8,
+        encoded_receipts: []const []const u8,
+        requests: []const []const u8,
+        encoded_block_access_list: []const u8,
+    };
+    const Canonical = struct {
+        gas_used: u64,
+        block_gas_used: u64,
+        block_state_gas_used: u64,
+        blob_gas_used: u64,
+        receipts_root: [32]u8,
+        logs_bloom: [256]u8,
+        requests_hash: [32]u8,
+        encoded_receipts: []const []const u8,
+        requests: []const []const u8,
+        encoded_block_access_list: []const u8,
+        block_access_list_matched: bool,
+    };
+
+    var candidate_receipt = [_]u8{ 0x01, 0x02 };
+    var canonical_receipt = candidate_receipt;
+    const candidate_receipts = [_][]const u8{&candidate_receipt};
+    const canonical_receipts = [_][]const u8{&canonical_receipt};
+    var candidate_request = [_]u8{ 0x03, 0x04 };
+    var canonical_request = candidate_request;
+    const candidate_requests = [_][]const u8{&candidate_request};
+    const canonical_requests = [_][]const u8{&canonical_request};
+    var candidate_bal = [_]u8{ 0xc1, 0x80 };
+    var canonical_bal = candidate_bal;
+
+    var candidate = Candidate{
+        .gas_used = 1,
+        .block_gas_used = 2,
+        .block_state_gas_used = 3,
+        .blob_gas_used = 4,
+        .receipts_root = [_]u8{0x11} ** 32,
+        .logs_bloom = [_]u8{0x22} ** 256,
+        .requests_hash = [_]u8{0x33} ** 32,
+        .encoded_receipts = &candidate_receipts,
+        .requests = &candidate_requests,
+        .encoded_block_access_list = &candidate_bal,
+    };
+    var canonical = Canonical{
+        .gas_used = candidate.gas_used,
+        .block_gas_used = candidate.block_gas_used,
+        .block_state_gas_used = candidate.block_state_gas_used,
+        .blob_gas_used = candidate.blob_gas_used,
+        .receipts_root = candidate.receipts_root,
+        .logs_bloom = candidate.logs_bloom,
+        .requests_hash = candidate.requests_hash,
+        .encoded_receipts = &canonical_receipts,
+        .requests = &canonical_requests,
+        .encoded_block_access_list = &canonical_bal,
+        .block_access_list_matched = true,
+    };
+    try std.testing.expectEqual(Status.matched, comparisonStatus(candidate, canonical));
+
+    candidate.gas_used += 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.gas_used -= 1;
+    candidate.block_gas_used += 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.block_gas_used -= 1;
+    candidate.block_state_gas_used += 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.block_state_gas_used -= 1;
+    candidate.blob_gas_used += 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.blob_gas_used -= 1;
+
+    candidate.receipts_root[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.receipts_root[0] ^= 1;
+    candidate.logs_bloom[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.logs_bloom[0] ^= 1;
+    candidate.requests_hash[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate.requests_hash[0] ^= 1;
+
+    candidate_receipt[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate_receipt[0] ^= 1;
+    candidate_request[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate_request[0] ^= 1;
+    candidate_bal[0] ^= 1;
+    try std.testing.expectEqual(Status.candidate_artifact_mismatch, comparisonStatus(candidate, canonical));
+    candidate_bal[0] ^= 1;
+
+    canonical.block_access_list_matched = false;
+    try std.testing.expectEqual(Status.candidate_matched, comparisonStatus(candidate, canonical));
 }
