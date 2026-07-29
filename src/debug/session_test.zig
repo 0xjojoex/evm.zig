@@ -771,3 +771,67 @@ test "debug session rejects an active capture context" {
     var controlled: driver.Session = undefined;
     try std.testing.expectError(error.CaptureActive, controlled.init(&executor, message, bytecode.view()));
 }
+
+test "debug session inspection rebinds to the active frame" {
+    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Executor = Exact.Executor;
+    const driver = session.bind(Executor);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const child = evmz.addr(0x1234);
+    const child_code = [_]u8{0x00}; // STOP
+    const root_code = [_]u8{
+        0x60, 0xaa, // PUSH1 aa
+        0x5f, // PUSH0
+        0x53, // MSTORE8  memory[0] = aa
+        0x5f, // return size
+        0x5f, // return offset
+        0x5f, // input size
+        0x5f, // input offset
+        0x5f, // value
+        0x61, 0x12, 0x34, // child
+        0x5a, // GAS
+        0xf1, // CALL
+        0x00, // STOP
+    };
+    const message = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 200_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = recipient,
+    };
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &child_code });
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 200_000),
+        sender,
+        recipient,
+    );
+    defer executor.discardStateTransition();
+    var bytecode = try executor.prepareBytecode(&root_code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var controlled: driver.Session = undefined;
+    try controlled.init(&executor, message, bytecode.view());
+    defer controlled.deinit();
+
+    var pause = try controlled.pause();
+    try std.testing.expectEqual(@as(usize, 0), controlled.memory().len);
+    while (pause == .opcode) pause = try controlled.step();
+
+    try std.testing.expectEqual(recipient, controlled.message().recipient);
+    try std.testing.expectEqualSlices(u8, &root_code, controlled.code());
+    try std.testing.expectEqual(@as(u8, 0xaa), controlled.memory()[0]);
+
+    pause = try controlled.dispatchAction();
+    try std.testing.expectEqual(@as(u16, 1), pause.opcode.site.depth);
+    try std.testing.expectEqual(child, controlled.message().recipient);
+    try std.testing.expectEqualSlices(u8, &child_code, controlled.code());
+    try std.testing.expectEqual(@as(usize, 0), controlled.memory().len);
+}

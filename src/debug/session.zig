@@ -121,10 +121,32 @@ pub fn bind(comptime Executor: type) type {
 
             /// Borrow the active frame's stack until the next resume.
             pub fn stack(self: *const Session) []const u256 {
+                return self.activeFrame().stack.asSlice();
+            }
+
+            /// Borrow the active frame's EVM memory until the next resume.
+            pub fn memory(self: *const Session) []const u8 {
+                const frame = self.activeFrame();
+                return frame.memory.readBytes(0, frame.memory.len());
+            }
+
+            /// Borrow the code the active frame is executing. For a child this
+            /// is the callee's deployed code, or a CREATE's init code.
+            pub fn code(self: *const Session) []const u8 {
+                return self.activeFrame().code;
+            }
+
+            /// Borrow the message the active frame is executing. Its recipient
+            /// is the account SSTORE writes to, which an inspector needs to
+            /// resolve storage reads against the right account.
+            pub fn message(self: *const Session) *const Host.Message {
+                return self.activeFrame().msg;
+            }
+
+            fn activeFrame(self: *const Session) *Interpreter.CallFrame {
                 std.debug.assert(self.open);
                 std.debug.assert(self.call_runtime.frames.len() > self.call_runtime.frame_base);
-                const index = self.call_runtime.frames.len() - 1;
-                return self.call_runtime.frames.frame(index).stack.asSlice();
+                return self.call_runtime.frames.frame(self.call_runtime.frames.len() - 1);
             }
 
             /// Whether the caller has changed the execution path.

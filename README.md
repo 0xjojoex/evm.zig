@@ -236,6 +236,7 @@ zig build test                       # native unit tests
 zig build test -Dprofile=zkvm        # zkVM adapter semantics on the host
 zig build eest-test                  # spec-test lane
 zig build tidy                       # dead declarations, unexercised exports
+zig build debug -- 6001600201        # step bytecode, `help` lists the commands
 ```
 
 `tidy` reports review candidates the compiler cannot see; it never edits
