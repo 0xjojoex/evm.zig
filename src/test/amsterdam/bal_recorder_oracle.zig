@@ -167,7 +167,7 @@ pub const Recorder = struct {
 
     pub fn recordLifecycle(
         self: *Recorder,
-        kind: observation.LifecycleKind,
+        kind: LifecycleKind,
         account_address: bal.Address,
     ) !void {
         try self.recordAccountAccess(account_address);
@@ -387,9 +387,18 @@ const CodeWrite = struct {
     active: bool = true,
 };
 
+/// Local to the oracle: observations no longer carry lifecycle, but the tape
+/// still has to drop reverted lifecycle events and register the account access
+/// each one implies.
+const LifecycleKind = enum {
+    created_contract,
+    selfdestruct,
+    account_deleted,
+};
+
 const LifecycleEvent = struct {
     address: bal.Address,
-    kind: observation.LifecycleKind,
+    kind: LifecycleKind,
     sequence: usize,
     active: bool = true,
 };
@@ -502,7 +511,6 @@ const AccountBuilder = struct {
                 .slot = slot,
                 .original = original,
                 .current = current,
-                .written = written,
             });
         }
         result.storage = try storage.toOwnedSlice(allocator);
@@ -528,11 +536,6 @@ const AccountBuilder = struct {
                 .current_hash = crypto.keccak256(last.new_code),
                 .current_code = current_code,
             };
-        }
-        if (self.lifecycle.items.len != 0) {
-            const lifecycle = try allocator.alloc(observation.LifecycleKind, self.lifecycle.items.len);
-            for (self.lifecycle.items, lifecycle) |event, *kind| kind.* = event.kind;
-            result.lifecycle = lifecycle;
         }
         return result;
     }
@@ -765,7 +768,6 @@ fn observationAccountLessThan(
 fn deinitObservationAccount(allocator: Allocator, account: observation.AccountObservation) void {
     allocator.free(@constCast(account.storage));
     if (account.code) |code| allocator.free(@constCast(code.current_code));
-    allocator.free(@constCast(account.lifecycle));
 }
 
 test "BAL recorder owns and coalesces code changes per block access index" {
@@ -973,7 +975,7 @@ test "BAL recorder discards reverted writes but preserves accesses" {
     try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].code_changes.len);
 }
 
-test "transaction observation delta owns compact reads writes restores and lifecycle" {
+test "transaction observation delta owns compact reads writes and restores" {
     const allocator = std.testing.allocator;
     const target = address.addr(0x66);
     const code = [_]u8{ 0x60, 0x00 };
@@ -1034,13 +1036,12 @@ test "transaction observation delta owns compact reads writes restores and lifec
     try std.testing.expectEqual(target, account.address);
     try std.testing.expectEqualSlices(observation.StorageObservation, &.{
         .{ .slot = 1, .original = 11, .current = 11 },
-        .{ .slot = 2, .original = 0, .current = 22, .written = true },
-        .{ .slot = 3, .original = 0, .current = 0, .written = true },
+        .{ .slot = 2, .original = 0, .current = 22 },
+        .{ .slot = 3, .original = 0, .current = 0 },
         .{ .slot = 4, .original = 0, .current = 0 },
     }, account.storage);
     try std.testing.expectEqual(observation.ValueObservation{ .original = 5, .current = 9 }, account.balance.?);
     try std.testing.expectEqualSlices(u8, &code, account.code.?.current_code);
-    try std.testing.expectEqualSlices(observation.LifecycleKind, &.{.created_contract}, account.lifecycle);
 
     var shard = try shard_fold.shardAlloc(allocator, delta, 9);
     defer shard.deinit(allocator);
@@ -1359,14 +1360,9 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var delta = try materialize(state.pendingView().observations(), allocator);
     defer delta.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), delta.accounts.len);
-    try std.testing.expectEqualSlices(
-        observation.LifecycleKind,
-        &.{ .selfdestruct, .account_deleted },
-        delta.accounts[0].lifecycle,
-    );
-    try std.testing.expect(delta.accounts[0].account_deleted);
+    // A destroyed contract keeps only the fact BAL needs: its touched slots
+    // are reads, not writes to zero.
     try std.testing.expect(delta.accounts[0].storage_wiped);
-    try std.testing.expect(delta.accounts[0].storage[0].written);
 
     var actual = try shard_fold.shardAlloc(allocator, delta, 1);
     defer actual.deinit(allocator);

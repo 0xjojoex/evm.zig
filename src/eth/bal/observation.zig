@@ -22,7 +22,6 @@ pub const StorageObservation = struct {
     slot: u256,
     original: u256,
     current: u256,
-    written: bool = false,
 };
 
 pub const CodeObservation = struct {
@@ -31,32 +30,25 @@ pub const CodeObservation = struct {
     current_code: []const u8,
 };
 
-pub const LifecycleKind = enum {
-    created_contract,
-    selfdestruct,
-    account_deleted,
-};
-
 pub const AccountObservation = struct {
     address: bal.Address,
     storage: []const StorageObservation = &.{},
     balance: ?ValueObservation = null,
     nonce: ?NonceObservation = null,
     code: ?CodeObservation = null,
-    lifecycle: []const LifecycleKind = &.{},
-    account_reset: bool = false,
-    account_deleted: bool = false,
+    /// A destroyed contract's touched slots are BAL reads rather than writes to
+    /// zero, so the wipe has to survive as its own fact.
     storage_wiped: bool = false,
 };
 
 /// One owned, index-free transition detached from a sealed tracked transaction.
 ///
-/// BAL consumes observations and original/current pairs. Candidate-state folds
-/// consume written fields and final lifecycle flags. This is the only detached
-/// state artifact produced by an isolated execution lane.
-/// Account and storage entries are sorted and unique. Reverted writes and
-/// lifecycle events are absent; original-equal-current entries retain the
-/// access needed to classify a BAL read.
+/// This is BAL evidence and nothing more. Whether a slot changed is read from
+/// its original and current values, so no separate written flag is kept, and
+/// lifecycle events are absent now that no fold interprets them.
+/// Account and storage entries are sorted and unique. Reverted writes are
+/// absent; original-equal-current entries retain the access needed to classify
+/// a BAL read.
 pub const LaneTransition = struct {
     accounts: []AccountObservation = &.{},
 
@@ -64,7 +56,6 @@ pub const LaneTransition = struct {
         for (self.accounts) |account| {
             allocator.free(@constCast(account.storage));
             if (account.code) |code| allocator.free(@constCast(code.current_code));
-            allocator.free(@constCast(account.lifecycle));
         }
         allocator.free(self.accounts);
         self.* = .{};

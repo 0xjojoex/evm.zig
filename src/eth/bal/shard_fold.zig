@@ -370,7 +370,7 @@ test "observation append projects reads writes and code at one index" {
     const code = [_]u8{ 0x60, 0x00 };
     var storage = [_]observation.StorageObservation{
         .{ .slot = 1, .original = 5, .current = 5 },
-        .{ .slot = 2, .original = 7, .current = 9, .written = true },
+        .{ .slot = 2, .original = 7, .current = 9 },
     };
     var accounts = [_]observation.AccountObservation{.{
         .address = target,

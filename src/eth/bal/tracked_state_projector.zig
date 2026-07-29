@@ -182,7 +182,6 @@ const ObservationFold = struct {
                 .slot = fact.key,
                 .original = fact.original,
                 .current = fact.current,
-                .written = fact.effect.written,
             });
         }
     }
@@ -225,16 +224,12 @@ const FoldAccount = struct {
     balance: ?observation.ValueObservation = null,
     nonce: ?observation.NonceObservation = null,
     code: ?observation.CodeObservation = null,
-    lifecycle: std.ArrayList(observation.LifecycleKind) = .empty,
-    account_reset: bool = false,
-    account_deleted: bool = false,
     storage_wiped: bool = false,
 
     fn deinit(self: *FoldAccount, allocator: Allocator) void {
         self.storage.deinit(allocator);
         self.storage_indices.deinit();
         if (self.code) |code| allocator.free(@constCast(code.current_code));
-        self.lifecycle.deinit(allocator);
         self.* = undefined;
     }
 
@@ -249,8 +244,7 @@ const FoldAccount = struct {
         if (account.balance) |balance| self.appendBalance(balance);
         if (account.nonce) |nonce| self.appendNonce(nonce);
         if (account.code) |code| try self.appendCode(allocator, code);
-        try self.lifecycle.appendSlice(allocator, account.lifecycle);
-        self.appendFlags(account.account_reset, account.account_deleted, account.storage_wiped);
+        self.storage_wiped = self.storage_wiped or account.storage_wiped;
     }
 
     fn appendStorage(
@@ -318,21 +312,7 @@ const FoldAccount = struct {
             }
         }
 
-        const lifecycle_len: usize =
-            @as(usize, @intFromBool(fact.effect.created_contract)) +
-            @as(usize, @intFromBool(fact.effect.selfdestruct)) +
-            @as(usize, @intFromBool(fact.effect.account_deleted));
-        try self.lifecycle.ensureUnusedCapacity(allocator, lifecycle_len);
-        if (fact.effect.created_contract) self.lifecycle.appendAssumeCapacity(.created_contract);
-        if (fact.effect.selfdestruct) self.lifecycle.appendAssumeCapacity(.selfdestruct);
-        if (fact.effect.account_deleted) self.lifecycle.appendAssumeCapacity(.account_deleted);
-
-        self.appendFlags(
-            accountAbsent(fact.original) and
-                (!accountAbsent(fact.current) or fact.effect.created_contract),
-            fact.effect.account_deleted,
-            fact.effect.storage_wiped,
-        );
+        self.storage_wiped = self.storage_wiped or fact.effect.storage_wiped;
     }
 
     fn appendBalance(self: *FoldAccount, balance: observation.ValueObservation) void {
@@ -370,18 +350,6 @@ const FoldAccount = struct {
         }
     }
 
-    fn appendFlags(
-        self: *FoldAccount,
-        account_reset: bool,
-        account_deleted: bool,
-        storage_wiped: bool,
-    ) void {
-        self.account_reset = self.account_reset or account_reset;
-        if (account_reset) self.account_deleted = false;
-        if (account_deleted) self.account_deleted = true;
-        self.storage_wiped = self.storage_wiped or storage_wiped;
-    }
-
     /// Hand the folded rows to the caller. The code body is already owned; the
     /// slot and lifecycle lists transfer as-is.
     fn toOwnedObservation(self: *FoldAccount, allocator: Allocator) !observation.AccountObservation {
@@ -394,7 +362,6 @@ const FoldAccount = struct {
         var result = self.asObservation();
         result.storage = try self.storage.toOwnedSlice(allocator);
         errdefer allocator.free(@constCast(result.storage));
-        result.lifecycle = try self.lifecycle.toOwnedSlice(allocator);
         self.code = null;
         return result;
     }
@@ -406,9 +373,6 @@ const FoldAccount = struct {
             .balance = self.balance,
             .nonce = self.nonce,
             .code = self.code,
-            .lifecycle = self.lifecycle.items,
-            .account_reset = self.account_reset,
-            .account_deleted = self.account_deleted,
             .storage_wiped = self.storage_wiped,
         };
     }
@@ -447,7 +411,6 @@ fn deinitAccountObservation(
 ) void {
     allocator.free(@constCast(account.storage));
     if (account.code) |code| allocator.free(@constCast(code.current_code));
-    allocator.free(@constCast(account.lifecycle));
 }
 
 test "existence-only semantic access does not require account fields" {
@@ -547,7 +510,6 @@ test "small observation indices promote and preserve duplicate merges" {
                 .slot = slot,
                 .original = slot,
                 .current = slot + 1,
-                .written = true,
             }},
         });
     }
@@ -559,7 +521,6 @@ test "small observation indices promote and preserve duplicate merges" {
             .slot = 3,
             .original = 3,
             .current = 99,
-            .written = true,
         }},
     });
     try std.testing.expectEqual(linear_index_limit + 1, account.storage.items.len);
