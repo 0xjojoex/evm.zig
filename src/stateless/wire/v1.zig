@@ -12,15 +12,17 @@ const input_mod = @import("../input.zig");
 const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
+const eth_spec = @import("../../eth/spec.zig");
+const vm = @import("../../vm.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
 const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const revision: Revision = .amsterdam;
 const AmsterdamValidator = stateless_validate.Exact(revision);
-const AmsterdamOneShotValidator = stateless_validate.ExactWithOptions(revision, .{
-    .step_capture = false,
-});
+/// The guest engine: identical consensus spec, no step-capture dispatch.
+const SlimVm = vm.VmWithOptions(eth_spec.specAt(revision), .{ .step_capture = false });
+const AmsterdamOneShotValidator = stateless_validate.Bind(block_stf.Bind(revision, SlimVm));
 
 pub const schema_id: u16 = 0x1501;
 pub const schema_id_size = 2;

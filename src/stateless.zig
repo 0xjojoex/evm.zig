@@ -8,7 +8,7 @@ pub const input = @import("./stateless/input.zig");
 const validator = @import("./stateless/validate.zig");
 pub const ValidationOptions = validator.Options;
 pub const Exact = validator.Exact;
-pub const ExactWithOptions = validator.ExactWithOptions;
+pub const Bind = validator.Bind;
 pub const wire = @import("./stateless/wire.zig");
 pub const tx = @import("./stateless/tx.zig");
 

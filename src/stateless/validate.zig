@@ -36,15 +36,15 @@ pub const Options = struct {
 /// Callers supporting multiple revisions dispatch to these types themselves;
 /// this library never compiles or loops over a runtime fork set.
 pub fn Exact(comptime revision: Revision) type {
-    return ExactWithOptions(revision, .{});
+    return Bind(block_stf.Exact(revision));
 }
 
-pub fn ExactWithOptions(comptime revision: Revision, comptime compile_options: Vm.CompileOptions) type {
-    const ExactBlockStf = block_stf.ExactWithOptions(revision, compile_options);
-
+/// Bind the validator to an already-compiled exact block STF. Fork identity
+/// and compile options are read from the type, never threaded as parameters.
+pub fn Bind(comptime ExactBlockStf: type) type {
     return struct {
-        pub const fork = revision;
-        pub const options = compile_options;
+        pub const fork = ExactBlockStf.fork;
+        pub const compile_options = ExactBlockStf.compile_options;
         pub const BlockStf = ExactBlockStf;
 
         pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
@@ -76,7 +76,6 @@ pub fn ExactWithOptions(comptime revision: Revision, comptime compile_options: V
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             return validateWithScratchExact(
-                revision,
                 ExactBlockStf,
                 arena.allocator(),
                 input,
@@ -92,7 +91,6 @@ pub fn ExactWithOptions(comptime revision: Revision, comptime compile_options: V
             input: input_mod.Input,
         ) Error!block_stf.Result {
             return validateWithScratchExact(
-                revision,
                 ExactBlockStf,
                 allocator,
                 input,
@@ -104,7 +102,6 @@ pub fn ExactWithOptions(comptime revision: Revision, comptime compile_options: V
 }
 
 fn validateWithScratchExact(
-    comptime revision: Revision,
     comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
@@ -112,7 +109,7 @@ fn validateWithScratchExact(
     options: Options,
 ) Error!block_stf.Result {
     const block = input.block;
-    if (!blockShapeValid(revision, block)) return .{ .status = .invalid_block_body };
+    if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     var header_chain = try HeaderChain.init(
         allocator,
         input.witness.headers,
@@ -124,7 +121,6 @@ fn validateWithScratchExact(
     const codes = try witnessCodes(allocator, input.witness.codes);
 
     return validateExact(
-        revision,
         ExactBlockStf,
         allocator,
         input,
@@ -137,7 +133,6 @@ fn validateWithScratchExact(
 }
 
 fn validateExact(
-    comptime revision: Revision,
     comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
     input: input_mod.Input,
@@ -147,6 +142,7 @@ fn validateExact(
     parent_header: ParsedHeader,
     codes: []const state.WitnessStateReader.Code,
 ) Error!block_stf.Result {
+    const revision = ExactBlockStf.fork;
     const block = input.block;
     return ExactBlockStf.applyAssumeDecoded(allocator, .{
         .env = .{

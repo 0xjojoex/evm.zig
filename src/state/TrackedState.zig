@@ -1329,7 +1329,13 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
     }
 }
 
-pub fn reserveAccessHint(self: *TrackedState, hint: anytype) !void {
+/// Advisory presize for access maps; never affects execution semantics.
+pub const AccessHint = struct {
+    accounts: usize,
+    storage_keys: usize,
+};
+
+pub fn reserveAccessHint(self: *TrackedState, hint: AccessHint) !void {
     const tx = self.mutableTransaction();
     try tx.scope.warm_accounts.ensureUnusedCapacity(@intCast(hint.accounts));
     try tx.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
@@ -1337,7 +1343,7 @@ pub fn reserveAccessHint(self: *TrackedState, hint: anytype) !void {
     try tx.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
 }
 
-pub fn reserveAcceptedAccessHint(self: *TrackedState, hint: anytype) !void {
+pub fn reserveAcceptedAccessHint(self: *TrackedState, hint: AccessHint) !void {
     std.debug.assert(self.tx == null);
     try self.accepted.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
     try self.accepted.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
