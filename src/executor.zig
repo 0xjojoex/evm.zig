@@ -1257,14 +1257,9 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state);
             }
 
-            const code_hash = try self.state.getCodeHashForCodeRead(recipient);
-            const authenticated_code = runtime.lookupAuthenticatedExecutionCode(self, code_hash);
-            const resolved_view = if (authenticated_code == null) blk: {
-                const resolved = try runtime.resolveCode(self, recipient);
-                break :blk try runtime.resolvedCodeView(self, resolved);
-            } else null;
-            const bytecode = authenticated_code orelse
-                try runtime.resolveExecutionCodeView(self, resolved_view.?);
+            const resolved = try runtime.resolveCode(self, recipient);
+            const resolved_view = try runtime.resolvedCodeView(self, resolved);
+            const bytecode = try runtime.resolveExecutionCodeView(self, resolved_view);
             try self.traceAccountAccess(recipient);
             const message = Host.Message{
                 .depth = 0,

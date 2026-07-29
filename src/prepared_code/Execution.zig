@@ -76,13 +76,6 @@ pub fn resolve(
     return bytecode;
 }
 
-/// Resolve executable code from an authenticated hash only when the backend
-/// explicitly promises that raw bytes cannot alter code-address semantics.
-pub fn lookupAuthenticated(self: *Execution, code_hash: [32]u8) ?Bytecode.View {
-    const backend = self.backend orelse return null;
-    return backend.lookupAuthenticated(code_hash) catch null;
-}
-
 /// Prepare ephemeral executable bytes, such as CREATE initcode, for this
 /// top-level execution without consulting or admitting them to the backend.
 pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {

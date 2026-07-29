@@ -1,8 +1,8 @@
 //! Static execution artifacts for protocol-constant Ethereum system code.
 //!
 //! Lookup is keyed only by an authenticated account code hash. The state
-//! reader validates ordinary code materialization; these built-in artifacts
-//! can also execute directly from their authenticated hashes.
+//! reader remains responsible for loading witness code and validating that its
+//! bytes match the account hash.
 
 const std = @import("std");
 const Bytecode = @import("../code/Bytecode.zig");
@@ -56,7 +56,6 @@ const backend_vtable = Backend.VTable{
     .beginExecution = beginExecution,
     .endExecution = endExecution,
     .lookup = lookup,
-    .authenticated_lookup = true,
     .admit = admit,
 };
 

@@ -1123,14 +1123,6 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        pub noinline fn lookupAuthenticatedExecutionCode(
-            self: *Executor,
-            code_hash: [32]u8,
-        ) ?Bytecode.View {
-            std.debug.assert(self.prepared_code_execution != null);
-            return self.prepared_code_execution.?.lookupAuthenticated(code_hash);
-        }
-
         pub fn dupeExecutionCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {
             const code = try self.getCode(address);
             if (eip7702.delegationTarget(code)) |target| {

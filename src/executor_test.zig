@@ -305,7 +305,7 @@ test "prepared execution follows current code hash without owning public code re
     try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
 }
 
-test "only authenticated system artifacts can bypass omitted witness code" {
+test "prepared caches cannot satisfy code omitted from the active witness" {
     const TestTrie = struct {
         fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
             const path = try allocator.alloc(u8, key.len + 1);
@@ -383,14 +383,16 @@ test "only authenticated system artifacts can bypass omitted witness code" {
         });
         defer executor.deinit();
 
-        const result = try executor.executeSystemCall(
-            testExecutionContext(evmz.addr(1), 100_000),
-            evmz.addr(1),
-            target,
-            &.{},
-            .legacy(100_000),
+        try std.testing.expectError(
+            error.InvalidWitness,
+            executor.executeSystemCall(
+                testExecutionContext(evmz.addr(1), 100_000),
+                evmz.addr(1),
+                target,
+                &.{},
+                .legacy(100_000),
+            ),
         );
-        try std.testing.expectEqual(Interpreter.Status.revert, result.status);
     }
 }
 
