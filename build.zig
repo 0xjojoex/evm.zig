@@ -132,6 +132,8 @@ pub fn build(b: *std.Build) void {
     b.default_step.dependOn(&core_check.step);
     b.step("check", "Compile the public evmz module").dependOn(&core_check.step);
 
+    addTidy(b);
+
     const call_fixture_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
         .target = target,
@@ -252,7 +254,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&run_unit_tests.step);
         test_step.dependOn(&b.addRunArtifact(ssz_unit_tests).step);
@@ -750,6 +751,26 @@ fn addGuestZiskAb(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
     run.addArgs(&.{ "--zig", b.graph.zig_exe });
     if (b.args) |args| run.addArgs(args);
     const step = b.step("guest-zisk-ab", "Compare verified ZisK guest steps across two source trees");
+    step.dependOn(&run.step);
+}
+
+/// Whole-tree hygiene check. It reads the working tree rather than a declared
+/// input set, so the run can never be cached.
+fn addTidy(b: *std.Build) void {
+    const tidy = b.addExecutable(.{
+        .name = "tidy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/tidy.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run = b.addRunArtifact(tidy);
+    run.has_side_effects = true;
+    run.addDirectoryArg(b.path("."));
+    if (b.args) |args| run.addArgs(args);
+
+    const step = b.step("tidy", "Report unused private declarations and orphan files");
     step.dependOn(&run.step);
 }
 

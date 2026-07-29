@@ -1,3 +1,6 @@
+// tidy:root — run by hand, not from the build graph:
+// `zig run tools/generate-zero-roots.zig -- src/merkle/zero_roots.bin`
+
 const std = @import("std");
 
 const Root = [32]u8;

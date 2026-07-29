@@ -2606,14 +2606,6 @@ inline fn accountObservation(
     return &tx.observed_accounts.items[@intFromEnum(id)];
 }
 
-inline fn storageObservation(
-    tx: *Transaction,
-    row: *const StorageRow,
-) ?*StorageObservationRow {
-    const id = row.observation_id orelse return null;
-    return &tx.observed_storage.items[@intFromEnum(id)];
-}
-
 fn appendAccountUndo(self: *TrackedState, account_id: AccountId, row: *const AccountRow) !void {
     const tx = &self.tx.?;
     if (!tx.scope.active) return;

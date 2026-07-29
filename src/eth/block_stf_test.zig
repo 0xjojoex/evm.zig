@@ -7,7 +7,6 @@ const block_stf = @import("block_stf.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
-const execution = @import("../execution.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");

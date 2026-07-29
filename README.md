@@ -235,7 +235,17 @@ against it.
 zig build test                       # native unit tests
 zig build test -Dprofile=zkvm        # zkVM adapter semantics on the host
 zig build eest-test                  # spec-test lane
+zig build tidy                       # dead declarations, unexercised exports
 ```
+
+`tidy` reports review candidates the compiler cannot see; it never edits
+source. Only `unused-private` fails the step. `unreferenced-pub` (a `pub`
+declaration no file in the repository names, including the `examples/`,
+`bench/`, and `eest/` consumers), `test-only`, and `orphan-file` are advisory,
+and `--strict` promotes them. An unreferenced export is a prompt to ask whether
+it earns its keep, not proof that it does not — evmz is a library. A standalone
+entry point outside the build graph opts out of the orphan report with a
+`// tidy:root` comment.
 
 ## License
 
