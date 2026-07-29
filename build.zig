@@ -342,7 +342,7 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build);
-        addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", "zkevm-input", optimize_name, null, evmz_build);
+        addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", "zkevm-input", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build);
         addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, evmz_build);
         addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, evmz_build);
@@ -385,15 +385,22 @@ pub fn build(b: *std.Build) void {
         "ziskos-staticlib",
         "Path to a ZisK libziskos_staticlib.a provider for guest-zisk",
     );
-    const guest_input_path = b.option([]const u8, "guest-input", "Path to ZisK stdin input file for guest-zisk-run");
-    const guest_output_path = b.option([]const u8, "guest-output", "Path to write ZisK public output from guest-zisk-run");
+    const sp1_staticlib_path = b.option(
+        []const u8,
+        "sp1-staticlib",
+        "Path to an SP1 libzkevm.a provider for guest-sp1",
+    );
+    const guest_input_path = b.option([]const u8, "guest-input", "Path to zkVM guest input");
+    const guest_output_path = b.option([]const u8, "guest-output", "Path to write zkVM public output");
     const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .basic;
     const guest_zisk_strip = b.option(bool, "guest-zisk-strip", "Strip symbols from the ZisK guest ELF") orelse true;
+    const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse true;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
     const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
     addGuestZiskAb(b, optimize);
-    addGuestZisk(
+    addGuest(
         b,
+        .zisk,
         optimize,
         ziskos_staticlib_path,
         guest_payload,
@@ -402,6 +409,19 @@ pub fn build(b: *std.Build) void {
         guest_zisk_strip,
         omit_frame_pointer,
         guest_zisk_profile_tags,
+        guest_heap_metrics,
+    );
+    addGuest(
+        b,
+        .sp1,
+        optimize,
+        sp1_staticlib_path,
+        guest_payload,
+        guest_input_path,
+        guest_output_path,
+        guest_sp1_strip,
+        omit_frame_pointer,
+        false,
         guest_heap_metrics,
     );
 
@@ -474,20 +494,61 @@ fn buildOptions(
     return options;
 }
 
-fn guestOptions(b: *std.Build, use_ziskos_staticlib: bool, heap_metrics: bool) *std.Build.Step.Options {
+fn guestOptions(b: *std.Build, backend: GuestBackend, heap_metrics: bool) *std.Build.Step.Options {
     const options = b.addOptions();
-    options.addOption(bool, "use_ziskos_staticlib", use_ziskos_staticlib);
+    options.addOption(GuestBackend, "backend", backend);
     options.addOption(bool, "heap_metrics", heap_metrics);
     return options;
 }
 
-fn guestZiskTarget(b: *std.Build) std.Build.ResolvedTarget {
-    const query = std.Target.Query.parse(.{
-        .arch_os_abi = "riscv64-freestanding",
-        .cpu_features = "generic_rv64+m+a",
-    }) catch @panic("invalid ZisK guest target");
-    return b.resolveTargetQuery(query);
-}
+const GuestBackend = enum {
+    native,
+    zisk,
+    sp1,
+
+    fn config(self: GuestBackend) GuestBackendConfig {
+        return switch (self) {
+            .native => unreachable,
+            .zisk => .{
+                .target_features = "generic_rv64+m+a",
+                .runtime_root = "guest/runtime/zisk/root.zig",
+                .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
+                .artifact_name = "evmz-guest-zisk",
+                .install_dir = "guest/zisk",
+                .build_step = "guest-zisk",
+                .build_description = "Build the ZisK rv64 guest ELF",
+                .run_step = "guest-zisk-run",
+                .run_description = "Run the ZisK guest ELF with ziskemu",
+                .missing_provider = "guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a",
+            },
+            .sp1 => .{
+                .target_features = "generic_rv64+m",
+                .runtime_root = "guest/runtime/sp1/root.zig",
+                .linker_script = "guest/runtime/sp1/sp1-rv64.ld",
+                .artifact_name = "evmz-guest-sp1",
+                .install_dir = "guest/sp1",
+                .build_step = "guest-sp1",
+                .build_description = "Build the SP1 rv64 guest ELF",
+                .run_step = "guest-sp1-run",
+                .run_description = "Run the SP1 guest ELF",
+                .missing_provider = "guest-sp1 requires -Dsp1-staticlib=<path>/libzkevm.a",
+            },
+        };
+    }
+};
+
+const GuestBackendConfig = struct {
+    target_features: []const u8,
+    runtime_root: []const u8,
+    linker_script: []const u8,
+    artifact_name: []const u8,
+    install_dir: []const u8,
+    build_step: []const u8,
+    build_description: []const u8,
+    run_step: []const u8,
+    run_description: []const u8,
+    missing_provider: []const u8,
+};
 
 const GuestPayload = enum {
     basic,
@@ -507,7 +568,7 @@ fn addGuestPayloadTest(
     optimize: std.builtin.OptimizeMode,
     evmz_mod: *std.Build.Module,
 ) void {
-    const guest_options = guestOptions(b, false, false);
+    const guest_options = guestOptions(b, .native, false);
     const guest_options_mod = guest_options.createModule();
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -580,10 +641,11 @@ fn addGuestPayloadTest(
     guest_payload_test_step.dependOn(&b.addRunArtifact(stateless_ere_tests).step);
 }
 
-fn addGuestZisk(
+fn addGuest(
     b: *std.Build,
+    backend: GuestBackend,
     optimize: std.builtin.OptimizeMode,
-    ziskos_staticlib_path: ?[]const u8,
+    provider_path_option: ?[]const u8,
     guest_payload: GuestPayload,
     guest_input_path: ?[]const u8,
     guest_output_path: ?[]const u8,
@@ -592,18 +654,22 @@ fn addGuestZisk(
     profile_tags: bool,
     heap_metrics: bool,
 ) void {
-    const provider_path = ziskos_staticlib_path orelse {
-        const fail = b.addFail("guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a");
-        const guest_step = b.step("guest-zisk", "Build the ZisK rv64 guest ELF");
+    const config = backend.config();
+    const provider_path = provider_path_option orelse {
+        const fail = b.addFail(config.missing_provider);
+        const guest_step = b.step(config.build_step, config.build_description);
         guest_step.dependOn(&fail.step);
-        const run_step = b.step("guest-zisk-run", "Run the ZisK guest ELF with ziskemu");
+        const run_step = b.step(config.run_step, config.run_description);
         run_step.dependOn(&fail.step);
         return;
     };
 
-    const target = guestZiskTarget(b);
+    const target = b.resolveTargetQuery(std.Target.Query.parse(.{
+        .arch_os_abi = "riscv64-freestanding",
+        .cpu_features = config.target_features,
+    }) catch @panic("invalid guest target"));
     const build_options = buildOptions(b, .zkvm, .std, .std);
-    const guest_options = guestOptions(b, true, heap_metrics);
+    const guest_options = guestOptions(b, backend, heap_metrics);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();
     const stateless_profile_mod = b.createModule(.{
@@ -706,7 +772,7 @@ fn addGuestZisk(
     };
 
     const root_mod = b.createModule(.{
-        .root_source_file = b.path("guest/runtime/zisk/root.zig"),
+        .root_source_file = b.path(config.runtime_root),
         .target = target,
         .optimize = optimize,
         .code_model = .medium,
@@ -719,34 +785,96 @@ fn addGuestZisk(
         .unwind_tables = .none,
     });
     root_mod.addObjectFile(.{ .cwd_relative = provider_path });
+    if (backend == .sp1) {
+        const atomics_mod = b.createModule(.{
+            .root_source_file = b.path("guest/runtime/sp1/atomics.zig"),
+            .target = target,
+            .optimize = optimize,
+            .code_model = .medium,
+            .error_tracing = false,
+            .omit_frame_pointer = omit_frame_pointer,
+            .pic = false,
+            .single_threaded = true,
+            .strip = strip,
+            .unwind_tables = .none,
+        });
+        root_mod.addObject(b.addObject(.{
+            .name = "evmz-sp1-atomics",
+            .root_module = atomics_mod,
+        }));
+    }
 
     const guest = b.addExecutable(.{
-        .name = "evmz-guest-zisk",
+        .name = config.artifact_name,
         .root_module = root_mod,
     });
     guest.entry = .{ .symbol_name = "_start" };
     guest.link_gc_sections = true;
-    guest.setLinkerScript(b.path("guest/runtime/zisk/zisk-rv64.ld"));
+    guest.setLinkerScript(b.path(config.linker_script));
 
     const install_guest = b.addInstallArtifact(guest, .{
-        .dest_dir = .{ .override = .{ .custom = "guest/zisk" } },
-        .dest_sub_path = "evmz-guest-zisk.elf",
+        .dest_dir = .{ .override = .{ .custom = config.install_dir } },
+        .dest_sub_path = b.fmt("{s}.elf", .{config.artifact_name}),
     });
 
-    const guest_step = b.step("guest-zisk", "Build the ZisK rv64 guest ELF");
+    const guest_step = b.step(config.build_step, config.build_description);
     guest_step.dependOn(&install_guest.step);
 
-    const ziskemu = b.option([]const u8, "ziskemu", "Path to ziskemu for guest-zisk-run") orelse "ziskemu";
-    const ziskemu_steps = b.option([]const u8, "ziskemu-steps", "Maximum ziskemu steps for guest-zisk-run") orelse "5000000";
-    const run = b.addSystemCommand(&.{ ziskemu, "-e" });
-    run.addFileArg(guest.getEmittedBin());
-    if (guest_input_path) |path| run.addArgs(&.{ "-i", path });
-    if (guest_output_path) |path| run.addArgs(&.{ "-o", path });
-    run.addArgs(&.{ "-n", ziskemu_steps, "-m", "--steps", "-c" });
-    run.has_side_effects = true;
+    addGuestRunner(b, backend, guest, guest_input_path, guest_output_path);
+}
 
-    const run_step = b.step("guest-zisk-run", "Run the ZisK guest ELF with ziskemu");
-    run_step.dependOn(&run.step);
+fn addGuestRunner(
+    b: *std.Build,
+    backend: GuestBackend,
+    guest: *std.Build.Step.Compile,
+    guest_input_path: ?[]const u8,
+    guest_output_path: ?[]const u8,
+) void {
+    switch (backend) {
+        .native => unreachable,
+        .zisk => {
+            const ziskemu = b.option([]const u8, "ziskemu", "Path to ziskemu for guest-zisk-run") orelse "ziskemu";
+            const ziskemu_steps = b.option([]const u8, "ziskemu-steps", "Maximum ziskemu steps for guest-zisk-run") orelse "5000000";
+            const run = b.addSystemCommand(&.{ ziskemu, "-e" });
+            run.addFileArg(guest.getEmittedBin());
+            if (guest_input_path) |path| run.addArgs(&.{ "-i", path });
+            if (guest_output_path) |path| run.addArgs(&.{ "-o", path });
+            run.addArgs(&.{ "-n", ziskemu_steps, "-m", "--steps", "-c" });
+            run.has_side_effects = true;
+
+            const config = backend.config();
+            const run_step = b.step(config.run_step, config.run_description);
+            run_step.dependOn(&run.step);
+        },
+        .sp1 => {
+            const config = backend.config();
+            const host_manifest = b.pathFromRoot("guest/runtime/sp1/host/Cargo.toml");
+            const host_target = b.cache_root.join(b.allocator, &.{"sp1-host"}) catch @panic("OOM");
+            const build_host = b.addSystemCommand(&.{
+                "cargo",
+                "build",
+                "--quiet",
+                "--release",
+                "--locked",
+                "--manifest-path",
+                host_manifest,
+                "--target-dir",
+                host_target,
+            });
+            build_host.has_side_effects = true;
+
+            const host_exe = b.pathJoin(&.{ host_target, "release", "evmz-sp1-host" });
+            const run = b.addSystemCommand(&.{ host_exe, "--elf" });
+            run.step.dependOn(&build_host.step);
+            run.addFileArg(guest.getEmittedBin());
+            if (guest_input_path) |path| run.addArgs(&.{ "--input", path });
+            if (guest_output_path) |path| run.addArgs(&.{ "--output", path });
+            run.has_side_effects = true;
+
+            const run_step = b.step(config.run_step, config.run_description);
+            run_step.dependOn(&run.step);
+        },
+    }
 }
 
 fn addGuestZiskAb(b: *std.Build, optimize: std.builtin.OptimizeMode) void {

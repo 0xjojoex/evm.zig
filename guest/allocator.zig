@@ -9,7 +9,7 @@ pub const MeteredFixedBufferAllocator = evmz.fixed_buffer_meter.MeteredFixedBuff
 extern var _evmz_heap_bottom: u8;
 extern var _evmz_heap_top: u8;
 
-const NativeHeap = if (guest_options.use_ziskos_staticlib) struct {
+const NativeHeap = if (guest_options.backend != .native) struct {
     fn buffer() []u8 {
         unreachable;
     }
@@ -27,7 +27,7 @@ const NativeHeap = if (guest_options.use_ziskos_staticlib) struct {
 };
 
 pub fn fixedBuffer() []u8 {
-    if (comptime guest_options.use_ziskos_staticlib) {
+    if (comptime guest_options.backend != .native) {
         const bottom = @intFromPtr(&_evmz_heap_bottom);
         const top = @intFromPtr(&_evmz_heap_top);
         if (top <= bottom) unreachable;

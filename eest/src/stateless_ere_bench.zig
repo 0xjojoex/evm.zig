@@ -22,17 +22,22 @@ pub const Options = struct {
     zisk_elf_path: ?[]const u8 = null,
     zisk_work_dir: []const u8 = "zig-out/zkevm-ere-bench",
     zisk_max_steps: []const u8 = "1000000",
+    sp1_host_path: ?[]const u8 = null,
+    sp1_elf_path: ?[]const u8 = null,
+    sp1_work_dir: []const u8 = "zig-out/zkevm-ere-bench-sp1",
     report_only: bool = false,
 };
 
 pub const Engine = enum {
     native,
     zisk,
+    sp1,
 
     pub fn label(self: Engine) []const u8 {
         return switch (self) {
             .native => "evmz-native",
             .zisk => "zisk-ziskemu",
+            .sp1 => "sp1-executor",
         };
     }
 };
@@ -388,7 +393,69 @@ fn executeFixture(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixt
     return switch (options.engine) {
         .native => try executeNative(io, allocator, fixture),
         .zisk => try executeZisk(io, allocator, fixture, options),
+        .sp1 => try executeSp1(io, allocator, fixture, options),
     };
+}
+
+fn executeSp1(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture, options: Options) !ExecutionMetrics {
+    const host_path = options.sp1_host_path orelse return error.MissingSp1HostPath;
+    const elf_path = options.sp1_elf_path orelse return error.MissingSp1ElfPath;
+    var mirror = try validateWithMeteredFixedHeap(allocator, fixture.stateless_input_bytes, "native-fixed-mirror");
+    defer mirror.deinit(allocator);
+
+    const run_id = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ fixture.name, monotonicNanos(io) });
+    defer allocator.free(run_id);
+    const work_dir = try std.fs.path.join(allocator, &.{ options.sp1_work_dir, run_id });
+    defer allocator.free(work_dir);
+    try std.Io.Dir.cwd().createDirPath(io, work_dir);
+
+    const input_path = try std.fs.path.join(allocator, &.{ work_dir, "stdin.bin" });
+    defer allocator.free(input_path);
+    const output_path = try std.fs.path.join(allocator, &.{ work_dir, "public.bin" });
+    defer allocator.free(output_path);
+
+    const input = try ere_io.inputBytes(allocator, fixture.stateless_input_bytes, .sp1);
+    defer allocator.free(input);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = input_path, .data = input });
+
+    const argv = [_][]const u8{
+        host_path,
+        "--elf",
+        elf_path,
+        "--input",
+        input_path,
+        "--output",
+        output_path,
+    };
+    const start = monotonicNanos(io);
+    const result = try std.process.run(allocator, io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(4 * 1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const elapsed_ns = monotonicNanos(io) - start;
+
+    const cycles = parseSp1Cycles(result.stdout) orelse parseSp1Cycles(result.stderr) orelse 0;
+    if (!childTermOk(result.term)) {
+        const reason = try std.fmt.allocPrint(allocator, "SP1 executor exited with {f}: {s}{s}", .{ fmtTerm(result.term), result.stdout, result.stderr });
+        return .{ .crashed = .{ .reason = reason } };
+    }
+    if (cycles == 0) {
+        const reason = try std.fmt.allocPrint(allocator, "SP1 executor reported no cycle count: {s}{s}", .{ result.stdout, result.stderr });
+        return .{ .crashed = .{ .reason = reason } };
+    }
+
+    const actual = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(1024));
+    defer allocator.free(actual);
+    return .{ .success = .{
+        .output_matched = std.mem.eql(u8, actual, fixture.stateless_output_bytes),
+        .public_values = try .init(allocator, actual),
+        .total_num_cycles = cycles,
+        .execution_duration = durationJson(elapsed_ns),
+        .heap = mirror.heap,
+    } };
 }
 
 fn executeNative(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture) !ExecutionMetrics {
@@ -647,7 +714,14 @@ fn truncateFixtureName(allocator: std.mem.Allocator, base: []const u8, suffix: [
 }
 
 fn parseZiskSteps(bytes: []const u8) ?u64 {
-    const needle = "steps=";
+    return parseCounter(bytes, "steps=");
+}
+
+fn parseSp1Cycles(bytes: []const u8) ?u64 {
+    return parseCounter(bytes, "cycles=");
+}
+
+fn parseCounter(bytes: []const u8, needle: []const u8) ?u64 {
     const start = std.mem.indexOf(u8, bytes, needle) orelse return null;
     var cursor = start + needle.len;
     const digits_start = cursor;
@@ -663,6 +737,11 @@ fn ziskRunErrored(bytes: []const u8) bool {
 test "ZisK error marker overrides a zero process exit" {
     try std.testing.expect(ziskRunErrored("Emu::run() finished with error at step=42"));
     try std.testing.expect(!ziskRunErrored("Emu::run() finished at step=42"));
+}
+
+test "parses SP1 executor cycles" {
+    try std.testing.expectEqual(@as(?u64, 37_367), parseSp1Cycles("sp1 cycles=37367 exit_code=0"));
+    try std.testing.expectEqual(@as(?u64, null), parseSp1Cycles("sp1 exit_code=0"));
 }
 
 fn childTermOk(term: std.process.Child.Term) bool {
@@ -728,12 +807,13 @@ fn rfc3339TimestampAlloc(allocator: std.mem.Allocator, timestamp_nanos: u128) ![
 
 pub fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk] [--output-folder PATH] [--limit N] [--test NAME] [--report-only] [--ziskemu PATH] [--zisk-elf PATH] [path ...]
+        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk|sp1] [--output-folder PATH] [--limit N] [--test NAME] [--report-only] [--ziskemu PATH] [--zisk-elf PATH] [--zisk-max-steps N] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
         \\
         \\Consumes direct EEST zkEVM fixtures with non-empty statelessInputBytes
         \\and emits ERE BenchmarkRun-compatible execution JSON rows. Native
         \\runs execute evmz directly. ZisK runs frame the raw fixture bytes at
         \\the backend boundary and compare the 256-byte padded public output.
+        \\SP1 runs use one raw hint chunk and compare raw public output.
         \\
     , .{});
 }

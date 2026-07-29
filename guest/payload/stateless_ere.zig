@@ -39,13 +39,20 @@ comptime {
         }
         @export(&evmz_guest_entry, .{ .name = "evmz_guest_entry" });
     }
-    if (guest_options.use_ziskos_staticlib) {
-        @export(&ziskMain, .{ .name = "main" });
+    switch (guest_options.backend) {
+        .native => {},
+        .zisk => @export(&ziskMain, .{ .name = "main" }),
+        .sp1 => @export(&sp1Main, .{ .name = "main" }),
     }
 }
 
 fn ziskMain() callconv(.c) void {
     evmz_guest_entry();
+}
+
+fn sp1Main() callconv(.c) c_int {
+    evmz_guest_entry();
+    return 0;
 }
 
 pub fn runStatelessEreInput(allocator: std.mem.Allocator, input: []const u8) evmz.stateless.wire.Error![]u8 {

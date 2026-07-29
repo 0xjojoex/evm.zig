@@ -3,7 +3,7 @@ const evmz = @import("evmz");
 const fixture_common = @import("../fixture.zig");
 const ere_io = @import("../stateless_ere_io.zig");
 
-pub const about = "Extract one EEST zkEVM stateless input as ZisK stdin";
+pub const about = "Extract one EEST zkEVM stateless input for a zkVM guest";
 
 const JsonValue = fixture_common.JsonValue;
 const asArray = fixture_common.asArray;
@@ -163,11 +163,11 @@ fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm-input -- [--test NAME] [--index N] [--format raw|zisk] [--expected-public PATH] [--expected-public-format raw|zisk] <fixture.json> <output.bin>
+        \\usage: zig build zkevm-input -- [--test NAME] [--index N] [--format raw|zisk|sp1] [--expected-public PATH] [--expected-public-format raw|zisk] <fixture.json> <output.bin>
         \\
         \\Extracts one EEST zkEVM statelessInputBytes value. The default
         \\format is zisk, a length-prefixed stdin frame for local ziskemu.
-        \\Use --format raw for the ERE/benchmark-workload stdin contract.
+        \\Use --format raw for ERE or --format sp1 for one raw SP1 hint chunk.
         \\
     , .{});
 }

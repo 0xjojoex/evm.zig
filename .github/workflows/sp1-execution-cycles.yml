@@ -1,0 +1,136 @@
+# Execute-only SP1 guest-performance lane. It consumes the released zkEVM SDK,
+# builds one stateless Zig guest, and archives ERE-shaped rows for the pinned
+# tests-zkevm corpus. No proving key or proof generation is involved.
+# Correctness gates the run: a nonzero guest exit or a public-output mismatch
+# fails the fixture suite. Cycle counts are archived without a baseline diff,
+# unlike the ZisK lane.
+name: SP1 execution cycles
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - build.zig
+      - build.zig.zon
+      - src/**
+      - guest/**
+      - eest/**
+      - .github/workflows/sp1-execution-cycles.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sp1-execution-cycles-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: tests-zkevm v0.6.2 execution cycles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SP1_VERSION: v6.3.1
+      SP1_SDK_SHA256: ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8
+      SP1_SDK_ROOT: ${{ runner.temp }}/sp1-sdk
+      SP1_HOST_TARGET: ${{ runner.temp }}/sp1-host-target
+      FIXTURE_MANIFEST: eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
+      FIXTURE_ROOT: ${{ github.workspace }}/.eest/fixtures/tests-zkevm-v0.6.2
+      RESULTS_ROOT: ${{ github.workspace }}/sp1-cycle-results
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-riscv64-unknown-elf
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Restore fixture archive
+        uses: actions/cache@v4
+        with:
+          path: .eest/cache
+          key: sp1-cycles-tests-zkevm-v0.6.2-${{ hashFiles('eest.lock', 'eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt') }}
+
+      - name: Fetch selected tests-zkevm v0.6.2 fixtures
+        working-directory: eest
+        run: scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
+
+      - name: Download pinned SP1 zkEVM SDK
+        run: |
+          archive="${RUNNER_TEMP}/zkevm-sdk-${SP1_VERSION}.tar.gz"
+          curl -fsSL \
+            "https://github.com/succinctlabs/sp1/releases/download/${SP1_VERSION}/zkevm-sdk-${SP1_VERSION#v}.tar.gz" \
+            -o "${archive}"
+          echo "${SP1_SDK_SHA256}  ${archive}" | sha256sum --check -
+          mkdir -p "${SP1_SDK_ROOT}"
+          tar -xzf "${archive}" -C "${SP1_SDK_ROOT}" --strip-components=1
+          test -f "${SP1_SDK_ROOT}/libzkevm.a"
+
+      - name: Restore SP1 host build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/sp1-host-target
+          key: sp1-host-v6.3.1-${{ runner.os }}-${{ hashFiles('guest/runtime/sp1/host/Cargo.lock') }}
+
+      - name: Build execute-only SP1 host
+        run: |
+          cargo build \
+            --quiet \
+            --release \
+            --locked \
+            --manifest-path guest/runtime/sp1/host/Cargo.toml \
+            --target-dir "${SP1_HOST_TARGET}"
+
+      - name: Build stateless SP1 guest
+        run: |
+          zig build guest-sp1 \
+            -Dguest-payload=stateless-ere \
+            -Doptimize=ReleaseFast \
+            "-Dsp1-staticlib=${SP1_SDK_ROOT}/libzkevm.a" \
+            --prefix "${RUNNER_TEMP}/guest" \
+            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+            --summary all
+          elf="${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf"
+          if riscv64-unknown-elf-objdump -d "${elf}" \
+            | grep -E '[[:space:]](amo|lr\.|sc\.)' >/dev/null; then
+            echo "error: SP1 RV64IM guest contains unsupported atomic instructions" >&2
+            exit 1
+          fi
+
+      - name: Run fixture suite
+        run: |
+          fixtures=()
+          while IFS= read -r fixture || [[ -n "${fixture}" ]]; do
+            fixture="${fixture%$'\r'}"
+            [[ -z "${fixture}" || "${fixture}" == \#* ]] && continue
+            fixtures+=("${FIXTURE_ROOT}/${fixture}")
+          done < "${FIXTURE_MANIFEST}"
+
+          zig build zkevm-ere-bench --summary all -- \
+            --engine sp1 \
+            --output-folder "${RESULTS_ROOT}" \
+            --sp1-host "${SP1_HOST_TARGET}/release/evmz-sp1-host" \
+            --sp1-elf "${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf" \
+            --sp1-work-dir "${RUNNER_TEMP}/sp1-runs" \
+            "${fixtures[@]}"
+
+      - name: Archive execution rows
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp1-cycle-results
+          path: ${{ env.RESULTS_ROOT }}
+          if-no-files-found: error
+          retention-days: 90
