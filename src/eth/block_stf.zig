@@ -9,7 +9,6 @@
 const std = @import("std");
 
 const Executor = @import("../executor.zig");
-const Host = @import("../Host.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
@@ -1514,14 +1513,6 @@ fn serialFold(
         }
     }
     return result;
-}
-
-fn byteSlicesEqual(lhs: []const []const u8, rhs: []const []const u8) bool {
-    if (lhs.len != rhs.len) return false;
-    for (lhs, rhs) |lhs_item, rhs_item| {
-        if (!std.mem.eql(u8, lhs_item, rhs_item)) return false;
-    }
-    return true;
 }
 
 /// Keep a spec-owned before-transaction batch in the same rollback

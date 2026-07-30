@@ -71,7 +71,7 @@ Run the full root suite through the zkVM adapters without building an RV64
 guest:
 
 ```sh
-zig build test -Dprofile=zkvm --summary all
+zig build test-evmz-zkvm --summary all
 ```
 
 This test command alone links a host-native implementation of every symbol in
@@ -113,6 +113,57 @@ guest-side complement to the host RSS and VM-loop benchmarks in
 [`bench/`](../bench/README.md). A representation optimization should normally
 improve or preserve both surfaces; an explicit product tradeoff should not be
 hidden behind a host-only improvement.
+
+## Published cross-guest scoreboard
+
+The complete guest field behind the two-row summary in the root README.
+Execute-only totals over the pinned 75-block Amsterdam `tests-zkevm` v0.6.2
+manifest (12 JSON files, 52 test objects). Lower is better. evmz uses its
+committed release configuration; peers use their published optimized defaults,
+including fat LTO and one codegen unit for the Reth and Ethrex SP1 builds. No
+peer artifact was rebuilt with evmz-specific flags.
+
+SP1 cycles:
+
+| Guest    | Correct |   Total cycles |  vs leader |
+| -------- | ------: | -------------: | ---------: |
+| **evmz** |   75/75 | **94,915,078** | **leader** |
+| Reth     |   75/75 |    134,914,894 |    +42.14% |
+| Ethrex   |   75/75 |    292,260,053 |   +207.92% |
+
+ZisK steps:
+
+| Guest    | Correct |    Total steps |  vs leader |
+| -------- | ------: | -------------: | ---------: |
+| **Reth** |   75/75 | **54,672,821** | **leader** |
+| evmz     |   75/75 |     56,995,060 |     +4.25% |
+| Zesu     |   75/75 |     76,314,637 |    +39.58% |
+| Ethrex   |   75/75 |    100,659,842 |    +84.11% |
+
+Cycles and steps are backend-specific instruction metrics and must not be
+compared across zkVMs. They are not proof cycles or proving time. These measure
+the complete stateless guest workload, not the EVM interpreter in isolation.
+
+### Snapshot
+
+- evmz `ee78731dc8b195a0e30460d1c5c09f40121979f6`, Zig `0.16.0`, `ReleaseFast`,
+  backend-specific RV64 target features with linker relaxation, frame pointers
+  omitted, fully relaxed external SP1 and ZisK provider archives, stripped ELF,
+  `.medium` code model.
+- Workload: Eth Act `zkevm-benchmark-workload`
+  `35fa24ebf007edd4c9d65bdc41b25cb5fd726a80`; ERE
+  `58ca85beaee2fa8acd31dbf33b90bb765aac9010`.
+- Reth and Ethrex guests: `ere-guests`
+  `a52609d4553405ab46d2dbda60dffd59b47e2082`. Zilkworm: official
+  `zilkworm-stateless` v0.2.5, commit `bd2638c`.
+- Host: Linux 6.8.0-110-generic, x86_64, 4-vCPU AMD EPYC Genoa, 7.6 GiB RAM.
+- Fixture manifest SHA-256
+  `fdd5f0e59e0343df0a569fcb04e1aa49ea4e7537b455236686573584da263e8b`.
+- Each of the eight backend/guest combinations ran twice. Pass 2 changed no
+  cycle or step count, correctness result, or public output.
+
+The integration patch that drives the guests is preserved at
+[`0xjojoex/zkevm-benchmark-workload@a7e2203a`](https://github.com/0xjojoex/zkevm-benchmark-workload/tree/a7e2203a2316d9a44254a8ebfe3f1d51c1baa744).
 
 ## Pinned stateless fixture report
 

@@ -6,14 +6,13 @@ the compatibility source, headers, C example, and static/shared
 package.
 
 ```sh
-zig build test
-zig build -Doptimize=ReleaseFast
-zig build example -Doptimize=ReleaseFast
+zig build ci -Doptimize=ReleaseFast
 ```
 
 Installed headers are `evmz/evmc.h`, the compatibility include `evmz.h`, and
 the pinned `evmc/evmc.h` used to build the adapter. The Zig module is named
-`evmz_evmc`.
+`evmz_evmc`. The `ci` step builds both libraries, runs the adapter tests, and
+runs the C example against both the static and shared artifacts.
 
 Test and diagnostic tools can use the reverse host bridge through
 `evmz_evmc.testing.host2c`; it is not part of the installed C ABI.

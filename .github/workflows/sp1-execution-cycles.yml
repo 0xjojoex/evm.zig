@@ -33,8 +33,6 @@ jobs:
     env:
       SP1_VERSION: v6.3.1
       SP1_SDK_SHA256: ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8
-      SP1_SDK_ROOT: ${{ runner.temp }}/sp1-sdk
-      SP1_HOST_TARGET: ${{ runner.temp }}/sp1-host-target
       FIXTURE_MANIFEST: eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
       FIXTURE_ROOT: ${{ github.workspace }}/.eest/fixtures/tests-zkevm-v0.6.2
       RESULTS_ROOT: ${{ github.workspace }}/sp1-cycle-results
@@ -42,6 +40,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve runner paths
+        run: |
+          {
+            echo "SP1_SDK_ROOT=${RUNNER_TEMP}/sp1-sdk"
+            echo "SP1_HOST_TARGET=${RUNNER_TEMP}/sp1-host-target"
+          } >> "${GITHUB_ENV}"
 
       - name: Install system dependencies
         run: |

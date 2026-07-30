@@ -24,18 +24,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
-      - name: Run unit tests
-        run: zig build test --summary all
+      - name: Run native verification
+        run: >-
+          zig build
+          test-evmz-native
+          test-packages
+          test-tools
+          guest-payload-test
+          guest-payload-abi-check
+          fmt-check
+          tidy
+          -j2
+          --summary all
 
   zkvm-profile-test:
     name: zkVM-profile semantic tests
@@ -46,18 +51,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
       - name: Run zkVM-profile semantic tests
-        run: zig build test -Dprofile=zkvm --summary all
+        run: zig build test-evmz-zkvm -j2 --summary all
 
   evmc-test:
     name: EVMC compatibility package
@@ -68,27 +68,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
-      - name: Run EVMC tests
+      - name: Build and test EVMC
         working-directory: pkg/evmc
-        run: zig build test --summary all
-
-      - name: Build EVMC release artifacts
-        working-directory: pkg/evmc
-        run: zig build -Doptimize=ReleaseFast --summary all
-
-      - name: Run EVMC C example
-        working-directory: pkg/evmc
-        run: zig build example -Doptimize=ReleaseFast --summary all
+        run: zig build ci -Doptimize=ReleaseFast -j2 --summary all
 
   fuzz:
     name: Fuzz pure-Zig units
@@ -98,11 +85,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -132,15 +114,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          cache-key: ${{ matrix.target }}
 
       - name: Record target
         run: |
@@ -161,7 +139,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: zig build -Dtarget="${TARGET}" -Doptimize=ReleaseFast --summary all
 
-      - name: Cross compile EVMC adapter
+      - name: Cross compile EVMC artifacts
+        if: matrix.target == 'aarch64-linux-musl'
         working-directory: pkg/evmc
         env:
           TARGET: ${{ matrix.target }}

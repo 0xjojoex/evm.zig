@@ -44,17 +44,22 @@ jobs:
       ZISK_VERSION: 1.0.0-alpha
       ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
       ZISK_RUST_TOOLCHAIN: zisk-1.0.0
-      ZISK_HOME: ${{ runner.temp }}/zisk-sdk
-      ZISK_SOURCE: ${{ runner.temp }}/zisk-source
       FIXTURE_MANIFEST: eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
       FIXTURE_ROOT: ${{ github.workspace }}/.eest/fixtures/tests-zkevm-v0.6.2
       RESULTS_ROOT: ${{ github.workspace }}/zisk-step-results
-      BASELINE_ROOT: ${{ runner.temp }}/zisk-step-baseline
       MAX_STEPS: ${{ inputs.max_steps || '10000000' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve runner paths
+        run: |
+          {
+            echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
+            echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
+            echo "BASELINE_ROOT=${RUNNER_TEMP}/zisk-step-baseline"
+          } >> "${GITHUB_ENV}"
 
       - name: Install system dependencies
         run: |
