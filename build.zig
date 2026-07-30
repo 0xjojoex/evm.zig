@@ -134,6 +134,38 @@ pub fn build(b: *std.Build) void {
 
     addTidy(b);
 
+    const debug_description = "Run the interactive controlled-execution debugger";
+    if (is_native_profile) {
+        const debug_cli_mod = b.createModule(.{
+            .root_source_file = b.path("src/debug_cli.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+        });
+        debug_cli_mod.addOptions("build_options", build_options);
+        debug_cli_mod.addImport("ssz", ssz_mod);
+        debug_cli_mod.addImport("rlp", rlp_mod);
+        debug_cli_mod.addImport("mpt", mpt_mod);
+        debug_cli_mod.addIncludePath(b.path("include"));
+        if (native_precompile_deps) |deps| {
+            addPrecompileNative(b, debug_cli_mod, deps);
+        }
+        addNativeKeccak(debug_cli_mod, xkcp_object);
+        addNativeSecp256k1(debug_cli_mod, libsecp256k1_object);
+
+        const debug_cli = b.addExecutable(.{
+            .name = "evmz-debug",
+            .root_module = debug_cli_mod,
+        });
+        const run_debug_cli = b.addRunArtifact(debug_cli);
+        // The debugger reads commands from stdin, so it needs the real one.
+        run_debug_cli.stdio = .inherit;
+        if (b.args) |args| run_debug_cli.addArgs(args);
+        b.step("debug", debug_description).dependOn(&run_debug_cli.step);
+    } else {
+        b.step("debug", debug_description).dependOn(&b.addFail("debug is native-only").step);
+    }
+
     const call_fixture_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
         .target = target,

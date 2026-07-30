@@ -28,6 +28,8 @@ pub const Entry = instruction_table.Entry;
 pub const Table = instruction_table.Table;
 pub const Spec = instruction_table.Spec;
 
+pub const disassemble = @import("./instruction/disassemble.zig");
+
 pub const arithmetic = @import("./instruction/arithmetic.zig");
 pub const environment = @import("./instruction/environment.zig");
 pub const flow = @import("./instruction/flow.zig");
@@ -37,6 +39,12 @@ pub const storage = @import("./instruction/storage.zig");
 pub const system = @import("./instruction/system.zig");
 pub const memory = @import("./instruction/memory.zig");
 pub const logic = @import("./instruction/logic.zig");
+
+test {
+    // No production code path reaches the disassembler, so reference it here or
+    // its tests never reach the binary.
+    _ = disassemble;
+}
 
 test "fork-gated opcodes are invalid before their activation fork" {
     try evmz.t.expectBytecodeStatusByRevision(.{.RETURNDATASIZE}, .homestead, .invalid);
