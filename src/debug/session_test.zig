@@ -835,3 +835,97 @@ test "debug session inspection rebinds to the active frame" {
     try std.testing.expectEqualSlices(u8, &child_code, controlled.code());
     try std.testing.expectEqual(@as(usize, 0), controlled.memory().len);
 }
+
+/// Fails every allocation once armed, so setup can use the real allocator and
+/// only the call under test sees `error.OutOfMemory`.
+const ArmedFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    armed: bool = false,
+
+    fn allocator(self: *ArmedFailingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return null;
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return false;
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return null;
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+test "failed debug session init leaves no prepared-code execution scope" {
+    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Executor = Exact.Executor;
+    const driver = session.bind(Executor);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const root_code = evmz.t.bytecode(.{ .PUSH1, 0x01, .PUSH1, 0x02, .ADD, .STOP });
+    const message = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 200_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = recipient,
+    };
+
+    var failing = ArmedFailingAllocator{ .backing = std.testing.allocator };
+    var executor = Executor.init(failing.allocator(), .{});
+    defer executor.deinit();
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 200_000),
+        sender,
+        recipient,
+    );
+    defer executor.discardStateTransition();
+    var bytecode = try executor.prepareBytecode(&root_code);
+    defer bytecode.deinit(failing.allocator());
+
+    var controlled: driver.Session = undefined;
+    failing.armed = true;
+    const failed = controlled.init(&executor, message, bytecode.view());
+    failing.armed = false;
+    try std.testing.expectError(error.OutOfMemory, failed);
+
+    // `init`'s errdefers already closed the scope it opened.
+    try std.testing.expect(executor.prepared_code_execution == null);
+    try std.testing.expectEqual(@as(usize, 0), executor.prepared_code_execution_depth);
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
+
+    // A caller that unconditionally tears down must not close it a second time.
+    controlled.deinit();
+    try std.testing.expect(executor.prepared_code_execution == null);
+    try std.testing.expectEqual(@as(usize, 0), executor.prepared_code_execution_depth);
+
+    // The session is reusable in place once allocation succeeds again.
+    try controlled.init(&executor, message, bytecode.view());
+    defer controlled.deinit();
+    try std.testing.expectEqual(@as(u8, 0x60), (try controlled.pause()).opcode.opcode);
+}

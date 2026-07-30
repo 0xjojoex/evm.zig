@@ -273,6 +273,9 @@ const Repl = struct {
         };
         const loaded = &self.loaded.?;
         errdefer {
+            // A no-op if the driver never opened; otherwise it closes the
+            // prepared-code scope before `discardStateTransition` demands it.
+            loaded.driver.deinit();
             loaded.bytecode.deinit(self.allocator);
             self.loaded = null;
         }

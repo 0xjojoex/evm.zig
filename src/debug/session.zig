@@ -47,18 +47,24 @@ pub fn bind(comptime Executor: type) type {
             /// the surrounding transaction attempt and resolves it after this
             /// session finishes or aborts.
             pub fn init(self: *Session, executor: *Executor, msg: Host.Message, bytecode: evmz.Bytecode.View) !void {
-                if (executor.currentCaptureContext() != null) return error.CaptureActive;
-
-                executor.beginPreparedCodeExecution();
-                errdefer executor.endPreparedCodeExecution();
-
+                // Establish a deinit-safe closed value here before any fallible steps
                 self.* = .{
                     .call_runtime = runtime.CallRuntime.init(executor),
-                    .open = true,
+                    .open = false,
                     .intervened = false,
                     .top_frame_resolved = false,
                 };
-                errdefer self.call_runtime.deinit();
+                if (executor.currentCaptureContext() != null) return error.CaptureActive;
+
+                executor.beginPreparedCodeExecution();
+                self.open = true;
+                // Unwind to a closed session: `deinit` must not close the
+                // prepared-code scope a second time.
+                errdefer {
+                    self.call_runtime.deinit();
+                    executor.endPreparedCodeExecution();
+                    self.open = false;
+                }
 
                 try self.call_runtime.prepare();
                 try self.call_runtime.pushRootCall(msg, bytecode);
@@ -66,6 +72,9 @@ pub fn bind(comptime Executor: type) type {
 
             /// Abort unfinished frames and close the prepared-code execution
             /// scope. The caller still resolves the surrounding transaction.
+            ///
+            /// A no-op on a session that already closed itself or whose `init`
+            /// failed, so an unconditional teardown path is safe.
             pub fn deinit(self: *Session) void {
                 if (self.open) self.abort();
             }
