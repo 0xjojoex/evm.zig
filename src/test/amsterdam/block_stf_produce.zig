@@ -163,6 +163,199 @@ test "BlockSTF produced BAL round trips through compare mode" {
     );
 }
 
+test "BlockSTF BAL differential rejects correlated claimed values" {
+    const sender = evmz.addr(0x4100);
+    const target = evmz.addr(0x4200);
+    const first_slot: u256 = 2;
+    const dependent_slot: u256 = 3;
+    const target_code = [_]u8{
+        0x36, // CALLDATASIZE
+        0x15, // ISZERO
+        0x60, 0x0b, // PUSH1 dependent
+        0x57, // JUMPI
+        0x60, 0x07, // PUSH1 7
+        0x60, 0x02, // PUSH1 first_slot
+        0x55, // SSTORE
+        0x00, // STOP
+        0x5b, // dependent: JUMPDEST
+        0x60, 0x02, // PUSH1 first_slot
+        0x54, // SLOAD
+        0x60, 0x03, // PUSH1 dependent_slot
+        0x55, // SSTORE
+        0x00, // STOP
+    };
+    const transactions = [_]block_stf.TransactionInput{
+        block_stf.TransactionInput.initAssumeDecoded(.{
+            .sender = sender,
+            .nonce = 0,
+            .gas_limit = 1_000_000,
+            .gas_price = 7,
+            .to = target,
+            .input = &.{1},
+        }, "correlated-claim-producer"),
+        block_stf.TransactionInput.initAssumeDecoded(.{
+            .sender = sender,
+            .nonce = 1,
+            .gas_limit = 1_000_000,
+            .gas_price = 7,
+            .to = target,
+        }, "correlated-claim-consumer"),
+    };
+
+    var pre_state = state.MemoryStore.init(std.testing.allocator);
+    defer pre_state.deinit();
+    (try pre_state.getOrCreateAccount(sender)).balance = 100_000_000;
+    try (try pre_state.getOrCreateAccount(target)).setCode(&target_code);
+
+    var producer_state = try pre_state.clone(std.testing.allocator);
+    defer producer_state.deinit();
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
+        .env = blockEnv(3_000_000),
+        .state_backend = producer_state.backend(),
+        .transactions = &transactions,
+        .parent_blob_gas = parentBlobGas(),
+    });
+    defer outcome.deinit(std.testing.allocator);
+    const produced = switch (outcome) {
+        .produced => |*value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    var hostile = try bal.decode(std.testing.allocator, produced.encoded_block_access_list);
+    defer hostile.deinit(std.testing.allocator);
+    var changed_first = false;
+    var changed_dependent = false;
+    for (hostile.accounts) |*account| {
+        if (!std.mem.eql(u8, &account.address, &target)) continue;
+        for (@constCast(account.storage_changes)) |*slot| {
+            const expected_index: bal.BlockAccessIndex = if (slot.slot == first_slot)
+                1
+            else if (slot.slot == dependent_slot)
+                2
+            else
+                continue;
+            for (@constCast(slot.changes)) |*change| {
+                if (change.block_access_index != expected_index) continue;
+                try std.testing.expectEqual(@as(u256, 7), change.new_value);
+                change.new_value = 8;
+                if (slot.slot == first_slot) changed_first = true else changed_dependent = true;
+            }
+        }
+    }
+    try std.testing.expect(changed_first);
+    try std.testing.expect(changed_dependent);
+
+    const hostile_encoded = try bal.encodeAlloc(std.testing.allocator, hostile.accounts);
+    defer std.testing.allocator.free(hostile_encoded);
+    var verifier_state = try pre_state.clone(std.testing.allocator);
+    defer verifier_state.deinit();
+    var report = bal.Report{};
+    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
+        .env = blockEnv(3_000_000),
+        .state_backend = verifier_state.backend(),
+        .transactions = &transactions,
+        .parent_blob_gas = parentBlobGas(),
+        .block_access_list = hostile_encoded,
+        .root_checks = rootChecks(produced.output),
+        .header_claims = .{
+            .block_access_list_hash = evmz.crypto.keccak256(hostile_encoded),
+        },
+        .bal_differential = &report,
+    });
+    try std.testing.expectEqual(block_stf.Status.block_access_list_mismatch, verified.status);
+    try std.testing.expectEqual(bal.DifferentialStatus.candidate_artifact_mismatch, report.status);
+    try std.testing.expectEqualSlices(u8, &produced.output.state_root, &verified.state_root);
+}
+
+test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as absent" {
+    const sender = evmz.addr(0x5100);
+    const probe = evmz.addr(0x5200);
+    const destroyed = evmz.address.create(sender, 0);
+    const init_code = evmz.t.bytecode(.{
+        .PUSH1,
+        0x01,
+        .PUSH0,
+        .SSTORE,
+        .ADDRESS,
+        .SELFDESTRUCT,
+    });
+    var probe_code: [28]u8 = undefined;
+    probe_code[0] = 0x73; // PUSH20 destroyed
+    @memcpy(probe_code[1..21], &destroyed);
+    probe_code[21] = 0x3f; // EXTCODEHASH
+    probe_code[22] = 0x5f; // PUSH0
+    probe_code[23] = 0x52; // MSTORE
+    probe_code[24] = 0x60; // PUSH1 32
+    probe_code[25] = 0x20;
+    probe_code[26] = 0x5f; // PUSH0
+    probe_code[27] = 0xf3; // RETURN
+    const transactions = [_]block_stf.TransactionInput{
+        block_stf.TransactionInput.initAssumeDecoded(.{
+            .sender = sender,
+            .nonce = 0,
+            .gas_limit = 1_000_000,
+            .gas_price = 7,
+            .input = &init_code,
+        }, "create-store-selfdestruct"),
+        block_stf.TransactionInput.initAssumeDecoded(.{
+            .sender = sender,
+            .nonce = 1,
+            .gas_limit = 1_000_000,
+            .gas_price = 7,
+            .to = probe,
+        }, "observe-destroyed-account"),
+    };
+
+    var pre_state = state.MemoryStore.init(std.testing.allocator);
+    defer pre_state.deinit();
+    (try pre_state.getOrCreateAccount(sender)).balance = 100_000_000;
+    try (try pre_state.getOrCreateAccount(probe)).setCode(&probe_code);
+
+    var producer_state = try pre_state.clone(std.testing.allocator);
+    defer producer_state.deinit();
+    var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
+        .env = blockEnv(3_000_000),
+        .state_backend = producer_state.backend(),
+        .transactions = &transactions,
+        .parent_blob_gas = parentBlobGas(),
+    });
+    defer outcome.deinit(std.testing.allocator);
+    const produced = switch (outcome) {
+        .produced => |*value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(producer_state.getAccount(destroyed) == null);
+
+    var decoded = try bal.decode(std.testing.allocator, produced.encoded_block_access_list);
+    defer decoded.deinit(std.testing.allocator);
+    const destroyed_changes = for (decoded.accounts) |*account| {
+        if (std.mem.eql(u8, &account.address, &destroyed)) break account;
+    } else return error.TestExpectedDestroyedAccount;
+    try std.testing.expectEqual(@as(usize, 0), destroyed_changes.nonce_changes.len);
+    try std.testing.expectEqual(@as(usize, 0), destroyed_changes.code_changes.len);
+    try std.testing.expectEqualSlices(u256, &.{0}, destroyed_changes.storage_reads);
+    try std.testing.expectEqual(@as(usize, 0), destroyed_changes.storage_changes.len);
+
+    var verifier_state = try pre_state.clone(std.testing.allocator);
+    defer verifier_state.deinit();
+    var report = bal.Report{};
+    const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
+        .env = blockEnv(3_000_000),
+        .state_backend = verifier_state.backend(),
+        .transactions = &transactions,
+        .parent_blob_gas = parentBlobGas(),
+        .block_access_list = produced.encoded_block_access_list,
+        .root_checks = rootChecks(produced.output),
+        .header_claims = .{
+            .block_access_list_hash = produced.output.block_access_list_hash,
+        },
+        .bal_differential = &report,
+    });
+    try std.testing.expectEqual(block_stf.Status.valid, verified.status);
+    try std.testing.expectEqual(bal.DifferentialStatus.matched, report.status);
+    try std.testing.expect(verifier_state.getAccount(destroyed) == null);
+}
+
 test "BlockSTF checked produce and apply decode raw bytes once for execution and trie root" {
     const hex = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
     var encoded: [hex.len / 2]u8 = undefined;

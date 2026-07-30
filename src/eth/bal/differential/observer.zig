@@ -124,9 +124,9 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
             self.candidate = runner.finishCandidate(withdrawals);
         }
 
-        /// Compare the independently assembled candidate block against the
-        /// authoritative serial one. Exact observed-versus-claimed BAL bytes
-        /// already pin every write, so this checks the derived commitments.
+        /// Compare candidate outcome-derived BAL evidence and block accounting
+        /// against the authoritative serial artifacts. This does not compute
+        /// an independent candidate post-state root.
         pub fn compareBlock(self: *Self, canonical: Comparison) void {
             const candidate = if (self.candidate) |*value| value else return;
             self.report.status = comparisonStatus(candidate.*, canonical);

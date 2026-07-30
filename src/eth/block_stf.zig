@@ -1027,6 +1027,7 @@ fn serialFold(
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
+    var claimed_block_access_list_hash: ?[32]u8 = null;
     var block_access_list_mismatch = false;
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
@@ -1050,6 +1051,7 @@ fn serialFold(
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
+        claimed_block_access_list_hash = crypto.keccak256(encoded_claim);
 
         if (input.execution_resource_preparer != null or input.precheck_block_access_list_state) {
             var plan = try bal_witness.planAllocAssumeValidated(
@@ -1411,8 +1413,8 @@ fn serialFold(
 
         observed_block_access_list_encoded = try eth_bal.encodeAlloc(allocator, observed_block_access_list.?.accounts);
         computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
-        if (input.block_access_list) |encoded_claim| {
-            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) {
+        if (claimed_block_access_list_hash) |claimed_hash| {
+            if (!std.mem.eql(u8, &computed_block_access_list_hash, &claimed_hash)) {
                 block_access_list_mismatch = true;
                 if (input.bal_differential) |report| {
                     if (report.mismatch_writer) |writer| {

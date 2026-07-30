@@ -205,8 +205,8 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
         expected_roots,
         &lied_report,
     ));
-    // The claim lies, so the block is rejected by exact observed-versus-claimed
-    // BAL bytes - the first assertion above. The candidate itself still agrees
+    // The claim lies, so the block is rejected by the observed-versus-claimed
+    // BAL hash - the first assertion above. The candidate itself still agrees
     // with canonical execution, because the lie is in what was declared rather
     // than in what executing produced.
     try expectContainedMismatch(baseline, lied, lied_report, .candidate_matched);

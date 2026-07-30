@@ -18,9 +18,10 @@
 //! an address remains eligible for the EIP-7610 predicate, so
 //! `accountHasStorage` delegates to the authenticated base reader.
 //!
-//! This lane is speculative: its output is gated by exact observed-versus-
-//! claimed BAL bytes and by the block's roots. A claim that violates these
-//! Amsterdam invariants can only produce a mismatch, never a false accept.
+//! This lane is speculative: its output is gated by the observed BAL hash
+//! matching the claimed BAL commitment and by the block's roots. A claim that
+//! violates these Amsterdam invariants can only produce a mismatch, never a
+//! false accept.
 
 const std = @import("std");
 
