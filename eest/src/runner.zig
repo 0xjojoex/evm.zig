@@ -83,7 +83,11 @@ pub fn Runner(comptime module: type) type {
                 for (workers) |*worker| worker.deinit();
                 allocator.free(workers);
             }
-            for (workers) |*worker| worker.* = .{ .allocator = allocator, .options = options };
+            for (workers) |*worker| worker.* = .{
+                .allocator = allocator,
+                .arena = .init(allocator),
+                .options = options,
+            };
             try fixture_pool.runWorkers(io, allocator, path, workers, .{ .suffix = ".json" }, Worker.run);
 
             var total = Summary{};
@@ -114,7 +118,15 @@ pub fn Runner(comptime module: type) type {
         }
 
         const Worker = struct {
+            /// Shared across workers. Only owns values that outlive the run:
+            /// the queued path and any recorded file error.
             allocator: std.mem.Allocator,
+            /// Private per-file scratch. Reading and JSON-parsing a fixture
+            /// allocates heavily, and routing that through the shared allocator
+            /// serialized every worker on its lock - twelve threads at one core
+            /// of throughput. An arena touches the shared allocator only when it
+            /// needs a fresh chunk.
+            arena: std.heap.ArenaAllocator,
             options: Options,
             summary: Summary = .{},
             file_errors: std.ArrayList(FileError) = .empty,
@@ -123,6 +135,7 @@ pub fn Runner(comptime module: type) type {
             fn deinit(self: *Worker) void {
                 for (self.file_errors.items) |file_error| self.allocator.free(file_error.path);
                 self.file_errors.deinit(self.allocator);
+                self.arena.deinit();
             }
 
             fn run(self: *Worker, io: std.Io, queue: *std.Io.Queue([]u8)) std.Io.Cancelable!void {
@@ -131,7 +144,9 @@ pub fn Runner(comptime module: type) type {
                         error.Closed => return,
                         error.Canceled => return error.Canceled,
                     };
-                    const summary = module.runFile(io, self.allocator, path, self.options) catch |err| {
+                    // `Summary` is plain counters, so nothing survives the reset.
+                    defer _ = self.arena.reset(.retain_capacity);
+                    const summary = module.runFile(io, self.arena.allocator(), path, self.options) catch |err| {
                         self.file_errors.append(self.allocator, .{ .path = path, .err = err }) catch |alloc_err| {
                             if (self.allocation_error == null) self.allocation_error = alloc_err;
                             self.allocator.free(path);

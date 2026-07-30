@@ -22,7 +22,6 @@ pub const StorageObservation = struct {
     slot: u256,
     original: u256,
     current: u256,
-    written: bool = false,
 };
 
 pub const CodeObservation = struct {
@@ -31,32 +30,25 @@ pub const CodeObservation = struct {
     current_code: []const u8,
 };
 
-pub const LifecycleKind = enum {
-    created_contract,
-    selfdestruct,
-    account_deleted,
-};
-
 pub const AccountObservation = struct {
     address: bal.Address,
     storage: []const StorageObservation = &.{},
     balance: ?ValueObservation = null,
     nonce: ?NonceObservation = null,
     code: ?CodeObservation = null,
-    lifecycle: []const LifecycleKind = &.{},
-    account_reset: bool = false,
-    account_deleted: bool = false,
+    /// A destroyed contract's touched slots are BAL reads rather than writes to
+    /// zero, so the wipe has to survive as its own fact.
     storage_wiped: bool = false,
 };
 
 /// One owned, index-free transition detached from a sealed tracked transaction.
 ///
-/// BAL consumes observations and original/current pairs. Candidate-state folds
-/// consume written fields and final lifecycle flags. This is the only detached
-/// state artifact produced by an isolated execution lane.
-/// Account and storage entries are sorted and unique. Reverted writes and
-/// lifecycle events are absent; original-equal-current entries retain the
-/// access needed to classify a BAL read.
+/// This is BAL evidence and nothing more. Whether a slot changed is read from
+/// its original and current values, so no separate written flag is kept, and
+/// lifecycle events are absent now that no fold interprets them.
+/// Account and storage entries are sorted and unique. Reverted writes are
+/// absent; original-equal-current entries retain the access needed to classify
+/// a BAL read.
 pub const LaneTransition = struct {
     accounts: []AccountObservation = &.{},
 
@@ -64,98 +56,8 @@ pub const LaneTransition = struct {
         for (self.accounts) |account| {
             allocator.free(@constCast(account.storage));
             if (account.code) |code| allocator.free(@constCast(code.current_code));
-            allocator.free(@constCast(account.lifecycle));
         }
         allocator.free(self.accounts);
         self.* = .{};
     }
-
-    /// Build one BAL shard at the coordinator-owned block access index.
-    /// Lifecycle is retained in this delta for policy/fallback decisions but
-    /// remains intentionally uninterpreted until the EIP-8246 shape is pinned.
-    pub fn toOwnedBlockAccessList(
-        self: LaneTransition,
-        allocator: Allocator,
-        block_access_index: bal.BlockAccessIndex,
-    ) !bal.Decoded {
-        var accounts: std.ArrayList(bal.AccountChanges) = .empty;
-        errdefer {
-            for (accounts.items) |*account| deinitBalAccount(allocator, account);
-            accounts.deinit(allocator);
-        }
-        try accounts.ensureTotalCapacity(allocator, self.accounts.len);
-
-        for (self.accounts) |observed| {
-            var account = bal.AccountChanges{ .address = observed.address };
-            errdefer deinitBalAccount(allocator, &account);
-
-            var storage_changes: std.ArrayList(bal.SlotChanges) = .empty;
-            errdefer {
-                for (storage_changes.items) |slot| allocator.free(@constCast(slot.changes));
-                storage_changes.deinit(allocator);
-            }
-            var storage_reads: std.ArrayList(u256) = .empty;
-            errdefer storage_reads.deinit(allocator);
-            try storage_changes.ensureTotalCapacity(allocator, observed.storage.len);
-            try storage_reads.ensureTotalCapacity(allocator, observed.storage.len);
-
-            for (observed.storage) |slot| {
-                if (observed.storage_wiped or slot.original == slot.current) {
-                    storage_reads.appendAssumeCapacity(slot.slot);
-                } else {
-                    const changes = try allocator.alloc(bal.StorageChange, 1);
-                    changes[0] = .{
-                        .block_access_index = block_access_index,
-                        .new_value = slot.current,
-                    };
-                    storage_changes.appendAssumeCapacity(.{
-                        .slot = slot.slot,
-                        .changes = changes,
-                    });
-                }
-            }
-            account.storage_changes = try storage_changes.toOwnedSlice(allocator);
-            account.storage_reads = try storage_reads.toOwnedSlice(allocator);
-
-            if (observed.balance) |balance| if (balance.original != balance.current) {
-                const changes = try allocator.alloc(bal.BalanceChange, 1);
-                changes[0] = .{
-                    .block_access_index = block_access_index,
-                    .post_balance = balance.current,
-                };
-                account.balance_changes = changes;
-            };
-            if (observed.nonce) |nonce| if (nonce.original != nonce.current) {
-                const changes = try allocator.alloc(bal.NonceChange, 1);
-                changes[0] = .{
-                    .block_access_index = block_access_index,
-                    .new_nonce = nonce.current,
-                };
-                account.nonce_changes = changes;
-            };
-            if (observed.code) |code| if (!std.mem.eql(u8, &code.original_hash, &code.current_hash)) {
-                const current_code = try allocator.dupe(u8, code.current_code);
-                errdefer allocator.free(current_code);
-                const changes = try allocator.alloc(bal.CodeChange, 1);
-                changes[0] = .{
-                    .block_access_index = block_access_index,
-                    .new_code = current_code,
-                };
-                account.code_changes = changes;
-            };
-
-            accounts.appendAssumeCapacity(account);
-        }
-        return .{ .accounts = try accounts.toOwnedSlice(allocator) };
-    }
 };
-
-fn deinitBalAccount(allocator: Allocator, account: *const bal.AccountChanges) void {
-    for (account.storage_changes) |slot| allocator.free(@constCast(slot.changes));
-    allocator.free(@constCast(account.storage_changes));
-    allocator.free(@constCast(account.storage_reads));
-    allocator.free(@constCast(account.balance_changes));
-    allocator.free(@constCast(account.nonce_changes));
-    for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
-    allocator.free(@constCast(account.code_changes));
-}

@@ -1,16 +1,29 @@
-//! BAL recorder for projecting sealed tracked-state observations.
+//! Independent BAL oracle built from the raw execution trace tape.
+//!
+//! This is a test double, not a production path. The shipping builder folds
+//! `TrackedState.ObservationsView` rows, which are already checkpoint-resolved.
+//! This one replays trace events and resolves reverts itself, so agreement
+//! between the two is real evidence rather than a tautology. Keep it out of the
+//! production module graph.
 
 const std = @import("std");
-const bal = @import("model.zig");
-const observation = @import("observation.zig");
+const bal = @import("../../eth/bal/model.zig");
+const observation = @import("../../eth/bal/observation.zig");
 const trace = @import("../../trace.zig");
 const address = @import("../../address.zig");
 const crypto = @import("../../crypto.zig");
 
 const Allocator = std.mem.Allocator;
 
+const shard_fold = @import("../../eth/bal/shard_fold.zig");
+const tracked_state_projector = @import("../../eth/bal/tracked_state_projector.zig");
+const materialize = tracked_state_projector.materialize;
+const BlockBuilder = tracked_state_projector.BlockBuilder;
+const State = @import("../../state/TrackedState.zig");
+const MemoryAccount = @import("../../state/MemoryAccount.zig");
+
 pub const LaneTransition = observation.LaneTransition;
-pub const ShardFold = @import("shard_fold.zig").ShardFold;
+pub const ShardFold = shard_fold.ShardFold;
 
 pub const Recorder = struct {
     allocator: Allocator,
@@ -154,7 +167,7 @@ pub const Recorder = struct {
 
     pub fn recordLifecycle(
         self: *Recorder,
-        kind: observation.LifecycleKind,
+        kind: LifecycleKind,
         account_address: bal.Address,
     ) !void {
         try self.recordAccountAccess(account_address);
@@ -374,9 +387,18 @@ const CodeWrite = struct {
     active: bool = true,
 };
 
+/// Local to the oracle: observations no longer carry lifecycle, but the tape
+/// still has to drop reverted lifecycle events and register the account access
+/// each one implies.
+const LifecycleKind = enum {
+    created_contract,
+    selfdestruct,
+    account_deleted,
+};
+
 const LifecycleEvent = struct {
     address: bal.Address,
-    kind: observation.LifecycleKind,
+    kind: LifecycleKind,
     sequence: usize,
     active: bool = true,
 };
@@ -489,7 +511,6 @@ const AccountBuilder = struct {
                 .slot = slot,
                 .original = original,
                 .current = current,
-                .written = written,
             });
         }
         result.storage = try storage.toOwnedSlice(allocator);
@@ -515,11 +536,6 @@ const AccountBuilder = struct {
                 .current_hash = crypto.keccak256(last.new_code),
                 .current_code = current_code,
             };
-        }
-        if (self.lifecycle.items.len != 0) {
-            const lifecycle = try allocator.alloc(observation.LifecycleKind, self.lifecycle.items.len);
-            for (self.lifecycle.items, lifecycle) |event, *kind| kind.* = event.kind;
-            result.lifecycle = lifecycle;
         }
         return result;
     }
@@ -752,7 +768,6 @@ fn observationAccountLessThan(
 fn deinitObservationAccount(allocator: Allocator, account: observation.AccountObservation) void {
     allocator.free(@constCast(account.storage));
     if (account.code) |code| allocator.free(@constCast(code.current_code));
-    allocator.free(@constCast(account.lifecycle));
 }
 
 test "BAL recorder owns and coalesces code changes per block access index" {
@@ -960,7 +975,7 @@ test "BAL recorder discards reverted writes but preserves accesses" {
     try std.testing.expectEqual(@as(usize, 0), observed.accounts[0].code_changes.len);
 }
 
-test "transaction observation delta owns compact reads writes restores and lifecycle" {
+test "transaction observation delta owns compact reads writes and restores" {
     const allocator = std.testing.allocator;
     const target = address.addr(0x66);
     const code = [_]u8{ 0x60, 0x00 };
@@ -1021,15 +1036,14 @@ test "transaction observation delta owns compact reads writes restores and lifec
     try std.testing.expectEqual(target, account.address);
     try std.testing.expectEqualSlices(observation.StorageObservation, &.{
         .{ .slot = 1, .original = 11, .current = 11 },
-        .{ .slot = 2, .original = 0, .current = 22, .written = true },
-        .{ .slot = 3, .original = 0, .current = 0, .written = true },
+        .{ .slot = 2, .original = 0, .current = 22 },
+        .{ .slot = 3, .original = 0, .current = 0 },
         .{ .slot = 4, .original = 0, .current = 0 },
     }, account.storage);
     try std.testing.expectEqual(observation.ValueObservation{ .original = 5, .current = 9 }, account.balance.?);
     try std.testing.expectEqualSlices(u8, &code, account.code.?.current_code);
-    try std.testing.expectEqualSlices(observation.LifecycleKind, &.{.created_contract}, account.lifecycle);
 
-    var shard = try delta.toOwnedBlockAccessList(allocator, 9);
+    var shard = try shard_fold.shardAlloc(allocator, delta, 9);
     defer shard.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), shard.accounts.len);
     try std.testing.expectEqualSlices(u256, &.{ 1, 3, 4 }, shard.accounts[0].storage_reads);
@@ -1188,4 +1202,190 @@ test "BAL shard fold rejects overlapping storage change ownership" {
     try fold.append(&second);
     try std.testing.expectError(error.DuplicateStorageChangeIndex, fold.finish());
     try std.testing.expectError(error.FoldFailed, fold.finish());
+}
+
+test "tracked observations match recorder after inner rollback" {
+    const allocator = std.testing.allocator;
+    const target = address.addr(1);
+    const accessed = address.addr(2);
+    const reverted = address.addr(3);
+    const original_code = [_]u8{ 0x60, 0x01 };
+    const replacement_code = [_]u8{ 0x60, 0x02 };
+
+    var state = State.init(allocator);
+    defer state.deinit();
+    var seeded = MemoryAccount.init(allocator);
+    seeded.balance = 10;
+    seeded.nonce = 3;
+    try seeded.setCode(&original_code);
+    try seeded.storage.put(7, 11);
+    try state.seedAccount(target, seeded);
+
+    var oracle = Recorder.init(allocator);
+    defer oracle.deinit();
+    oracle.setBlockAccessIndex(1);
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try state.observeAccountAccess(accessed);
+    try oracle.recordAccountAccess(accessed);
+
+    try state.setBalance(target, 12);
+    try oracle.recordBalanceWrite(.{
+        .address = target,
+        .previous = 10,
+        .value = 12,
+    });
+    try state.setNonce(target, 4);
+    try oracle.recordNonceWrite(.{
+        .address = target,
+        .previous = 3,
+        .value = 4,
+    });
+    try state.setCode(target, &replacement_code);
+    try oracle.recordCodeWrite(.{
+        .address = target,
+        .previous_hash = crypto.keccak256(&original_code),
+        .size = replacement_code.len,
+        .code = &replacement_code,
+    });
+    _ = try state.setStorage(target, 7, 13);
+    try oracle.recordStorageWrite(.{
+        .address = target,
+        .key = 7,
+        .previous = 11,
+        .value = 13,
+    });
+    _ = try state.getStorage(target, 8);
+    try oracle.recordStorageRead(.{
+        .address = target,
+        .key = 8,
+        .value = 0,
+    });
+
+    const checkpoint = state.checkpoint();
+    try oracle.checkpoint(.{
+        .kind = .checkpoint,
+        .depth = 1,
+        .journal_len = 0,
+        .logs_len = 0,
+    });
+    try state.setBalance(reverted, 9);
+    try oracle.recordBalanceWrite(.{
+        .address = reverted,
+        .previous = 0,
+        .value = 9,
+    });
+    _ = try state.setStorage(target, 7, 15);
+    try oracle.recordStorageWrite(.{
+        .address = target,
+        .key = 7,
+        .previous = 13,
+        .value = 15,
+    });
+    try state.markCreatedContract(reverted);
+    try oracle.recordLifecycle(.created_contract, reverted);
+    state.revertToCheckpoint(checkpoint);
+    try oracle.checkpoint(.{
+        .kind = .revert,
+        .depth = 1,
+        .journal_len = 0,
+        .logs_len = 0,
+    });
+
+    state.closeScope();
+    state.seal(attempt);
+
+    var delta = try materialize(state.pendingView().observations(), allocator);
+    defer delta.deinit(allocator);
+    var actual = try shard_fold.shardAlloc(allocator, delta, 1);
+    defer actual.deinit(allocator);
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, actual, direct);
+
+    var expected = try oracle.toOwnedBlockAccessList(allocator);
+    defer expected.deinit(allocator);
+    try expectEqualEncoded(allocator, expected, actual);
+}
+
+test "selfdestruct finalization projects post-transaction BAL state" {
+    const allocator = std.testing.allocator;
+    const target = address.addr(1);
+    const original_code = [_]u8{ 0x60, 0x01 };
+    const replacement_code = [_]u8{ 0x60, 0x02 };
+
+    var state = State.init(allocator);
+    defer state.deinit();
+    var seeded = MemoryAccount.init(allocator);
+    seeded.balance = 10;
+    seeded.nonce = 3;
+    try seeded.setCode(&original_code);
+    try seeded.storage.put(7, 11);
+    try state.seedAccount(target, seeded);
+
+    var oracle = Recorder.init(allocator);
+    defer oracle.deinit();
+    oracle.setBlockAccessIndex(1);
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try state.setBalance(target, 12);
+    try oracle.recordBalanceWrite(.{
+        .address = target,
+        .previous = 10,
+        .value = 0,
+    });
+    try state.setNonce(target, 4);
+    try state.setCode(target, &replacement_code);
+    _ = try state.setStorage(target, 7, 13);
+    try oracle.recordStorageRead(.{
+        .address = target,
+        .key = 7,
+        .value = 11,
+    });
+    try state.markSelfdestructed(target);
+    try oracle.recordLifecycle(.selfdestruct, target);
+    try state.finalize(.{ .existing_account = .{
+        .delete_account = true,
+        .clear_storage = true,
+    } });
+    try oracle.recordLifecycle(.account_deleted, target);
+    state.closeScope();
+    state.seal(attempt);
+
+    var delta = try materialize(state.pendingView().observations(), allocator);
+    defer delta.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), delta.accounts.len);
+    // A destroyed contract keeps only the fact BAL needs: its touched slots
+    // are reads, not writes to zero.
+    try std.testing.expect(delta.accounts[0].storage_wiped);
+
+    var actual = try shard_fold.shardAlloc(allocator, delta, 1);
+    defer actual.deinit(allocator);
+    var expected = try oracle.toOwnedBlockAccessList(allocator);
+    defer expected.deinit(allocator);
+    try expectEqualEncoded(allocator, expected, actual);
+
+    var direct_builder = BlockBuilder.init(allocator);
+    defer direct_builder.deinit();
+    try direct_builder.append(state.pendingView().observations(), 1);
+    var direct = try direct_builder.finish();
+    defer direct.deinit(allocator);
+    try expectEqualEncoded(allocator, expected, direct);
+}
+
+fn expectEqualEncoded(
+    allocator: Allocator,
+    expected: bal.Decoded,
+    actual: bal.Decoded,
+) !void {
+    const expected_encoded = try bal.encodeAlloc(allocator, expected.accounts);
+    defer allocator.free(expected_encoded);
+    const actual_encoded = try bal.encodeAlloc(allocator, actual.accounts);
+    defer allocator.free(actual_encoded);
+    try std.testing.expectEqualSlices(u8, expected_encoded, actual_encoded);
 }

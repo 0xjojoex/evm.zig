@@ -409,10 +409,11 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
 
         /// Initialize an executor with empty tracked state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
-            const state = if (options.state_reader) |state_reader|
+            var state = if (options.state_reader) |state_reader|
                 TrackedState.initWithStateReader(allocator, state_reader)
             else
                 TrackedState.init(allocator);
+            state.retains_empty_accounts = spec.retains_empty_accounts;
 
             const executor: Self = .{
                 .allocator = allocator,

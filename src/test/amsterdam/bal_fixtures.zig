@@ -309,8 +309,6 @@ fn assertExpected(test_name: []const u8, value: JsonValue, fixture: ParsedFixtur
     var expected = try expectObject(expected_value);
     try rejectUnknownKeys(&expected, &.{
         "counts",
-        "per_index",
-        "perIndex",
         "hash",
     });
 
@@ -339,19 +337,6 @@ fn assertExpected(test_name: []const u8, value: JsonValue, fixture: ParsedFixtur
         if (fieldAny(&counts_object, &.{"max_block_access_index"})) |max_value| {
             try std.testing.expectEqual(try parseBlockAccessIndex(max_value), counts.max_block_access_index.?);
         }
-    }
-
-    if (fieldAny(&expected, &.{ "per_index", "perIndex" })) |per_index_value| {
-        var per_index_object = try expectObject(per_index_value);
-        try rejectUnknownKeys(&per_index_object, &.{
-            "max_storage_write_keys",
-            "max_changed_accounts",
-        });
-        var plan = try bal.planIndexResources(std.testing.allocator, fixture.block_access_list);
-        defer plan.deinit(std.testing.allocator);
-        const maxima = plan.maxima();
-        try expectOptionalUsize(&per_index_object, "max_storage_write_keys", maxima.storage_write_keys);
-        try expectOptionalUsize(&per_index_object, "max_changed_accounts", maxima.changed_accounts);
     }
 
     if (fieldAny(&expected, &.{"hash"})) |hash_value| {

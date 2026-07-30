@@ -229,12 +229,11 @@ step-regression threshold or any proof-generation work.
 
 `--bal-differential` is a serial diagnostic lane. For each Amsterdam payload
 transaction it compares an isolated `BalClaimReader` execution with the
-authoritative `BlockSTF` fold. Positioned account/storage ambiguity and
-unsupported transaction hooks stop the complete claim lane and leave the
-authoritative serial result untouched. Coverage, outcome, or diagnostic
-infrastructure failures fail the differential gate. Final BAL parity promotes
-matched transaction outcomes to a complete match; mismatches print a bounded,
-deterministic per-account diff.
+authoritative `BlockSTF` fold. Coverage failures and unsupported transaction
+hooks stop the claim lane and leave the authoritative serial result untouched.
+Outcome or diagnostic infrastructure failures fail the differential gate. Final
+BAL parity promotes matched transaction outcomes to an outcome-and-BAL-evidence
+match; mismatches print a bounded, deterministic per-account diff.
 
 The broader Glamsterdam block corpus is still the golden regular source. In the
 locked fixture cache it is currently under `fixtures/blockchain_tests_sync`.

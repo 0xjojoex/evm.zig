@@ -160,12 +160,19 @@ pub const BlockSpec = struct {
     /// End-of-block system calls (EIP-7002 withdrawal and EIP-7251
     /// consolidation requests).
     finalizeBlock: *const fn (block_program.FinalizeBlockContext) block_program.FinalizeSystemCalls,
+    /// Execution builds and verifies an EIP-7928 block-level access list.
+    /// This gates the execution-side surfaces: observation recording, claim
+    /// verification, and the candidate lane. The matching header field stays
+    /// revision-owned, per `block_stf.Bind`; `Bind` rejects at compile time any
+    /// engine whose spec disagrees with its header lineage.
+    block_access_list: bool,
 
     pub const Patch = struct {
         beforeBlock: ?@FieldType(BlockSpec, "beforeBlock") = null,
         beforeTransaction: ?@FieldType(BlockSpec, "beforeTransaction") = null,
         afterTransaction: ?@FieldType(BlockSpec, "afterTransaction") = null,
         finalizeBlock: ?@FieldType(BlockSpec, "finalizeBlock") = null,
+        block_access_list: ?bool = null,
     };
 
     fn extend(comptime self: BlockSpec, comptime patch: Patch) BlockSpec {
@@ -328,6 +335,19 @@ pub const Spec = struct {
     create: CreateSpec,
     storage: StorageSpec,
     self_destruct: SelfDestructSpec,
+    /// An account with zero nonce, zero balance, and no code is a real state
+    /// entry rather than nothing at all. EIP-161 ended that and EIP-7523
+    /// retires the concept outright, so only pre-Spurious-Dragon forks set it.
+    ///
+    /// When false the executor resolves such an account to absent whatever a
+    /// reader reports, so account existence, `EXTCODEHASH` (EIP-1052), and the
+    /// CALL/SELFDESTRUCT new-account charge all follow EIP-161's *dead* rule
+    /// even over state that was seeded rather than proved.
+    ///
+    /// Storage plays no part, matching EIP-161. The stricter "no state at all"
+    /// predicate that decides whether a trie leaf exists is
+    /// `trie.Account.hasNoState`; `state.Account` documents why the two differ.
+    retains_empty_accounts: bool,
     /// Log emission for value transfers (EIP-7708 shape); null emits none.
     valueTransferLog: *const fn (execution.ValueTransferInput) ?execution.ValueTransferLog,
     /// Exact instruction table: activation, static gas, dispatch targets.
@@ -345,6 +365,7 @@ pub const Spec = struct {
         create: CreateSpec.Patch = .{},
         storage: StorageSpec.Patch = .{},
         self_destruct: SelfDestructSpec.Patch = .{},
+        retains_empty_accounts: ?bool = null,
         valueTransferLog: ?@FieldType(Spec, "valueTransferLog") = null,
         instruction: ?instruction_table.Spec = null,
         precompile: ?type = null,
@@ -362,6 +383,7 @@ pub const Spec = struct {
             .create = self.create.extend(patch.create),
             .storage = self.storage.extend(patch.storage),
             .self_destruct = self.self_destruct.extend(patch.self_destruct),
+            .retains_empty_accounts = patch.retains_empty_accounts orelse self.retains_empty_accounts,
             .valueTransferLog = patch.valueTransferLog orelse self.valueTransferLog,
             .instruction = patch.instruction orelse self.instruction,
             .precompile = patch.precompile orelse self.precompile,

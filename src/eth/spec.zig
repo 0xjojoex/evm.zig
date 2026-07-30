@@ -566,6 +566,7 @@ pub const frontier: Spec = .{
         .beforeTransaction = semantics.noBeforeTransaction,
         .afterTransaction = semantics.noAfterTransaction,
         .finalizeBlock = semantics.noFinalize,
+        .block_access_list = false,
     },
     .call = .{
         .base_gas = 40,
@@ -606,6 +607,7 @@ pub const frontier: Spec = .{
         .cold_account_access_gas = null,
         .refund_gas = 24_000,
     },
+    .retains_empty_accounts = true,
     .valueTransferLog = semantics.noValueTransferLog,
     .instruction = eth_instruction.frontier,
     .precompile = eth_precompile.Exact(eth_precompile.frontier_config),
@@ -627,6 +629,9 @@ pub const tangerine_whistle = dao_fork.extend(.{
 });
 
 pub const spurious_dragon = tangerine_whistle.extend(.{
+    // EIP-161: the empty account stops being a state entry. EIP-7523 later
+    // retires the concept for every post-merge network.
+    .retains_empty_accounts = false,
     .settlement = .{ .touches_fee_recipient_on_zero_payment = false },
     .call = .{ .newAccountGas = semantics.spuriousCallNewAccount, .touches_empty_recipient = false },
     .create = .{ .code_size_limit = .{ .replace = eth_system.max_code_size }, .initial_nonce = 1 },
@@ -769,6 +774,7 @@ pub const amsterdam = osaka.extend(.{
     .block = .{
         .beforeBlock = semantics.amsterdamBeforeBlock,
         .finalizeBlock = semantics.amsterdamFinalize,
+        .block_access_list = true,
     },
     .call = .{
         .cold_account_access_gas = .{ .replace = @as(i64, @intCast(eth_tx.amsterdam_cold_account_access_cost)) - warm_storage_read_cost },

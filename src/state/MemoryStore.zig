@@ -22,8 +22,21 @@ const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
 const Address = evmz.Address;
 const ChangesView = TrackedState.ChangesView;
 
+/// Whether a stored account holding no state at all reaches the state root.
+///
+/// This is the encoding half of the same fork boundary as
+/// `Spec.retains_empty_accounts`, which is the execution half: this decides
+/// what a root commits to, that decides what a read can see. Both are needed,
+/// because a store keeps whatever was seeded into it whether or not execution
+/// can observe it.
+///
+/// The predicate is `trie.Account.hasNoState`, not EIP-161 emptiness, so a
+/// storage-only EIP-7610 account is committed under either policy.
 pub const EmptyAccountPolicy = enum {
+    /// Spurious Dragon onward. EIP-161 removed the empty account and EIP-7523
+    /// retires the concept, so it owns no leaf.
     omit,
+    /// Pre-Spurious-Dragon, where an empty account is a real state entry.
     include,
 };
 
@@ -186,7 +199,7 @@ pub fn stateRootWithOptions(self: *MemoryStore, allocator: std.mem.Allocator, op
             .storage_root = storage_root,
             .code_hash = code_hash,
         };
-        if (options.empty_accounts == .omit and account.isEmpty()) continue;
+        if (options.empty_accounts == .omit and account.hasNoState()) continue;
 
         const key = try scratch.alloc(u8, 32);
         const hashed_key = trie.hashedAddressKey(entry.key_ptr.*);
@@ -336,7 +349,12 @@ fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
 fn accountHasStorage(ptr: *anyopaque, address: Address) !bool {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const account = self.accounts.getPtr(address) orelse return false;
-    return account.storage.count() != 0;
+    var storage = account.storage;
+    var values = storage.valueIterator();
+    while (values.next()) |value| {
+        if (value.* != 0) return true;
+    }
+    return false;
 }
 
 fn accountStorageRoot(allocator: std.mem.Allocator, account: *const MemoryAccount) ![32]u8 {
@@ -383,6 +401,19 @@ test "memory store exposes state reader" {
     const loaded = (try state_reader.loadAccount(address)).?;
     try std.testing.expectEqual(@as(u256, 99), loaded.balance);
     try std.testing.expectEqualSlices(u8, &.{0x5f}, try state_reader.loadCode(loaded.code_hash));
+}
+
+test "memory store storage presence ignores zero-valued entries" {
+    const address = addr(0xabc);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    const account = try memory.getOrCreateAccount(address);
+    try account.storage.put(1, 0);
+    try std.testing.expect(!try memory.reader().accountHasStorage(address));
+
+    try account.storage.put(2, 1);
+    try std.testing.expect(try memory.reader().accountHasStorage(address));
 }
 
 test "memory store computes full state root" {

@@ -9,7 +9,10 @@ const t = @import("../../t.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Address = address.Address;
+
+/// 0 for pre-execution, 1..n for transactions, n+1 for post-execution
 pub const BlockAccessIndex = u32;
+
 pub const item_cost: u64 = 2_000;
 
 /// keccak256(rlp.encode([]))
@@ -47,10 +50,15 @@ pub const SlotChanges = struct {
 
 pub const AccountChanges = struct {
     address: Address,
+    /// storage_changes (slot -> [block_access_index -> new_value])
     storage_changes: []const SlotChanges = &.{},
+    /// storage_reads (read-only storage keys)
     storage_reads: []const u256 = &.{},
+    /// balance_changes ([block_access_index -> post_balance])
     balance_changes: []const BalanceChange = &.{},
+    /// nonce_changes ([block_access_index -> new_nonce])
     nonce_changes: []const NonceChange = &.{},
+    /// code_changes ([block_access_index -> new_code])
     code_changes: []const CodeChange = &.{},
 };
 
@@ -98,35 +106,6 @@ pub const Counts = struct {
     }
 };
 
-pub const IndexResources = struct {
-    block_access_index: BlockAccessIndex,
-    storage_write_keys: usize = 0,
-    changed_accounts: usize = 0,
-};
-
-pub const IndexResourceMaxima = struct {
-    storage_write_keys: usize = 0,
-    changed_accounts: usize = 0,
-};
-
-pub const IndexResourcePlan = struct {
-    resources: []IndexResources = &.{},
-
-    pub fn deinit(self: *IndexResourcePlan, allocator: Allocator) void {
-        if (self.resources.len > 0) allocator.free(self.resources);
-        self.* = .{};
-    }
-
-    pub fn maxima(self: IndexResourcePlan) IndexResourceMaxima {
-        var result = IndexResourceMaxima{};
-        for (self.resources) |entry| {
-            result.storage_write_keys = @max(result.storage_write_keys, entry.storage_write_keys);
-            result.changed_accounts = @max(result.changed_accounts, entry.changed_accounts);
-        }
-        return result;
-    }
-};
-
 pub const Decoded = struct {
     accounts: []AccountChanges = &.{},
 
@@ -169,82 +148,6 @@ pub fn count(block_access_list: BlockAccessList) Counts {
     return result;
 }
 
-/// Derive per-`BlockAccessIndex` resource shape from BAL changes.
-///
-/// BAL storage reads are not indexed, so this planner only covers transaction-
-/// lived resources that can be proven from change indices. It expects callers to
-/// validate canonical BAL shape before relying on the result.
-pub fn planIndexResources(allocator: Allocator, block_access_list: BlockAccessList) Allocator.Error!IndexResourcePlan {
-    var storage_events: std.ArrayList(IndexEvent) = .empty;
-    defer storage_events.deinit(allocator);
-    var account_events: std.ArrayList(IndexAddressEvent) = .empty;
-    defer account_events.deinit(allocator);
-
-    for (block_access_list) |account| {
-        for (account.storage_changes) |slot| {
-            for (slot.changes) |change| {
-                try storage_events.append(allocator, .{ .block_access_index = change.block_access_index });
-                try account_events.append(allocator, .{
-                    .block_access_index = change.block_access_index,
-                    .address = account.address,
-                });
-            }
-        }
-        for (account.balance_changes) |change| {
-            try account_events.append(allocator, .{
-                .block_access_index = change.block_access_index,
-                .address = account.address,
-            });
-        }
-        for (account.nonce_changes) |change| {
-            try account_events.append(allocator, .{
-                .block_access_index = change.block_access_index,
-                .address = account.address,
-            });
-        }
-        for (account.code_changes) |change| {
-            try account_events.append(allocator, .{
-                .block_access_index = change.block_access_index,
-                .address = account.address,
-            });
-        }
-    }
-
-    std.mem.sort(IndexEvent, storage_events.items, {}, indexEventLessThan);
-    std.mem.sort(IndexAddressEvent, account_events.items, {}, indexAddressEventLessThan);
-
-    var resources: std.ArrayList(IndexResources) = .empty;
-    errdefer resources.deinit(allocator);
-
-    var storage_index: usize = 0;
-    var account_index: usize = 0;
-    while (storage_index < storage_events.items.len or account_index < account_events.items.len) {
-        const next_storage = if (storage_index < storage_events.items.len) storage_events.items[storage_index].block_access_index else null;
-        const next_account = if (account_index < account_events.items.len) account_events.items[account_index].block_access_index else null;
-        const block_access_index = nextIndex(next_storage, next_account);
-
-        var entry = IndexResources{ .block_access_index = block_access_index };
-        while (storage_index < storage_events.items.len and storage_events.items[storage_index].block_access_index == block_access_index) {
-            entry.storage_write_keys += 1;
-            storage_index += 1;
-        }
-
-        var previous_account: ?Address = null;
-        while (account_index < account_events.items.len and account_events.items[account_index].block_access_index == block_access_index) {
-            const account = account_events.items[account_index].address;
-            if (previous_account == null or !std.mem.eql(u8, &previous_account.?, &account)) {
-                entry.changed_accounts += 1;
-                previous_account = account;
-            }
-            account_index += 1;
-        }
-
-        try resources.append(allocator, entry);
-    }
-
-    return .{ .resources = try resources.toOwnedSlice(allocator) };
-}
-
 pub fn validate(block_access_list: BlockAccessList, options: ValidationOptions) ValidationError!void {
     for (block_access_list, 0..) |account, index| {
         if (index != 0) {
@@ -257,32 +160,6 @@ pub fn validate(block_access_list: BlockAccessList, options: ValidationOptions) 
         }
         try validateAccount(account, options);
     }
-}
-
-const IndexEvent = struct {
-    block_access_index: BlockAccessIndex,
-};
-
-const IndexAddressEvent = struct {
-    block_access_index: BlockAccessIndex,
-    address: Address,
-};
-
-fn indexEventLessThan(_: void, lhs: IndexEvent, rhs: IndexEvent) bool {
-    return lhs.block_access_index < rhs.block_access_index;
-}
-
-fn indexAddressEventLessThan(_: void, lhs: IndexAddressEvent, rhs: IndexAddressEvent) bool {
-    if (lhs.block_access_index != rhs.block_access_index) return lhs.block_access_index < rhs.block_access_index;
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
-}
-
-fn nextIndex(lhs: ?BlockAccessIndex, rhs: ?BlockAccessIndex) BlockAccessIndex {
-    if (lhs) |left| {
-        if (rhs) |right| return @min(left, right);
-        return left;
-    }
-    return rhs.?;
 }
 
 pub fn validateGasLimit(block_access_list: BlockAccessList, block_gas_limit: u64) ValidationError!void {
@@ -662,47 +539,6 @@ test "BAL count helper summarizes declared shape" {
     try std.testing.expectEqual(@as(usize, 3), counted.code_bytes);
     try std.testing.expectEqual(@as(usize, 4), counted.blockAccessItems());
     try std.testing.expectEqual(@as(?BlockAccessIndex, 2), counted.max_block_access_index);
-}
-
-test "BAL per-index planner derives transaction-lived maxima" {
-    const accounts = [_]AccountChanges{
-        .{
-            .address = address.addr(1),
-            .storage_changes = &.{
-                .{ .slot = 1, .changes = &.{
-                    .{ .block_access_index = 1, .new_value = 11 },
-                    .{ .block_access_index = 3, .new_value = 13 },
-                } },
-                .{ .slot = 2, .changes = &.{
-                    .{ .block_access_index = 1, .new_value = 21 },
-                } },
-            },
-            .balance_changes = &.{
-                .{ .block_access_index = 1, .post_balance = 100 },
-            },
-            .nonce_changes = &.{
-                .{ .block_access_index = 2, .new_nonce = 7 },
-            },
-        },
-        .{
-            .address = address.addr(2),
-            .balance_changes = &.{
-                .{ .block_access_index = 1, .post_balance = 200 },
-            },
-        },
-    };
-
-    var plan = try planIndexResources(std.testing.allocator, &accounts);
-    defer plan.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 3), plan.resources.len);
-    try std.testing.expectEqual(IndexResources{ .block_access_index = 1, .storage_write_keys = 2, .changed_accounts = 2 }, plan.resources[0]);
-    try std.testing.expectEqual(IndexResources{ .block_access_index = 2, .storage_write_keys = 0, .changed_accounts = 1 }, plan.resources[1]);
-    try std.testing.expectEqual(IndexResources{ .block_access_index = 3, .storage_write_keys = 1, .changed_accounts = 1 }, plan.resources[2]);
-
-    const maxima = plan.maxima();
-    try std.testing.expectEqual(@as(usize, 2), maxima.storage_write_keys);
-    try std.testing.expectEqual(@as(usize, 2), maxima.changed_accounts);
 }
 
 test "BAL validation rejects non-canonical account and storage ordering" {

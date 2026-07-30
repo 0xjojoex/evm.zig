@@ -2642,7 +2642,9 @@ test "active precompiles are warm but not existing state accounts" {
     try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(precompile_address));
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(precompile_address));
 
-    try evmz.t.seedExecutorAccount(&executor, precompile_address, .{});
+    // Alive, so the address is a real state account: an EIP-161-empty one is
+    // dead and would still report zero.
+    try evmz.t.seedExecutorAccount(&executor, precompile_address, .{ .balance = 1 });
     try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(precompile_address));
 }
 
@@ -2780,4 +2782,104 @@ const StepOrderRecorder = struct {
 fn executeHostCall(executor: anytype, msg: Host.Message) !Host.Result {
     var host_iface = executor.host();
     return host_iface.call(msg);
+}
+
+test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
+    const sender = evmz.addr(0x1111);
+    const probe = evmz.addr(0xaaaa);
+    const seeded_empty = evmz.addr(0x00e0);
+
+    // PUSH2 0x00e0, EXTCODEHASH, PUSH0, SSTORE, STOP
+    const probe_code = evmz.t.bytecode(.{
+        .PUSH2, 0x00,
+        0xe0,   .EXTCODEHASH,
+        .PUSH0, .SSTORE,
+        .STOP,
+    });
+
+    // A reader may hand back an EIP-161-empty account: `MemoryStore` does it
+    // for any address a fixture seeds without fields. EIP-1052 requires zero
+    // for such an account, not the hash of empty code.
+    {
+        var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
+        defer executor.deinit();
+        try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{});
+        try evmz.t.seedExecutorAccount(&executor, probe, .{ .code = &probe_code });
+        _ = try executor.executeSystemCall(
+            testExecutionContext(sender, 200_000),
+            sender,
+            probe,
+            &.{},
+            .legacy(200_000),
+        );
+        try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(probe, 0));
+        try std.testing.expect(!try executor.state.accountExists(seeded_empty));
+    }
+
+    // Alive through balance alone: an ordinary codeless account still reports
+    // the empty-code hash.
+    {
+        var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
+        defer executor.deinit();
+        try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{ .balance = 1 });
+        try evmz.t.seedExecutorAccount(&executor, probe, .{ .code = &probe_code });
+        _ = try executor.executeSystemCall(
+            testExecutionContext(sender, 200_000),
+            sender,
+            probe,
+            &.{},
+            .legacy(200_000),
+        );
+        try std.testing.expectEqual(
+            @as(u256, std.mem.readInt(u256, &evmz.crypto.keccak256_empty, .big)),
+            try executor.getStorage(probe, 0),
+        );
+    }
+}
+
+test "pre-Spurious-Dragon retains empty accounts as real state" {
+    const seeded_empty = evmz.addr(0x00e0);
+    var executor = evmz.Vm(evmz.eth.tangerine_whistle).Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.reset(.{});
+    try std.testing.expect(executor.state.retains_empty_accounts);
+    executor.discardAccepted();
+    try std.testing.expect(executor.state.retains_empty_accounts);
+    try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{});
+
+    const attempt = executor.state.beginTransaction();
+    executor.state.beginScope();
+    defer {
+        executor.state.closeScope();
+        executor.state.seal(attempt);
+        executor.state.discard(attempt);
+    }
+    try std.testing.expect(try executor.state.accountExists(seeded_empty));
+}
+
+test "EIP-7610 storage-only accounts collide even though EIP-161 calls them dead" {
+    const target = evmz.addr(0x7610);
+    var executor = London.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    // Zero nonce, zero balance, no code, but storage: EIP-161 emptiness ignores
+    // storage, so this reads as absent, while the state trie still keeps the
+    // leaf because its storage root is non-empty.
+    var seeded = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try seeded.storage.put(1, 1);
+    try executor.state.seedAccount(target, seeded);
+
+    const attempt = executor.state.beginTransaction();
+    executor.state.beginScope();
+    defer {
+        executor.state.closeScope();
+        executor.state.seal(attempt);
+        executor.state.discard(attempt);
+    }
+    // Dead for existence, code hash, and CALL gas; still present for the
+    // EIP-7610 creation predicate. `expectCreationCollision` in call_runtime
+    // covers the collision itself across every revision.
+    try std.testing.expect(!try executor.state.accountExists(target));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getCodeHash(target));
+    try std.testing.expect(try executor.state.accountHasStorage(target));
 }

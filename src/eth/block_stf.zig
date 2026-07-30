@@ -15,10 +15,9 @@ const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_diff = @import("bal/diff.zig");
 const bal_differential = @import("bal/differential.zig");
+const bal_observer = @import("bal/differential/observer.zig");
 const tracked_state_projector = @import("bal/tracked_state_projector.zig");
-const ClaimView = @import("bal/ClaimView.zig");
 const bal_witness = @import("bal/witness.zig");
-const candidate_transition = @import("bal/candidate_transition.zig");
 const execution = @import("../execution.zig");
 const execution_resources = @import("../execution/resources.zig");
 const eth_header = @import("header.zig");
@@ -47,10 +46,10 @@ fn BalDifferentialOperations(
         pub fn appendCandidateDepositRequestData(
             allocator: std.mem.Allocator,
             output: *std.ArrayList(u8),
-            logs: []const Host.Log,
+            logs: state.TrackedState.LogView,
         ) !void {
             if (revision.isImpl(.prague))
-                try eip6110.appendRequestDataFromLogs(allocator, output, .fromSlice(logs));
+                try eip6110.appendRequestDataFromLogs(allocator, output, logs);
         }
 
         pub fn encodeCandidateReceipt(
@@ -61,8 +60,8 @@ fn BalDifferentialOperations(
             return encodeReceipt(allocator, kind, receipt);
         }
 
-        pub fn candidateLogsBloom(logs: []const Host.Log) [256]u8 {
-            return logsBloom(.fromSlice(logs));
+        pub fn candidateLogsBloom(logs: state.TrackedState.LogView) [256]u8 {
+            return logsBloom(logs);
         }
 
         pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
@@ -123,8 +122,25 @@ fn BalDifferentialOperations(
     };
 }
 
-fn BalDifferentialRunner(comptime revision: Revision, comptime Engine: type) type {
-    return bal_differential.Runner(
+/// Serial block execution reports its boundaries here. Doing nothing is the
+/// default, and the BAL candidate lane is the only real implementation - it
+/// lives outside this file so the serial fold carries no knowledge of
+/// positioned reads, lanes, or concurrency.
+const NoBlockObserver = struct {
+    pub fn claimDecoded(_: *NoBlockObserver, _: anytype, _: anytype) void {}
+    pub fn isActive(_: *const NoBlockObserver) bool {
+        return false;
+    }
+    pub fn beforeBlock(_: *NoBlockObserver, _: anytype) void {}
+    pub fn included(_: *NoBlockObserver, _: anytype) std.Io.Cancelable!void {}
+    pub fn rejected(_: *NoBlockObserver, _: anytype) std.Io.Cancelable!void {}
+    pub fn finish(_: *NoBlockObserver) std.Io.Cancelable!void {}
+    pub fn finishCandidate(_: *NoBlockObserver, _: anytype) void {}
+    pub fn compareBlock(_: *NoBlockObserver, _: anytype) void {}
+};
+
+fn BalDifferentialObserver(comptime revision: Revision, comptime Engine: type) type {
+    return bal_observer.Observer(
         Engine,
         BalDifferentialOperations(revision, Engine),
     );
@@ -176,6 +192,10 @@ pub const ParallelResources = struct {
 /// Scheduling the whole `run` call through another task is valid, but the
 /// caller must join or cancel that task before calling `deinit`.
 fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
+    if (!Engine.specification.block.block_access_list) {
+        @compileError("BalExecutor requires a fork that commits to an EIP-7928 block access list; " ++
+            @tagName(revision) ++ " does not");
+    }
     return struct {
         const Self = @This();
 
@@ -262,7 +282,16 @@ fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
 
         fn runAssumeDecoded(self: *const Self, input: AssumeDecodedBlockInput) !Result {
             resetBalReport(input);
-            const parallel_execution = self.parallelExecution(input);
+            var observer = BalDifferentialObserver(revision, Engine).init(
+                self.allocator,
+                input.env,
+                lifecycleExecutionContext(input.env),
+                input.prepared_code_backend,
+                input.block_hash_source,
+                input.bal_differential.?,
+                self.parallelExecution(input),
+            );
+            defer observer.deinit();
             var no_produced_bal: ?[]u8 = null;
             const result = try serialFold(
                 revision,
@@ -271,7 +300,7 @@ fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
                 input,
                 .compare,
                 &no_produced_bal,
-                parallel_execution,
+                &observer,
             );
             std.debug.assert(no_produced_bal == null);
             return result;
@@ -725,11 +754,17 @@ pub fn Exact(comptime revision: Revision) type {
 /// Compile options never thread through this layer; they are closed inside
 /// `ExactVm` and only read back as `compile_options`.
 pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
+    // Header shape is revision-owned while execution reads the spec, so the two
+    // must agree or a block would record no access list yet still owe the
+    // header an access-list hash. Catch that when the engine is bound.
+    if (ExactVm.specification.block.block_access_list != revision.isImpl(.amsterdam)) {
+        @compileError("engine spec block_access_list disagrees with the " ++
+            @tagName(revision) ++ " header lineage");
+    }
     const BlockInputAlias = BlockInput;
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
-    const BalExecutorAlias = BalExecutorType(revision, ExactVm);
 
     return struct {
         pub const fork = revision;
@@ -740,7 +775,9 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
         pub const ProduceInput = ProduceInputAlias;
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
-        pub const BalExecutor = BalExecutorAlias;
+        /// Lazily instantiated: referencing this on a fork without a block
+        /// access list is a compile error, not a silently idle executor.
+        pub const BalExecutor = BalExecutorType(revision, ExactVm);
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
             try requireStepCaptureSupport(compile_options, input.capture);
@@ -838,15 +875,22 @@ fn applyAssumeDecodedExact(
 ) !Result {
     resetBalReport(input);
     var no_produced_bal: ?[]u8 = null;
-    const result = try serialFold(
-        revision,
-        Engine,
-        allocator,
-        input,
-        .compare,
-        &no_produced_bal,
-        null,
-    );
+    const result = if (input.bal_differential) |report| blk: {
+        var observer = BalDifferentialObserver(revision, Engine).init(
+            allocator,
+            input.env,
+            lifecycleExecutionContext(input.env),
+            input.prepared_code_backend,
+            input.block_hash_source,
+            report,
+            null,
+        );
+        defer observer.deinit();
+        break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+    } else blk: {
+        var observer = NoBlockObserver{};
+        break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+    };
     std.debug.assert(no_produced_bal == null);
     return result;
 }
@@ -898,6 +942,7 @@ fn produceAssumeDecodedExact(
     var encoded_block_access_list: ?[]u8 = null;
     errdefer if (encoded_block_access_list) |encoded| allocator.free(encoded);
 
+    var observer = NoBlockObserver{};
     const result = try serialFold(revision, Engine, allocator, .{
         .env = input.env,
         .block_hash_source = input.block_hash_source,
@@ -917,7 +962,7 @@ fn produceAssumeDecodedExact(
             },
         },
         .capture = input.capture,
-    }, .produce, &encoded_block_access_list, null);
+    }, .produce, &encoded_block_access_list, &observer);
 
     if (result.status != .valid) {
         std.debug.assert(encoded_block_access_list == null);
@@ -958,9 +1003,11 @@ fn serialFold(
     input: AssumeDecodedBlockInput,
     comptime mode: FoldMode,
     produced_bal: *?[]u8,
-    parallel_execution: ?bal_differential.ParallelExecution,
+    observer: anytype,
 ) !Result {
-    const DifferentialRunner = BalDifferentialRunner(revision, Engine);
+    // One spec fact gates the header field, observation recording, claim
+    // verification, and the candidate lane.
+    const record_block_access_list = Engine.specification.block.block_access_list;
 
     var state_backend = input.state_backend;
     defer state_backend.deinit();
@@ -971,19 +1018,17 @@ fn serialFold(
         std.debug.assert(std.meta.eql(input.header_claims, HeaderClaims{}));
         std.debug.assert(input.header_hash_claim == null);
         std.debug.assert(input.bal_differential == null);
-        std.debug.assert(parallel_execution == null);
-        if (!revision.isImpl(.amsterdam)) return .{ .status = .invalid_block_body };
+        comptime std.debug.assert(@TypeOf(observer) == *NoBlockObserver);
+        if (!record_block_access_list) return .{ .status = .invalid_block_body };
     }
-    if (!blockBodyValid(revision, input)) return .{ .status = .invalid_block_body };
+    if (!blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
     if (parentHeaderStatus(revision, input)) |status| return .{ .status = status };
     if (!blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
+    var claimed_block_access_list_hash: ?[32]u8 = null;
     var block_access_list_mismatch = false;
-    const record_block_access_list = mode == .produce or input.block_access_list != null or
-        input.header_claims.block_access_list_hash != null or
-        revision.isImpl(.amsterdam);
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
     var claimed_block_access_list: ?eth_bal.Decoded = null;
@@ -1006,6 +1051,7 @@ fn serialFold(
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return .{ .status = .invalid_block_access_list },
         };
+        claimed_block_access_list_hash = crypto.keccak256(encoded_claim);
 
         if (input.execution_resource_preparer != null or input.precheck_block_access_list_state) {
             var plan = try bal_witness.planAllocAssumeValidated(
@@ -1032,34 +1078,7 @@ fn serialFold(
         }
     }
 
-    var claim_view: ?ClaimView = null;
-    defer if (claim_view) |*view| view.deinit(allocator);
-    var differential_runner: ?DifferentialRunner = null;
-    defer if (differential_runner) |*runner| runner.deinit();
-    var differential_candidate: ?DifferentialRunner.Artifacts = null;
-    defer if (differential_candidate) |*candidate| candidate.deinit(allocator);
-    if (input.bal_differential) |report| {
-        if (claimed_block_access_list) |*claim| {
-            claim_view = ClaimView.initAssumeValidated(allocator, claim.accounts) catch |err| blk: {
-                report.status = if (err == error.OutOfMemory) .diagnostic_failure else .claim_import_failed;
-                report.diagnostic_error = err;
-                break :blk null;
-            };
-            if (claim_view) |*view| {
-                differential_runner = DifferentialRunner.init(
-                    allocator,
-                    input.env,
-                    lifecycleExecutionContext(input.env),
-                    state_backend.reader(),
-                    input.prepared_code_backend,
-                    input.block_hash_source,
-                    view,
-                    report,
-                    parallel_execution,
-                );
-            }
-        }
-    }
+    if (claimed_block_access_list) |*claim| observer.claimDecoded(claim.accounts, state_backend.reader());
 
     var observed_block_access_list: ?eth_bal.Decoded = null;
     defer if (observed_block_access_list) |*decoded| decoded.deinit(allocator);
@@ -1133,9 +1152,7 @@ fn serialFold(
             else => return err,
         };
     }
-    if (differential_runner) |*runner| {
-        runner.verifyBeforeBlock(input.block_header);
-    }
+    observer.beforeBlock(input.block_header);
 
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     defer {
@@ -1162,15 +1179,15 @@ fn serialFold(
         const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
         if (next_blob_gas_used > blob_gas_limit) {
             const progress = block.progress();
-            if (differential_runner) |*runner| if (runner.active) {
-                try runner.verifyRejected(.{
+            if (observer.isActive()) {
+                try observer.rejected(.{
                     .kind = .blob_gas,
                     .transaction = entry.tx,
                     .tx_index = tx_index,
                     .progress_before = progress,
                     .blob_gas_used_before = blob_gas_used,
                 });
-            };
+            }
             return .{
                 .status = .blob_gas_limit_exceeded,
                 .tx_index = tx_index,
@@ -1181,10 +1198,7 @@ fn serialFold(
                 .requests_hash = computed_requests_hash,
             };
         }
-        const progress_before = if (differential_runner) |*runner|
-            if (runner.active) block.progress() else null
-        else
-            null;
+        const progress_before = block.progress();
         const tx_result = transactPayload(
             Engine,
             &block,
@@ -1201,15 +1215,15 @@ fn serialFold(
             error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
             error.BlockGasExceeded => {
                 const progress = block.progress();
-                if (differential_runner) |*runner| if (runner.active) {
-                    try runner.verifyRejected(.{
+                if (observer.isActive()) {
+                    try observer.rejected(.{
                         .kind = .block_gas,
                         .transaction = entry.tx,
                         .tx_index = tx_index,
-                        .progress_before = progress_before.?,
+                        .progress_before = progress_before,
                         .blob_gas_used_before = blob_gas_used,
                     });
-                };
+                }
                 return .{
                     .status = .block_gas_exceeded,
                     .tx_index = tx_index,
@@ -1225,15 +1239,15 @@ fn serialFold(
             .included => |value| value,
             .rejected => {
                 const progress = block.progress();
-                if (differential_runner) |*runner| if (runner.active) {
-                    try runner.verifyRejected(.{
+                if (observer.isActive()) {
+                    try observer.rejected(.{
                         .kind = .transaction,
                         .transaction = entry.tx,
                         .tx_index = tx_index,
-                        .progress_before = progress_before.?,
+                        .progress_before = progress_before,
                         .blob_gas_used_before = blob_gas_used,
                     });
-                };
+                }
                 return .{
                     .status = .transaction_rejected,
                     .tx_index = tx_index,
@@ -1246,17 +1260,17 @@ fn serialFold(
         };
         const receipt = included.receipt;
         const progress_after = block.progress();
-        if (differential_runner) |*runner| if (runner.active) {
-            try runner.verifyIncluded(.{
+        if (observer.isActive()) {
+            try observer.included(.{
                 .transaction = entry.tx,
                 .tx_index = tx_index,
-                .progress_before = progress_before.?,
+                .progress_before = progress_before,
                 .progress_after = progress_after,
                 .result = &included.result,
                 .logs = receipt.logs,
                 .blob_gas_used_after = next_blob_gas_used,
             });
-        };
+        }
         mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
         if (revision.isImpl(.prague)) {
             eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
@@ -1327,7 +1341,7 @@ fn serialFold(
             try steps.tape.reset();
         }
     }
-    if (differential_runner) |*runner| try runner.finish();
+    try observer.finish();
 
     const effective_parent_blob_gas = if (revision.isImpl(.cancun))
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
@@ -1391,15 +1405,16 @@ fn serialFold(
             error.OutOfMemory => return error.OutOfMemory,
             else => return err,
         };
-        _ = validateBlockAccessList(observed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
+        // BlockBuilder emits canonical structure; only its consensus item budget remains.
+        validateBlockAccessCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
             error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
             else => return err,
         };
 
         observed_block_access_list_encoded = try eth_bal.encodeAlloc(allocator, observed_block_access_list.?.accounts);
         computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
-        if (input.block_access_list) |encoded_claim| {
-            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) {
+        if (claimed_block_access_list_hash) |claimed_hash| {
+            if (!std.mem.eql(u8, &computed_block_access_list_hash, &claimed_hash)) {
                 block_access_list_mismatch = true;
                 if (input.bal_differential) |report| {
                     if (report.mismatch_writer) |writer| {
@@ -1414,9 +1429,7 @@ fn serialFold(
             }
         }
     }
-    if (differential_runner) |*runner| {
-        differential_candidate = runner.finishCandidate(input.withdrawals);
-    }
+    observer.finishCandidate(input.withdrawals);
 
     const block_result = block.finish();
     const changes = executor.acceptedChanges();
@@ -1440,33 +1453,20 @@ fn serialFold(
         .block_access_list_hash = computed_block_access_list_hash,
     };
 
-    if (differential_candidate) |*candidate| {
-        const report = input.bal_differential.?;
-        if (!try candidate.state.matchesChanges(
-            state_backend.reader(),
-            executor.acceptedChanges(),
-        )) {
-            report.status = .candidate_artifact_mismatch;
-            report.tx_index = input.transactions.len;
-        } else {
-            const candidate_matches = candidateArtifactsEqual(
-                candidate,
-                result,
-                result.state_root,
-                encoded_receipts.items,
-                derived_requests,
-                observed_block_access_list_encoded.?,
-            );
-            report.status = if (candidate_matches)
-                .candidate_matched
-            else
-                .candidate_artifact_mismatch;
-            if (!candidate_matches) report.tx_index = input.transactions.len;
-        }
-        if (report.status == .candidate_matched and !block_access_list_mismatch) {
-            report.status = .matched;
-        }
-    }
+    observer.compareBlock(.{
+        .gas_used = result.gas_used,
+        .block_gas_used = result.block_gas_used,
+        .block_state_gas_used = result.block_state_gas_used,
+        .blob_gas_used = result.blob_gas_used,
+        .receipts_root = result.receipts_root,
+        .logs_bloom = result.logs_bloom,
+        .requests_hash = result.requests_hash,
+        .encoded_receipts = encoded_receipts.items,
+        .requests = derived_requests,
+        .encoded_block_access_list = observed_block_access_list_encoded orelse &.{},
+        .block_access_list_matched = !block_access_list_mismatch,
+        .transaction_count = input.transactions.len,
+    });
 
     var block_hash_mismatch = false;
     if (input.header_hash_claim) |claim| {
@@ -1516,110 +1516,12 @@ fn serialFold(
     return result;
 }
 
-fn candidateArtifactsEqual(
-    candidate: anytype,
-    canonical: Result,
-    candidate_state_root: [32]u8,
-    canonical_receipts: []const []const u8,
-    canonical_requests: []const []const u8,
-    canonical_bal: []const u8,
-) bool {
-    return candidate.gas_used == canonical.gas_used and
-        candidate.block_gas_used == canonical.block_gas_used and
-        candidate.block_state_gas_used == canonical.block_state_gas_used and
-        candidate.blob_gas_used == canonical.blob_gas_used and
-        std.mem.eql(u8, &candidate_state_root, &canonical.state_root) and
-        std.mem.eql(u8, &candidate.receipts_root, &canonical.receipts_root) and
-        std.mem.eql(u8, &candidate.logs_bloom, &canonical.logs_bloom) and
-        std.mem.eql(u8, &candidate.requests_hash, &canonical.requests_hash) and
-        byteSlicesEqual(candidate.encoded_receipts, canonical_receipts) and
-        byteSlicesEqual(candidate.requests, canonical_requests) and
-        std.mem.eql(u8, candidate.encoded_block_access_list, canonical_bal);
-}
-
 fn byteSlicesEqual(lhs: []const []const u8, rhs: []const []const u8) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |lhs_item, rhs_item| {
         if (!std.mem.eql(u8, lhs_item, rhs_item)) return false;
     }
     return true;
-}
-
-test "candidate artifact equality checks every nonzero field" {
-    const DifferentialRunner = BalDifferentialRunner(.amsterdam, vm.Vm(eth_spec.amsterdam));
-    var receipt = [_]u8{ 0x01, 0x02 };
-    var request = [_]u8{ 0x03, 0x04 };
-    var encoded_bal = [_]u8{ 0xc1, 0x80 };
-    const receipts = [_][]const u8{&receipt};
-    const requests = [_][]const u8{&request};
-    var candidate = DifferentialRunner.Artifacts{
-        .state = candidate_transition.CandidateState.init(),
-        .gas_used = 1,
-        .block_gas_used = 2,
-        .block_state_gas_used = 3,
-        .receipts_root = [_]u8{0x11} ** 32,
-        .encoded_receipts = &receipts,
-        .logs_bloom = [_]u8{0x22} ** 256,
-        .blob_gas_used = 4,
-        .requests = &requests,
-        .requests_hash = [_]u8{0x33} ** 32,
-        .encoded_block_access_list = &encoded_bal,
-    };
-    var candidate_state_root = [_]u8{0x44} ** 32;
-    const canonical = Result{
-        .status = .valid,
-        .gas_used = candidate.gas_used,
-        .block_gas_used = candidate.block_gas_used,
-        .block_state_gas_used = candidate.block_state_gas_used,
-        .state_root = candidate_state_root,
-        .receipts_root = candidate.receipts_root,
-        .logs_bloom = candidate.logs_bloom,
-        .blob_gas_used = candidate.blob_gas_used,
-        .requests_hash = candidate.requests_hash,
-    };
-    try std.testing.expect(candidateArtifactsEqual(
-        &candidate,
-        canonical,
-        candidate_state_root,
-        &receipts,
-        &requests,
-        &encoded_bal,
-    ));
-
-    candidate.gas_used += 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.gas_used -= 1;
-    candidate.block_gas_used += 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.block_gas_used -= 1;
-    candidate.block_state_gas_used += 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.block_state_gas_used -= 1;
-    candidate.blob_gas_used += 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.blob_gas_used -= 1;
-
-    candidate_state_root[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate_state_root[0] ^= 1;
-    candidate.receipts_root[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.receipts_root[0] ^= 1;
-    candidate.logs_bloom[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.logs_bloom[0] ^= 1;
-    candidate.requests_hash[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &encoded_bal));
-    candidate.requests_hash[0] ^= 1;
-
-    receipt[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &.{&.{ 0x01, 0x02 }}, &requests, &encoded_bal));
-    receipt[0] ^= 1;
-    request[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &.{&.{ 0x03, 0x04 }}, &encoded_bal));
-    request[0] ^= 1;
-    encoded_bal[0] ^= 1;
-    try std.testing.expect(!candidateArtifactsEqual(&candidate, canonical, candidate_state_root, &receipts, &requests, &.{ 0xc1, 0x80 }));
 }
 
 /// Keep a spec-owned before-transaction batch in the same rollback
@@ -1682,7 +1584,12 @@ fn transactPayload(
     };
 }
 
-fn blockBodyValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
+fn blockBodyValid(
+    comptime revision: Revision,
+    comptime block_access_list: bool,
+    input: AssumeDecodedBlockInput,
+) bool {
+    // TODO: spec-icfy after moving block_stf out of eth
     if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
     if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
     if (!revision.isImpl(.cancun)) {
@@ -1700,8 +1607,12 @@ fn blockBodyValid(comptime revision: Revision, input: AssumeDecodedBlockInput) b
         }
     }
     if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
-    if (!revision.isImpl(.amsterdam) and
-        (input.block_access_list != null or input.header_claims.block_access_list_hash != null))
+    // Only payload and header fields decide validity. `bal_differential` is a
+    // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
+    // every block and reads `.not_run` back on the forks that have no list.
+    if (!block_access_list and
+        (input.block_access_list != null or
+            input.header_claims.block_access_list_hash != null))
     {
         return false;
     }
@@ -1798,9 +1709,13 @@ fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessInd
 fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!eth_bal.Counts {
     try eth_bal.validate(block_access_list, .{ .transaction_count = transaction_count });
     const counts = eth_bal.count(block_access_list);
+    try validateBlockAccessCounts(counts, gas_limit);
+    return counts;
+}
+
+fn validateBlockAccessCounts(counts: eth_bal.Counts, gas_limit: u64) eth_bal.ValidationError!void {
     if (gas_limit != 0 and counts.blockAccessItems() > gas_limit / eth_bal.item_cost)
         return error.BlockAccessListGasLimitExceeded;
-    return counts;
 }
 
 fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
