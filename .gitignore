@@ -7,3 +7,4 @@ __pycache__/
 bench/revm/target/
 output/
 .kraft/
+guest/runtime/sp1/host/target/

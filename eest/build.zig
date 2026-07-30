@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
         addStep(b, eest_exe, "eest-tx", "Run EEST raw transaction-test fixtures", &.{"tx"});
         addStep(b, eest_exe, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", &.{"zkevm"});
         addStep(b, eest_exe, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", &.{"zkevm-mutations"});
-        addStep(b, eest_exe, "zkevm-input", "Extract one EEST zkEVM stateless input as ZisK stdin", &.{"zkevm-input"});
+        addStep(b, eest_exe, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", &.{"zkevm-input"});
         addStep(b, eest_exe, "zkevm-ere", "Run raw ERE stateless input through native adapter", &.{"zkevm-ere"});
         addStep(b, eest_exe, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", &.{"block-stf"});
         addStep(

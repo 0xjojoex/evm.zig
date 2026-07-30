@@ -5,7 +5,7 @@ pub const Error = error{
 };
 
 pub fn readInput() Error![]const u8 {
-    if (comptime guest_options.use_ziskos_staticlib) {
+    if (comptime guest_options.backend != .native) {
         var ptr: ?[*]const u8 = null;
         var len: usize = 0;
         read_input(&ptr, &len);
@@ -18,7 +18,7 @@ pub fn readInput() Error![]const u8 {
 }
 
 pub fn writeOutput(bytes: []const u8) void {
-    if (comptime guest_options.use_ziskos_staticlib) {
+    if (comptime guest_options.backend != .native) {
         if (bytes.len == 0) return;
         write_output(bytes.ptr, bytes.len);
     }

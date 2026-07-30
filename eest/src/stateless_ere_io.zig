@@ -3,6 +3,7 @@ const std = @import("std");
 pub const InputFormat = enum {
     raw,
     zisk,
+    sp1,
 };
 
 pub const PublicFormat = enum {
@@ -13,6 +14,7 @@ pub const PublicFormat = enum {
 pub fn parseInputFormat(value: []const u8) ?InputFormat {
     if (std.mem.eql(u8, value, "raw")) return .raw;
     if (std.mem.eql(u8, value, "zisk")) return .zisk;
+    if (std.mem.eql(u8, value, "sp1")) return .sp1;
     return null;
 }
 
@@ -24,7 +26,7 @@ pub fn parsePublicFormat(value: []const u8) ?PublicFormat {
 
 pub fn inputBytes(allocator: std.mem.Allocator, input: []const u8, format: InputFormat) ![]u8 {
     return switch (format) {
-        .raw => try allocator.dupe(u8, input),
+        .raw, .sp1 => try allocator.dupe(u8, input),
         .zisk => try ziskInputFrame(allocator, input),
     };
 }
@@ -54,6 +56,12 @@ fn ziskInputFrame(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 
 test "input raw format leaves bytes unchanged" {
     const out = try inputBytes(std.testing.allocator, "hello", .raw);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("hello", out);
+}
+
+test "input sp1 format is one raw hint chunk" {
+    const out = try inputBytes(std.testing.allocator, "hello", .sp1);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("hello", out);
 }

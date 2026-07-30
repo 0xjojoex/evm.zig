@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const evmz = @import("evmz");
 const guest_options = @import("guest_options");
 const guest_allocator = @import("guest_allocator");
+const guest_io = @import("guest_io");
 
 const sender = evmz.addr(0xaaaa);
 const contract = evmz.addr(0xbbbb);
@@ -83,14 +84,22 @@ comptime {
         @export(&evmz_guest_output, .{ .name = "evmz_guest_output" });
         @export(&evmz_guest_entry, .{ .name = "evmz_guest_entry" });
     }
-    if (guest_options.use_ziskos_staticlib) {
-        @export(&ziskMain, .{ .name = "main" });
+    switch (guest_options.backend) {
+        .native => {},
+        .zisk => @export(&ziskMain, .{ .name = "main" }),
+        .sp1 => @export(&sp1Main, .{ .name = "main" }),
     }
 }
 
 fn ziskMain() callconv(.c) void {
     evmz_guest_entry();
     writeZiskOutput();
+}
+
+fn sp1Main() callconv(.c) c_int {
+    evmz_guest_entry();
+    guest_io.writeOutput(std.mem.sliceAsBytes(&evmz_guest_output));
+    return 0;
 }
 
 pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {

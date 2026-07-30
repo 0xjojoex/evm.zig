@@ -14,6 +14,57 @@ the `evmz_guest_heap_capacity_bytes` and `evmz_guest_heap_peak_used_bytes`
 diagnostic symbols. Heap metering is independent of profile tags and changes
 the guest execution-step count.
 
+## SP1 execute-only backend
+
+SP1 v6.3.1 is the second guest backend. It uses the same
+`zkvm_accelerators.h` ABI and vendor-static-library shape as ZisK: SP1 owns
+`_start`, Zig exports `main`, and no Rust guest wrapper is involved.
+
+Download the released SDK and verify its pinned archive:
+
+```sh
+curl -fL \
+  https://github.com/succinctlabs/sp1/releases/download/v6.3.1/zkevm-sdk-v6.3.1.tar.gz \
+  -o /tmp/zkevm-sdk-v6.3.1.tar.gz
+echo "ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8  /tmp/zkevm-sdk-v6.3.1.tar.gz" \
+  | shasum -a 256 -c -
+tar -xzf /tmp/zkevm-sdk-v6.3.1.tar.gz -C /tmp
+```
+
+Build or execute a payload with the released `libzkevm.a`:
+
+```sh
+zig build guest-sp1 -Dguest-payload=basic -Doptimize=ReleaseFast \
+  -Dsp1-staticlib=/tmp/zkevm-sdk-v6.3.1/libzkevm.a
+
+zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+  -Dsp1-staticlib=/tmp/zkevm-sdk-v6.3.1/libzkevm.a \
+  -Dguest-input=/path/to/raw-stateless-input.bin \
+  -Dguest-output=/path/to/public-values.bin
+```
+
+The host driver is locked to `sp1-core-executor` 6.3.1 and built on demand.
+It sends the entire private input as one raw SP1 hint chunk, requires exit code
+zero, writes unpadded public values, and reports deterministic instruction
+cycles. These are execute-only measurements, not proof cycles or proving time.
+
+SP1's executor accepts RV64IM but not atomic instructions. Because the guest is
+single-threaded, `guest/runtime/sp1/atomics.zig` supplies the six 64-bit atomic
+libcalls emitted by Zig as ordinary operations. Its exports are strong and
+override compiler-rt's weak ones, which matters because compiler-rt implements
+them with `@atomicLoad`/`@cmpxchg` and would recurse into the same libcalls on a
+target without the A extension. The rest of compiler-rt stays bundled; the guest
+needs `memcpy`, `memset`, and `memmove` from it.
+
+The linker script keeps the payload heap as bare symbols rather than an output
+section. SP1's ELF loader walks each `PT_LOAD` by `p_memsz` and materializes a
+zero word per address past `p_filesz`, so an emitted 16 MiB heap section would
+add ~2M entries to the initial memory image on every run.
+
+`zkevm-ere-bench --engine sp1` emits the same ERE-shaped rows as the native
+and ZisK engines. Pass `--sp1-host`, `--sp1-elf`, and raw fixture paths. SP1
+public output is already raw, unlike ZisK's 256-byte public region.
+
 ## Host semantic gate
 
 Run the full root suite through the zkVM adapters without building an RV64

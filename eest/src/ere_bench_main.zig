@@ -43,6 +43,15 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--zisk-max-steps")) {
             const value = args.next() orelse return error.MissingZiskMaxSteps;
             options.zisk_max_steps = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-host")) {
+            const value = args.next() orelse return error.MissingSp1HostPath;
+            options.sp1_host_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-elf")) {
+            const value = args.next() orelse return error.MissingSp1ElfPath;
+            options.sp1_elf_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-work-dir")) {
+            const value = args.next() orelse return error.MissingSp1WorkDir;
+            options.sp1_work_dir = try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--report-only")) {
             options.report_only = true;
         } else {
@@ -70,6 +79,7 @@ pub fn main(init: std.process.Init) !void {
 fn parseEngine(value: []const u8) ?bench.Engine {
     if (std.mem.eql(u8, value, "native")) return .native;
     if (std.mem.eql(u8, value, "zisk")) return .zisk;
+    if (std.mem.eql(u8, value, "sp1")) return .sp1;
     return null;
 }
 
