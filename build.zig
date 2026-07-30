@@ -400,6 +400,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_zisk_strip,
+        omit_frame_pointer,
         guest_zisk_profile_tags,
         guest_heap_metrics,
     );
@@ -587,6 +588,7 @@ fn addGuestZisk(
     guest_input_path: ?[]const u8,
     guest_output_path: ?[]const u8,
     strip: bool,
+    omit_frame_pointer: bool,
     profile_tags: bool,
     heap_metrics: bool,
 ) void {
@@ -608,6 +610,7 @@ fn addGuestZisk(
         .root_source_file = b.path(if (profile_tags) "guest/profile_zisk.zig" else "guest/profile_none.zig"),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
     });
 
     const evmz_mod = b.createModule(.{
@@ -616,6 +619,7 @@ fn addGuestZisk(
         .optimize = optimize,
         .code_model = .medium,
         .error_tracing = false,
+        .omit_frame_pointer = omit_frame_pointer,
         .pic = false,
         .single_threaded = true,
         .strip = strip,
@@ -628,11 +632,13 @@ fn addGuestZisk(
         .root_source_file = b.path("pkg/ssz/src/lib.zig"),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
     });
     const rlp_mod = b.createModule(.{
         .root_source_file = b.path("pkg/rlp/src/lib.zig"),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
     });
     evmz_mod.addImport("ssz", ssz_mod);
     evmz_mod.addImport("rlp", rlp_mod);
@@ -640,6 +646,7 @@ fn addGuestZisk(
         .root_source_file = b.path("pkg/mpt/src/lib.zig"),
         .target = target,
         .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
     });
     mpt_mod.addImport("rlp", rlp_mod);
     evmz_mod.addImport("mpt", mpt_mod);
@@ -650,6 +657,7 @@ fn addGuestZisk(
         .optimize = optimize,
         .code_model = .medium,
         .error_tracing = false,
+        .omit_frame_pointer = omit_frame_pointer,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },
             .{ .name = "guest_options", .module = guest_options_mod },
@@ -665,6 +673,7 @@ fn addGuestZisk(
         .optimize = optimize,
         .code_model = .medium,
         .error_tracing = false,
+        .omit_frame_pointer = omit_frame_pointer,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },
             .{ .name = "guest_options", .module = guest_options_mod },
@@ -681,6 +690,7 @@ fn addGuestZisk(
         .optimize = optimize,
         .code_model = .medium,
         .error_tracing = false,
+        .omit_frame_pointer = omit_frame_pointer,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },
             .{ .name = "guest_options", .module = guest_options_mod },
@@ -701,6 +711,7 @@ fn addGuestZisk(
         .optimize = optimize,
         .code_model = .medium,
         .error_tracing = false,
+        .omit_frame_pointer = omit_frame_pointer,
         .imports = root_imports,
         .pic = false,
         .single_threaded = true,

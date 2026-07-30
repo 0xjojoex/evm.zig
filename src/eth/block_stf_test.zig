@@ -92,7 +92,7 @@ test "BlockSTF validates a single witnessed transaction" {
     const state_node = try testLeafNode(scratch, &account_key, pre_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
-    const codes = [_]state.WitnessStateReader.Code{.{ .hash = code_hash, .bytes = &code }};
+    const codes = [_][]const u8{&code};
 
     const tx_input = [_]TransactionInput{.{
         .tx = .{
@@ -500,7 +500,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     const state_node = try testLeafNode(scratch, &account_key, pre_account_value);
     const pre_state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
-    const codes = [_]state.WitnessStateReader.Code{.{ .hash = beacon_code_hash, .bytes = beacon_code }};
+    const codes = [_][]const u8{beacon_code};
 
     var parent_beacon_root = [_]u8{0} ** 32;
     parent_beacon_root[31] = 0xbb;

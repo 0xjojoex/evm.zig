@@ -336,7 +336,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
         const nodes = [_][]const u8{state_node};
         const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-        var witness = evmz.state.WitnessStateReader.init(
+        var witness = try evmz.state.WitnessStateReader.init(
             scratch,
             evmz.crypto.keccak256(state_node),
             indexed,
@@ -369,7 +369,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
         const nodes = [_][]const u8{state_node};
         const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-        var witness = evmz.state.WitnessStateReader.init(
+        var witness = try evmz.state.WitnessStateReader.init(
             scratch,
             evmz.crypto.keccak256(state_node),
             indexed,

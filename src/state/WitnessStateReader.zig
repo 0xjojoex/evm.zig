@@ -16,7 +16,7 @@ const WitnessStateReader = @This();
 
 pub const Error = error{InvalidWitness};
 
-pub const Code = struct {
+const CodeEntry = struct {
     hash: [32]u8,
     bytes: []const u8,
 };
@@ -24,28 +24,31 @@ pub const Code = struct {
 allocator: std.mem.Allocator,
 state_root: [32]u8,
 indexed: *trie.IndexedNodes,
-codes: []const Code = &.{},
-accounts: trie.AccountFacts = .empty,
+codes: []CodeEntry = &.{},
+accounts: trie.AccountFacts,
 proof_cache: trie.ProofCache,
 
 pub fn init(
     allocator: std.mem.Allocator,
     state_root: [32]u8,
     indexed: *trie.IndexedNodes,
-    codes: []const Code,
-) WitnessStateReader {
+    codes: []const []const u8,
+) !WitnessStateReader {
+    errdefer indexed.deinit();
     return .{
         .allocator = allocator,
         .state_root = state_root,
         .indexed = indexed,
-        .codes = codes,
+        .codes = try indexCodes(allocator, codes),
+        .accounts = trie.AccountFacts.init(allocator),
         .proof_cache = .init(allocator),
     };
 }
 
 pub fn deinit(self: *WitnessStateReader) void {
     self.proof_cache.deinit();
-    self.accounts.deinit(self.allocator);
+    self.accounts.deinit();
+    if (self.codes.len != 0) self.allocator.free(self.codes);
     self.indexed.deinit();
     self.* = undefined;
 }
@@ -69,7 +72,7 @@ pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
 fn loadMptAccount(self: *WitnessStateReader, target: Address) !?trie.Account {
     if (self.accounts.get(target)) |account| return account;
     const account = try self.loadMptAccountFrom(target, &self.proof_cache);
-    try self.accounts.put(self.allocator, target, account);
+    try self.accounts.put(target, account);
     return account;
 }
 
@@ -95,11 +98,21 @@ fn codeForHash(self: *const WitnessStateReader, hash: [32]u8) Error![]const u8 {
     if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return "";
     for (self.codes) |code| {
         if (!std.mem.eql(u8, &code.hash, &hash)) continue;
-        const actual_hash = crypto.keccak256(code.bytes);
-        if (!std.mem.eql(u8, &actual_hash, &hash)) return error.InvalidWitness;
         return code.bytes;
     }
     return error.InvalidWitness;
+}
+
+fn indexCodes(allocator: std.mem.Allocator, codes: []const []const u8) ![]CodeEntry {
+    if (codes.len == 0) return &.{};
+    const entries = try allocator.alloc(CodeEntry, codes.len);
+    for (entries, codes) |*entry, code| {
+        entry.* = .{
+            .hash = crypto.keccak256(code),
+            .bytes = code,
+        };
+    }
+    return entries;
 }
 
 const vtable = StateReader.VTable{
@@ -232,7 +245,7 @@ test "witness state reader loads account and code" {
     const state_node = try testLeafNode(scratch, &account_key, account_value);
     const state_root = crypto.keccak256(state_node);
     const nodes = [_][]const u8{state_node};
-    const codes = [_]Code{.{ .hash = code_hash, .bytes = &code }};
+    const codes = [_][]const u8{&code};
 
     var witness = try initForTest(scratch, state_root, &nodes, &codes);
     defer witness.deinit();
@@ -303,18 +316,24 @@ test "witness state reader rejects missing witness nodes and code" {
     try std.testing.expectError(error.InvalidWitness, state_reader.loadCode(loaded.code_hash));
     try std.testing.expectError(error.InvalidWitness, state_reader.getStorage(target, 1));
 
-    const malformed_codes = [_]Code{.{ .hash = code_hash, .bytes = &.{0x00} }};
-    witness.codes = &malformed_codes;
-    try std.testing.expectError(error.InvalidWitness, state_reader.loadCode(loaded.code_hash));
+    const malformed_code = [_]u8{0x00};
+    const malformed_codes = [_][]const u8{&malformed_code};
+    var malformed_witness = try initForTest(scratch, state_root, &nodes, &malformed_codes);
+    defer malformed_witness.deinit();
+    try std.testing.expectError(
+        error.InvalidWitness,
+        malformed_witness.reader().loadCode(loaded.code_hash),
+    );
 }
 
 fn initForTest(
     allocator: std.mem.Allocator,
     state_root: [32]u8,
     nodes: []const []const u8,
-    codes: []const Code,
+    codes: []const []const u8,
 ) !WitnessStateReader {
-    return WitnessStateReader.init(allocator, state_root, try trie.indexNodes(allocator, nodes), codes);
+    const indexed = try trie.indexNodes(allocator, nodes);
+    return WitnessStateReader.init(allocator, state_root, indexed, codes);
 }
 
 fn testLeafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {

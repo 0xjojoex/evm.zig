@@ -342,7 +342,6 @@ fn runBlockExact(
 
     const witness_nodes = try parseByteList(scratch, asArray(witness.get("state") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
     const code_bytes = try parseByteList(scratch, asArray(witness.get("codes") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
-    const codes = try witnessCodes(scratch, code_bytes);
     const transactions = try parseTransactions(scratch, asArray(block.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
     const withdrawals = if (revision.isImpl(.shanghai))
         try parseWithdrawals(scratch, asArray(block.get("withdrawals") orelse return error.MalformedFixture) orelse return error.MalformedFixture)
@@ -383,7 +382,7 @@ fn runBlockExact(
             allocator,
             try hashField(&genesis_header, "stateRoot"),
             witness_nodes,
-            codes,
+            code_bytes,
         ),
         .transactions = transactions,
         .withdrawals = withdrawals,
@@ -470,12 +469,6 @@ fn parseByteList(allocator: std.mem.Allocator, array: JsonArray) ![]const []cons
     for (out, array.items) |*target, value| {
         target.* = try parseBytesFromValue(allocator, value);
     }
-    return out;
-}
-
-fn witnessCodes(allocator: std.mem.Allocator, codes: []const []const u8) ![]const evmz.state.WitnessStateReader.Code {
-    const out = try allocator.alloc(evmz.state.WitnessStateReader.Code, codes.len);
-    for (out, codes) |*item, code| item.* = .{ .hash = crypto.keccak256(code), .bytes = code };
     return out;
 }
 

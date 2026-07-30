@@ -324,6 +324,13 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             return root;
         }
 
+        fn branchChildren(self: *Self, path: *const TreePath, children: *const [2]Root) WalkError!Root {
+            // Nested arrays have the exact contiguous 64-byte layout required by hash64.
+            const root = self.context.hash64(@ptrCast(children));
+            try self.visitor.visit(path, .{ .root = root, .kind = .branch });
+            return root;
+        }
+
         pub fn merkleizeSource(
             self: *Self,
             source: anytype,
@@ -395,7 +402,8 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
         fn mixIn(self: *Self, path: *const TreePath, left: Root, right: Root) WalkError!Root {
             var right_path = path.child(.right);
             _ = try self.leaf(&right_path, right);
-            return self.branch(path, &left, &right);
+            const children = [2]Root{ left, right };
+            return self.branchChildren(path, &children);
         }
 
         fn merkleizeSourceDepth(
@@ -413,7 +421,8 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             var left_path = path.child(.left);
             var right_path = path.child(.right);
             const child_depth = depth - 1;
-            const left = try self.merkleizeSourceDepth(
+            var children: [2]Root = undefined;
+            children[0] = try self.merkleizeSourceDepth(
                 source,
                 count,
                 start,
@@ -421,7 +430,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
                 zero_hashes,
                 &left_path,
             );
-            const right = if (child_depth >= @bitSizeOf(usize))
+            children[1] = if (child_depth >= @bitSizeOf(usize))
                 try self.zeroSubtree(&right_path, child_depth, zero_hashes.at(child_depth))
             else blk: {
                 const half = @as(usize, 1) << @intCast(child_depth);
@@ -437,7 +446,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
                     &right_path,
                 );
             };
-            return self.branch(path, &left, &right);
+            return self.branchChildren(path, &children);
         }
 
         fn merkleizeProgressiveSourceRange(
@@ -452,7 +461,8 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             if (start >= count) return self.zeroSubtree(path, 0, zero);
 
             var left_path = path.child(.left);
-            const left = try self.merkleizeSourceDepth(
+            var children: [2]Root = undefined;
+            children[0] = try self.merkleizeSourceDepth(
                 source,
                 count,
                 start,
@@ -463,7 +473,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             const next_start = std.math.add(usize, start, num_leaves) catch
                 return error.EncodedLengthOverflow;
             var right_path = path.child(.right);
-            const right = if (next_start >= count)
+            children[1] = if (next_start >= count)
                 try self.zeroSubtree(&right_path, 0, zero)
             else blk: {
                 const next_leaves = std.math.mul(usize, num_leaves, 4) catch
@@ -477,7 +487,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
                     &right_path,
                 );
             };
-            return self.branch(path, &left, &right);
+            return self.branchChildren(path, &children);
         }
     };
 }
