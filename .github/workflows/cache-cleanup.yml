@@ -38,6 +38,7 @@ jobs:
           CACHE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
         run: |
           gh cache delete --all \
+            --repo "${GITHUB_REPOSITORY}" \
             --ref "${CACHE_REF}" \
             --succeed-on-no-caches
           echo "deleted cache entries for ${CACHE_REF}" \
