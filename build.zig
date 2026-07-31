@@ -174,6 +174,7 @@ pub fn build(b: *std.Build) void {
         .name = "evmz",
         .root_module = evmz_mod,
     });
+    core_check.use_llvm = true;
     b.default_step.dependOn(&core_check.step);
     b.step("check", "Compile the public evmz module").dependOn(&core_check.step);
 
@@ -588,6 +589,7 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .name = "zkvm-test-accelerators",
         .root_module = provider_mod,
     });
+    provider.use_llvm = true;
     zkvm_test_mod.addObject(provider);
     zkvm_test_mod.link_libcpp = true;
 
@@ -601,6 +603,7 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .name = "zkvm-test-accelerators",
         .root_module = provider_mod,
     });
+    provider_tests.use_llvm = true;
     const zkvm_step = b.step("test-evmz-zkvm", "Run zkVM-profile evmz semantic tests");
     zkvm_step.dependOn(&b.addRunArtifact(zkvm_tests).step);
     zkvm_step.dependOn(&b.addRunArtifact(provider_tests).step);
@@ -817,6 +820,7 @@ fn addGuestPayloadTests(
         .name = "guest-payload-tests",
         .root_module = payload_tests_mod,
     });
+    payload_tests.use_llvm = true;
 
     const test_step = b.step("guest-payload-test", "Run native tests for guest payload fixtures");
     test_step.dependOn(&b.addRunArtifact(payload_tests).step);
@@ -825,10 +829,12 @@ fn addGuestPayloadTests(
         .name = "guest-payload-basic-abi",
         .root_module = basic_payload_mod,
     });
+    basic_abi.use_llvm = true;
     const stateless_ere_abi = b.addObject(.{
         .name = "guest-payload-stateless-ere-abi",
         .root_module = stateless_ere_payload_mod,
     });
+    stateless_ere_abi.use_llvm = true;
     const abi_step = b.step(
         "guest-payload-abi-check",
         "Compile guest payloads with production C exports enabled",
