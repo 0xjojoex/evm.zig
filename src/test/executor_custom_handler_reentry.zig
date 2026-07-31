@@ -42,8 +42,8 @@ const ReentrantInstruction = struct {
                 const capture = capture_context orelse return error.MissingTestCaptureContext;
                 root_capture_stable = root_capture_before.? == @intFromPtr(&capture.frame_captures.items[0]);
             }
-            const sentinel = try frame.stack.pop();
-            try frame.stack.push(sentinel + 1);
+            const sentinel = frame.pop() orelse return;
+            _ = frame.push(sentinel + 1);
         }
     };
 };

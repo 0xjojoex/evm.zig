@@ -1005,14 +1005,12 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 return null;
             };
             if (end <= ctx.frame.memory.len()) return gas;
-            const expansion = ctx.frame.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    _ = fail(ctx, ip, sp, gas, .out_of_gas);
-                    return null;
-                },
+            const expansion = ctx.frame.memory.planExpansion(offset, byte_size) orelse {
+                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                return null;
             };
             const next_gas = chargeGas(ip, sp, gas, ctx, expansion.cost) orelse return null;
-            ctx.frame.memory.expandPrepared(expansion) catch |err| switch (err) {
+            ctx.frame.memory.applyExpansion(expansion) catch |err| switch (err) {
                 error.OutOfMemory => {
                     recordError(ctx, ip, sp, next_gas, err);
                     return null;

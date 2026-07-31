@@ -7,73 +7,73 @@ const uint256 = @import("../uint256.zig");
 const CallFrame = interpreter.CallFrame;
 
 pub fn add(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
+    const a, const b = frame.popN(2) orelse return;
     const result = a +% b;
 
-    frame.stack.pushUnchecked(result);
+    frame.stack.push(result);
 }
 
 pub fn mul(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
+    const a, const b = frame.popN(2) orelse return;
     const result = a *% b;
 
-    frame.stack.pushUnchecked(result);
+    frame.stack.push(result);
 }
 
 pub fn sub(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
+    const a, const b = frame.popN(2) orelse return;
     const result = a -% b;
 
-    frame.stack.pushUnchecked(result);
+    frame.stack.push(result);
 }
 
 pub fn div(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
-    frame.stack.pushUnchecked(uint256.div(a, b));
+    const a, const b = frame.popN(2) orelse return;
+    frame.stack.push(uint256.div(a, b));
 }
 
 pub fn sdiv(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
+    const a, const b = frame.popN(2) orelse return;
 
-    frame.stack.pushUnchecked(uint256.sdiv(a, b));
+    frame.stack.push(uint256.sdiv(a, b));
 }
 
 pub fn mod(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
-    frame.stack.pushUnchecked(uint256.mod(a, b));
+    const a, const b = frame.popN(2) orelse return;
+    frame.stack.push(uint256.mod(a, b));
 }
 
 pub fn smod(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
-    frame.stack.pushUnchecked(uint256.smod(a, b));
+    const a, const b = frame.popN(2) orelse return;
+    frame.stack.push(uint256.smod(a, b));
 }
 
 pub fn addmod(frame: *CallFrame) !void {
-    const a, const b, const c = try frame.stack.popN(3);
-    frame.stack.pushUnchecked(uint256.addMod(a, b, c));
+    const a, const b, const c = frame.popN(3) orelse return;
+    frame.stack.push(uint256.addMod(a, b, c));
 }
 
 pub fn mulmod(frame: *CallFrame) !void {
-    const a, const b, const c = try frame.stack.popN(3);
-    frame.stack.pushUnchecked(uint256.mulMod(a, b, c));
+    const a, const b, const c = frame.popN(3) orelse return;
+    frame.stack.push(uint256.mulMod(a, b, c));
 }
 
 pub fn bind(comptime spec: ExactSpec) type {
     return struct {
         pub fn exp(frame: *CallFrame) !void {
-            const a, const exponent = try frame.stack.popN(2);
+            const a, const exponent = frame.popN(2) orelse return;
 
             const exponent_byte_size = countSignificantBytesSize(exponent);
             if (!frame.trackGas(spec.instruction.exp_byte_gas * exponent_byte_size)) return;
 
             const result = wrapExp(a, exponent);
-            frame.stack.pushUnchecked(result);
+            frame.stack.push(result);
         }
     };
 }
 
 pub fn signextend(frame: *CallFrame) !void {
-    const a, const b = try frame.stack.popN(2);
+    const a, const b = frame.popN(2) orelse return;
 
     var val = b;
     if (a < 32) {
@@ -86,11 +86,11 @@ pub fn signextend(frame: *CallFrame) !void {
         }
     }
 
-    frame.stack.pushUnchecked(val);
+    frame.stack.push(val);
 }
 
 pub fn keccak256(frame: *CallFrame) !void {
-    const offset_word, const size_word = try frame.stack.popN(2);
+    const offset_word, const size_word = frame.popN(2) orelse return;
     const size = frame.wordToUsizeOrOog(size_word) orelse return;
     const offset = frame.memoryOffsetToUsizeOrOog(offset_word, size) orelse return;
 
@@ -104,7 +104,7 @@ pub fn keccak256(frame: *CallFrame) !void {
     const result = if (value.len == 0) evmz.crypto.keccak256_empty else evmz.crypto.keccak256(value);
 
     const final_result = evmz.uint256.fromBytes32(&result);
-    frame.stack.pushUnchecked(final_result);
+    frame.stack.push(final_result);
 }
 
 test "DIV and SDIV with one operand fail as invalid instructions" {
@@ -187,8 +187,8 @@ test "EXP byte gas comes from the exact spec" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(0x0100);
-    try frame.frame.stack.push(2);
+    frame.frame.stack.push(0x0100);
+    frame.frame.stack.push(2);
 
     try bind(spec).exp(frame.frame);
 

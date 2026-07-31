@@ -624,8 +624,8 @@ test "debug session resolves and executes a custom instruction" {
     const Square = struct {
         pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
             if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
-            const value = try frame.stack.pop();
-            try frame.stack.push(value *% value);
+            const value = frame.pop() orelse return;
+            _ = frame.push(value *% value);
         }
     };
     const custom_instructions = comptime instructions: {

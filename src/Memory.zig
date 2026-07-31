@@ -150,49 +150,51 @@ pub fn copy(self: *Memory, dest: usize, src: usize, size: usize) void {
     }
 }
 
-pub fn expansionFor(self: *const Memory, offset: usize, byte_size: usize) error{OutOfMemory}!Expansion {
-    const next_size = try nextSize(offset, byte_size);
+pub fn planExpansion(self: *const Memory, offset: usize, byte_size: usize) ?Expansion {
+    const next_size = nextSize(offset, byte_size) orelse return null;
     const cost = if (self.len() < next_size)
-        try memoryCost(next_size) - try memoryCost(self.len())
+        (memoryCost(next_size) orelse return null) - (memoryCost(self.len()) orelse return null)
     else
         0;
     return .{ .cost = cost, .next_size = next_size };
 }
 
 pub fn expandToFit(self: *Memory, offset: usize, byte_size: usize) !void {
-    try self.expandPrepared(try self.expansionFor(offset, byte_size));
+    const expansion = self.planExpansion(offset, byte_size) orelse return error.MemorySizeOverflow;
+    try self.applyExpansion(expansion);
 }
 
-pub fn expandPrepared(self: *Memory, expansion: Expansion) !void {
+pub fn applyExpansion(self: *Memory, expansion: Expansion) Allocator.Error!void {
     if (self.len() < expansion.next_size) {
         try self.resize(expansion.next_size);
     }
 }
 
-inline fn nextSize(offset: usize, byte_size: usize) !usize {
+inline fn nextSize(offset: usize, byte_size: usize) ?usize {
     if (byte_size == 0) {
         return 0;
     }
-    const end = std.math.add(usize, offset, byte_size) catch return error.OutOfMemory;
-    const end_with_padding = std.math.add(usize, end, word_size - 1) catch return error.OutOfMemory;
+    const end = std.math.add(usize, offset, byte_size) catch return null;
+    const end_with_padding = std.math.add(usize, end, word_size - 1) catch return null;
     return (end_with_padding / word_size) * word_size;
 }
 
 test nextSize {
-    try std.testing.expectEqual(32, try nextSize(0, 32));
-    try std.testing.expectEqual(64, try nextSize(31, 32));
-    try std.testing.expectEqual(64, try nextSize(32, 32));
-    try std.testing.expectEqual(96, try nextSize(57, 32));
-    try std.testing.expectEqual(256, try nextSize(255, 1));
-    try std.testing.expectEqual(32, try nextSize(1, 3));
-    try std.testing.expectError(error.OutOfMemory, nextSize(std.math.maxInt(usize), 1));
+    try std.testing.expectEqual(32, nextSize(0, 32));
+    try std.testing.expectEqual(64, nextSize(31, 32));
+    try std.testing.expectEqual(64, nextSize(32, 32));
+    try std.testing.expectEqual(96, nextSize(57, 32));
+    try std.testing.expectEqual(256, nextSize(255, 1));
+    try std.testing.expectEqual(32, nextSize(1, 3));
+    try std.testing.expectEqual(null, nextSize(std.math.maxInt(usize), 1));
 }
 
-pub inline fn memoryCost(expand_size: usize) !i64 {
-    const memory_size_word = (expand_size + 31) / 32;
+inline fn memoryCost(expand_size: usize) ?i64 {
+    assert(expand_size % word_size == 0);
+    const memory_size_word = expand_size / word_size;
     const words: u128 = memory_size_word;
     const cost = (words * words) / 512 + (3 * words);
-    if (cost > std.math.maxInt(i64)) return error.OutOfMemory;
+    if (cost > std.math.maxInt(i64)) return null;
     return @intCast(cost);
 }
 
@@ -213,6 +215,15 @@ test Memory {
     memory.write(31, 0xff);
     const value2 = memory.read(31);
     try std.testing.expectEqual(0xff, value2);
+}
+
+test "unrepresentable expansion is distinct from allocation failure" {
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
+    defer memory.deinit();
+
+    try std.testing.expectEqual(null, memory.planExpansion(std.math.maxInt(usize), 1));
+    try std.testing.expectError(error.MemorySizeOverflow, memory.expandToFit(std.math.maxInt(usize), 1));
 }
 
 test "bounded memory reuses reserved capacity and rejects growth" {

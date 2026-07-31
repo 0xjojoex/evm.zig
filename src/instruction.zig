@@ -117,8 +117,8 @@ test "execute uses resolved dispatch target for hot opcodes" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(2);
-    try frame.frame.stack.push(3);
+    frame.frame.stack.push(2);
+    frame.frame.stack.push(3);
     try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
     try std.testing.expectEqual(interpreter.FrameStatus.invalid_opcode, frame.frame.status);
 }
@@ -157,7 +157,7 @@ test "execute calls custom dispatch target directly" {
     const CustomHandler = struct {
         pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
             if (!Instructions.chargeStaticGas(frame, .ADD)) return;
-            return frame.stack.push(42);
+            _ = frame.push(42);
         }
     };
     const spec = instructionOverrideSpec(.ADD, .{ .custom = CustomHandler });
@@ -305,7 +305,7 @@ test "instruction boundary resolves EVM faults without throwing" {
         .code = &code,
     });
     defer frame.deinit();
-    for (0..Stack.capacity) |_| frame.frame.stack.pushUnchecked(0);
+    for (0..Stack.capacity) |_| frame.frame.stack.push(0);
 
     try Instruction(evmz.eth.cancun).execute(code[0], frame.frame);
     try std.testing.expectEqual(interpreter.FrameStatus.stack_overflow, frame.frame.status);
@@ -734,16 +734,10 @@ pub fn Instruction(comptime spec: ExactSpec) type {
         }
 
         pub inline fn executeDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
-            (switch (comptime dispatch_entry.dispatchTarget()) {
+            return switch (comptime dispatch_entry.dispatchTarget()) {
                 .invalid => Self.executeInvalidDispatchEntry(dispatch_entry, frame),
                 .builtin => |opcode| builtinHandlerForOpcode(opcode).execute(Self, frame),
                 .custom => |Handler| Self.executeCustomDispatchEntry(Handler, frame),
-            }) catch |err| switch (err) {
-                error.StackOverflow => if (frame.status == .running)
-                    frame.failWithFrameStatus(.stack_overflow),
-                error.StackUnderflow => if (frame.status == .running)
-                    frame.failWithFrameStatus(.stack_underflow),
-                else => return err,
             };
         }
 

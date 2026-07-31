@@ -37,8 +37,8 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
             .bytecode = bytecode.view(),
         });
         defer frame.deinit();
-        try frame.frame.stack.push(case.below);
-        try frame.frame.stack.push(case.top);
+        frame.frame.stack.push(case.below);
+        frame.frame.stack.push(case.top);
         var interpreter = frame.interpreter();
 
         const result = try interpreter.execute();
@@ -145,8 +145,8 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
         .bytecode = bytecode.view(),
     });
     defer frame.deinit();
-    try frame.frame.stack.push(1);
-    try frame.frame.stack.push(1);
+    frame.frame.stack.push(1);
+    frame.frame.stack.push(1);
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
@@ -232,9 +232,9 @@ test "prepared tail dispatch copies frame-local byte slices" {
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
-        try frame.frame.stack.push(case.size);
-        try frame.frame.stack.push(case.source_offset);
-        try frame.frame.stack.push(0);
+        frame.frame.stack.push(case.size);
+        frame.frame.stack.push(case.source_offset);
+        frame.frame.stack.push(0);
         var interpreter = frame.interpreter();
 
         const result = try interpreter.execute();
@@ -260,9 +260,9 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     });
     defer frame.deinit();
     try frame.frame.replaceReturnData(&.{ 1, 2 });
-    try frame.frame.stack.push(2);
-    try frame.frame.stack.push(1);
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(2);
+    frame.frame.stack.push(1);
+    frame.frame.stack.push(0);
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
@@ -297,8 +297,8 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         defer frame.deinit();
         try frame.frame.memory.expandToFit(0, output.len);
         frame.frame.memory.writeBytes(0, &output);
-        try frame.frame.stack.push(output.len);
-        try frame.frame.stack.push(0);
+        frame.frame.stack.push(output.len);
+        frame.frame.stack.push(0);
         var interpreter = frame.interpreter();
 
         const result = try interpreter.execute();

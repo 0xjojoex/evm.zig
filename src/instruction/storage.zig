@@ -52,7 +52,7 @@ pub fn bind(comptime spec: ExactSpec) type {
                 frame.failWithFrameStatus(.write_protection);
                 return;
             }
-            const key, const value = try frame.stack.popN(2);
+            const key, const value = frame.popN(2) orelse return;
 
             try Self.sstoreAfterPop(frame, key, value);
         }
@@ -99,9 +99,9 @@ pub fn bind(comptime spec: ExactSpec) type {
         }
 
         pub fn sload(frame: *CallFrame) !void {
-            const key = try frame.stack.pop();
+            const key = frame.pop() orelse return;
             const value = (try Self.sloadAfterPop(frame, key)) orelse return;
-            frame.stack.pushUnchecked(value);
+            frame.stack.push(value);
         }
 
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
@@ -127,9 +127,9 @@ pub fn bind(comptime spec: ExactSpec) type {
 }
 
 pub fn tload(frame: *CallFrame) !void {
-    const key = try frame.stack.pop();
+    const key = frame.pop() orelse return;
     const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
-    frame.stack.pushUnchecked(value);
+    frame.stack.push(value);
 }
 
 pub fn tstore(frame: *CallFrame) !void {
@@ -138,7 +138,7 @@ pub fn tstore(frame: *CallFrame) !void {
         return;
     }
 
-    const key, const value = try frame.stack.popN(2);
+    const key, const value = frame.popN(2) orelse return;
 
     try frame.host.setTransientStorage(frame.msg.recipient, key, value);
 }
@@ -169,7 +169,7 @@ test "SLOAD cold storage access gas comes from the exact spec" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(0);
     try bind(spec).sload(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
@@ -216,8 +216,8 @@ test "SSTORE gas and state gas come from the exact spec" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(42);
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(42);
+    frame.frame.stack.push(0);
     try bind(spec).sstore(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);

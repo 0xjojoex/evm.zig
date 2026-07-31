@@ -12,7 +12,7 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
         return;
     }
 
-    const offset, const size = try frame.stack.popN(2);
+    const offset, const size = frame.popN(2) orelse return;
 
     var topics: [n]u256 = undefined;
 
@@ -31,7 +31,7 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
     const data = frame.memory.readBytes(offset_usize, size_usize);
 
     for (0..n) |i| {
-        const topic = try frame.stack.pop();
+        const topic = frame.pop() orelse return;
         topics[i] = topic;
     }
 

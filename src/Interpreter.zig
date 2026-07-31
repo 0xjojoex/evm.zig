@@ -431,7 +431,7 @@ pub const CallFrame = struct {
         self.memory.writeBytes(continuation.out_offset, result.output_data[0..output_size]);
 
         try self.replaceReturnData(result.output_data);
-        self.stack.pushUnchecked(if (result.status == .success) 1 else 0);
+        self.stack.push(if (result.status == .success) 1 else 0);
     }
 
     pub fn resumeCreateResult(self: *CallFrame, continuation: CreateResume, result: Host.CreateResult) !void {
@@ -451,10 +451,10 @@ pub const CallFrame = struct {
 
         if (result.status == .success) {
             try self.replaceReturnData(&.{});
-            self.stack.pushUnchecked(evmz.address.toU256(result.address));
+            self.stack.push(evmz.address.toU256(result.address));
         } else {
             try self.replaceReturnData(result.output_data);
-            self.stack.pushUnchecked(0);
+            self.stack.push(0);
         }
     }
 
@@ -513,6 +513,75 @@ pub const CallFrame = struct {
         }
     }
 
+    inline fn requireStack(self: *CallFrame, needed: usize) bool {
+        if (self.stack.len < needed) {
+            self.failWithFrameStatus(.stack_underflow);
+            return false;
+        }
+        return true;
+    }
+
+    inline fn requireStackRoom(self: *CallFrame) bool {
+        if (self.stack.len >= Stack.capacity) {
+            self.failWithFrameStatus(.stack_overflow);
+            return false;
+        }
+        return true;
+    }
+
+    /// Semantic stack boundary: malformed bytecode halts the frame; the
+    /// invariant-only `Stack` operations below never return Zig errors.
+    pub inline fn push(self: *CallFrame, value: u256) bool {
+        if (!self.requireStackRoom()) return false;
+        self.stack.push(value);
+        return true;
+    }
+
+    pub inline fn pop(self: *CallFrame) ?u256 {
+        if (!self.requireStack(1)) return null;
+        return self.stack.pop();
+    }
+
+    pub inline fn popN(self: *CallFrame, comptime n: usize) ?Stack.PopN(n) {
+        if (!self.requireStack(n)) return null;
+        return self.stack.popN(n);
+    }
+
+    pub inline fn peek(self: *CallFrame) ?u256 {
+        if (!self.requireStack(1)) return null;
+        return self.stack.peek().?;
+    }
+
+    pub inline fn dup(self: *CallFrame, comptime n: usize) bool {
+        if (!self.requireStack(n) or !self.requireStackRoom()) return false;
+        self.stack.dup(n);
+        return true;
+    }
+
+    pub inline fn dupDepth(self: *CallFrame, n: usize) bool {
+        if (!self.requireStack(n) or !self.requireStackRoom()) return false;
+        self.stack.dupDepth(n);
+        return true;
+    }
+
+    pub inline fn swap(self: *CallFrame, comptime n: usize) bool {
+        if (!self.requireStack(n + 1)) return false;
+        self.stack.swap(n);
+        return true;
+    }
+
+    pub inline fn swapDepth(self: *CallFrame, n: usize) bool {
+        if (!self.requireStack(n + 1)) return false;
+        self.stack.swapDepth(n);
+        return true;
+    }
+
+    pub inline fn exchangeDepths(self: *CallFrame, n: usize, m: usize) bool {
+        if (!self.requireStack(@max(n, m) + 1)) return false;
+        self.stack.exchangeDepths(n, m);
+        return true;
+    }
+
     pub fn isValidJumpDest(self: *CallFrame, target: usize) !bool {
         if (target >= self.code.len) return false;
         if (self.code[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
@@ -551,15 +620,13 @@ pub const CallFrame = struct {
         };
         if (end <= self.memory.len()) return true;
 
-        const expansion = self.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
-            error.OutOfMemory => {
-                @branchHint(.unlikely);
-                self.failWithStatus(.out_of_gas);
-                return false;
-            },
+        const expansion = self.memory.planExpansion(offset, byte_size) orelse {
+            @branchHint(.unlikely);
+            self.failWithStatus(.out_of_gas);
+            return false;
         };
         if (!self.trackGas(expansion.cost)) return false;
-        try self.memory.expandPrepared(expansion);
+        try self.memory.applyExpansion(expansion);
         return true;
     }
 

@@ -25,7 +25,7 @@ pub inline fn invalid(frame: *CallFrame) !void {
 
 /// `RETURN` Halt the execution returning the output data
 pub inline fn ret(frame: *CallFrame) !void {
-    const offset, const size = try frame.stack.popN(2);
+    const offset, const size = frame.popN(2) orelse return;
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
@@ -37,7 +37,7 @@ pub inline fn ret(frame: *CallFrame) !void {
 
 /// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
 pub inline fn revert(frame: *CallFrame) !void {
-    const offset, const size = try frame.stack.popN(2);
+    const offset, const size = frame.popN(2) orelse return;
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
@@ -55,8 +55,8 @@ pub fn bind(comptime spec: ExactSpec) type {
             comptime std.debug.assert(op == Opcode.CALL or op == Opcode.STATICCALL or op == Opcode.DELEGATECALL or op == Opcode.CALLCODE);
 
             const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size =
-                if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
-                    const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);
+                if (op == Opcode.CALL or op == Opcode.CALLCODE) frame.popN(7) orelse return else blk: {
+                    const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = frame.popN(6) orelse return;
                     break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
                 };
             const address = evmz.address.fromWord(address_word);
@@ -170,8 +170,8 @@ pub fn bind(comptime spec: ExactSpec) type {
                 return;
             }
 
-            const value, const offset, const size, const salt = if (is_create2) try frame.stack.popN(4) else blk: {
-                const value, const offset, const size = try frame.stack.popN(3);
+            const value, const offset, const size, const salt = if (is_create2) frame.popN(4) orelse return else blk: {
+                const value, const offset, const size = frame.popN(3) orelse return;
                 break :blk .{ value, offset, size, 0 };
             };
 
@@ -301,7 +301,7 @@ pub fn bind(comptime spec: ExactSpec) type {
                 return;
             }
 
-            const address_word = try frame.stack.pop();
+            const address_word = frame.pop() orelse return;
 
             const address = evmz.address.fromWord(address_word);
 
@@ -350,9 +350,9 @@ test "CREATE initcode limit is independent from transaction validation" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(2);
-    try frame.frame.stack.push(0);
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(2);
+    frame.frame.stack.push(0);
+    frame.frame.stack.push(0);
     try bind(spec).create(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameStatus.out_of_gas, frame.frame.status);
