@@ -24,11 +24,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -91,18 +86,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install system toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-
-      - name: Run EEST sidecar tests
-        run: zig build eest-test --summary all
 
       - name: Restore execution fixture archive
         uses: actions/cache@v6
@@ -151,7 +138,7 @@ jobs:
           retention-days: 7
 
   consensus-ssz:
-    name: Consensus SSZ conformance
+    name: Consensus SSZ conformance and sidecar tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -180,6 +167,9 @@ jobs:
         run: |
           set -o pipefail
           zig build -Doptimize=ReleaseFast ssz-conformance --summary all -- --jobs 4 2>&1 | tee eest-ssz.log
+
+      - name: Run EEST sidecar tests
+        run: zig build eest-test --summary all
 
       - name: Upload failure log
         if: failure()

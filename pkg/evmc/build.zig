@@ -72,11 +72,38 @@ pub fn build(b: *std.Build) void {
         .filters = b.args orelse &.{},
     });
     tests.use_llvm = true;
+    const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run EVMC compatibility package tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(&run_tests.step);
 
+    const static_example = cExample(b, "evmz-evmc-example", target, optimize, evmone_dep);
+    static_example.root_module.linkLibrary(static_lib);
+    const run_static_example = b.addRunArtifact(static_example);
+    run_static_example.has_side_effects = true;
+    b.step("example", "Run the EVMC C example against the static library").dependOn(&run_static_example.step);
+
+    const shared_example = cExample(b, "evmz-evmc-shared-example", target, optimize, evmone_dep);
+    shared_example.root_module.linkLibrary(shared_lib);
+    const run_shared_example = b.addRunArtifact(shared_example);
+    run_shared_example.has_side_effects = true;
+    b.step("shared-example", "Run the EVMC C example against the shared library").dependOn(&run_shared_example.step);
+
+    const ci_step = b.step("ci", "Build and test the EVMC compatibility package");
+    ci_step.dependOn(b.getInstallStep());
+    ci_step.dependOn(&run_tests.step);
+    ci_step.dependOn(&run_static_example.step);
+    ci_step.dependOn(&run_shared_example.step);
+}
+
+fn cExample(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    evmone_dep: *std.Build.Dependency,
+) *std.Build.Step.Compile {
     const example = b.addExecutable(.{
-        .name = "evmz-evmc-example",
+        .name = name,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -89,10 +116,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("examples/basic.c"),
         .flags = &.{ "-Wall", "-Wextra", "-pedantic", "-std=c23" },
     });
-    example.root_module.linkLibrary(static_lib);
-    const run_example = b.addRunArtifact(example);
-    run_example.has_side_effects = true;
-    b.step("example", "Run the EVMC C example").dependOn(&run_example.step);
+    return example;
 }
 
 fn adapterModule(

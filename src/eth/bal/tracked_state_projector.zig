@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const address = @import("../../address.zig");
-const crypto = @import("../../crypto.zig");
 const State = @import("../../state/TrackedState.zig");
 const Account = @import("../../state/Account.zig");
 const MemoryAccount = @import("../../state/MemoryAccount.zig");

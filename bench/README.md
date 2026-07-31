@@ -44,6 +44,64 @@ Future transaction/integration rows should stay separate, for example
 `evmz-executor`, `revm-transact`, or an evmone transaction shim. Keep the
 `scope` column visible whenever VM-core rows are compared.
 
+## Published snapshots
+
+The full native snapshots the root README excerpts. Both are fixed-Osaka, native
+`ReleaseFast`, with frame pointers omitted for every engine. Lower is better.
+`base/evmz` and `revm/evmz` above `1.00×` mean evmz is faster.
+
+### Apple M1 Max / macOS arm64
+
+This snapshot enables evmz's optional XKCP Keccak and libsecp256k1 providers for
+its maximum-performance configuration. It uses a 100 ms discarded warmup and five
+complete repeats; each cell is the median of five 100-run medians per
+deployed-runtime call:
+
+```sh
+zig build bench-compare -Dbench-optimize=ReleaseFast \
+  -Dbench-support-min=osaka -Dbench-support-max=osaka \
+  -Dnative-keccak=xkcp -Dnative-secp256k1=libsecp256k1 \
+  -- --spec osaka --num-runs 100 --warmup-ms 100
+```
+
+| VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
+| ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
+| Arithmetic loop         |  0.119 ms |    0.099 ms |   0.325 ms |  0.489 ms |     0.83× |     4.11× |
+| Memory MSTORE loop      |  0.136 ms |    0.083 ms |   0.252 ms |  0.403 ms |     0.61× |     2.96× |
+| Keccak loop             |  2.652 ms |    3.508 ms |   3.589 ms |  2.697 ms |     1.32× |     1.02× |
+| Ten-thousand hashes     |  0.916 ms |    0.742 ms |   1.629 ms |  2.036 ms |     0.81× |     2.22× |
+| Storage SLOAD loop      |  0.189 ms |    0.589 ms |   0.644 ms |  0.350 ms |     3.12× |     1.85× |
+| Storage SSTORE loop     |  0.196 ms |    0.866 ms |   0.879 ms |  0.858 ms |     4.42× |     4.38× |
+| LOG0 / 0-byte data      |  0.045 ms |    0.030 ms |   0.081 ms |  0.127 ms |     0.66× |     2.81× |
+| LOG0 / 32-byte data     |  0.050 ms |    0.033 ms |   0.081 ms |  0.308 ms |     0.66× |     6.17× |
+| LOG4 / 0-byte data      |  0.086 ms |    0.078 ms |   0.148 ms |  0.264 ms |     0.90× |     3.08× |
+| LOG4 / 32-byte data     |  0.102 ms |    0.082 ms |   0.147 ms |  0.409 ms |     0.81× |     4.01× |
+| ERC20 mint              |  1.869 ms |    3.817 ms |   4.717 ms |  3.625 ms |     2.04× |     1.94× |
+| ERC20 transfer          |  3.859 ms |    6.183 ms |   7.423 ms |  6.088 ms |     1.60× |     1.58× |
+| ERC20 approval+transfer |  3.485 ms |    4.936 ms |   5.950 ms |  4.665 ms |     1.42× |     1.34× |
+| Snailtracer             | 20.495 ms |   59.606 ms |  78.840 ms | 37.704 ms |     2.91× |     1.84× |
+
+### AMD EPYC Genoa / Linux x86-64
+
+A KVM guest pinned to one CPU.
+
+| VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
+| ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
+| Arithmetic loop         |  0.151 ms |    0.145 ms |   0.331 ms |  0.340 ms |     0.96× |     2.25× |
+| Memory MSTORE loop      |  0.183 ms |    0.263 ms |   0.284 ms |  0.308 ms |     1.44× |     1.69× |
+| Keccak loop             |  4.597 ms |    4.584 ms |   4.680 ms | 10.883 ms |     1.00× |     2.37× |
+| Ten-thousand hashes     |  2.006 ms |    1.880 ms |   2.059 ms |  2.513 ms |     0.94× |     1.25× |
+| Storage SLOAD loop      |  0.584 ms |    0.575 ms |   0.548 ms |  0.630 ms |     0.98× |     1.08× |
+| Storage SSTORE loop     |  0.595 ms |    0.838 ms |   0.857 ms |  1.112 ms |     1.41× |     1.87× |
+| LOG0 / 0-byte data      |  0.060 ms |    0.043 ms |   0.088 ms |  0.096 ms |     0.73× |     1.62× |
+| LOG0 / 32-byte data     |  0.065 ms |    0.049 ms |   0.094 ms |  0.202 ms |     0.75× |     3.08× |
+| LOG4 / 0-byte data      |  0.107 ms |    0.113 ms |   0.239 ms |  0.201 ms |     1.06× |     1.88× |
+| LOG4 / 32-byte data     |  0.113 ms |    0.113 ms |   0.191 ms |  0.307 ms |     1.00× |     2.71× |
+| ERC20 mint              |  3.929 ms |    4.204 ms |   4.757 ms |  6.991 ms |     1.07× |     1.78× |
+| ERC20 transfer          |  7.686 ms |    7.447 ms |   8.433 ms | 14.896 ms |     0.97× |     1.94× |
+| ERC20 approval+transfer |  6.278 ms |    6.227 ms |   7.032 ms | 13.413 ms |     0.99× |     2.14× |
+| Snailtracer             | 33.347 ms |   57.983 ms |  69.988 ms | 52.417 ms |     1.74× |     1.57× |
+
 ## Micro Benchmarks
 
 `zig build micro` runs focused zBench tests for inner-loop work. These are
