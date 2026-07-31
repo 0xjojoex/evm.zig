@@ -13,6 +13,7 @@ pub const Backend = @import("./state/Backend.zig").Backend;
 pub const RootProvider = @import("./state/Backend.zig").RootProvider;
 pub const MemoryAccount = @import("./state/MemoryAccount.zig");
 pub const storage = @import("./state/storage.zig");
+pub const sparse_hash_map = @import("./state/sparse_hash_map.zig");
 pub const Reader = @import("./state/Reader.zig");
 pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
 // Internal until the BAL differential path locks positioned fallback policy.

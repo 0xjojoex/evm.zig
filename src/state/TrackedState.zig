@@ -27,7 +27,6 @@ const AcceptedAccountMap = SparseHashMap(Address, AcceptedAccountRow);
 const AcceptedStorageMap = SparseHashMap(StorageKey, AcceptedStorageRow);
 const TransactionAccountMap = SparseHashMap(Address, AccountRow);
 const TransactionStorageMap = SparseHashMap(StorageKey, StorageRow);
-const ScopeStorageMap = SparseHashMap(StorageKey, ScopeStorage);
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 const CodeMap = SparseHashMap(CodeHash, CodeEntry);
 const minimum_code_chunk_bytes = 4096;
@@ -197,6 +196,10 @@ pub const StorageRow = struct {
     current: ?u256 = null,
     observation_id: ?StorageObservationId = null,
     mutation: StorageMutation = .{},
+    /// Scope-local state, valid only while `scope_generation` matches the
+    /// transaction's current scope; stale generations read as a fresh scope row.
+    scope: ScopeStorage = .{},
+    scope_generation: u64 = 0,
 };
 
 const AccountObservationRow = struct {
@@ -851,7 +854,6 @@ pub const Scope = struct {
     generation: u64,
     active: bool,
     warm_accounts: AddressSet,
-    storage: ScopeStorageMap,
     transient_storage: TransientStorageMap,
 
     fn init(allocator: std.mem.Allocator) Scope {
@@ -859,21 +861,18 @@ pub const Scope = struct {
             .generation = 0,
             .active = false,
             .warm_accounts = AddressSet.init(allocator),
-            .storage = ScopeStorageMap.init(allocator),
             .transient_storage = TransientStorageMap.init(allocator),
         };
     }
 
     fn deinit(self: *Scope) void {
         self.warm_accounts.deinit();
-        self.storage.deinit();
         self.transient_storage.deinit();
         self.* = undefined;
     }
 
     fn clearRetainingCapacity(self: *Scope) void {
         self.warm_accounts.clearRetainingCapacity();
-        self.storage.clearRetainingCapacity();
         self.transient_storage.clearRetainingCapacity();
         self.active = false;
     }
@@ -1349,7 +1348,6 @@ pub fn reserveAccessHint(self: *TrackedState, hint: AccessHint) !void {
     const tx = self.mutableTransaction();
     try tx.scope.warm_accounts.ensureUnusedCapacity(@intCast(hint.accounts));
     try tx.accounts.ensureUnusedCapacity(@intCast(hint.accounts));
-    try tx.scope.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
     try tx.storage.ensureUnusedCapacity(@intCast(hint.storage_keys));
 }
 
@@ -1651,9 +1649,9 @@ fn revertEntry(self: *TrackedState, tx: *Transaction, entry: Journal.Entry) void
             _ = tx.scope.warm_accounts.remove(tx.accounts.keyById(account_id).*);
         },
         .warm_storage => |storage_id| {
-            const key = tx.storage.keyById(storage_id).*;
-            const row = tx.scope.storage.getPtr(key) orelse unreachable;
-            row.warm = false;
+            const row = tx.storage.valuePtrById(storage_id);
+            std.debug.assert(row.scope_generation == tx.scope.generation);
+            row.scope.warm = false;
         },
         .transient_storage => |undo_id| {
             const undo = tx.undo.takeTransient(undo_id);
@@ -1942,17 +1940,19 @@ pub fn warmStorage(self: *TrackedState, address: Address, key: u256) !void {
 }
 
 pub fn isStorageWarm(self: *const TrackedState, address: Address, key: u256) bool {
-    const tx = self.tx orelse return false;
-    const scope_storage = tx.scope.storage.get(.{ .address = address, .key = key }) orelse return false;
-    return scope_storage.warm;
+    const tx = if (self.tx) |*value| value else return false;
+    if (!tx.scope.active) return false;
+    const row = tx.storage.get(.{ .address = address, .key = key }) orelse return false;
+    return row.scope_generation == tx.scope.generation and row.scope.warm;
 }
 
 pub fn warmStorageCount(self: *TrackedState) usize {
     const tx = if (self.tx) |*value| value else return 0;
+    if (!tx.scope.active) return 0;
     var count: usize = 0;
-    var it = tx.scope.storage.valueIterator();
-    while (it.next()) |scope_storage| {
-        if (scope_storage.warm) count += 1;
+    var it = tx.storage.valueIterator();
+    while (it.next()) |row| {
+        if (row.scope_generation == tx.scope.generation and row.scope.warm) count += 1;
     }
     return count;
 }
@@ -1971,7 +1971,7 @@ pub fn setStorage(self: *TrackedState, address: Address, key: u256, value: u256)
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
     const storage_ref = try self.transactionStorageRef(tx, storage_key);
-    const scope_storage = try self.scopeStorageRef(tx, storage_key);
+    const scope_storage = scopeStorageRef(tx, storage_ref);
     try self.loadStorageRef(storage_key, storage_ref);
     return self.setStorageAfterAccess(storage_key, storage_ref, scope_storage, value);
 }
@@ -2017,8 +2017,8 @@ pub fn originalStorage(self: *TrackedState, address: Address, key: u256) !u256 {
     const storage_key = StorageKey{ .address = address, .key = key };
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
-    const scope_storage = try self.scopeStorageRef(tx, storage_key);
     const storage_ref = try self.transactionStorageRef(tx, storage_key);
+    const scope_storage = scopeStorageRef(tx, storage_ref);
     try self.loadStorageRef(storage_key, storage_ref);
     if (try self.observeStorage(storage_ref)) |observation| {
         observation.observation.accessed = true;
@@ -2422,6 +2422,21 @@ fn appendCodeChunk(self: *TrackedState, required_bytes: usize) !usize {
 }
 
 fn readAcceptedStorage(self: *TrackedState, key: StorageKey) !u256 {
+    // With no wipes recorded, changed and unchanged rows read identically, so
+    // one probe resolves the row and a miss can fill in place.
+    if (self.accepted.storage_wipes.items.len == 0) {
+        const result = try self.accepted.storage.getOrPut(key);
+        if (result.found_existing) return result.value_ptr.value;
+        // The filled row is the newest dense entry, so eviction on reader
+        // failure cannot move any previously issued entry id.
+        errdefer _ = self.accepted.storage.remove(key);
+        const value = if (self.reader) |reader|
+            try reader.getStorage(key.address, key.key)
+        else
+            0;
+        result.value_ptr.* = .{ .value = value };
+        return value;
+    }
     if (self.accepted.storage.get(key)) |row| {
         if (row.changed) return row.value;
     }
@@ -2463,10 +2478,13 @@ fn transactionStorageRef(_: *TrackedState, tx: *Transaction, key: StorageKey) !S
     return .{ .id = result.entry_id, .row = result.value_ptr };
 }
 
-fn scopeStorageRef(_: *TrackedState, tx: *Transaction, key: StorageKey) !*ScopeStorage {
-    const result = try tx.scope.storage.getOrPut(key);
-    if (!result.found_existing) result.value_ptr.* = .{};
-    return result.value_ptr;
+fn scopeStorageRef(tx: *const Transaction, storage_ref: StorageRef) *ScopeStorage {
+    const row = storage_ref.row;
+    if (row.scope_generation != tx.scope.generation) {
+        row.scope_generation = tx.scope.generation;
+        row.scope = .{};
+    }
+    return &row.scope;
 }
 
 fn loadStorageRef(self: *TrackedState, key: StorageKey, storage_ref: StorageRef) !void {
@@ -2513,7 +2531,7 @@ fn ensureStorageWarm(self: *TrackedState, key: StorageKey) !StorageAccess {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
     const storage_ref = try self.transactionStorageRef(tx, key);
-    const scope_storage = try self.scopeStorageRef(tx, key);
+    const scope_storage = scopeStorageRef(tx, storage_ref);
     if (scope_storage.warm) return .{
         .storage = storage_ref,
         .scope = scope_storage,

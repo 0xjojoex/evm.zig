@@ -29,6 +29,7 @@ pub const Lookup = union(enum) {
 pub const LookupCache = struct {
     allocator: std.mem.Allocator,
     index: ?*const NodeIndex = null,
+    last_root: ?CachedRoot = null,
     slots: []usize = &.{},
     entries: std.ArrayList(node.Node) = .empty,
 
@@ -67,6 +68,25 @@ pub const LookupCache = struct {
         return decoded;
     }
 
+    /// A resolved position belongs to one immutable index. Reuse it only when
+    /// both that index identity and the complete root digest still match.
+    fn resolveRoot(
+        self: *LookupCache,
+        index: *const NodeIndex,
+        root: hash.Root,
+    ) std.mem.Allocator.Error!?IndexedNode {
+        if (self.index == index) {
+            if (self.last_root) |cached| {
+                if (std.mem.eql(u8, &cached.hash, &root)) return cached.node;
+            }
+        }
+
+        const resolved = dataFromIndex(index).find(root) orelse return null;
+        try self.prepareIndex(index);
+        self.last_root = .{ .hash = root, .node = resolved };
+        return resolved;
+    }
+
     fn prepareIndex(self: *LookupCache, index: *const NodeIndex) std.mem.Allocator.Error!void {
         if (self.index == index) return;
 
@@ -76,7 +96,13 @@ pub const LookupCache = struct {
         self.slots = slots;
         self.entries.clearRetainingCapacity();
         self.index = index;
+        self.last_root = null;
     }
+};
+
+const CachedRoot = struct {
+    hash: hash.Root,
+    node: IndexedNode,
 };
 
 pub const NodeRecord = struct {
@@ -204,7 +230,10 @@ fn lookupWithCache(
     const step_capacity = std.math.add(usize, key_nibbles, 1) catch
         return error.ResourceLimitExceeded;
 
-    const root_node = dataFromIndex(index).find(root) orelse return error.MissingNode;
+    const root_node = if (cache) |active|
+        (try active.resolveRoot(index, root)) orelse return error.MissingNode
+    else
+        dataFromIndex(index).find(root) orelse return error.MissingNode;
     var resolved = ResolvedReference{
         .encoded = root_node.encoded,
         .position = root_node.position,
@@ -318,4 +347,40 @@ test "decoded-node cache indexes many witness positions" {
         try std.testing.expect((try cache.decode(index, position, &encoded_leaf, false)) == .leaf);
     }
     try std.testing.expectEqual(@as(usize, node_count), cache.entries.items.len);
+}
+
+test "lookup cache binds exact root resolution to the witness index" {
+    const first_root = [_]u8{0x11} ** 32;
+    const earlier_root = [_]u8{0x10} ** 32;
+    const later_root = [_]u8{0x12} ** 32;
+    const encoded = [_]u8{ 0xc2, 0x20, 0x01 };
+
+    const first_records = [_]NodeRecord{
+        .{ .hash = first_root, .encoded = &encoded },
+    };
+    const second_records = [_]NodeRecord{
+        .{ .hash = earlier_root, .encoded = &encoded },
+        .{ .hash = first_root, .encoded = &encoded },
+        .{ .hash = later_root, .encoded = &encoded },
+    };
+    const first_data = IndexData{ .records = &first_records };
+    const second_data = IndexData{ .records = &second_records };
+    const first_index = indexFromData(&first_data);
+    const second_index = indexFromData(&second_data);
+
+    var cache = LookupCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const first = (try cache.resolveRoot(first_index, first_root)).?;
+    try std.testing.expectEqual(@as(usize, 0), first.position);
+    const repeated = (try cache.resolveRoot(first_index, first_root)).?;
+    try std.testing.expectEqual(first.position, repeated.position);
+
+    const rebound = (try cache.resolveRoot(second_index, first_root)).?;
+    try std.testing.expectEqual(@as(usize, 1), rebound.position);
+    try std.testing.expect(cache.index == second_index);
+    try std.testing.expect(std.mem.eql(u8, &cache.last_root.?.hash, &first_root));
+
+    try std.testing.expect((try cache.resolveRoot(second_index, [_]u8{0x13} ** 32)) == null);
+    try std.testing.expect(std.mem.eql(u8, &cache.last_root.?.hash, &first_root));
 }

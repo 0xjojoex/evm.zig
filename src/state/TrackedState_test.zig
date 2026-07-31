@@ -120,8 +120,7 @@ test "tracked rows survive scope rollback while current mutations revert" {
     try std.testing.expect(observed.observation.accessed);
     try std.testing.expect(observed.observation.value_read);
     try std.testing.expect(!row.mutation.dirty);
-    const scope_row = state.tx.?.scope.storage.get(.{ .address = addr(1), .key = 2 }).?;
-    try std.testing.expect(!scope_row.warm);
+    try std.testing.expect(!row.scope.warm);
 }
 
 test "execution original refreshes across scopes while transaction original remains" {
@@ -146,6 +145,84 @@ test "execution original refreshes across scopes while transaction original rema
     state.retain(attempt);
     try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(addr(1), 2));
+}
+
+test "accepted storage read failure does not cache a value" {
+    const FlakyReader = struct {
+        fail_remaining: usize = 1,
+        inner: TestReader = .{},
+
+        fn reader(self: *@This()) Reader {
+            return .{ .ptr = self, .vtable = &.{
+                .accountExists = accountExists,
+                .loadAccount = loadAccount,
+                .loadCode = loadCode,
+                .getStorage = getStorage,
+                .accountHasStorage = accountHasStorage,
+            } };
+        }
+
+        fn cast(ptr: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ptr));
+        }
+
+        fn accountExists(ptr: *anyopaque, address: @import("../address.zig").Address) !bool {
+            return TestReader.accountExists(&cast(ptr).inner, address);
+        }
+
+        fn loadAccount(ptr: *anyopaque, address: @import("../address.zig").Address) !?Account {
+            return TestReader.loadAccount(&cast(ptr).inner, address);
+        }
+
+        fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
+            return TestReader.loadCode(&cast(ptr).inner, hash);
+        }
+
+        fn getStorage(ptr: *anyopaque, address: @import("../address.zig").Address, key: u256) !u256 {
+            const self = cast(ptr);
+            if (self.fail_remaining > 0) {
+                self.fail_remaining -= 1;
+                return error.InvalidWitness;
+            }
+            return TestReader.getStorage(&self.inner, address, key);
+        }
+
+        fn accountHasStorage(ptr: *anyopaque, address: @import("../address.zig").Address) !bool {
+            return TestReader.accountHasStorage(&cast(ptr).inner, address);
+        }
+    };
+
+    var backing = FlakyReader{};
+    var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
+    defer state.deinit();
+
+    try std.testing.expectError(error.InvalidWitness, state.getStorage(addr(1), 2));
+    try std.testing.expectEqual(@as(u256, 7), try state.getStorage(addr(1), 2));
+}
+
+test "storage warmth does not leak across scopes" {
+    var backing = TestReader{};
+    var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
+    defer state.deinit();
+
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    try std.testing.expectEqual(.cold, try state.accessStorage(addr(1), 2));
+    try std.testing.expectEqual(.warm, try state.accessStorage(addr(1), 2));
+    try std.testing.expect(state.isStorageWarm(addr(1), 2));
+    state.closeScope();
+
+    try std.testing.expect(!state.isStorageWarm(addr(1), 2));
+    try std.testing.expectEqual(@as(usize, 0), state.warmStorageCount());
+
+    state.beginScope();
+    try std.testing.expect(!state.isStorageWarm(addr(1), 2));
+    try std.testing.expectEqual(.cold, try state.accessStorage(addr(1), 2));
+    try std.testing.expectEqual(@as(usize, 1), state.warmStorageCount());
+    state.closeScope();
+
+    state.seal(attempt);
+    state.discard(attempt);
 }
 
 test "discard drops account writes without advancing accepted generation" {
@@ -336,7 +413,7 @@ test "compact journal order unwinds typed undo arenas" {
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(addr(1)));
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(addr(1), 2));
     try std.testing.expect(!state.tx.?.scope.warm_accounts.contains(addr(1)));
-    try std.testing.expect(!state.tx.?.scope.storage.get(.{ .address = addr(1), .key = 2 }).?.warm);
+    try std.testing.expect(!state.tx.?.storage.get(.{ .address = addr(1), .key = 2 }).?.scope.warm);
     try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
 }
 

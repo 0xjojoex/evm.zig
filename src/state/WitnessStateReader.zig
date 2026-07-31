@@ -27,6 +27,12 @@ indexed: *trie.IndexedNodes,
 codes: []CodeEntry = &.{},
 accounts: trie.AccountFacts,
 proof_cache: trie.ProofCache,
+last_account: ?CachedAccount = null,
+
+const CachedAccount = struct {
+    address: Address,
+    account: ?trie.Account,
+};
 
 pub fn init(
     allocator: std.mem.Allocator,
@@ -70,9 +76,16 @@ pub fn concurrentReader(self: *WitnessStateReader) ConcurrentReader {
 }
 
 fn loadMptAccount(self: *WitnessStateReader, target: Address) !?trie.Account {
-    if (self.accounts.get(target)) |account| return account;
+    if (self.last_account) |cached| {
+        if (std.mem.eql(u8, &cached.address, &target)) return cached.account;
+    }
+    if (self.accounts.get(target)) |account| {
+        self.last_account = .{ .address = target, .account = account };
+        return account;
+    }
     const account = try self.loadMptAccountFrom(target, &self.proof_cache);
     try self.accounts.put(target, account);
+    self.last_account = .{ .address = target, .account = account };
     return account;
 }
 
@@ -225,6 +238,20 @@ test "witness state reader returns empty state for empty root" {
     try std.testing.expect(try state_reader.loadAccount(target) == null);
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 1));
     try std.testing.expect(!try state_reader.accountHasStorage(target));
+}
+
+test "witness state reader last account requires the complete address" {
+    var witness = try initForTest(std.testing.allocator, trie.empty_root_hash, &.{}, &.{});
+    defer witness.deinit();
+
+    const first = address.addr(0x1000);
+    var second = first;
+    second[0] = 1;
+    const cached = trie.Account{ .nonce = 7 };
+    witness.last_account = .{ .address = first, .account = cached };
+
+    try std.testing.expectEqual(cached, (try witness.loadMptAccount(first)).?);
+    try std.testing.expect(try witness.loadMptAccount(second) == null);
 }
 
 test "witness state reader loads account and code" {
