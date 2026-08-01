@@ -2,12 +2,15 @@
 
 const std = @import("std");
 
+const build_options = @import("build_options");
 const Committer = @import("Committer.zig");
 const Reader = @import("Reader.zig");
 const TrackedState = @import("TrackedState.zig");
 const WitnessStateReader = @import("WitnessStateReader.zig");
 const trie = @import("../eth/trie.zig");
 const ChangesView = TrackedState.ChangesView;
+const stateless_profile = @import("stateless_profile");
+const use_catalog = build_options.mpt_catalog_reader;
 
 pub const RootProvider = struct {
     ptr: *anyopaque,
@@ -39,7 +42,15 @@ pub const Backend = union(enum) {
         nodes: []const []const u8,
         codes: []const []const u8,
     ) !Backend {
-        const indexed = try trie.indexNodes(allocator, nodes);
+        if (comptime !stateless_profile.enabled) {
+            const indexed = try trie.indexNodes(allocator, nodes);
+            return .{ .witness = try WitnessStateReader.init(allocator, state_root, indexed, codes) };
+        }
+        stateless_profile.begin(.mpt_index_witness);
+        const indexed = try stateless_profile.finish(
+            .mpt_index_witness,
+            trie.indexNodes(allocator, nodes),
+        );
         return .{ .witness = try WitnessStateReader.init(allocator, state_root, indexed, codes) };
     }
 
@@ -113,12 +124,47 @@ fn witnessRootAfterChanges(
 ) ![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    return trie.stateRootAfterChangesIndexed(
-        arena.allocator(),
-        witness.state_root,
-        witness.indexed,
-        &witness.accounts,
-        changes,
+    if (comptime use_catalog) {
+        if (comptime !stateless_profile.enabled) {
+            return trie.stateRootAfterChangesCatalog(
+                arena.allocator(),
+                witness.state_root,
+                &witness.catalog,
+                &witness.accounts,
+                changes,
+            );
+        }
+        stateless_profile.begin(.mpt_state_commit);
+        return stateless_profile.finish(
+            .mpt_state_commit,
+            trie.stateRootAfterChangesCatalog(
+                arena.allocator(),
+                witness.state_root,
+                &witness.catalog,
+                &witness.accounts,
+                changes,
+            ),
+        );
+    }
+    if (comptime !stateless_profile.enabled) {
+        return trie.stateRootAfterChangesIndexed(
+            arena.allocator(),
+            witness.state_root,
+            witness.indexed,
+            &witness.accounts,
+            changes,
+        );
+    }
+    stateless_profile.begin(.mpt_state_commit);
+    return stateless_profile.finish(
+        .mpt_state_commit,
+        trie.stateRootAfterChangesIndexed(
+            arena.allocator(),
+            witness.state_root,
+            witness.indexed,
+            &witness.accounts,
+            changes,
+        ),
     );
 }
 
@@ -126,7 +172,7 @@ test "witness backend releases its owned node index" {
     const nodes = [_][]const u8{"encoded witness node"};
     var backend = try Backend.fromWitness(
         std.testing.allocator,
-        [_]u8{0} ** 32,
+        trie.empty_root_hash,
         &nodes,
         &.{},
     );

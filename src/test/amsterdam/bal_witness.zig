@@ -1,5 +1,6 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
+const build_options = @import("build_options");
 
 const bal = evmz.eth.bal;
 const block_stf = evmz.eth.block_stf;
@@ -30,6 +31,19 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
     const claim = [_]bal.AccountChanges{.{ .address = evmz.addr(0x7928) }};
     const encoded = try bal.encodeAlloc(std.testing.allocator, &claim);
     defer std.testing.allocator.free(encoded);
+
+    if (comptime build_options.mpt_catalog_reader) {
+        try std.testing.expectError(
+            error.InvalidNode,
+            evmz.state.Backend.fromWitness(
+                std.testing.allocator,
+                [_]u8{0xab} ** 32,
+                &.{},
+                &.{},
+            ),
+        );
+        return;
+    }
 
     const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },

@@ -3,18 +3,23 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
+const build_options = @import("build_options");
 const crypto = @import("../crypto.zig");
 const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
 const Account = @import("./Account.zig");
 const StateReader = @import("./Reader.zig");
 const ConcurrentReader = @import("./ConcurrentReader.zig");
+const stateless_profile = @import("stateless_profile");
 
 const Address = address.Address;
+const use_catalog = build_options.mpt_catalog_reader;
+const CatalogState = if (use_catalog) trie.WitnessCatalog else void;
 
 const WitnessStateReader = @This();
 
 pub const Error = error{InvalidWitness};
+const CatalogInitError = std.mem.Allocator.Error || error{ InvalidNode, ResourceLimitExceeded };
 
 const CodeEntry = struct {
     hash: [32]u8,
@@ -24,6 +29,7 @@ const CodeEntry = struct {
 allocator: std.mem.Allocator,
 state_root: [32]u8,
 indexed: *trie.IndexedNodes,
+catalog: CatalogState,
 codes: []CodeEntry = &.{},
 accounts: trie.AccountFacts,
 proof_cache: trie.ProofCache,
@@ -34,21 +40,71 @@ pub fn init(
     indexed: *trie.IndexedNodes,
     codes: []const []const u8,
 ) !WitnessStateReader {
+    if (comptime !use_catalog) {
+        errdefer indexed.deinit();
+        return .{
+            .allocator = allocator,
+            .state_root = state_root,
+            .indexed = indexed,
+            .catalog = {},
+            .codes = try indexCodes(allocator, codes),
+            .accounts = trie.AccountFacts.init(allocator),
+            .proof_cache = .init(allocator),
+        };
+    }
+
     errdefer indexed.deinit();
+    var catalog = try buildCatalog(allocator, state_root, indexed);
+    errdefer catalog.deinit();
+    const indexed_codes = try indexCodes(allocator, codes);
     return .{
         .allocator = allocator,
         .state_root = state_root,
         .indexed = indexed,
-        .codes = try indexCodes(allocator, codes),
+        .catalog = catalog,
+        .codes = indexed_codes,
         .accounts = trie.AccountFacts.init(allocator),
         .proof_cache = .init(allocator),
     };
 }
 
+fn buildCatalog(
+    allocator: std.mem.Allocator,
+    state_root: [32]u8,
+    indexed: *const trie.IndexedNodes,
+) CatalogInitError!trie.WitnessCatalog {
+    if (comptime !stateless_profile.enabled) {
+        return trie.buildWitnessCatalog(allocator, state_root, indexed) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ResourceLimitExceeded => error.ResourceLimitExceeded,
+            else => error.InvalidNode,
+        };
+    }
+    stateless_profile.begin(.mpt_catalog_link);
+    return stateless_profile.finish(
+        .mpt_catalog_link,
+        trie.buildWitnessCatalog(allocator, state_root, indexed) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ResourceLimitExceeded => error.ResourceLimitExceeded,
+            else => error.InvalidNode,
+        },
+    );
+}
+
 pub fn deinit(self: *WitnessStateReader) void {
+    if (comptime !use_catalog) {
+        self.proof_cache.deinit();
+        self.accounts.deinit();
+        if (self.codes.len != 0) self.allocator.free(self.codes);
+        self.indexed.deinit();
+        self.* = undefined;
+        return;
+    }
+
     self.proof_cache.deinit();
     self.accounts.deinit();
     if (self.codes.len != 0) self.allocator.free(self.codes);
+    if (comptime use_catalog) self.catalog.deinit();
     self.indexed.deinit();
     self.* = undefined;
 }
@@ -85,7 +141,32 @@ fn loadMptAccountFrom(
     target: Address,
     cache: ?*trie.ProofCache,
 ) !?trie.Account {
+    if (comptime stateless_profile.enabled) {
+        return self.loadMptAccountFromProfiled(target, cache);
+    }
     const key = trie.hashedAddressKey(target);
+    if (comptime use_catalog) {
+        return self.catalog.decodedAccount(&key) catch return error.InvalidWitness;
+    }
+    const lookup = if (cache) |active|
+        trie.cachedProof(self.state_root, self.indexed, active)
+    else
+        trie.proof(self.state_root, self.indexed);
+    const encoded = lookup.get(&key) catch return error.InvalidWitness;
+    return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
+}
+
+fn loadMptAccountFromProfiled(
+    self: *const WitnessStateReader,
+    target: Address,
+    cache: ?*trie.ProofCache,
+) !?trie.Account {
+    stateless_profile.begin(.mpt_account_proof);
+    defer stateless_profile.end(.mpt_account_proof);
+    const key = trie.hashedAddressKey(target);
+    if (comptime use_catalog) {
+        return self.catalog.decodedAccount(&key) catch return error.InvalidWitness;
+    }
     const lookup = if (cache) |active|
         trie.cachedProof(self.state_root, self.indexed, active)
     else
@@ -188,14 +269,48 @@ fn getStorageFrom(
     cache: ?*trie.ProofCache,
 ) !u256 {
     if (std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash)) return 0;
-
+    if (comptime stateless_profile.enabled) {
+        return self.getStorageFromProfiled(account, key, cache);
+    }
     const storage_key = trie.hashedStorageKey(key);
+    if (comptime use_catalog) {
+        const encoded = self.catalog.storage(account.storage_root, &storage_key) catch return error.InvalidWitness;
+        return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
+    }
     const lookup = if (cache) |active|
         trie.cachedProof(account.storage_root, self.indexed, active)
     else
         trie.proof(account.storage_root, self.indexed);
     const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
     return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
+}
+
+fn getStorageFromProfiled(
+    self: *const WitnessStateReader,
+    account: trie.Account,
+    key: u256,
+    cache: ?*trie.ProofCache,
+) !u256 {
+    stateless_profile.begin(.mpt_storage_proof);
+    defer stateless_profile.end(.mpt_storage_proof);
+    const storage_key = trie.hashedStorageKey(key);
+    if (comptime use_catalog) {
+        const encoded = self.catalog.storage(account.storage_root, &storage_key) catch return error.InvalidWitness;
+        return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
+    }
+    const lookup = if (cache) |active|
+        trie.cachedProof(account.storage_root, self.indexed, active)
+    else
+        trie.proof(account.storage_root, self.indexed);
+    const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
+    return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
+}
+
+fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
+    var cursor = rlp.Cursor.init(encoded);
+    const value = try cursor.nextInt(u256);
+    try cursor.expectDone();
+    return value;
 }
 
 fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
@@ -206,13 +321,6 @@ fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
 fn accountHasStorageUncached(ptr: *anyopaque, target: Address) !bool {
     const account = try context(ptr).loadMptAccountUncached(target) orelse return false;
     return !std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash);
-}
-
-fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
-    var cursor = rlp.Cursor.init(encoded);
-    const value = try cursor.nextInt(u256);
-    try cursor.expectDone();
-    return value;
 }
 
 test "witness state reader returns empty state for empty root" {
@@ -285,10 +393,17 @@ test "witness state reader reads storage through account storage root" {
 
     witness.state_root = [_]u8{0xaa} ** 32;
     try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
-    try std.testing.expectError(
-        error.InvalidWitness,
-        witness.concurrentReader().reader().getStorage(target, 3),
-    );
+    if (comptime use_catalog) {
+        try std.testing.expectEqual(
+            @as(u256, 42),
+            try witness.concurrentReader().reader().getStorage(target, 3),
+        );
+    } else {
+        try std.testing.expectError(
+            error.InvalidWitness,
+            witness.concurrentReader().reader().getStorage(target, 3),
+        );
+    }
 }
 
 test "witness state reader rejects missing witness nodes and code" {

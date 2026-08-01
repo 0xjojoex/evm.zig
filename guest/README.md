@@ -34,6 +34,16 @@ conformance baseline, not a production-mainnet memory claim. Size a deployment
 artifact from metered replay of its real witness/block workload and retain an
 explicit failure when that artifact's fixed capacity is exceeded.
 
+`-Dmpt-catalog-reader=true` is an experimental stateless read and commit path.
+It builds one authenticated state/storage catalog during witness ingest,
+retains decoded account values by stable node handle, serves execution reads
+through integer-linked nodes, and commits through a separate block-local
+occurrence engine. That engine creates mutable nodes only along selected dirty
+paths, retains untouched catalog children as authenticated references, and
+rehashes dirty ancestors bottom-up. State and storage commits reuse one
+resettable workspace for the block. The option is off by default so the
+proof-index and catalog guests can be measured from the same tree.
+
 ## SP1 execute-only backend
 
 SP1 v6.3.1 is the second guest backend. It uses the same

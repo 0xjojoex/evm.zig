@@ -5,6 +5,7 @@ const std = @import("std");
 
 const block_stf = @import("block_stf.zig");
 const address = @import("../address.zig");
+const build_options = @import("build_options");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const eip6110 = @import("eip/6110.zig");
@@ -366,6 +367,14 @@ test "BlockSTF reports root mismatches and invalid witness" {
         ),
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
+
+    if (comptime build_options.mpt_catalog_reader) {
+        try std.testing.expectError(
+            error.InvalidNode,
+            state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
+        );
+        return;
+    }
 
     const invalid = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },

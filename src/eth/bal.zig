@@ -4,6 +4,7 @@
 const std = @import("std");
 const model = @import("bal/model.zig");
 const block_stf = @import("block_stf.zig");
+const trie = @import("trie.zig");
 const state = @import("../state.zig");
 
 pub const tracked_state_projector = @import("bal/tracked_state_projector.zig");
@@ -59,15 +60,15 @@ test "BAL executor releases an unconsumed state backend" {
         .{
             .state_backend = try state.Backend.fromWitness(
                 std.testing.allocator,
-                [_]u8{0} ** 32,
+                trie.empty_root_hash,
                 &.{},
                 &.{},
             ),
             .transactions = &.{},
             .root_checks = .{
                 .payload_header = .{
-                    .state = .fromHash([_]u8{0} ** 32),
-                    .receipts = .fromHash([_]u8{0} ** 32),
+                    .state = .fromHash(trie.empty_root_hash),
+                    .receipts = .fromHash(trie.empty_root_hash),
                 },
             },
             .bal_differential = &report,

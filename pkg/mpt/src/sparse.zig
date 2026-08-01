@@ -8,6 +8,7 @@
 const std = @import("std");
 const rlp = @import("rlp");
 
+const catalog = @import("catalog.zig");
 const errors = @import("error.zig");
 const UpdateError = errors.UpdateError;
 const hash = @import("hash.zig");
@@ -21,6 +22,27 @@ const AllocUpdateError = Allocator.Error || UpdateError;
 pub const Update = struct {
     key: []const u8,
     value: ?[]const u8,
+};
+
+/// Reusable transient storage for catalog-backed root updates. One workspace
+/// may serve multiple independent roots sequentially; each update resets it
+/// while retaining capacity.
+pub const CatalogUpdateWorkspace = struct {
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(backing_allocator: Allocator) CatalogUpdateWorkspace {
+        return .{ .arena = .init(backing_allocator) };
+    }
+
+    pub fn deinit(self: *CatalogUpdateWorkspace) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    fn reset(self: *CatalogUpdateWorkspace) Allocator {
+        _ = self.arena.reset(.retain_capacity);
+        return self.arena.allocator();
+    }
 };
 
 const SparseNode = struct {
@@ -96,11 +118,74 @@ const WorkFrame = union(enum) {
     encode: EncodeFrame,
 };
 
+const BatchFrame = union(enum) {
+    visit: struct {
+        node: *SparseNode,
+        depth: usize,
+        updates: []const Update,
+    },
+    finish_extension: *SparseNode,
+    finish_branch: *SparseNode,
+};
+
+const UpdateRange = struct {
+    start: usize = 0,
+    end: usize = 0,
+};
+
 fn Context(comptime KeccakContext: type) type {
     return struct {
         allocator: Allocator,
         keccak_context: KeccakContext,
         index: *const proof.NodeIndex,
+        compact_buffer: std.ArrayList(u8) = .empty,
+        node_buffer: std.ArrayList(u8) = .empty,
+        steps: usize = 0,
+        nodes: usize = 0,
+
+        const Self = @This();
+
+        fn deinit(self: *Self) void {
+            self.compact_buffer.deinit(self.allocator);
+            self.node_buffer.deinit(self.allocator);
+        }
+
+        fn step(self: *Self) UpdateError!void {
+            self.steps = std.math.add(usize, self.steps, 1) catch
+                return error.ResourceLimitExceeded;
+        }
+
+        fn newNode(self: *Self, kind: SparseNode.Kind) AllocUpdateError!*SparseNode {
+            self.nodes = std.math.add(usize, self.nodes, 1) catch
+                return error.ResourceLimitExceeded;
+            const pointer = try self.allocator.create(SparseNode);
+            pointer.* = .{ .kind = kind };
+            return pointer;
+        }
+
+        fn alloc(self: *Self, comptime T: type, len: usize) Allocator.Error![]T {
+            return self.allocator.alloc(T, len);
+        }
+
+        fn buffers(self: *Self, compact_len: usize, node_len: usize) Allocator.Error!struct {
+            compact: []u8,
+            node: []u8,
+        } {
+            try self.compact_buffer.resize(self.allocator, compact_len);
+            try self.node_buffer.resize(self.allocator, node_len);
+            return .{
+                .compact = self.compact_buffer.items,
+                .node = self.node_buffer.items,
+            };
+        }
+    };
+}
+
+fn CatalogContext(comptime KeccakContext: type) type {
+    return struct {
+        allocator: Allocator,
+        keccak_context: KeccakContext,
+        catalog: *const catalog.Catalog,
         compact_buffer: std.ArrayList(u8) = .empty,
         node_buffer: std.ArrayList(u8) = .empty,
         steps: usize = 0,
@@ -186,6 +271,114 @@ pub fn updateSorted(
         try delete(&context, root_node, path);
     }
 
+    return encodeRoot(&context, root_node);
+}
+
+pub fn validateCatalogRoot(root_hash: hash.Root, root_ref: catalog.RootRef) UpdateError!void {
+    switch (root_ref) {
+        .empty => if (!std.mem.eql(u8, &root_hash, &hash.empty_root)) {
+            return error.InvalidNodeReference;
+        },
+        .node => |root| if (!std.mem.eql(u8, &root_hash, &root.digest)) {
+            return error.InvalidNodeReference;
+        },
+    }
+}
+
+/// Apply a sorted update batch through an already authenticated catalog. A
+/// selected linked child is materialized directly by NodeId; untouched child
+/// references retain their authenticated parent encoding.
+pub fn updateSortedCatalog(
+    keccak_context: anytype,
+    backing_allocator: Allocator,
+    root_hash: hash.Root,
+    topology: *const catalog.Catalog,
+    root_ref: catalog.RootRef,
+    updates: []const Update,
+) AllocUpdateError!hash.Root {
+    if (updates.len == 0) return root_hash;
+
+    var workspace = CatalogUpdateWorkspace.init(backing_allocator);
+    defer workspace.deinit();
+    return updateSortedCatalogWithWorkspace(
+        keccak_context,
+        &workspace,
+        root_hash,
+        topology,
+        root_ref,
+        updates,
+    );
+}
+
+/// Apply catalog-backed updates through reusable caller-owned workspace. No
+/// pointer into the workspace escapes this call.
+pub fn updateSortedCatalogWithWorkspace(
+    keccak_context: anytype,
+    workspace: *CatalogUpdateWorkspace,
+    root_hash: hash.Root,
+    topology: *const catalog.Catalog,
+    root_ref: catalog.RootRef,
+    updates: []const Update,
+) AllocUpdateError!hash.Root {
+    try validateUpdates(updates, true);
+    if (updates.len == 0) return root_hash;
+
+    const allocator = workspace.reset();
+    var context: CatalogContext(@TypeOf(keccak_context)) = .{
+        .allocator = allocator,
+        .keccak_context = keccak_context,
+        .catalog = topology,
+    };
+    defer context.deinit();
+
+    const root_node = switch (root_ref) {
+        .empty => try context.newNode(.empty),
+        .node => |root| try catalogNode(&context, root.id, .empty),
+    };
+
+    for (updates) |update| {
+        const value = update.value orelse continue;
+        const path = try keyNibbles(&context, update.key);
+        try insert(&context, root_node, path, value);
+    }
+    for (updates) |update| {
+        if (update.value != null) continue;
+        const path = try keyNibbles(&context, update.key);
+        try delete(&context, root_node, path);
+    }
+
+    return encodeRoot(&context, root_node);
+}
+
+/// Apply a sorted catalog update batch by descending shared branch prefixes
+/// once. Divergent extension and terminal cases retain the proven sequential
+/// mutation path; the resulting trie is encoded once after the merged walk.
+pub fn updateSortedCatalogBatch(
+    keccak_context: anytype,
+    backing_allocator: Allocator,
+    root_hash: hash.Root,
+    topology: *const catalog.Catalog,
+    root_ref: catalog.RootRef,
+    updates: []const Update,
+) AllocUpdateError!hash.Root {
+    try validateUpdates(updates, true);
+    if (updates.len == 0) return root_hash;
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var context: CatalogContext(@TypeOf(keccak_context)) = .{
+        .allocator = allocator,
+        .keccak_context = keccak_context,
+        .catalog = topology,
+    };
+    defer context.deinit();
+
+    const root_node = switch (root_ref) {
+        .empty => try context.newNode(.empty),
+        .node => |root| try catalogNode(&context, root.id, .empty),
+    };
+    try applyCatalogBatch(&context, root_node, updates);
     return encodeRoot(&context, root_node);
 }
 
@@ -316,18 +509,113 @@ fn copyCompactPath(context: anytype, path: nibble.CompactPath) AllocUpdateError!
     return owned;
 }
 
-fn materializeHash(context: anytype, sparse_node: *SparseNode) AllocUpdateError!void {
+fn materializeNode(context: anytype, sparse_node: *SparseNode) AllocUpdateError!void {
     switch (sparse_node.kind) {
         .hash => |digest| {
-            const encoded = proof.find(context.index, digest) orelse return error.MissingNode;
-            if (encoded.len < 32) return error.InvalidNodeReference;
-            try decodeInto(context, sparse_node, encoded);
+            if (comptime @hasField(@TypeOf(context.*), "catalog")) {
+                if (sparse_node.reference == .unset) return error.MissingNode;
+                try materializeCatalogNode(context, sparse_node, catalogId(digest));
+            } else {
+                const encoded = proof.find(context.index, digest) orelse return error.MissingNode;
+                if (encoded.len < 32) return error.InvalidNodeReference;
+                try decodeInto(context, sparse_node, encoded);
+            }
         },
         else => {},
     }
 }
 
-fn branchChildNode(context: anytype, child: *SparseNode.BranchChild) AllocUpdateError!?*SparseNode {
+fn materializeCatalogNode(
+    context: anytype,
+    target: *SparseNode,
+    id: catalog.NodeId,
+) AllocUpdateError!void {
+    try context.step();
+    const entry = context.catalog.node(id) orelse return error.InvalidNodeReference;
+    switch (entry.kind) {
+        .leaf => {
+            const path = entry.path() orelse return error.InvalidNode;
+            target.kind = .{ .leaf = .{
+                .path = try copyCompactPath(context, path),
+                .value = entry.value() orelse return error.InvalidNode,
+            } };
+        },
+        .extension => {
+            const path = entry.path() orelse return error.InvalidNode;
+            const link = entry.extensionChild() orelse return error.InvalidNodeReference;
+            const reference = try context.catalog.extensionReference(id);
+            const child = try catalogChild(context, link, reference);
+            target.kind = .{ .extension = .{
+                .path = try copyCompactPath(context, path),
+                .child = child orelse return error.InvalidNodeReference,
+            } };
+        },
+        .branch => {
+            const links = context.catalog.branchChildren(id) orelse return error.InvalidNodeReference;
+            var branch = emptyBranch();
+            for (links, 0..) |link, child_index| {
+                const reference = try context.catalog.branchReference(id, child_index);
+                branch.children[child_index] = if (try catalogChild(context, link, reference)) |child|
+                    .{ .node = child }
+                else
+                    .empty;
+            }
+            branch.value = entry.value();
+            target.kind = .{ .branch = branch };
+        },
+    }
+}
+
+fn catalogChild(
+    context: anytype,
+    link: catalog.Link,
+    reference: node_codec.Reference,
+) AllocUpdateError!?*SparseNode {
+    return switch (link) {
+        .empty => null,
+        .@"opaque" => switch (reference) {
+            .hashed => |digest| try context.newNode(.{ .hash = digest.* }),
+            else => error.InvalidNodeReference,
+        },
+        _ => if (link.node()) |id| child: {
+            break :child try catalogNode(context, id, try sparseReference(reference));
+        } else error.InvalidNodeReference,
+    };
+}
+
+fn catalogNode(
+    context: anytype,
+    id: catalog.NodeId,
+    reference: Reference,
+) AllocUpdateError!*SparseNode {
+    var token: hash.Root = [_]u8{0} ** @sizeOf(hash.Root);
+    std.mem.writeInt(u32, token[0..4], @intFromEnum(id), .little);
+    const node = try context.newNode(.{ .hash = token });
+    node.reference = reference;
+    return node;
+}
+
+fn catalogId(token: hash.Root) catalog.NodeId {
+    return @enumFromInt(std.mem.readInt(u32, token[0..4], .little));
+}
+
+fn sparseReference(reference: node_codec.Reference) UpdateError!Reference {
+    return switch (reference) {
+        .empty => .empty,
+        .hashed => |digest| .{ .hashed = digest.* },
+        .embedded => |encoded| embedded: {
+            if (encoded.len >= 32) return error.InvalidNodeReference;
+            var value: Reference.Embedded = .{ .len = @intCast(encoded.len), .bytes = undefined };
+            @memcpy(value.bytes[0..encoded.len], encoded);
+            break :embedded .{ .embedded = value };
+        },
+    };
+}
+
+fn branchChildNode(
+    context: anytype,
+    child: *SparseNode.BranchChild,
+) AllocUpdateError!?*SparseNode {
     return switch (child.*) {
         .empty => null,
         .node => |node| node,
@@ -339,12 +627,160 @@ fn branchChildNode(context: anytype, child: *SparseNode.BranchChild) AllocUpdate
     };
 }
 
+fn applyCatalogBatch(context: anytype, root: *SparseNode, updates: []const Update) AllocUpdateError!void {
+    var frames: std.ArrayList(BatchFrame) = .empty;
+    defer frames.deinit(context.allocator);
+    try frames.append(context.allocator, .{ .visit = .{
+        .node = root,
+        .depth = 0,
+        .updates = updates,
+    } });
+
+    while (frames.pop()) |frame| switch (frame) {
+        .visit => |visit| {
+            try context.step();
+            try materializeNode(context, visit.node);
+            switch (visit.node.kind) {
+                .empty, .leaf => try applySequentialAtDepth(
+                    context,
+                    visit.node,
+                    visit.depth,
+                    visit.updates,
+                ),
+                .hash => unreachable,
+                .extension => |extension| {
+                    if (!allMatchAtDepth(visit.updates, visit.depth, extension.path)) {
+                        try applySequentialAtDepth(
+                            context,
+                            visit.node,
+                            visit.depth,
+                            visit.updates,
+                        );
+                        continue;
+                    }
+                    try frames.append(context.allocator, .{ .finish_extension = visit.node });
+                    try frames.append(context.allocator, .{ .visit = .{
+                        .node = extension.child,
+                        .depth = visit.depth + extension.path.len,
+                        .updates = visit.updates,
+                    } });
+                },
+                .branch => |*branch| {
+                    var ranges = [_]UpdateRange{.{}} ** 16;
+                    var cursor: usize = 0;
+                    while (cursor < visit.updates.len and
+                        nibble.keyNibbleLen(visit.updates[cursor].key) == visit.depth)
+                    {
+                        branch.value = visit.updates[cursor].value;
+                        cursor += 1;
+                    }
+                    if (cursor < visit.updates.len and
+                        nibble.keyNibbleLen(visit.updates[cursor].key) < visit.depth)
+                    {
+                        return error.InvalidNode;
+                    }
+                    while (cursor < visit.updates.len) {
+                        const child_index = nibble.keyNibbleAt(visit.updates[cursor].key, visit.depth);
+                        const start = cursor;
+                        cursor += 1;
+                        while (cursor < visit.updates.len and
+                            nibble.keyNibbleLen(visit.updates[cursor].key) > visit.depth and
+                            nibble.keyNibbleAt(visit.updates[cursor].key, visit.depth) == child_index)
+                        {
+                            cursor += 1;
+                        }
+                        ranges[child_index] = .{ .start = start, .end = cursor };
+                    }
+
+                    try frames.append(context.allocator, .{ .finish_branch = visit.node });
+                    var child_index: usize = 16;
+                    while (child_index > 0) {
+                        child_index -= 1;
+                        const range = ranges[child_index];
+                        if (range.start == range.end) continue;
+                        const selected = visit.updates[range.start..range.end];
+                        const child = (try branchChildNode(context, &branch.children[child_index])) orelse child: {
+                            if (!hasInsertion(selected)) continue;
+                            const created = try context.newNode(.empty);
+                            branch.children[child_index] = .{ .node = created };
+                            break :child created;
+                        };
+                        try frames.append(context.allocator, .{ .visit = .{
+                            .node = child,
+                            .depth = visit.depth + 1,
+                            .updates = selected,
+                        } });
+                    }
+                },
+            }
+        },
+        .finish_extension => |node| {
+            try context.step();
+            const extension = switch (node.kind) {
+                .extension => |value| value,
+                else => unreachable,
+            };
+            try compressExtension(context, node, extension);
+        },
+        .finish_branch => |node| {
+            try context.step();
+            var branch = switch (node.kind) {
+                .branch => |value| value,
+                else => unreachable,
+            };
+            for (&branch.children) |*child| switch (child.*) {
+                .node => |selected| if (selected.kind == .empty) {
+                    child.* = .empty;
+                },
+                else => {},
+            };
+            try compressBranch(context, node, branch);
+        },
+    };
+}
+
+fn applySequentialAtDepth(
+    context: anytype,
+    node: *SparseNode,
+    depth: usize,
+    updates: []const Update,
+) AllocUpdateError!void {
+    for (updates) |update| {
+        const value = update.value orelse continue;
+        const path = try keyNibbles(context, update.key);
+        if (depth > path.len) return error.InvalidNode;
+        try insert(context, node, path[depth..], value);
+    }
+    for (updates) |update| {
+        if (update.value != null) continue;
+        const path = try keyNibbles(context, update.key);
+        if (depth > path.len) return error.InvalidNode;
+        try delete(context, node, path[depth..]);
+    }
+}
+
+fn allMatchAtDepth(updates: []const Update, depth: usize, path: []const u8) bool {
+    for (updates) |update| {
+        const key_len = nibble.keyNibbleLen(update.key);
+        if (depth > key_len or path.len > key_len - depth) return false;
+        for (path, 0..) |path_nibble, index| {
+            if (path_nibble != nibble.keyNibbleAt(update.key, depth + index)) return false;
+        }
+    }
+    return true;
+}
+
+fn hasInsertion(updates: []const Update) bool {
+    for (updates) |update| if (update.value != null) return true;
+    return false;
+}
+
 fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u8) AllocUpdateError!void {
     var current = node;
     var remaining = key;
     while (true) {
         try context.step();
-        try materializeHash(context, current);
+        try materializeNode(context, current);
         switch (current.kind) {
             .empty => {
                 current.* = .{ .kind = .{ .leaf = .{ .path = remaining, .value = value } } };
@@ -362,7 +798,7 @@ fn insert(context: anytype, node: *SparseNode, key: []const u8, value: []const u
                     return;
                 }
                 if (extension.child.kind == .hash) {
-                    try materializeHash(context, extension.child);
+                    try materializeNode(context, extension.child);
                     if (extension.child.kind != .branch) return error.NonCanonicalNode;
                 }
                 current = extension.child;
@@ -469,7 +905,7 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
 
     while (true) {
         try context.step();
-        try materializeHash(context, current);
+        try materializeNode(context, current);
         switch (current.kind) {
             .empty => return,
             .hash => unreachable,
@@ -481,7 +917,7 @@ fn delete(context: anytype, node: *SparseNode, key: []const u8) AllocUpdateError
             .extension => |extension| {
                 if (!startsWith(remaining, extension.path)) return;
                 if (extension.child.kind == .hash) {
-                    try materializeHash(context, extension.child);
+                    try materializeNode(context, extension.child);
                     if (extension.child.kind != .branch) return error.NonCanonicalNode;
                 }
                 try frames.append(context.allocator, .{ .delete = .{ .extension = current } });
@@ -578,7 +1014,7 @@ fn compressBranch(context: anytype, node: *SparseNode, branch: SparseNode.Branch
         .node => |value| value,
         .hash => |digest| try context.newNode(.{ .hash = digest.* }),
     };
-    try materializeHash(context, child);
+    try materializeNode(context, child);
     const child_nibble: u8 = @intCast(only_child_index);
     switch (child.kind) {
         .empty => node.* = .{ .kind = .empty },
@@ -622,6 +1058,9 @@ fn encodeRoot(context: anytype, root: *SparseNode) AllocUpdateError!hash.Root {
             },
             .hash => |digest| {
                 if (frame.is_root) return error.InvalidNode;
+                if (comptime @hasField(@TypeOf(context.*), "catalog")) {
+                    if (frame.node.reference != .unset) continue;
+                }
                 frame.node.reference = .{ .hashed = digest };
                 continue;
             },

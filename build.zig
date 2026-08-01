@@ -72,6 +72,11 @@ pub fn build(b: *std.Build) void {
     ) orelse .std;
     const native_secp256k1 = resolveNativeSecp256k1(profile, target, requested_native_secp256k1);
     const pic = b.option(bool, "pic", "Build the public evmz module as position-independent code") orelse false;
+    const mpt_catalog_reader = b.option(
+        bool,
+        "mpt-catalog-reader",
+        "Use the authenticated MPT catalog for witness state reads",
+    ) orelse false;
     const evmz_build = EvmzBuildConfig{
         .profile = profile,
         .native_keccak = native_keccak,
@@ -102,8 +107,20 @@ pub fn build(b: *std.Build) void {
         const install_license = b.addInstallFile(dep.path("COPYING"), "share/licenses/evmz/libsecp256k1.txt");
         b.getInstallStep().dependOn(&install_license.step);
     }
-    const native_build_options = buildOptions(b, .native, native_keccak, native_secp256k1);
-    const zkvm_build_options = buildOptions(b, .zkvm, .std, .std);
+    const native_build_options = buildOptions(
+        b,
+        .native,
+        native_keccak,
+        native_secp256k1,
+        mpt_catalog_reader,
+    );
+    const zkvm_build_options = buildOptions(
+        b,
+        .zkvm,
+        .std,
+        .std,
+        mpt_catalog_reader,
+    );
     const build_options = if (is_native_profile) native_build_options else zkvm_build_options;
     const stateless_profile_none_mod = b.createModule(.{
         .root_source_file = b.path("guest/profile_none.zig"),
@@ -209,6 +226,53 @@ pub fn build(b: *std.Build) void {
         b.step("debug", debug_description).dependOn(&run_debug_cli.step);
     } else {
         b.step("debug", debug_description).dependOn(&b.addFail("debug is native-only").step);
+    }
+
+    if (is_native_profile) {
+        const catalog_measure_mod = b.createModule(.{
+            .root_source_file = b.path("tools/mpt_catalog_measure.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
+        });
+        const catalog_measure = b.addExecutable(.{
+            .name = "mpt-catalog-measure",
+            .root_module = catalog_measure_mod,
+        });
+        catalog_measure.use_llvm = true;
+        const run_catalog_measure = b.addRunArtifact(catalog_measure);
+        if (b.args) |args| run_catalog_measure.addArgs(args);
+        b.step(
+            "mpt-catalog-measure",
+            "Measure authenticated catalog shape and fixed-heap demand",
+        ).dependOn(&run_catalog_measure.step);
+
+        const catalog_adversary_mod = b.createModule(.{
+            .root_source_file = b.path("tools/mpt_catalog_adversary.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
+        });
+        const catalog_adversary = b.addExecutable(.{
+            .name = "mpt-catalog-adversary",
+            .root_module = catalog_adversary_mod,
+        });
+        catalog_adversary.use_llvm = true;
+        const run_catalog_adversary = b.addRunArtifact(catalog_adversary);
+        if (b.args) |args| run_catalog_adversary.addArgs(args);
+        b.step(
+            "mpt-catalog-adversary",
+            "Scale adversarial catalog shapes against the guest heap",
+        ).dependOn(&run_catalog_adversary.step);
+    } else {
+        b.step(
+            "mpt-catalog-measure",
+            "Measure authenticated catalog shape and fixed-heap demand",
+        ).dependOn(&b.addFail("mpt-catalog-measure is native-only").step);
+        b.step(
+            "mpt-catalog-adversary",
+            "Scale adversarial catalog shapes against the guest heap",
+        ).dependOn(&b.addFail("mpt-catalog-adversary is native-only").step);
     }
 
     const call_fixture_oracle_mod = b.createModule(.{
@@ -424,6 +488,7 @@ pub fn build(b: *std.Build) void {
         guest_heap_metrics,
         guest_heap_bytes,
         guest_zisk_ram_bytes,
+        mpt_catalog_reader,
     );
     addGuest(
         b,
@@ -439,6 +504,7 @@ pub fn build(b: *std.Build) void {
         guest_heap_metrics,
         guest_heap_bytes,
         null,
+        mpt_catalog_reader,
     );
 
     // examples
@@ -503,11 +569,13 @@ fn buildOptions(
     profile: Profile,
     native_keccak: KeccakBackend,
     native_secp256k1: Secp256k1Backend,
+    mpt_catalog_reader: bool,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(Profile, "profile", profile);
     options.addOption(KeccakBackend, "native_keccak", native_keccak);
     options.addOption(Secp256k1Backend, "native_secp256k1", native_secp256k1);
+    options.addOption(bool, "mpt_catalog_reader", mpt_catalog_reader);
     return options;
 }
 
@@ -606,7 +674,7 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .optimize = config.optimize,
         .link_libcpp = true,
     });
-    provider_mod.addOptions("build_options", buildOptions(b, .native, .std, .std));
+    provider_mod.addOptions("build_options", config.native_build_options);
     addPrecompileNative(b, provider_mod, config.native_precompiles);
     const provider = b.addObject(.{
         .name = "zkvm-test-accelerators",
@@ -891,6 +959,7 @@ fn addGuest(
     heap_metrics: bool,
     heap_bytes: u64,
     ram_bytes: ?u64,
+    mpt_catalog_reader: bool,
 ) void {
     const config = backend.config();
     // A zero heap_bytes collapses _evmz_heap_bottom onto _evmz_heap_top, which the
@@ -922,7 +991,13 @@ fn addGuest(
         .omit_frame_pointer = omit_frame_pointer,
         .strip = strip,
     };
-    const build_options = buildOptions(b, .zkvm, .std, .std);
+    const build_options = buildOptions(
+        b,
+        .zkvm,
+        .std,
+        .std,
+        mpt_catalog_reader,
+    );
     const guest_options = guestOptions(b, backend, heap_metrics, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();
