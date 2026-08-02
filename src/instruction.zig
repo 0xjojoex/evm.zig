@@ -98,7 +98,7 @@ test "fork-dependent static gas follows legacy schedules" {
 }
 
 test "execute uses exact instruction availability" {
-    try expectOpcodeStatus(evmz.eth.frontier, .BASEFEE, .invalid_opcode);
+    try expectOpcodeHalt(evmz.eth.frontier, .BASEFEE, .invalid_opcode);
 }
 
 test "execute uses resolved dispatch target for hot opcodes" {
@@ -113,14 +113,14 @@ test "execute uses resolved dispatch target for hot opcodes" {
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
     frame.frame.stack.push(2);
     frame.frame.stack.push(3);
     try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
-    try std.testing.expectEqual(interpreter.FrameStatus.invalid_opcode, frame.frame.status);
+    try std.testing.expectEqual(interpreter.FrameHalt.invalid_opcode, frame.frame.haltReason().?);
 }
 
 test "untraced interpreter tail dispatch respects resolved dispatch target" {
@@ -143,14 +143,14 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var intpr = frame.interpreter();
 
     const result = try intpr.execute();
 
-    try std.testing.expectEqual(interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(interpreter.Status.invalid, result.status());
 }
 
 test "execute calls custom dispatch target directly" {
@@ -171,13 +171,13 @@ test "execute calls custom dispatch target directly" {
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
     try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
 
-    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(u256, 42), frame.frame.stack.pop());
     try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
 }
@@ -200,7 +200,7 @@ test "captured custom MSTORE handler retains inherited trace effects" {
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     var intpr = frame.interpreter();
@@ -209,7 +209,7 @@ test "captured custom MSTORE handler retains inherited trace effects" {
 
     const captured = try intpr.capture(&tape, .{ .memory = .writes });
     defer tape.resolve(captured.span) catch unreachable;
-    try std.testing.expectEqual(interpreter.Status.success, captured.result.status);
+    try std.testing.expectEqual(interpreter.Status.success, captured.result.status());
 
     var cursor = trace.TraceCursor.init(captured.span);
     cursor.enterFrame(captured.span.frames[0]);
@@ -246,7 +246,7 @@ fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i6
     return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).info.static_gas;
 }
 
-fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: interpreter.FrameStatus) !void {
+fn expectOpcodeHalt(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: interpreter.FrameHalt) !void {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
@@ -256,19 +256,19 @@ fn expectOpcodeStatus(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: in
     var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
     try Instruction(spec).execute(@intFromEnum(opcode), frame.frame);
-    try std.testing.expectEqual(expected, frame.frame.status);
+    try std.testing.expectEqual(expected, frame.frame.haltReason().?);
 }
 
 test "instruction boundary resolves EVM faults without throwing" {
     const cases = [_]struct {
         opcode: u8,
         is_static: bool = false,
-        expected: interpreter.FrameStatus,
+        expected: interpreter.FrameHalt,
     }{
         .{ .opcode = @intFromEnum(Opcode.ADD), .expected = .stack_underflow },
         .{ .opcode = 0x0c, .expected = .invalid_opcode },
@@ -286,12 +286,12 @@ test "instruction boundary resolves EVM faults without throwing" {
         var frame = try Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .code = &code,
+            .source = .{ .code = &code },
         });
         defer frame.deinit();
 
         try Instruction(evmz.eth.cancun).execute(case.opcode, frame.frame);
-        try std.testing.expectEqual(case.expected, frame.frame.status);
+        try std.testing.expectEqual(case.expected, frame.frame.haltReason().?);
     }
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
@@ -302,13 +302,13 @@ test "instruction boundary resolves EVM faults without throwing" {
     var frame = try Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     for (0..Stack.capacity) |_| frame.frame.stack.push(0);
 
     try Instruction(evmz.eth.cancun).execute(code[0], frame.frame);
-    try std.testing.expectEqual(interpreter.FrameStatus.stack_overflow, frame.frame.status);
+    try std.testing.expectEqual(interpreter.FrameHalt.stack_overflow, frame.frame.haltReason().?);
 }
 
 test "static gas helper uses resolved rule gas" {
@@ -321,7 +321,7 @@ test "static gas helper uses resolved rule gas" {
     var frame = try evmz.Vm(evmz.eth.frontier).Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
@@ -336,7 +336,7 @@ pub fn staticGas(opcode: Opcode) i64 {
 const UnknownBuiltinHandler = struct {
     pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
         _ = Instructions;
-        frame.failWithFrameStatus(.invalid_opcode);
+        frame.halt(.invalid_opcode);
     }
 };
 
@@ -743,7 +743,7 @@ pub fn Instruction(comptime spec: ExactSpec) type {
 
         inline fn executeInvalidDispatchEntry(comptime dispatch_entry: instruction_table.Entry, frame: *CallFrame) anyerror!void {
             _ = dispatch_entry;
-            frame.failWithFrameStatus(.invalid_opcode);
+            frame.halt(.invalid_opcode);
         }
 
         inline fn executeCustomDispatchEntry(comptime Handler: type, frame: *CallFrame) anyerror!void {
@@ -767,6 +767,6 @@ pub fn Instruction(comptime spec: ExactSpec) type {
 }
 
 inline fn failInvalid(frame: *CallFrame) bool {
-    frame.failWithFrameStatus(.invalid_opcode);
+    frame.halt(.invalid_opcode);
     return false;
 }

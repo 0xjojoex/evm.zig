@@ -1,6 +1,6 @@
 //! Pull-driven pause vocabulary.
 //!
-//! Every type here is spec-free. `Interpreter.Action`, `Interpreter.Result`, and
+//! Every type here is spec-free. `Interpreter.Action`, `Interpreter.FrameResult`, and
 //! `Host.Result` are module-level non-generic types, so a caller can match on a
 //! pause without naming a specification. Only the driver in `./session.zig`
 //! binds an executor.
@@ -43,9 +43,9 @@ pub const Pause = union(enum) {
     },
     /// The parent prepared a semantic CALL/CREATE and is suspended before the
     /// child is dispatched.
-    action: struct {
+    suspended: struct {
         site: Site,
-        value: Interpreter.Action,
+        value: *const Interpreter.Action,
     },
     /// The root execution resolved. The driver's frame span is empty.
     finished: Completion,

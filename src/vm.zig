@@ -519,8 +519,8 @@ pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: Co
                 observer,
             );
             return Host.Result.fromCall(.{
-                .status = result.status,
-                .cause = result.cause,
+                .outcome = result.outcome,
+                .frame_halt = result.frame_halt,
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,

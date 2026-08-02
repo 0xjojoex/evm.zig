@@ -152,7 +152,7 @@ test "Executor runs low-level standalone call" {
         .{ .call = call },
         .legacy(100_000),
     )).expectCall();
-    try std.testing.expectEqual(interpreter_module.Status.success, result.status);
+    try std.testing.expectEqual(interpreter_module.Status.success, result.status());
 
     const changes = executor.acceptedChanges();
     try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
@@ -191,7 +191,7 @@ test "Executor runs low-level standalone create" {
         .{ .create = create },
         .legacy(100_000),
     )).expectCreate();
-    try std.testing.expectEqual(interpreter_module.Status.success, result.status);
+    try std.testing.expectEqual(interpreter_module.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
 
     const changes = executor.acceptedChanges();

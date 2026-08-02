@@ -9,7 +9,7 @@ const AccountAccessStatus = evmz.execution.AccountAccessStatus;
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {
         @branchHint(.unlikely);
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return false;
     };
     return frame.trackGas(evmz.calcWordSize(i64, size_i64) * 3);
@@ -249,14 +249,14 @@ test "BALANCE cold account access gas comes from the exact spec" {
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
     frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
     try bind(spec).balance(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
@@ -281,14 +281,14 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
     frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
     try bind(spec).extcodesize(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(i64, 99_991), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
@@ -320,13 +320,13 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
     var frame = try Cancun.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = bytecode,
+        .source = .{ .code = bytecode },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{ 0xbb, 0xcc, 0x00, 0x00 }, interpreter.call_frame.memory.readBytes(0, 4));
 }
 
@@ -344,12 +344,12 @@ pub fn returndatacopy(frame: *CallFrame) !void {
 
     const offset = std.math.cast(usize, offset_word) orelse {
         @branchHint(.unlikely);
-        frame.failWithFrameStatus(.return_data_out_of_bounds);
+        frame.halt(.return_data_out_of_bounds);
         return;
     };
     if (offset > frame.return_data.len or size > frame.return_data.len - offset) {
         @branchHint(.unlikely);
-        frame.failWithFrameStatus(.return_data_out_of_bounds);
+        frame.halt(.return_data_out_of_bounds);
         return;
     }
     frame.memory.writeBytes(dest_offset, frame.return_data[offset .. offset + size]);

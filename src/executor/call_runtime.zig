@@ -9,8 +9,11 @@ const Interpreter = evmz.interpreter;
 const eip7702 = @import("./eip7702.zig");
 const frame_io = @import("../frame_io.zig");
 const FrameStore = @import("./frame_store.zig");
-const ExecutionGas = @import("../execution.zig").ExecutionGas;
-const ExecutionContext = @import("../execution.zig").ExecutionContext;
+const execution_values = @import("../execution.zig");
+const ExecutionGas = execution_values.ExecutionGas;
+const ExecutionContext = execution_values.ExecutionContext;
+const ExecutionResult = execution_values.ExecutionResult;
+const FrameResult = Interpreter.FrameResult;
 const call_scratch_storage = @import("./call_scratch.zig");
 const CaptureContext = executor_module.CaptureContext;
 
@@ -268,16 +271,16 @@ pub fn bind(comptime Executor: type) type {
                         defer self.executor.trace_depth = previous_depth;
                         if (comptime Executor.compile_options.step_capture) {
                             if (self.stepCaptureContext()) |context| {
-                                break :result try interpreter.executeCapturedUntilAction(context.currentFrame());
+                                break :result try interpreter.executeCapturedUntilSuspended(context.currentFrame());
                             }
                         }
                         if (call_frame.needs_action_loop) {
-                            break :result try interpreter.executeUntilAction();
+                            break :result try interpreter.executeUntilSuspended();
                         }
                         break :result .{ .finished = try interpreter.execute() };
                     };
                     switch (run_result) {
-                        .action => |action| try self.handleAction(index, action),
+                        .suspended => |action| try self.dispatchSuspension(index, action),
                         .finished => |result| {
                             const host_result = try self.finishFrame(index, result);
                             if (self.frames.len() == self.frame_base + 1) {
@@ -287,7 +290,7 @@ pub fn bind(comptime Executor: type) type {
                             }
 
                             const parent_index = self.frames.len() - 2;
-                            try self.resumeParentAction(parent_index, host_result);
+                            try self.resumeSuspended(parent_index, host_result);
                             self.popFrame();
                         },
                     }
@@ -295,33 +298,47 @@ pub fn bind(comptime Executor: type) type {
                 unreachable;
             }
 
-            pub fn handleAction(self: *CallRuntime, frame_index: usize, action: Interpreter.Action) !void {
-                switch (action) {
+            pub fn dispatchSuspension(self: *CallRuntime, frame_index: usize, action: *const Interpreter.Action) !void {
+                // `action` borrows the suspended frame's state, and starting a
+                // child may grow the frame store and move that frame. Own the
+                // action before anything below can invalidate it.
+                const owned = action.*;
+                switch (owned) {
                     .call => |call_action| {
+                        const continuation = call_action.continuation;
                         if (try self.startCall(call_action.msg)) |host_result| {
-                            const call_result = host_result.expectCall();
-                            _ = try self.frames.frame(frame_index).resumePendingAction(host_result);
-                            self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
+                            try self.frames.frame(frame_index).resumeWith(host_result);
+                            const call_result = switch (host_result) {
+                                .call => |value| value,
+                                .create => unreachable,
+                            };
+                            self.captureCallOutput(frame_index, continuation, call_result.output_data.len);
                             try self.captureReturnData(frame_index);
                         }
                     },
                     .create => |create_action| {
                         if (try self.startCreate(create_action.msg)) |host_result| {
-                            _ = try self.frames.frame(frame_index).resumePendingAction(host_result);
+                            try self.frames.frame(frame_index).resumeWith(host_result);
                             try self.captureReturnData(frame_index);
                         }
                     },
                 }
             }
 
-            pub fn resumeParentAction(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
-                const action = try self.frames.frame(frame_index).resumePendingAction(result);
-                switch (action) {
-                    .call => |call_action| {
-                        const call_result = result.expectCall();
-                        self.captureCallOutput(frame_index, call_action.continuation, call_result.output_data.len);
-                    },
-                    .create => {},
+            pub fn resumeSuspended(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
+                const frame = self.frames.frame(frame_index);
+                const action = frame.suspendedAction() orelse return error.FrameNotSuspended;
+                const call_continuation: ?Interpreter.CallResume = switch (action.*) {
+                    .call => |call_action| call_action.continuation,
+                    .create => null,
+                };
+                try frame.resumeWith(result);
+                if (call_continuation) |continuation| {
+                    const call_result = switch (result) {
+                        .call => |value| value,
+                        .create => unreachable,
+                    };
+                    self.captureCallOutput(frame_index, continuation, call_result.output_data.len);
                 }
                 try self.captureReturnData(frame_index);
             }
@@ -406,7 +423,7 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            pub fn finishFrame(self: *CallRuntime, frame_index: usize, result: Interpreter.Result) !Host.Result {
+            pub fn finishFrame(self: *CallRuntime, frame_index: usize, result: FrameResult) !Host.Result {
                 const control = self.frames.control(frame_index).*;
                 const frame_kind = control.kind;
                 const call_capture = control.call_capture;
@@ -420,7 +437,7 @@ pub fn bind(comptime Executor: type) type {
                 const call_frame = self.frames.frame(frame_index);
                 if (self.stepCaptureContext()) |context| {
                     try context.finishCurrentFrame(.{
-                        .outcome = Interpreter.traceFrameOutcome(result.status),
+                        .outcome = Interpreter.traceFrameOutcome(result.status()),
                         .memory_size = call_frame.memory.len(),
                     });
                 }
@@ -431,8 +448,8 @@ pub fn bind(comptime Executor: type) type {
 
                 const host_result = switch (frame_kind) {
                     .root_call => Host.Result.fromCall(.{
-                        .status = result.status,
-                        .cause = result.cause,
+                        .outcome = .{ .status = result.status(), .cause = result.terminalCause() },
+                        .frame_halt = result.halt,
                         .output_data = result.output_data,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
@@ -442,12 +459,12 @@ pub fn bind(comptime Executor: type) type {
                     }),
                     .call => blk: {
                         if (checkpoint) |*guard| {
-                            try guard.finish(result.status);
+                            try guard.finish(result.status());
                         } else unreachable;
                         break :blk Host.Result.fromCall(.{
-                            .status = result.status,
-                            .cause = result.cause,
-                            .checkpoint_reverted = result.status != .success,
+                            .outcome = .{ .status = result.status(), .cause = result.terminalCause() },
+                            .frame_halt = result.halt,
+                            .checkpoint_reverted = result.status() != .success,
                             .output_data = result.output_data,
                             .gas_left = result.gas_left,
                             .gas_refund = result.gas_refund,
@@ -596,10 +613,10 @@ pub fn bind(comptime Executor: type) type {
         pub fn finishRootCapture(
             self: *Executor,
             token: evmz.trace.CallToken,
-            result: Interpreter.Result,
+            result: ExecutionResult,
         ) !void {
             try self.currentCaptureContext().?.finishCall(token, .{
-                .status = callCaptureStatus(result.status, result.terminalCause()),
+                .status = callCaptureStatus(result.outcome.status, result.outcome.cause),
                 .gas_left = result.gas_left,
                 .output = result.output_data,
                 // Root execution has no frame-local checkpoint in CallRuntime.
@@ -678,8 +695,8 @@ pub fn bind(comptime Executor: type) type {
                 options.value,
             );
             return Host.Result.fromCall(.{
-                .status = result.status,
-                .cause = result.cause,
+                .outcome = result.outcome,
+                .frame_halt = result.frame_halt,
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
@@ -696,7 +713,7 @@ pub fn bind(comptime Executor: type) type {
             input: []const u8,
             gas: ExecutionGas,
             value: u256,
-        ) !Interpreter.Result {
+        ) !ExecutionResult {
             return (try executeCallTransactionPhased(
                 self,
                 sender,
@@ -725,7 +742,7 @@ pub fn bind(comptime Executor: type) type {
                 return .{
                     .stage = .preparation,
                     .result = .{
-                        .status = .out_of_gas,
+                        .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
                         .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
@@ -747,8 +764,8 @@ pub fn bind(comptime Executor: type) type {
                 else
                     0;
                 if (execution_gas.regular_left < access_cost) {
-                    var result = Interpreter.Result{
-                        .status = .out_of_gas,
+                    var result = ExecutionResult{
+                        .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
                         .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
@@ -852,10 +869,10 @@ pub fn bind(comptime Executor: type) type {
             };
         }
 
-        fn finishTopFrameStateGas(result: *Interpreter.Result, charge: TopFrameStateGasCharge) void {
+        fn finishTopFrameStateGas(result: *ExecutionResult, charge: TopFrameStateGasCharge) void {
             if (charge.spent == 0) return;
             const from_reservoir = std.math.sub(i64, charge.spent, charge.from_regular) catch 0;
-            switch (result.status) {
+            switch (result.outcome.status) {
                 .success => {
                     result.state_gas_spent = std.math.add(i64, result.state_gas_spent, charge.spent) catch std.math.maxInt(i64);
                     result.state_gas_from_gas_left = std.math.add(i64, result.state_gas_from_gas_left, charge.from_regular) catch std.math.maxInt(i64);
@@ -877,13 +894,12 @@ pub fn bind(comptime Executor: type) type {
             input: []const u8,
             gas: ExecutionGas,
             value: u256,
-        ) !Interpreter.Result {
+        ) !ExecutionResult {
             self.clearLastOutput();
             _ = currentExecutionContext(self);
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
-                    .status = .invalid,
-                    .cause = .insufficient_balance,
+                    .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
                     .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
                     .gas_refund = 0,
                     .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
@@ -905,8 +921,8 @@ pub fn bind(comptime Executor: type) type {
             const host_result = (try runPrecompileCall(self, &message)) orelse unreachable;
             const result = host_result.expectCall();
             return .{
-                .status = result.status,
-                .cause = result.cause,
+                .outcome = result.outcome,
+                .frame_halt = result.frame_halt,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
                 .gas_reservoir = result.gas_reservoir,
@@ -919,7 +935,7 @@ pub fn bind(comptime Executor: type) type {
         pub fn executePreparedCallTransaction(
             self: *Executor,
             options: executor_module.PreparedCallTransaction,
-        ) !Interpreter.Result {
+        ) !ExecutionResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -927,8 +943,7 @@ pub fn bind(comptime Executor: type) type {
             _ = currentExecutionContext(self);
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
-                    .status = .invalid,
-                    .cause = .insufficient_balance,
+                    .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
                     .gas_left = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
                     .gas_refund = 0,
                     .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
@@ -951,8 +966,8 @@ pub fn bind(comptime Executor: type) type {
             const host_result = try executePreparedCallMessage(self, message, options.bytecode);
             const call_result = host_result.expectCall();
             return .{
-                .status = call_result.status,
-                .cause = call_result.cause,
+                .outcome = call_result.outcome,
+                .frame_halt = call_result.frame_halt,
                 .gas_left = call_result.gas_left,
                 .gas_refund = call_result.gas_refund,
                 .gas_reservoir = call_result.gas_reservoir,
@@ -1000,8 +1015,8 @@ pub fn bind(comptime Executor: type) type {
             defer self.trace_depth = previous_depth;
             const result = try interpreter.execute();
             return stabilizeFinalResult(self, Host.Result.fromCall(.{
-                .status = result.status,
-                .cause = result.cause,
+                .outcome = .{ .status = result.status(), .cause = result.terminalCause() },
+                .frame_halt = result.halt,
                 .output_data = result.output_data,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
@@ -1045,7 +1060,7 @@ pub fn bind(comptime Executor: type) type {
                 return .{
                     .stage = .preparation,
                     .result = .{
-                        .status = .out_of_gas,
+                        .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
                         .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
@@ -1065,9 +1080,9 @@ pub fn bind(comptime Executor: type) type {
                 .value = options.value,
             });
             const create_result = host_result.expectCreate();
-            var result = Interpreter.Result{
-                .status = create_result.status,
-                .cause = create_result.cause,
+            var result = ExecutionResult{
+                .outcome = create_result.outcome,
+                .frame_halt = create_result.frame_halt,
                 .gas_left = create_result.gas_left,
                 .gas_refund = create_result.gas_refund,
                 .gas_reservoir = create_result.gas_reservoir,
@@ -1135,7 +1150,7 @@ pub fn bind(comptime Executor: type) type {
             return allocator.dupe(u8, try self.getCode(address));
         }
 
-        pub fn executeInterpreter(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !Interpreter.Result {
+        pub fn executeInterpreter(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !FrameResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1152,7 +1167,7 @@ pub fn bind(comptime Executor: type) type {
             const previous_depth = self.trace_depth;
             self.trace_depth = depth;
             defer self.trace_depth = previous_depth;
-            return interpreter.executeUntilAction();
+            return interpreter.executeUntilSuspended();
         }
 
         pub fn currentExecutionContext(self: *const Executor) ExecutionContext {
@@ -1196,8 +1211,8 @@ pub fn bind(comptime Executor: type) type {
         pub fn stabilizeFinalResult(self: *Executor, result: Host.Result) !Host.Result {
             return switch (result) {
                 .call => |call_result| Host.Result.fromCall(.{
-                    .status = call_result.status,
-                    .cause = call_result.cause,
+                    .outcome = call_result.outcome,
+                    .frame_halt = call_result.frame_halt,
                     .output_data = try self.setLastOutput(call_result.output_data),
                     .gas_left = call_result.gas_left,
                     .gas_refund = call_result.gas_refund,
@@ -1207,8 +1222,8 @@ pub fn bind(comptime Executor: type) type {
                     .checkpoint_reverted = call_result.checkpoint_reverted,
                 }),
                 .create => |create_result| Host.Result.fromCreate(create_result.address, .{
-                    .status = create_result.status,
-                    .cause = create_result.cause,
+                    .outcome = create_result.outcome,
+                    .frame_halt = create_result.frame_halt,
                     .output_data = if (aliasesLastOutput(self, create_result.output_data))
                         self.lastOutputData()
                     else
@@ -1233,8 +1248,7 @@ pub fn bind(comptime Executor: type) type {
         fn beginCall(self: *Executor, msg: Host.Message) !StartedCall {
             if (msg.depth > Host.max_call_depth) {
                 return .{ .immediate = Host.Result.fromCall(.{
-                    .status = .invalid,
-                    .cause = .call_depth_exceeded,
+                    .outcome = .{ .status = .invalid, .cause = .call_depth_exceeded },
                     .output_data = &.{},
                     .gas_left = msg.gas,
                     .gas_refund = 0,
@@ -1257,8 +1271,7 @@ pub fn bind(comptime Executor: type) type {
                 if (!value_ok) {
                     try checkpoint.restore();
                     return .{ .immediate = Host.Result.fromCall(.{
-                        .status = .invalid,
-                        .cause = .insufficient_balance,
+                        .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
                         .output_data = &.{},
                         .gas_left = msg.gas,
                         .gas_refund = 0,
@@ -1284,7 +1297,7 @@ pub fn bind(comptime Executor: type) type {
                 try touchEmptyCallRecipient(self, msg);
                 try checkpoint.commit();
                 return .{ .immediate = Host.Result.fromCall(.{
-                    .status = .success,
+                    .outcome = .{ .status = .success, .cause = .none },
                     .output_data = &.{},
                     .gas_left = msg.gas,
                     .gas_refund = 0,
@@ -1322,7 +1335,7 @@ pub fn bind(comptime Executor: type) type {
                 },
             ) catch |err| switch (err) {
                 error.NotImplemented => return Host.Result.fromCall(.{
-                    .status = .invalid,
+                    .outcome = .{ .status = .invalid, .cause = .invalid },
                     .output_data = &.{},
                     .gas_left = 0,
                     .gas_refund = 0,
@@ -1343,13 +1356,21 @@ pub fn bind(comptime Executor: type) type {
             } else {
                 return error.InvalidPrecompileOutput;
             };
-            const status: Interpreter.Status = switch (result.status) {
+            const status: execution_values.Status = switch (result.status) {
                 .success => .success,
                 .failure => .invalid,
                 .out_of_gas => .out_of_gas,
             };
             return Host.Result.fromCall(.{
-                .status = status,
+                .outcome = .{
+                    .status = status,
+                    .cause = switch (status) {
+                        .success => .none,
+                        .out_of_gas => .out_of_gas,
+                        .invalid => .invalid,
+                        .revert => unreachable,
+                    },
+                },
                 .output_data = output,
                 .gas_left = if (status == .success) result.gas_left else 0,
                 .gas_refund = 0,
@@ -1551,15 +1572,16 @@ pub fn bind(comptime Executor: type) type {
         fn finishCreate(
             self: *Executor,
             child: FrameStore.CreateControl,
-            result: Interpreter.Result,
+            frame_result: FrameResult,
             checkpoint: *CheckpointGuard,
         ) !Host.Result {
+            const result = frame_result.executionResult();
             const output = result.output_data;
-            if (result.status != .success) {
+            if (result.outcome.status != .success) {
                 try checkpoint.restore();
                 return Host.Result.fromCreate(child.address, .{
-                    .status = result.status,
-                    .cause = result.cause,
+                    .outcome = result.outcome,
+                    .frame_halt = result.frame_halt,
                     .checkpoint_reverted = true,
                     .output_data = output,
                     .gas_left = result.gas_left,
@@ -1593,8 +1615,8 @@ pub fn bind(comptime Executor: type) type {
                 if (spec.create.deposit_regular_gas_oog_commits) {
                     try checkpoint.commit();
                     return Host.Result.fromCreate(child.address, .{
-                        .status = .success,
-                        .cause = .code_store_out_of_gas,
+                        .outcome = .{ .status = .success, .cause = .code_store_out_of_gas },
+                        .frame_halt = result.frame_halt,
                         .output_data = output,
                         .gas_left = result.gas_left,
                         .gas_refund = result.gas_refund,
@@ -1614,16 +1636,17 @@ pub fn bind(comptime Executor: type) type {
                 return createFailureFromResult(self, child.address, deposit_result, .out_of_gas, .code_store_out_of_gas);
             };
             deposit_result.trackStateGas(deposit_state_gas);
-            if (deposit_result.status != .success) {
+            if (deposit_result.outcome.status != .success) {
                 try checkpoint.restore();
-                return createFailureFromResult(self, child.address, deposit_result, deposit_result.status, .code_store_out_of_gas);
+                return createFailureFromResult(self, child.address, deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
             }
 
             try self.state.setCode(child.address, output);
             try checkpoint.commit();
 
             return Host.Result.fromCreate(child.address, .{
-                .status = .success,
+                .outcome = .{ .status = .success, .cause = .none },
+                .frame_halt = deposit_result.frame_halt,
                 .output_data = output,
                 .gas_left = deposit_result.gas_left,
                 .gas_refund = deposit_result.gas_refund,
@@ -1633,22 +1656,17 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        fn createFailure(self: *Executor, create_address: Address, gas_left: i64, gas_reservoir: i64, status: Interpreter.Status) Host.Result {
-            return createFailureWithCause(self, create_address, gas_left, gas_reservoir, status, null);
-        }
-
         fn createFailureWithCause(
             self: *Executor,
             create_address: Address,
             gas_left: i64,
             gas_reservoir: i64,
-            status: Interpreter.Status,
-            cause: ?evmz.execution.TerminalCause,
+            status: execution_values.Status,
+            cause: execution_values.TerminalCause,
         ) Host.Result {
             self.clearLastOutput();
             return Host.Result.fromCreate(create_address, .{
-                .status = status,
-                .cause = cause,
+                .outcome = .{ .status = status, .cause = cause },
                 .output_data = &.{},
                 .gas_left = gas_left,
                 .gas_refund = 0,
@@ -1659,24 +1677,27 @@ pub fn bind(comptime Executor: type) type {
         fn createFailureFromResult(
             self: *Executor,
             create_address: Address,
-            result: Interpreter.Result,
-            status: Interpreter.Status,
-            cause: evmz.execution.TerminalCause,
+            result: ExecutionResult,
+            status: execution_values.Status,
+            cause: execution_values.TerminalCause,
         ) Host.Result {
             var failed = result;
-            failed.status = status;
+            failed.outcome = .{ .status = status, .cause = cause };
             failed.gas_left = 0;
             failed.gas_refund = 0;
-            failed.finalizeFrameStateGas();
-            const host_result = createFailureWithCause(
-                self,
-                create_address,
-                failed.gas_left,
-                failed.gas_reservoir,
-                status,
-                cause,
-            );
-            return hostResultWithCheckpointReverted(host_result, true);
+            execution_values.finalizeStateGas(&failed);
+            self.clearLastOutput();
+            return Host.Result.fromCreate(create_address, .{
+                .outcome = failed.outcome,
+                .frame_halt = failed.frame_halt,
+                .checkpoint_reverted = true,
+                .output_data = &.{},
+                .gas_left = failed.gas_left,
+                .gas_refund = failed.gas_refund,
+                .gas_reservoir = failed.gas_reservoir,
+                .state_gas_spent = failed.state_gas_spent,
+                .state_gas_from_gas_left = failed.state_gas_from_gas_left,
+            });
         }
 
         fn hostResultWithCheckpointReverted(result: Host.Result, reverted: bool) Host.Result {
@@ -1723,7 +1744,7 @@ test "CREATE final stabilization reuses already-stable output" {
     executor.last_call_output = frame_io.ByteSlot.init(std.testing.allocator);
     _ = try executor.setLastOutput(&.{0xaa});
     const result = (try runtime.stabilizeFinalResult(&executor, Host.Result.fromCreate(evmz.addr(0x1234), .{
-        .status = .success,
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = executor.lastOutputData(),
         .gas_left = 7,
         .gas_refund = 0,
@@ -1844,13 +1865,13 @@ test "nested call runtime owns its segment and keeps capture indices global" {
         .value = 0,
         .code_address = child_address,
     })).expectCall();
-    try std.testing.expectEqual(Interpreter.Status.success, child_result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, child_result.status());
     try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
     try std.testing.expectEqual(@as(usize, 1), capture.frame_captures.items.len);
     try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(child_address, 0));
 
     const root_result = (try outer.run()).expectCall();
-    try std.testing.expectEqual(Interpreter.Status.success, root_result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, root_result.status());
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 
     const span = (try capture.finish()).?;

@@ -8,7 +8,7 @@ pub fn mstore(frame: *CallFrame) !void {
     const offset, const value = frame.popN(2) orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
@@ -25,7 +25,7 @@ pub fn mstore8(frame: *CallFrame) !void {
     const offset, const value = frame.popN(2) orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 1) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
@@ -42,7 +42,7 @@ pub fn mload(frame: *CallFrame) !void {
     const offset = frame.pop() orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
@@ -84,7 +84,7 @@ pub fn mcopy(frame: *CallFrame) !void {
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     if (!try frame.expandMemory(dest_usize, size_usize)) return;
-    const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
+    const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
     const word_copied_cost = evmz.calcWordSize(i64, size_i64) * 3;
     if (!frame.trackGas(word_copied_cost)) return;
 

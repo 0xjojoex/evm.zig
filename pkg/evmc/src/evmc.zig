@@ -110,7 +110,7 @@ fn executeExact(
     var frame = ExactVm.Interpreter.OwnedCallFrame.init(std.heap.c_allocator, .{
         .host = host,
         .msg = message,
-        .code = code,
+        .source = .{ .code = code },
     }) catch |err| {
         log.err("execute failed: {}", .{err});
         return makeResult(evmc.EVMC_OUT_OF_MEMORY, 0, 0, &.{});
@@ -126,7 +126,10 @@ fn executeExact(
         return makeResult(status_code, 0, 0, &.{});
     };
 
-    const status_code = statusToEvmc(result.status);
+    const status_code = common.statusCodeFromOutcome(.{
+        .status = result.status(),
+        .cause = result.terminalCause(),
+    });
     const output_data = if (hasOutput(status_code)) result.output_data else &.{};
     return makeResult(status_code, result.gas_left, result.gas_refund, output_data);
 }
@@ -177,20 +180,25 @@ fn makeResult(
     };
 }
 
-fn statusToEvmc(status: evmz.Interpreter.Status) evmc.evmc_status_code {
-    return switch (status) {
-        .success => evmc.EVMC_SUCCESS,
-        .revert => evmc.EVMC_REVERT,
-        .invalid => evmc.EVMC_INVALID_INSTRUCTION,
-        .out_of_gas => evmc.EVMC_OUT_OF_GAS,
-    };
-}
-
 fn statusFromEvmc(status_code: evmc.evmc_status_code) evmz.Interpreter.Status {
     return switch (status_code) {
         evmc.EVMC_SUCCESS => .success,
         evmc.EVMC_REVERT => .revert,
         evmc.EVMC_OUT_OF_GAS => .out_of_gas,
+        else => .invalid,
+    };
+}
+
+fn terminalCauseFromEvmc(status_code: evmc.evmc_status_code) evmz.execution.TerminalCause {
+    return switch (status_code) {
+        evmc.EVMC_SUCCESS => .none,
+        evmc.EVMC_REVERT => .revert,
+        evmc.EVMC_OUT_OF_GAS => .out_of_gas,
+        evmc.EVMC_INVALID_INSTRUCTION, evmc.EVMC_UNDEFINED_INSTRUCTION => .invalid_opcode,
+        evmc.EVMC_STACK_UNDERFLOW => .stack_underflow,
+        evmc.EVMC_STACK_OVERFLOW => .stack_overflow,
+        evmc.EVMC_BAD_JUMP_DESTINATION => .invalid_jump,
+        evmc.EVMC_STATIC_MODE_VIOLATION => .write_protection,
         else => .invalid,
     };
 }
@@ -445,7 +453,10 @@ const ToHost = struct {
         try self.call_output.resize(std.heap.c_allocator, output_data.len);
         @memcpy(self.call_output.items, output_data);
         const call_result = evmz.Host.CallResult{
-            .status = statusFromEvmc(result.status_code),
+            .outcome = .{
+                .status = statusFromEvmc(result.status_code),
+                .cause = terminalCauseFromEvmc(result.status_code),
+            },
             .gas_left = result.gas_left,
             .output_data = self.call_output.items,
             .gas_refund = result.gas_refund,
@@ -639,6 +650,40 @@ test "EVMC execute returns owned output through mock host" {
     try std.testing.expectEqual(@as(usize, 32), result.output_size);
     try std.testing.expect(result.output_data != null);
     try std.testing.expectEqual(@as(u8, 0x2a), result.output_data[31]);
+}
+
+test "EVMC execute preserves precise frame fault statuses" {
+    const host2c = @import("./c_api/host2c.zig");
+    const mock = @import("./c_api/mock.zig");
+    const vm = evmc_create_evmz() orelse return error.OutOfMemory;
+    defer vm.*.destroy.?(vm);
+
+    var tx_context = std.mem.zeroes(evmc.evmc_tx_context);
+    tx_context.block_gas_limit = 200_000;
+    const mock_context = try mock.MockHostContext.create(tx_context);
+    defer mock_context.host_context.deinit();
+    const context = mock_context.toContext();
+    const host = host2c.getInterface();
+
+    var msg = std.mem.zeroes(evmc.evmc_message);
+    msg.kind = evmc.EVMC_CALL;
+    msg.gas = 100_000;
+
+    const stack_underflow = [_]u8{0x01};
+    const invalid_jump = [_]u8{ 0x60, 0x01, 0x56 };
+    const cases = [_]struct {
+        code: []const u8,
+        expected: evmc.evmc_status_code,
+    }{
+        .{ .code = &stack_underflow, .expected = evmc.EVMC_STACK_UNDERFLOW },
+        .{ .code = &invalid_jump, .expected = evmc.EVMC_BAD_JUMP_DESTINATION },
+    };
+
+    for (cases) |case| {
+        var result = vm.*.execute.?(vm, &host, context, evmc.EVMC_CANCUN, &msg, case.code.ptr, case.code.len);
+        defer if (result.release) |release_result| release_result(&result);
+        try std.testing.expectEqual(case.expected, result.status_code);
+    }
 }
 
 test "EVMC Paris revision maps to Merge revision" {
@@ -854,6 +899,7 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
         .code_address = authority,
     })).expectCall();
 
+    try std.testing.expectEqual(@as(?evmz.execution.FrameHalt, null), result.frame_halt);
     try std.testing.expect(context.last_msg.?.flags & evmc.EVMC_DELEGATED != 0);
     try std.testing.expectEqualSlices(u8, &target, &fromEvmcAddress(context.last_msg.?.code_address));
     context.output[0] = 0xcc;

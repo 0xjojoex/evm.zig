@@ -246,7 +246,7 @@ fn callSystemContract(
             observer,
         ),
     };
-    if (has_code and result.status != .success) return error.SystemCallFailed;
+    if (has_code and result.status() != .success) return error.SystemCallFailed;
 }
 
 fn callSystemContractInPrelude(
@@ -274,7 +274,7 @@ fn callSystemContractInPrelude(
             .reservoir = state_gas,
         },
     });
-    if (has_code and result.status != .success) return error.SystemCallFailed;
+    if (has_code and result.status() != .success) return error.SystemCallFailed;
 }
 
 fn callRequestSystemContract(
@@ -319,7 +319,7 @@ fn callRequestSystemContract(
             observer,
         ),
     };
-    if (has_code and result.status != .success) return error.SystemCallFailed;
+    if (has_code and result.status() != .success) return error.SystemCallFailed;
     if (!has_code or result.output_data.len == 0) return null;
 
     const request_len = std.math.add(usize, result.output_data.len, 1) catch return error.OutOfMemory;
@@ -392,7 +392,7 @@ test "before block calls Prague and Cancun system contracts" {
         evmz.addr(0x1234),
         &parent_hash,
         .legacy(ethereum.system_call_gas),
-    )).status);
+    )).status());
 }
 
 test "Amsterdam block hook executes state growth from the system-call reservoir" {

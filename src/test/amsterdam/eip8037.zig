@@ -156,7 +156,7 @@ test "Amsterdam CREATE collision with alive target skips state charge before chi
     try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(u64, 2), executor.getAccount(contract).?.nonce);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(create_address).?.nonce);
@@ -183,7 +183,7 @@ test "Amsterdam CREATE to pre-existing account leaves state reservoir available"
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u64, 2), executor.getAccount(contract).?.nonce);
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(create_address).?.nonce);
@@ -208,7 +208,7 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     }, 0);
     try executor.retainStateTransitionObserved(&observations);
 
-    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
     try std.testing.expect(observations.found);
 }
 
@@ -240,7 +240,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     try executor.retainStateTransitionObserved(&observations);
 
     try std.testing.expectEqual(evmz.executor.TransactionExecutionStage.preparation, outcome.stage);
-    try std.testing.expectEqual(Interpreter.Status.out_of_gas, outcome.result.status);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, outcome.result.status());
     try std.testing.expect(observations.found);
 }
 
@@ -264,7 +264,7 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
@@ -295,7 +295,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
         .reservoir = eth_tx.amsterdam_new_account_state_gas,
     }, 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(contract).?.nonce);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(create_address).?.nonce);
 }

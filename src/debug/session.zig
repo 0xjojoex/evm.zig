@@ -89,7 +89,7 @@ pub fn bind(comptime Executor: type) type {
                 while (self.call_runtime.frames.len() > self.call_runtime.frame_base) {
                     const index = self.call_runtime.frames.len() - 1;
                     const frame = self.call_runtime.frames.frame(index);
-                    switch (frame.status) {
+                    switch (frame.state) {
                         .running => {
                             if (frame.pc < frame.code.len) {
                                 return .{ .opcode = .{
@@ -99,16 +99,16 @@ pub fn bind(comptime Executor: type) type {
                                     .gas_left = frame.gas_left,
                                 } };
                             }
-                            frame.status = .success;
+                            frame.halt(.success);
                         },
-                        .suspended => return .{ .action = .{
+                        .suspended => return .{ .suspended = .{
                             .site = .{ .frame_index = index, .depth = frame.msg.depth },
-                            .value = frame.pending_action orelse unreachable,
+                            .value = frame.suspendedAction().?,
                         } },
-                        else => {},
+                        .halted => {},
                     }
 
-                    const host_result = try self.call_runtime.finishFrame(index, frame.getResult());
+                    const host_result = try self.call_runtime.finishFrame(index, frame.result());
                     self.top_frame_resolved = true;
                     if (self.call_runtime.frames.len() == self.call_runtime.frame_base + 1) {
                         const stable = try runtime.stabilizeFinalResult(self.call_runtime.executor, host_result);
@@ -122,7 +122,7 @@ pub fn bind(comptime Executor: type) type {
                     }
 
                     const parent_index = self.call_runtime.frames.len() - 2;
-                    try self.call_runtime.resumeParentAction(parent_index, host_result);
+                    try self.call_runtime.resumeSuspended(parent_index, host_result);
                     self.popResolvedFrame();
                 }
                 unreachable;
@@ -167,7 +167,7 @@ pub fn bind(comptime Executor: type) type {
             pub fn step(self: *Session) !Pause {
                 std.debug.assert(self.open);
                 const frame = self.call_runtime.frames.frame(self.call_runtime.frames.len() - 1);
-                std.debug.assert(frame.status == .running);
+                std.debug.assert(frame.isRunning());
                 std.debug.assert(frame.pc < frame.code.len);
                 try self.executeOne(frame);
                 return self.pause();
@@ -184,32 +184,32 @@ pub fn bind(comptime Executor: type) type {
                 const opcode = frame.code[frame.pc];
                 frame.pc += 1;
                 try Instructions.execute(opcode, frame);
-                if (frame.pc >= frame.code.len and frame.status == .running) {
-                    frame.status = .success;
+                if (frame.pc >= frame.code.len and frame.isRunning()) {
+                    frame.halt(.success);
                 }
             }
 
             /// Dispatch the suspended frame's pending CALL/CREATE normally.
-            pub fn dispatchAction(self: *Session) !Pause {
+            pub fn dispatchSuspension(self: *Session) !Pause {
                 std.debug.assert(self.open);
                 const index = self.call_runtime.frames.len() - 1;
                 const frame = self.call_runtime.frames.frame(index);
-                std.debug.assert(frame.status == .suspended);
-                try self.call_runtime.handleAction(index, frame.pending_action orelse unreachable);
+                const action = frame.suspendedAction() orelse unreachable;
+                try self.call_runtime.dispatchSuspension(index, action);
                 return self.pause();
             }
 
             /// Resolve the pending CALL/CREATE with a caller-supplied result
             /// instead of executing the child.
             ///
-            /// This immediately marks the session intervened, and its eventual
-            /// completion carries the same authority loss.
-            pub fn substituteAction(self: *Session, result: Host.Result) !Pause {
+            /// A successful substitution marks the session intervened, and its
+            /// eventual completion carries the same authority loss.
+            pub fn substituteResult(self: *Session, result: Host.Result) !Pause {
                 std.debug.assert(self.open);
                 const index = self.call_runtime.frames.len() - 1;
-                std.debug.assert(self.call_runtime.frames.frame(index).status == .suspended);
+                std.debug.assert(self.call_runtime.frames.frame(index).isSuspended());
+                try self.call_runtime.resumeSuspended(index, result);
                 self.intervened = true;
-                try self.call_runtime.resumeParentAction(index, result);
                 return self.pause();
             }
 

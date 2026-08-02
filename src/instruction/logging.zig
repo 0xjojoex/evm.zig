@@ -8,7 +8,7 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
     comptime std.debug.assert(n <= 4);
 
     if (frame.msg.is_static) {
-        frame.failWithFrameStatus(.write_protection);
+        frame.halt(.write_protection);
         return;
     }
 
@@ -20,10 +20,10 @@ pub fn log(frame: *CallFrame, comptime n: u8) !void {
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
+    const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
     const log_cost = std.math.mul(i64, 8, size_i64) catch {
         @branchHint(.unlikely);
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
     if (!frame.trackGas(log_cost)) return;

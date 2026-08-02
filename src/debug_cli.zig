@@ -316,7 +316,7 @@ const Repl = struct {
         if (loaded.closed) return;
         switch (loaded.pause) {
             .opcode => try self.settle(loaded, loaded.driver.step()),
-            .action => try self.settle(loaded, loaded.driver.dispatchAction()),
+            .suspended => try self.settle(loaded, loaded.driver.dispatchSuspension()),
             .finished => {},
         }
     }
@@ -334,7 +334,7 @@ const Repl = struct {
 
     fn substitute(self: *Repl, loaded: *Loaded, words: *Words) !void {
         const action = switch (loaded.pause) {
-            .action => |event| event.value,
+            .suspended => |event| event.value.*,
             else => return self.out.writeAll("no pending call to substitute\n"),
         };
         const status: Status = blk: {
@@ -350,7 +350,13 @@ const Repl = struct {
         defer self.allocator.free(output);
 
         const result: Host.CallResult = .{
-            .status = status,
+            // A substituted child never ran a frame, so it carries no frame halt.
+            .outcome = .{ .status = status, .cause = switch (status) {
+                .success => .none,
+                .revert => .revert,
+                .invalid => .invalid,
+                .out_of_gas => .out_of_gas,
+            } },
             .output_data = output,
             // A hard failure burns the child's gas; success and revert return it.
             .gas_left = if (status == .invalid) 0 else switch (action) {
@@ -359,7 +365,7 @@ const Repl = struct {
             },
             .gas_refund = 0,
         };
-        try self.settle(loaded, loaded.driver.substituteAction(switch (action) {
+        try self.settle(loaded, loaded.driver.substituteResult(switch (action) {
             .call => Host.Result.fromCall(result),
             // The CREATE handler derived the address before suspending, so a
             // substituted create still deploys where the canonical one would.
@@ -433,9 +439,9 @@ const Repl = struct {
                 });
                 try self.printStackSummary(loaded.driver.stack());
             },
-            .action => |event| {
+            .suspended => |event| {
                 if (loaded.closed) return self.out.writeAll("session closed\n");
-                const msg = switch (event.value) {
+                const msg = switch (event.value.*) {
                     .call => |call| call.msg,
                     .create => |create| create.msg,
                 };
@@ -529,7 +535,7 @@ const Repl = struct {
 fn depthOf(pause: session.Pause) ?u16 {
     return switch (pause) {
         .opcode => |event| event.site.depth,
-        .action => |event| event.site.depth,
+        .suspended => |event| event.site.depth,
         .finished => null,
     };
 }

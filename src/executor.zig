@@ -48,7 +48,7 @@ pub const TransactionExecutionStage = enum {
 
 pub const TransactionExecutionOutcome = struct {
     stage: TransactionExecutionStage,
-    result: Interpreter.Result,
+    result: execution_values.ExecutionResult,
 };
 
 const TransactionExecutionOutcomeType = TransactionExecutionOutcome;
@@ -957,12 +957,12 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             input: []const u8,
             gas: execution_values.ExecutionGas,
             value: u256,
-        ) !Interpreter.Result {
+        ) !execution_values.ExecutionResult {
             return runtime.executeCallTransaction(self, sender, recipient, input, gas, value);
         }
 
         /// Execute a raw call with caller-provided prepared bytecode.
-        pub fn executePreparedCallTransaction(self: *Self, options: Self.PreparedCallTransaction) !Interpreter.Result {
+        pub fn executePreparedCallTransaction(self: *Self, options: Self.PreparedCallTransaction) !execution_values.ExecutionResult {
             return runtime.executePreparedCallTransaction(self, options);
         }
 
@@ -1124,7 +1124,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
         ///
         /// The caller owns transaction charging, nonce/access/auth handling, settlement,
         /// and final commit/rollback. Transaction programs compose those pieces.
-        pub fn executeTransactionRequest(self: *Self, request: execution_values.EvmExecutionRequest) !Interpreter.Result {
+        pub fn executeTransactionRequest(self: *Self, request: execution_values.EvmExecutionRequest) !execution_values.ExecutionResult {
             return (try self.executeTransactionRequestPhased(request)).result;
         }
 
@@ -1180,7 +1180,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             recipient: Address,
             input: []const u8,
             gas: execution_values.ExecutionGas,
-        ) !Interpreter.Result {
+        ) !execution_values.ExecutionResult {
             return self.executeSystemCallMode(
                 context,
                 sender,
@@ -1202,7 +1202,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             input: []const u8,
             gas: execution_values.ExecutionGas,
             observer: anytype,
-        ) !Interpreter.Result {
+        ) !execution_values.ExecutionResult {
             return self.executeSystemCallMode(
                 context,
                 sender,
@@ -1223,7 +1223,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             gas: execution_values.ExecutionGas,
             capture: *CaptureContext,
             observer: anytype,
-        ) !Interpreter.Result {
+        ) !execution_values.ExecutionResult {
             return self.executeSystemCallMode(
                 context,
                 sender,
@@ -1244,7 +1244,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             gas: execution_values.ExecutionGas,
             mode: ExecutionMode,
             observer: anytype,
-        ) !Interpreter.Result {
+        ) !execution_values.ExecutionResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1278,9 +1278,9 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
             }).expectCall();
-            const result = Interpreter.Result{
-                .status = call_result.status,
-                .cause = call_result.cause,
+            const result = execution_values.ExecutionResult{
+                .outcome = call_result.outcome,
+                .frame_halt = call_result.frame_halt,
                 .gas_left = call_result.gas_left,
                 .gas_refund = call_result.gas_refund,
                 .gas_reservoir = call_result.gas_reservoir,
@@ -1289,7 +1289,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 .output_data = self.lastOutputData(),
             };
 
-            if (executionRolledBack(result.status)) {
+            if (executionRolledBack(result.outcome.status)) {
                 self.state.revertToCheckpoint(checkpoint_state);
                 checkpoint_open = false;
                 try self.retainStateTransitionObserved(observer);
@@ -1300,8 +1300,8 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             }
 
             return .{
-                .status = result.status,
-                .cause = result.cause,
+                .outcome = result.outcome,
+                .frame_halt = result.frame_halt,
                 .gas_left = result.gas_left,
                 .gas_refund = result.gas_refund,
                 .gas_reservoir = result.gas_reservoir,

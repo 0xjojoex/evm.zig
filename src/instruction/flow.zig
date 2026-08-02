@@ -12,7 +12,7 @@ pub fn pc(frame: *CallFrame) !void {
 pub fn jump(frame: *CallFrame) !void {
     const offset = frame.pop() orelse return;
     frame.pc = std.math.cast(usize, offset) orelse {
-        frame.failWithFrameStatus(.invalid_jump);
+        frame.halt(.invalid_jump);
         return;
     };
     try afterJump(frame);
@@ -22,7 +22,7 @@ pub fn jumpi(frame: *CallFrame) !void {
     const offset, const condition = frame.popN(2) orelse return;
     if (condition != 0) {
         frame.pc = std.math.cast(usize, offset) orelse {
-            frame.failWithFrameStatus(.invalid_jump);
+            frame.halt(.invalid_jump);
             return;
         };
         try afterJump(frame);
@@ -31,7 +31,7 @@ pub fn jumpi(frame: *CallFrame) !void {
 
 pub fn afterJump(frame: *CallFrame) !void {
     if (!try frame.isValidJumpDest(frame.pc)) {
-        frame.failWithFrameStatus(.invalid_jump);
+        frame.halt(.invalid_jump);
     }
 }
 

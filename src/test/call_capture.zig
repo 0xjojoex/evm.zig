@@ -93,7 +93,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 3), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallKind.call, span.rows[0].kind);
     try std.testing.expectEqual(evmz.trace.CallKind.staticcall, span.rows[1].kind);
@@ -133,7 +133,7 @@ test "call capture closes an immediate insufficient-balance call" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.insufficient_balance, span.rows[1].status);
     try std.testing.expectEqual(@as(i64, 0), span.rows[1].gas_used);
@@ -169,8 +169,8 @@ test "root insufficient-balance capture preserves unspent gas" {
         )).expectCall();
         const span = try capture.finish();
 
-        try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
-        try std.testing.expectEqual(evmz.execution.TerminalCause.insufficient_balance, result.cause.?);
+        try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
+        try std.testing.expectEqual(evmz.execution.TerminalCause.insufficient_balance, result.outcome.cause);
         try std.testing.expectEqual(@as(i64, gas), result.gas_left);
         try std.testing.expectEqual(@as(usize, 1), span.rows.len);
         try std.testing.expectEqual(evmz.trace.CallStatus.insufficient_balance, span.rows[0].status);
@@ -212,8 +212,9 @@ test "call capture retains immediate depth-limit cause" {
     })).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
-    try std.testing.expectEqual(evmz.execution.TerminalCause.call_depth_exceeded, result.cause.?);
+    try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
+    try std.testing.expectEqual(evmz.execution.TerminalCause.call_depth_exceeded, result.outcome.cause);
+    try std.testing.expectEqual(@as(?evmz.execution.FrameHalt, null), result.frame_halt);
     try std.testing.expectEqual(@as(usize, 1), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.call_depth_exceeded, span.rows[0].status);
     try std.testing.expectEqual(@as(i64, 0), span.rows[0].gas_used);
@@ -259,7 +260,7 @@ test "call capture retains opcode-local CALL depth attempt" {
     })).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(@as(?u32, 0), span.rows[1].parent_index);
     try std.testing.expectEqual(evmz.Host.max_call_depth + 1, span.rows[1].depth);
@@ -361,7 +362,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         })).expectCall();
         const span = try capture.finish();
 
-        try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+        try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(usize, 2), span.rows.len);
         try std.testing.expectEqual(@as(?u32, 0), span.rows[1].parent_index);
         try std.testing.expectEqual(case.kind, span.rows[1].kind);
@@ -408,7 +409,7 @@ test "call capture distinguishes CREATE collision from rollback" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.contract_address_collision, span.rows[1].status);
     try std.testing.expect(!span.rows[1].checkpointReverted());
@@ -449,7 +450,7 @@ test "call capture retains invalid deployed code and local rollback" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.invalid_code, span.rows[1].status);
     try std.testing.expect(span.rows[1].checkpointReverted());
@@ -489,8 +490,9 @@ test "call capture retains Frontier committed code-store out-of-gas" {
     )).expectCreate();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
-    try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, result.cause.?);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, result.outcome.cause);
+    try std.testing.expectEqual(evmz.execution.FrameHalt.success, result.frame_halt.?);
     try std.testing.expect(!result.checkpoint_reverted);
     try std.testing.expectEqual(@as(usize, 1), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.code_store_out_of_gas_committed, span.rows[0].status);
@@ -547,8 +549,8 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
         )).expectCall();
         const span = try capture.finish();
 
-        try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status);
-        try std.testing.expectEqual(case.cause, result.cause.?);
+        try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
+        try std.testing.expectEqual(case.cause, result.outcome.cause);
         try std.testing.expectEqual(@as(usize, 1), span.rows.len);
         try std.testing.expectEqual(case.call_status, span.rows[0].status);
     }
@@ -584,7 +586,7 @@ test "call capture retains pinned write-protection category" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.write_protection, span.rows[1].status);
 }
@@ -657,7 +659,7 @@ test "root CREATE capture closes after runtime-code finalization" {
     )).expectCreate();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallKind.create, span.rows[0].kind);
     try std.testing.expectEqual(evmz.trace.CallStatus.success, span.rows[0].status);

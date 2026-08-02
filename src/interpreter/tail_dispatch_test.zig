@@ -34,7 +34,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         frame.frame.stack.push(case.below);
@@ -43,7 +43,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
@@ -78,14 +78,14 @@ test "prepared tail dispatch executes promoted mcopy and exp" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
@@ -119,14 +119,14 @@ fn expectPreparedStatus(
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(expected_status, result.status);
+    try std.testing.expectEqual(expected_status, result.status());
 }
 
 test "prepared tail dispatch rejects SAR before Constantinople" {
@@ -142,7 +142,7 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
     var frame = try Byzantium.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     frame.frame.stack.push(1);
@@ -151,7 +151,7 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
 
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
 }
 
 test "prepared tail dispatch reads frame-local values" {
@@ -187,7 +187,7 @@ test "prepared tail dispatch reads frame-local values" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -195,7 +195,7 @@ test "prepared tail dispatch reads frame-local values" {
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
@@ -228,7 +228,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         try frame.frame.replaceReturnData(&returned);
@@ -239,7 +239,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(Interpreter.Status.success, result.status);
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqualSlices(u8, case.expected, interpreter.call_frame.memory.readBytes(0, case.expected.len));
     }
 }
@@ -256,7 +256,7 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     try frame.frame.replaceReturnData(&.{ 1, 2 });
@@ -267,7 +267,62 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
 
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
+}
+
+test "prepared tail dispatch halts once on unrepresentable memory operands" {
+    // Tail helpers that halt the frame themselves must report `.done`. Reporting
+    // `.out_of_gas` sends the outer dispatch loop through a second
+    // `frame.halt(.out_of_gas)`, which `CallFrame.halt` rejects because the frame
+    // is no longer running. Running these in a Debug build is the guard.
+    const cases = [_]struct {
+        name: []const u8,
+        code: []const u8,
+    }{
+        // Operand wider than usize: wordToUsizeOrOog halts.
+        .{ .name = "MSTORE offset", .code = &evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE }) },
+        .{ .name = "MSTORE8 offset", .code = &evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE8 }) },
+        .{ .name = "MLOAD offset", .code = &evmz.t.bytecode(.{ .PUSH0, .NOT, .MLOAD }) },
+        .{ .name = "KECCAK256 size", .code = &evmz.t.bytecode(.{ .PUSH0, .NOT, .PUSH0, .KECCAK256 }) },
+        // memoryOffsetToUsizeOrOog halts once the size is representable.
+        .{ .name = "KECCAK256 offset", .code = &evmz.t.bytecode(.{ .PUSH1, 0x20, .PUSH0, .NOT, .KECCAK256 }) },
+        .{ .name = "RETURN size", .code = &evmz.t.bytecode(.{ .PUSH0, .NOT, .PUSH0, .RETURN }) },
+        // Representable offset whose end overflows: expandMemory halts, so
+        // memoryFailureStatus must not claim the frame still needs halting.
+        .{ .name = "MSTORE range end", .code = &evmz.t.bytecode(.{
+            .PUSH1, 0x2a, .PUSH8, 0xff, 0xff, 0xff,
+            0xff,   0xff, 0xff,   0xff, 0xff, .MSTORE,
+        }) },
+        .{ .name = "MLOAD range end", .code = &evmz.t.bytecode(.{
+            .PUSH8, 0xff, 0xff, 0xff,   0xff, 0xff,
+            0xff,   0xff, 0xff, .MLOAD,
+        }) },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, case.code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        msg.gas = 100_000;
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .source = .{ .bytecode = bytecode.view() },
+        });
+        defer frame.deinit();
+        var interpreter = frame.interpreter();
+
+        const result = try interpreter.execute();
+
+        try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
+        try std.testing.expectEqual(evmz.execution.FrameHalt.out_of_gas, result.halt);
+        try std.testing.expectEqual(@as(i64, 0), result.gas_left);
+    }
 }
 
 test "prepared tail dispatch returns and reverts frame-local output" {
@@ -292,7 +347,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         try frame.frame.memory.expandToFit(0, output.len);
@@ -303,7 +358,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(case.expected_status, result.status);
+        try std.testing.expectEqual(case.expected_status, result.status());
         try std.testing.expectEqualSlices(u8, &output, result.output_data);
     }
 }
@@ -323,14 +378,14 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
         var frame = try Homestead.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .bytecode = bytecode.view(),
+            .source = .{ .bytecode = bytecode.view() },
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
 
         const result = try interpreter.execute();
 
-        try std.testing.expectEqual(Interpreter.Status.invalid, result.status);
+        try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     }
 }
 
@@ -354,14 +409,14 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), mock_host.logs.items.len);
     const event_log = mock_host.logs.items[0];
     try std.testing.expectEqualSlices(u256, &.{ 4, 3, 2, 1 }, event_log.topics);
@@ -376,13 +431,13 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var static_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &static_host,
         .msg = &static_msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer static_frame.deinit();
     var static_interpreter = static_frame.interpreter();
 
     const static_result = try static_interpreter.execute();
 
-    try std.testing.expectEqual(Interpreter.Status.invalid, static_result.status);
+    try std.testing.expectEqual(Interpreter.Status.invalid, static_result.status());
     try std.testing.expectEqual(@as(usize, 0), static_host_state.logs.items.len);
 }

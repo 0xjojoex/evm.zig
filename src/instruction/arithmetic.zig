@@ -183,7 +183,7 @@ test "EXP byte gas comes from the exact spec" {
     var frame = try interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
@@ -192,7 +192,7 @@ test "EXP byte gas comes from the exact spec" {
 
     try bind(spec).exp(frame.frame);
 
-    try std.testing.expectEqual(interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(i64, 99_998), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }

@@ -36,7 +36,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expect(!executor.state.isAccountWarm(create_address));
 }
 
@@ -55,7 +55,7 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(20_000), 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 11_997), result.gas_left);
     try std.testing.expectEqual(@as(u256, 2), executor.getAccount(beneficiary).?.balance);
 }
@@ -82,7 +82,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
     defer executor.discardStateTransition();
     const result = try executor.executeTransactionRequest(request);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
 }
@@ -130,7 +130,7 @@ test "Amsterdam top-level delegated call charges cold target access" {
     try executor.beginTransaction(execution_context, sender, authority);
     const result = try executor.executeCallTransaction(sender, authority, &.{}, .legacy(10_000), 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 7_000), result.gas_left);
 }
 

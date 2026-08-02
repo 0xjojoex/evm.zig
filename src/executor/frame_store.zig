@@ -527,10 +527,10 @@ test "frame store owns parent returndata and resolves output from frame memory" 
     try frame_value.memory.expandToFit(0, 32);
     frame_value.memory.writeBytes(0, "xyz");
     frame_value.setOutputRange(0, 3);
-    try std.testing.expectEqualSlices(u8, "xyz", frame_value.getResult().output_data);
+    try std.testing.expectEqualSlices(u8, "xyz", frame_value.result().output_data);
 
     try frame_value.memory.expandToFit(4096, 1);
-    try std.testing.expectEqualSlices(u8, "xyz", frame_value.getResult().output_data);
+    try std.testing.expectEqualSlices(u8, "xyz", frame_value.result().output_data);
 
     store.pop();
     try std.testing.expectEqual(@as(usize, 0), store.ios.items[0].return_data.slice().len);

@@ -126,12 +126,12 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             const result = try self.executor.executePreparedCallTransaction(call_options);
             const end_ns = try common.monotonicNowNs();
 
-            if (Executor.executionRolledBack(result.status)) {
+            if (Executor.executionRolledBack(result.status())) {
                 self.executor.restoreBranch(&pre_execution);
             } else {
                 try self.executor.commitTransaction();
             }
-            if (result.status != .success) return error.CallFailed;
+            if (result.status() != .success) return error.CallFailed;
 
             return end_ns - start_ns;
         }
@@ -576,13 +576,13 @@ fn deployRuntimeForVm(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
-        .code = contract_code,
+        .source = .{ .code = contract_code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    if (result.status != .success) return error.DeployFailed;
+    if (result.status() != .success) return error.DeployFailed;
     return allocator.dupe(u8, result.output_data);
 }
 
@@ -697,7 +697,7 @@ fn timeRuntimeCallForVm(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
@@ -707,7 +707,7 @@ fn timeRuntimeCallForVm(
     const end_ns = try common.monotonicNowNs();
     frame.deinit();
 
-    if (result.status != .success) return error.CallFailed;
+    if (result.status() != .success) return error.CallFailed;
     return end_ns - start_ns;
 }
 

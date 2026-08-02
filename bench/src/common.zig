@@ -286,7 +286,7 @@ pub const CountingHost = struct {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.call += 1;
         return Host.Result.fromCall(.{
-            .status = .success,
+            .outcome = .{ .status = .success, .cause = .none },
             .gas_left = msg.gas,
             .gas_refund = 0,
             .output_data = &.{},

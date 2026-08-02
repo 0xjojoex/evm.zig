@@ -370,7 +370,7 @@ fn runBytecodeHostOpExact(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = bytecode,
+        .source = .{ .code = bytecode },
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
@@ -381,7 +381,7 @@ fn runBytecodeHostOpExact(
     const end_ns = try common.monotonicNowNs();
     frame.deinit();
 
-    if (result.status != .success) return error.BytecodeFailed;
+    if (result.status() != .success) return error.BytecodeFailed;
     return .{
         .elapsed_ns = end_ns - start_ns,
         .counters = counting_host.counters,

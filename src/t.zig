@@ -367,7 +367,7 @@ pub const MockHost = struct {
             .gas_left = 0,
             .gas_refund = 0,
             .output_data = &.{},
-            .status = .success,
+            .outcome = .{ .status = .success, .cause = .none },
         });
     }
 
@@ -539,14 +539,14 @@ pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const 
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = host,
         .msg = msg,
-        .code = code,
+        .source = .{ .code = code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
     return .{
-        .status = result.status,
+        .status = result.status(),
         .gas_left = result.gas_left,
         .gas_refund = result.gas_refund,
         .stack_top = interpreter.call_frame.stack.peek(),
@@ -590,13 +590,13 @@ pub fn expectStackByRevision(code: []const u8, comptime revision: evmz.eth.Revis
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = code,
+        .source = .{ .code = code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u256, expected, interpreter.call_frame.stack.asSlice());
 }
 
@@ -617,13 +617,13 @@ test "ORIGIN and GASPRICE each read transaction context from the host" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &bytecode(.{ .ORIGIN, .GASPRICE }),
+        .source = .{ .code = &bytecode(.{ .ORIGIN, .GASPRICE }) },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
 
     try std.testing.expectEqual(@as(u64, 2), mock_host.execution_context_reads);
 }
