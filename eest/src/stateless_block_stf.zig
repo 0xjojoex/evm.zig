@@ -328,7 +328,7 @@ fn runBlockExact(
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const fixture_config = try parseFixtureConfig(fixture, revision);
+    const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
     const genesis_header = asObject(fixture.get("genesisBlockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
     const block_header = asObject(block.get("blockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
     const witness = asObject(fixture_block.get("executionWitness") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
@@ -364,12 +364,12 @@ fn runBlockExact(
             .gas_limit = try u64Field(&block_header, "gasLimit"),
             .prev_randao = try u256HashField(&block_header, "mixHash"),
             .base_fee = try optionalU256Field(&block_header, "baseFeePerGas") orelse 0,
-            .blob_base_fee = try blobBaseFee(
+            .blob_base_fee = fixture_common.blobBaseFee(
                 revision,
-                fixture_config.blob_schedule,
-                try optionalU256Field(&block_header, "excessBlobGas"),
-            ),
-            .blob_schedule = fixture_config.blob_schedule,
+                fixture_config.blob_params,
+                try optionalU256Field(&block_header, "excessBlobGas") orelse 0,
+            ) orelse return error.BlobGasOverflow,
+            .blob_params = fixture_config.blob_params,
         },
         .block_hash_source = block_hash_source,
         .block_header = .{
@@ -450,18 +450,8 @@ fn validateFixtureParent(genesis_number: u64, genesis_hash: [32]u8, number: u64,
 }
 
 fn fixtureRevision(fixture: *const JsonObject) !evmz.eth.Revision {
-    const network = jsonString(fixture.get("network") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
+    const network = fixture_common.fixtureForkName(fixture) orelse return error.MalformedFixture;
     return parseStateFork(network) orelse error.UnsupportedFork;
-}
-
-fn blobBaseFee(
-    comptime revision: evmz.eth.Revision,
-    blob_schedule: ?evmz.transaction.BlobSchedule,
-    excess_blob_gas: ?u256,
-) !u256 {
-    if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
-    return evmz.transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas orelse 0) orelse error.BlobGasOverflow;
 }
 
 fn parseByteList(allocator: std.mem.Allocator, array: JsonArray) ![]const []const u8 {

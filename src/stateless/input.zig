@@ -45,7 +45,7 @@ pub const Block = struct {
 pub const Input = struct {
     /// Transaction replay domain and `CHAINID` opcode value.
     chain_id: u256,
-    blob_schedule: ?transaction.BlobSchedule = null,
+    blob_params: ?transaction.BlobParams = null,
     /// The block number and timestamp live here as execution/header facts, not
     /// as fork-selection configuration.
     block: Block,

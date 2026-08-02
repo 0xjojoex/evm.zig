@@ -110,7 +110,7 @@ test "stateless wire v1 declares Amsterdam semantics at its type boundary" {
     const input = try smoke.amsterdamSmokeInput(scratch, .{});
     const normalized = try wire.normalize(scratch, input);
     try std.testing.expectEqual(.amsterdam, wire.revision);
-    try std.testing.expect(normalized.blob_schedule == null);
+    try std.testing.expect(normalized.blob_params == null);
 }
 
 test "stateless wire v1 validates chain configuration after decoding" {

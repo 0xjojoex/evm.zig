@@ -151,8 +151,8 @@ fn validateExact(
             .gas_limit = block.gas_limit,
             .prev_randao = block.prev_randao,
             .base_fee = block.base_fee_per_gas,
-            .blob_base_fee = try currentBlobBaseFeeExact(revision, input.blob_schedule, block),
-            .blob_schedule = input.blob_schedule,
+            .blob_base_fee = try currentBlobBaseFeeExact(revision, input.blob_params, block),
+            .blob_params = input.blob_params,
         },
         .block_hash_source = header_chain.source(),
         .block_header = .{
@@ -255,16 +255,16 @@ fn blockShapeValid(revision: Revision, block: input_mod.Block) bool {
 
 fn currentBlobBaseFeeExact(
     comptime revision: Revision,
-    blob_schedule: ?transaction.BlobSchedule,
+    blob_params: ?transaction.BlobParams,
     block: input_mod.Block,
 ) Error!u256 {
     if (!revision.isImpl(.cancun)) return 0;
     const excess_blob_gas = block.excess_blob_gas orelse return error.InvalidHeaderWitness;
-    if (blob_schedule) |schedule| {
-        return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.InvalidHeaderWitness;
+    if (blob_params) |params| {
+        return transaction.blobBaseFeeForParams(params, excess_blob_gas) orelse error.InvalidHeaderWitness;
     }
-    const schedule = eth_spec.specAt(revision).transaction.blob_schedule orelse return 0;
-    return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.InvalidHeaderWitness;
+    const params = eth_spec.specAt(revision).transaction.blob_params orelse return 0;
+    return transaction.blobBaseFeeForParams(params, excess_blob_gas) orelse error.InvalidHeaderWitness;
 }
 
 fn expectedExcessBlobGas(revision: Revision, block: input_mod.Block) Error!?u256 {
