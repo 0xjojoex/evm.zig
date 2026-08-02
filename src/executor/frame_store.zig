@@ -85,6 +85,9 @@ pub fn push(
 
     var frame_options = options;
     frame_options.io = &self.ios.items[index];
+    // A constructed row lives until FrameStore.deinit; retain its gas-charged
+    // memory high-water for later siblings at the same depth.
+    frame_options.memory_retain_capacity = true;
     const stack_base = self.nextStackBase();
     try self.ensureStackRange(allocator, stack_base);
     errdefer self.restoreStackRange(index);
@@ -121,7 +124,7 @@ pub fn pop(self: *FrameStore) void {
     std.debug.assert(row_count != 0);
     const index = row_count - 1;
 
-    self.frames.items[index].deinit();
+    self.frames.items[index].deinitRetainingMemoryCapacity();
     self.frames.items.len = index;
     self.controls.items.len = index;
     self.messages.items.len = index;
@@ -366,6 +369,8 @@ test "frame store rebinds active rows after growth" {
         &second_msg,
     );
     try store.frame(second).stack.push(44);
+    try store.frame(second).memory.expandToFit(0, 32);
+    const second_memory_ptr = store.frame(second).memory.bytes.items.ptr;
 
     try std.testing.expect(store.frame(first).msg == &store.messages.items[first]);
     try std.testing.expectEqual(@as(u32, 0), store.frame(first).stack.base_word);
@@ -384,12 +389,16 @@ test "frame store rebinds active rows after growth" {
     store.pop();
     const sibling = try pushTestFrame(
         &store,
-        std.testing.allocator,
+        no_growth_allocator,
         &host,
         &second_msg,
     );
     try std.testing.expectEqual(sibling_base, store.frame(sibling).stack.base_word);
     try std.testing.expectEqual(@as(u16, 0), store.frame(sibling).stack.len);
+    try std.testing.expectEqual(@as(usize, 0), store.frame(sibling).memory.len());
+    try store.frame(sibling).memory.expandToFit(0, 32);
+    try std.testing.expectEqual(second_memory_ptr, store.frame(sibling).memory.bytes.items.ptr);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), store.frame(sibling).memory.readBytes(0, 32));
 }
 
 test "stack arena growth failure leaves the parent row usable" {

@@ -18,13 +18,18 @@ const Options = struct {
     access_list_addresses: usize = 0,
     access_list_storage_keys: usize = 0,
     commit: bool = true,
+    resources: bool = false,
+    reuse_transaction_capacity: bool = false,
     summary: bool = false,
 };
 
 const Case = enum {
     noop,
+    log0_rows,
+    log0_data32,
     sstore_same,
     sstore_unique,
+    tstore_journal,
 };
 
 const RunResult = struct {
@@ -32,6 +37,94 @@ const RunResult = struct {
     gas_used: u64,
     block_gas_used: u64,
     tx_count: u64,
+};
+
+const ResourceMetrics = struct {
+    alloc_calls: usize = 0,
+    resize_calls: usize = 0,
+    remap_calls: usize = 0,
+    free_calls: usize = 0,
+    peak_live_bytes: usize = 0,
+    total_allocated_bytes: usize = 0,
+};
+
+const MeteredAllocator = struct {
+    child: std.mem.Allocator,
+    metrics: ResourceMetrics = .{},
+    live_bytes: usize = 0,
+
+    fn init(child: std.mem.Allocator) MeteredAllocator {
+        return .{ .child = child };
+    }
+
+    fn allocator(self: *MeteredAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *MeteredAllocator = @ptrCast(@alignCast(ctx));
+        const result = self.child.rawAlloc(len, alignment, ra) orelse return null;
+        self.metrics.alloc_calls += 1;
+        self.metrics.total_allocated_bytes += len;
+        self.live_bytes += len;
+        self.metrics.peak_live_bytes = @max(self.metrics.peak_live_bytes, self.live_bytes);
+        return result;
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *MeteredAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(memory, alignment, new_len, ra)) return false;
+        self.metrics.resize_calls += 1;
+        self.adjustLive(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *MeteredAllocator = @ptrCast(@alignCast(ctx));
+        const result = self.child.rawRemap(memory, alignment, new_len, ra) orelse return null;
+        self.metrics.remap_calls += 1;
+        self.adjustLive(memory.len, new_len);
+        return result;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *MeteredAllocator = @ptrCast(@alignCast(ctx));
+        std.debug.assert(memory.len <= self.live_bytes);
+        self.metrics.free_calls += 1;
+        self.live_bytes -= memory.len;
+        self.child.rawFree(memory, alignment, ra);
+    }
+
+    fn adjustLive(self: *MeteredAllocator, old_len: usize, new_len: usize) void {
+        if (new_len >= old_len) {
+            const growth = new_len - old_len;
+            self.metrics.total_allocated_bytes += growth;
+            self.live_bytes += growth;
+            self.metrics.peak_live_bytes = @max(self.metrics.peak_live_bytes, self.live_bytes);
+        } else {
+            self.live_bytes -= old_len - new_len;
+        }
+    }
 };
 
 const PreparedAccessList = struct {
@@ -105,6 +198,10 @@ pub fn main(init: std.process.Init) !void {
             options.access_list_storage_keys = try parseUsize(value);
         } else if (std.mem.eql(u8, arg, "--no-commit")) {
             options.commit = false;
+        } else if (std.mem.eql(u8, arg, "--resources")) {
+            options.resources = true;
+        } else if (std.mem.eql(u8, arg, "--reuse-transaction-capacity")) {
+            options.reuse_transaction_capacity = true;
         } else if (std.mem.eql(u8, arg, "--summary")) {
             options.summary = true;
         } else {
@@ -118,18 +215,22 @@ pub fn main(init: std.process.Init) !void {
 
     var warmup: usize = 0;
     while (warmup < options.warmups) : (warmup += 1) {
-        _ = try runLifecycle(allocator, options);
+        _ = try runLifecycle(allocator, allocator, options);
     }
 
-    try stdout.print("suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit\n", .{});
+    try stdout.print("suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit,alloc_calls,resize_calls,remap_calls,free_calls,peak_live_bytes,total_allocated_bytes\n", .{});
     var repeat: usize = 0;
     while (repeat < options.repeats) : (repeat += 1) {
-        const result = try runLifecycle(allocator, options);
+        var meter = MeteredAllocator.init(allocator);
+        const runtime_allocator = if (options.resources) meter.allocator() else allocator;
+        const result = try runLifecycle(allocator, runtime_allocator, options);
+        std.debug.assert(!options.resources or meter.live_bytes == 0);
+        const resources = if (options.resources) meter.metrics else ResourceMetrics{};
         const ns_per_tx = @as(f64, @floatFromInt(result.elapsed_ns)) / @as(f64, @floatFromInt(options.txs));
         try stdout.print(
-            "block-lifecycle,{s},{s},{s},{d},{d},{d},{d},{d},{d:.3},{d},{d},{d},{s}\n",
+            "block-lifecycle,{s},{s},{s},{d},{d},{d},{d},{d},{d:.3},{d},{d},{d},{s},{d},{d},{d},{d},{d},{d}\n",
             .{
-                "growable",
+                if (options.reuse_transaction_capacity) "retained" else "growable",
                 caseName(options.case),
                 @tagName(options.spec),
                 repeat,
@@ -142,6 +243,12 @@ pub fn main(init: std.process.Init) !void {
                 result.block_gas_used,
                 result.tx_count,
                 if (options.commit) "true" else "false",
+                resources.alloc_calls,
+                resources.resize_calls,
+                resources.remap_calls,
+                resources.free_calls,
+                resources.peak_live_bytes,
+                resources.total_allocated_bytes,
             },
         );
     }
@@ -149,9 +256,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.summary) {
         std.debug.print(
-            "policy={s} case={s} spec={s} warmups={d} repeats={d} txs={d} tx_gas_limit={d} block_gas_limit={d} access_list_addresses={d} access_list_storage_keys={d} commit={s}\n",
+            "policy={s} case={s} spec={s} warmups={d} repeats={d} txs={d} tx_gas_limit={d} block_gas_limit={d} access_list_addresses={d} access_list_storage_keys={d} commit={s} resources={s}\n",
             .{
-                "growable",
+                if (options.reuse_transaction_capacity) "retained" else "growable",
                 caseName(options.case),
                 @tagName(options.spec),
                 options.warmups,
@@ -162,27 +269,44 @@ pub fn main(init: std.process.Init) !void {
                 options.access_list_addresses,
                 options.access_list_storage_keys,
                 if (options.commit) "true" else "false",
+                if (options.resources) "true" else "false",
             },
         );
     }
 }
 
-fn runLifecycle(allocator: std.mem.Allocator, options: Options) !RunResult {
+fn runLifecycle(
+    setup_allocator: std.mem.Allocator,
+    runtime_allocator: std.mem.Allocator,
+    options: Options,
+) !RunResult {
     return switch (options.spec) {
-        inline else => |revision| runGrowableLifecycle(evmz.Vm(evmz.eth.specAt(revision)), allocator, options),
+        inline else => |revision| runGrowableLifecycle(
+            evmz.Vm(evmz.eth.specAt(revision)),
+            setup_allocator,
+            runtime_allocator,
+            options,
+        ),
     };
 }
 
-fn runGrowableLifecycle(comptime Engine: type, allocator: std.mem.Allocator, options: Options) !RunResult {
-    var memory = MemoryStore.init(allocator);
+fn runGrowableLifecycle(
+    comptime Engine: type,
+    setup_allocator: std.mem.Allocator,
+    runtime_allocator: std.mem.Allocator,
+    options: Options,
+) !RunResult {
+    var memory = MemoryStore.init(setup_allocator);
     defer memory.deinit();
     try seedState(&memory, options.case);
-    var access_list = try prepareAccessList(allocator, options);
-    defer access_list.deinit(allocator);
+    var access_list = try prepareAccessList(setup_allocator, options);
+    defer access_list.deinit(setup_allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var executor = Engine.Executor.init(allocator, .{ .state_reader = memory.reader() });
+    var executor = Engine.Executor.init(runtime_allocator, .{ .state_reader = memory.reader() });
     errdefer executor.deinit();
+    // No matching end on error paths: `executor.deinit` frees the container.
+    if (options.reuse_transaction_capacity) executor.beginTransactionCapacityReuse();
 
     var block = try Engine.BlockExecution.init(
         &executor,
@@ -190,6 +314,7 @@ fn runGrowableLifecycle(comptime Engine: type, allocator: std.mem.Allocator, opt
     );
     defer block.discardIfUnfinished();
     const block_result = try runTransactions(&block, options, access_list.entries);
+    if (options.reuse_transaction_capacity) executor.endTransactionCapacityReuse();
     if (options.commit) try commitChanges(&executor, &memory);
     executor.deinit();
     const end_ns = try common.monotonicNowNs();
@@ -306,10 +431,31 @@ fn runTransactions(block: anytype, options: Options, access_list: []const evmz.t
 fn contractCode(case: Case) []const u8 {
     return switch (case) {
         .noop => &.{0x00},
+        .log0_rows => &log0_rows_code,
+        .log0_data32 => &log0_data32_code,
         .sstore_same => &.{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x00 },
         .sstore_unique => &.{ 0x60, 0x01, 0x60, 0x00, 0x35, 0x55, 0x00 },
+        .tstore_journal => &tstore_journal_code,
     };
 }
+
+const log0_rows_code =
+    [_]u8{ 0x61, 0x03, 0xe8, 0x5b } ++
+    ([_]u8{ 0x60, 0x00, 0x60, 0x00, 0xa0 } ** 8) ++
+    [_]u8{ 0x60, 0x01, 0x90, 0x03, 0x80, 0x61, 0x00, 0x03, 0x57, 0x00 };
+
+const log0_data32_code =
+    [_]u8{ 0x61, 0x03, 0xe8, 0x5b } ++
+    ([_]u8{ 0x60, 0x20, 0x60, 0x00, 0xa0 } ** 8) ++
+    [_]u8{ 0x60, 0x01, 0x90, 0x03, 0x80, 0x61, 0x00, 0x03, 0x57, 0x00 };
+
+const tstore_journal_code =
+    [_]u8{ 0x61, 0x03, 0xe8, 0x5b } ++
+    ([_]u8{
+        0x60, 0x01, 0x60, 0x00, 0x5d,
+        0x60, 0x00, 0x60, 0x00, 0x5d,
+    } ** 4) ++
+    [_]u8{ 0x60, 0x01, 0x90, 0x03, 0x80, 0x61, 0x00, 0x03, 0x57, 0x00 };
 
 fn txInput(case: Case, index: usize, buffer: *[32]u8) []const u8 {
     if (case != .sstore_unique) return &.{};
@@ -340,8 +486,11 @@ fn parseCase(value: []const u8) ?Case {
 fn caseName(case: Case) []const u8 {
     return switch (case) {
         .noop => "noop",
+        .log0_rows => "log0-rows",
+        .log0_data32 => "log0-data32",
         .sstore_same => "sstore-same",
         .sstore_unique => "sstore-unique",
+        .tstore_journal => "tstore-journal",
     };
 }
 
@@ -371,7 +520,8 @@ fn printUsage() void {
         \\  zig build block-lifecycle -- [options]
         \\
         \\Options:
-        \\  --case <name>                noop, sstore-same, sstore-unique; default sstore-unique
+        \\  --case <name>                noop, log0-rows, log0-data32, sstore-same,
+        \\                               sstore-unique, tstore-journal; default sstore-unique
         \\  --spec <name>                fork spec, default amsterdam
         \\  --repeats <n>                measured repeats, default 5
         \\  --warmups <n>                untimed warmups, default 1
@@ -381,6 +531,8 @@ fn printUsage() void {
         \\  --access-list-addresses <n>  synthetic access-list address entries per tx, default 0
         \\  --access-list-storage-keys <n> synthetic storage keys spread across entries, default 0
         \\  --no-commit                  skip final state persistence
+        \\  --resources                  meter executor allocation calls and requested live bytes
+        \\  --reuse-transaction-capacity retain one cleared transaction container across the block
         \\  --summary                    print resolved options to stderr
         \\  EVMZ_BENCH_ALLOCATOR=smp     opt into std.heap.smp_allocator for allocator probes
         \\
@@ -392,6 +544,24 @@ fn printUsage() void {
 
 test "block lifecycle parser accepts dashed names" {
     try std.testing.expectEqual(Case.sstore_unique, parseCase("sstore-unique").?);
+    try std.testing.expectEqual(Case.log0_rows, parseCase("log0-rows").?);
+    try std.testing.expectEqual(Case.tstore_journal, parseCase("tstore-journal").?);
+}
+
+test "resource meter tracks requested live bytes" {
+    var meter = MeteredAllocator.init(std.testing.allocator);
+    const allocator = meter.allocator();
+
+    const first = try allocator.alloc(u8, 10);
+    const second = try allocator.alloc(u8, 20);
+    try std.testing.expectEqual(@as(usize, 2), meter.metrics.alloc_calls);
+    try std.testing.expectEqual(@as(usize, 30), meter.metrics.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 30), meter.metrics.peak_live_bytes);
+
+    allocator.free(second);
+    allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 2), meter.metrics.free_calls);
+    try std.testing.expectEqual(@as(usize, 0), meter.live_bytes);
 }
 
 test "block lifecycle unique calldata encodes tx index" {

@@ -500,6 +500,15 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             self.endPreparedCodeExecution();
         }
 
+        /// Reuse one cleared transaction container across an ordered batch.
+        pub fn beginTransactionCapacityReuse(self: *Self) void {
+            self.state.beginTransactionCapacityReuse();
+        }
+
+        pub fn endTransactionCapacityReuse(self: *Self) void {
+            self.state.endTransactionCapacityReuse();
+        }
+
         pub fn reserveAcceptedAccessHint(self: *Self, hint: TrackedState.AccessHint) !void {
             try self.state.reserveAcceptedAccessHint(hint);
         }
