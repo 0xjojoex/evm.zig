@@ -1164,6 +1164,13 @@ fn serialFold(
     var blob_gas_used: u64 = 0;
     const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_schedule);
 
+    // BAL counts are block-wide, so let the first transaction establish the
+    // real local shape and retain that capacity only when another can reuse it.
+    // Error paths need no matching end: `executor.deinit` frees the container.
+    const reuse_transaction_capacity =
+        input.transactions.len > 1 and claimed_block_access_counts != null;
+    if (reuse_transaction_capacity) executor.beginTransactionCapacityReuse();
+
     for (input.transactions, 0..) |entry, tx_index| {
         if (capture_steps) try capture_context.beginTrace(.{
             .tape = input.capture.?.steps.?.tape,
@@ -1340,6 +1347,8 @@ fn serialFold(
             try steps.tape.reset();
         }
     }
+    // Release before the post-execution system phase, which reuses its own.
+    if (reuse_transaction_capacity) executor.endTransactionCapacityReuse();
     try observer.finish();
 
     const effective_parent_blob_gas = if (revision.isImpl(.cancun))

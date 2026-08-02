@@ -213,23 +213,36 @@ dispatch comparisons.
 
 ```sh
 cd bench
-zig build block-lifecycle -- --policy growable --txs 1000 --summary
-zig build block-lifecycle -- --policy exact-120m --txs 1000 --summary
+zig build block-lifecycle -- --txs 1000 --summary
 zig build block-lifecycle -- --case noop --txs 50 --access-list-addresses 256 --summary
 zig build block-lifecycle -- --case noop --txs 50 --access-list-storage-keys 256 --summary
+zig build block-lifecycle -- \
+  --case log0-rows --txs 2 --tx-gas-limit 3200000 \
+  --resources --reuse-transaction-capacity
+zig build block-lifecycle -- \
+  --case tstore-journal --txs 2 --tx-gas-limit 1000000 \
+  --resources --reuse-transaction-capacity
 ```
 
 The default case is `sstore-unique`, where each transaction writes a distinct
 storage key through normal transaction execution. Use `--case noop` for lifecycle
 overhead or `--case sstore-same` for repeated writes to the same slot. The
-synthetic access-list flags model declared resource hints without changing the
+`log0-rows` and `log0-data32` cases each emit 8,000 logs per transaction,
+separating packed-row growth from 256 KiB of log-data growth.
+`tstore-journal` performs 8,000 alternating transient writes per transaction so
+every operation grows the undo journal. `--reuse-transaction-capacity` applies
+the same cleared-container lifetime used by the BAL serial fold.
+`--resources` meters executor allocation calls and requested live bytes while
+keeping pre-state construction outside the meter.
+
+The synthetic access-list flags model declared resource hints without changing the
 fixture protocol: `--access-list-addresses` creates distinct account entries,
 while `--access-list-storage-keys` spreads keys across those entries, or uses the
 benchmark contract as the single entry when no address count is supplied. Stdout
 is CSV:
 
 ```text
-suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
+suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit,alloc_calls,resize_calls,remap_calls,free_calls,peak_live_bytes,total_allocated_bytes
 ```
 
 ## Host-boundary runner
