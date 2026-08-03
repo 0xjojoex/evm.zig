@@ -476,7 +476,7 @@ const semantics = struct {
     }
 };
 
-const cancun_blob_params: tx_blob.BlobParams = .{
+const cancun_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 3,
     .max = 6,
     .max_per_transaction = 6,
@@ -488,7 +488,7 @@ const cancun_blob_params: tx_blob.BlobParams = .{
     .hash_version = 0x01,
 };
 
-const prague_blob_params: tx_blob.BlobParams = .{
+const prague_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 6,
     .max = 9,
     .max_per_transaction = 9,
@@ -500,7 +500,7 @@ const prague_blob_params: tx_blob.BlobParams = .{
     .hash_version = 0x01,
 };
 
-const osaka_blob_params: tx_blob.BlobParams = .{
+const osaka_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 6,
     .max = 9,
     .max_per_transaction = 6,
@@ -512,7 +512,7 @@ const osaka_blob_params: tx_blob.BlobParams = .{
     .hash_version = 0x01,
 };
 
-const amsterdam_blob_params: tx_blob.BlobParams = .{
+const amsterdam_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 14,
     .max = 21,
     .max_per_transaction = 6,
@@ -531,7 +531,7 @@ pub const frontier: Spec = .{
         .requiresAuthorizationList = semantics.requiresAuthorizationList,
         .rejectsNonDelegatingSenderCode = semantics.rejectsSenderCodeBeforeLondon,
         .isDelegationCode = semantics.noDelegationCode,
-        .blob_params = null,
+        .blob_schedule = null,
         .max_initcode_size = std.math.maxInt(usize),
         .intrinsicBaseGas = semantics.legacyIntrinsicBase,
         .create_intrinsic_gas = 0,
@@ -715,7 +715,7 @@ pub const shanghai = merge_fork.extend(.{
 pub const cancun = shanghai.extend(.{
     .transaction = .{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob }),
-        .blob_params = .{ .replace = cancun_blob_params },
+        .blob_schedule = .{ .replace = cancun_blob_schedule },
     },
     .block = .{ .beforeBlock = semantics.cancunBeforeBlock },
     .self_destruct = .{
@@ -730,7 +730,7 @@ pub const prague = cancun.extend(.{
     .transaction = .{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob, .set_code }),
         .isDelegationCode = semantics.eip7702DelegationCode,
-        .blob_params = .{ .replace = prague_blob_params },
+        .blob_schedule = .{ .replace = prague_blob_schedule },
         .authorization_intrinsic_gas = eth_tx.authorization_intrinsic_gas,
         .floorGas = semantics.pragueFloor,
     },
@@ -741,7 +741,7 @@ pub const prague = cancun.extend(.{
 
 pub const osaka = prague.extend(.{
     .transaction = .{
-        .blob_params = .{ .replace = osaka_blob_params },
+        .blob_schedule = .{ .replace = osaka_blob_schedule },
         .regular_gas_cap = .{ .replace = eth_tx.max_transaction_gas_limit },
         .total_gas_limit = .{ .replace = eth_tx.max_transaction_gas_limit },
     },
@@ -751,7 +751,7 @@ pub const osaka = prague.extend(.{
 
 pub const amsterdam = osaka.extend(.{
     .transaction = .{
-        .blob_params = .{ .replace = amsterdam_blob_params },
+        .blob_schedule = .{ .replace = amsterdam_blob_schedule },
         .max_initcode_size = eth_tx.amsterdam_max_initcode_size,
         .intrinsicBaseGas = semantics.amsterdamIntrinsicBase,
         .create_intrinsic_gas = 0,

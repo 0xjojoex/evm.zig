@@ -541,8 +541,6 @@ test "EEST fixture config selects Amsterdam blob params" {
     const osaka = try parseFixtureConfig(&obj, .osaka, null);
     try std.testing.expectEqual(@as(u64, 9), osaka.blob_params.?.target);
     try std.testing.expectEqual(@as(u64, 12), osaka.blob_params.?.max);
-    try std.testing.expectEqual(evmz.eth.transaction.min_blob_base_fee, osaka.blob_params.?.min_base_fee);
-    try std.testing.expectEqual(evmz.eth.transaction.blob_base_cost, osaka.blob_params.?.execution_base_cost);
 
     const amsterdam = try parseFixtureConfig(&obj, .amsterdam, null);
     try std.testing.expectEqual(@as(u256, 42), amsterdam.chain_id);
@@ -559,12 +557,6 @@ test "EEST fixture config selects Amsterdam blob params" {
     const bpo1 = try parseFixtureConfig(&obj, .osaka, "BPO1");
     try std.testing.expectEqual(@as(u64, 15), bpo1.blob_params.?.target);
     try std.testing.expectEqual(@as(u256, 5), bpo1.blob_params.?.base_fee_update_fraction);
-
-    // Fork constants outside the three BPO values still come from the revision.
-    try std.testing.expectEqual(
-        evmz.eth.transaction.min_blob_base_fee,
-        bpo2.blob_params.?.min_base_fee,
-    );
 
     // An unknown name (transition network) falls back, never fails.
     const transition = try parseFixtureConfig(&obj, .osaka, "OsakaToBPO1AtTime15k");

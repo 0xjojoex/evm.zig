@@ -100,7 +100,6 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .value = view.value,
                 .blob_base_fee = input.env.blob_base_fee,
                 .blob_count = view.blob_hashes.len,
-                .blob_params = input.env.blob_params,
             });
 
             const created_address = if (view.to == null)

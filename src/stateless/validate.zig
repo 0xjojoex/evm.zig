@@ -260,11 +260,9 @@ fn currentBlobBaseFeeExact(
 ) Error!u256 {
     if (!revision.isImpl(.cancun)) return 0;
     const excess_blob_gas = block.excess_blob_gas orelse return error.InvalidHeaderWitness;
-    if (blob_params) |params| {
-        return transaction.blobBaseFeeForParams(params, excess_blob_gas) orelse error.InvalidHeaderWitness;
-    }
-    const params = eth_spec.specAt(revision).transaction.blob_params orelse return 0;
-    return transaction.blobBaseFeeForParams(params, excess_blob_gas) orelse error.InvalidHeaderWitness;
+    const spec_schedule = eth_spec.specAt(revision).transaction.blob_schedule orelse return 0;
+    const schedule = if (blob_params) |params| spec_schedule.withParams(params) else spec_schedule;
+    return schedule.blobBaseFeeForSchedule(excess_blob_gas) orelse error.InvalidHeaderWitness;
 }
 
 fn expectedExcessBlobGas(revision: Revision, block: input_mod.Block) Error!?u256 {

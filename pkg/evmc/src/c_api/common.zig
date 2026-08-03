@@ -22,7 +22,7 @@ pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
     return std.mem.readInt(u256, &b.bytes, .big);
 }
 
-pub const max_blob_hashes: usize = @intCast(evmz.eth.amsterdam.transaction.blob_params.?.max);
+pub const max_blob_hashes: usize = @intCast(evmz.eth.amsterdam.transaction.blob_schedule.?.max);
 
 pub fn toEvmcBytes32(value: ?u256) evmc.evmc_bytes32 {
     var result = std.mem.zeroes(evmc.evmc_bytes32);

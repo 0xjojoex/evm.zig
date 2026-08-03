@@ -35,7 +35,7 @@ pub const TransactionSpec = struct {
     /// Recognizes an EIP-7702 delegation designation in account code.
     isDelegationCode: *const fn ([]const u8) bool,
     /// EIP-4844 blob gas accounting; null while blobs do not exist.
-    blob_params: ?tx_blob.BlobParams,
+    blob_schedule: ?tx_blob.BlobSchedule,
     /// EIP-3860 initcode ceiling for create transactions; maxInt is uncapped.
     max_initcode_size: usize,
     /// Base intrinsic gas for the transaction shape; null on overflow.
@@ -74,7 +74,7 @@ pub const TransactionSpec = struct {
         requiresAuthorizationList: ?@FieldType(TransactionSpec, "requiresAuthorizationList") = null,
         rejectsNonDelegatingSenderCode: ?@FieldType(TransactionSpec, "rejectsNonDelegatingSenderCode") = null,
         isDelegationCode: ?@FieldType(TransactionSpec, "isDelegationCode") = null,
-        blob_params: OptionalPatch(tx_blob.BlobParams) = .inherit,
+        blob_schedule: OptionalPatch(tx_blob.BlobSchedule) = .inherit,
         max_initcode_size: ?usize = null,
         intrinsicBaseGas: ?@FieldType(TransactionSpec, "intrinsicBaseGas") = null,
         create_intrinsic_gas: ?u64 = null,

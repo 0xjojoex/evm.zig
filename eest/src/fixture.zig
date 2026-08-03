@@ -146,7 +146,7 @@ pub fn parseFixtureConfig(
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
     if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
-        result.blob_params = try parseBlobParams(revision, value);
+        result.blob_params = try parseBlobParams(value);
     }
     return result;
 }
@@ -179,17 +179,14 @@ fn blobScheduleEntry(
     return schedules.get(revision_key orelse return null);
 }
 
-fn parseBlobParams(
-    comptime revision: evmz.eth.Revision,
-    value: JsonValue,
-) !evmz.transaction.BlobParams {
+fn parseBlobParams(value: JsonValue) !evmz.transaction.BlobParams {
     const params = asObject(value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&params, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = evmz.eth.specAt(revision).transaction.blob_params orelse return error.MalformedFixture;
-    result.target = try parseU64FromValue(params.get("target") orelse return error.MalformedFixture);
-    result.max = try parseU64FromValue(params.get("max") orelse return error.MalformedFixture);
-    result.base_fee_update_fraction = try parseU256FromValue(params.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);
-    return result;
+    return .{
+        .target = try parseU64FromValue(params.get("target") orelse return error.MalformedFixture),
+        .max = try parseU64FromValue(params.get("max") orelse return error.MalformedFixture),
+        .base_fee_update_fraction = try parseU256FromValue(params.get("baseFeeUpdateFraction") orelse return error.MalformedFixture),
+    };
 }
 
 pub fn blobBaseFee(
@@ -198,8 +195,9 @@ pub fn blobBaseFee(
     excess_blob_gas: u256,
 ) ?u256 {
     if (!revision.isImpl(.cancun)) return 0;
-    const params = blob_params orelse evmz.eth.specAt(revision).transaction.blob_params orelse return 0;
-    return evmz.transaction.blobBaseFeeForParams(params, excess_blob_gas);
+    const spec_schedule = evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
+    const schedule = if (blob_params) |params| spec_schedule.withParams(params) else spec_schedule;
+    return schedule.blobBaseFeeForSchedule(excess_blob_gas);
 }
 
 pub fn parseAddressFromValue(value: JsonValue) !Address {

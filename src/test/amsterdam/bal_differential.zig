@@ -421,8 +421,12 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     defer blob_store.deinit();
     const empty_claim = try bal.encodeAlloc(std.testing.allocator, &.{});
     defer std.testing.allocator.free(empty_claim);
-    var blob_params = evmz.eth.amsterdam.transaction.blob_params.?;
-    blob_params.max = 1;
+    const blob_schedule = evmz.eth.amsterdam.transaction.blob_schedule.?;
+    const blob_params = evmz.transaction.BlobParams{
+        .target = blob_schedule.target,
+        .max = 1,
+        .base_fee_update_fraction = blob_schedule.base_fee_update_fraction,
+    };
     var blob_report = bal.Report{};
     const blob_rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{
