@@ -10,7 +10,6 @@ const address = @import("../address.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const execution = @import("../execution.zig");
 const executor = @import("../executor.zig");
-const interpreter = @import("../Interpreter.zig");
 const transaction = @import("../transaction.zig");
 const transaction_prepare = @import("prepare.zig");
 const transaction_validation = @import("validation.zig");
@@ -85,7 +84,7 @@ pub fn bind(
                 return true;
             }
 
-            fn foldInto(self: @This(), result: *interpreter.Result) void {
+            fn foldInto(self: @This(), result: *execution.ExecutionResult) void {
                 const regular_refund = std.math.cast(i64, self.regular_refund) orelse std.math.maxInt(i64);
                 result.gas_refund = std.math.add(i64, result.gas_refund, regular_refund) catch std.math.maxInt(i64);
                 const state_spent = std.math.cast(i64, self.state_spent) orelse std.math.maxInt(i64);
@@ -98,9 +97,9 @@ pub fn bind(
                 ) catch std.math.maxInt(i64);
             }
 
-            fn includedOutOfGas(self: @This()) interpreter.Result {
+            fn includedOutOfGas(self: @This()) execution.ExecutionResult {
                 return .{
-                    .status = .out_of_gas,
+                    .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                     .gas_left = 0,
                     .gas_refund = 0,
                     // Pre-execution rollback refills all state gas. The
@@ -177,7 +176,7 @@ pub fn bind(
             context: *Context,
             executable: PreparedTransaction,
         ) Error!struct {
-            status: interpreter.Status,
+            status: execution.Status,
             gas: transaction.ResultGas,
             output_data: []const u8,
         } {
@@ -192,15 +191,15 @@ pub fn bind(
                 try warmAccessList(context, executable.scope.access_list);
             }
 
-            var result = interpreter.Result{
-                .status = .out_of_gas,
+            var result = execution.ExecutionResult{
+                .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                 .gas_left = 0,
                 .gas_refund = 0,
                 .output_data = &.{},
             };
             if (execution_gas) |gas| {
                 if (!transaction_charged) {
-                    result.status = .invalid;
+                    result.outcome = .{ .status = .invalid, .cause = .insufficient_balance };
                 } else {
                     const has_authorization_phase = authorization_spec.active and
                         executable.scope.authorizationCount() != 0;
@@ -223,7 +222,7 @@ pub fn bind(
                 }));
             };
             return .{
-                .status = result.status,
+                .status = result.outcome.status,
                 .gas = result_gas,
                 .output_data = result.output_data,
             };
@@ -233,7 +232,7 @@ pub fn bind(
             context: *Context,
             executable: PreparedTransaction,
             initial_gas: execution.ExecutionGas,
-        ) Error!interpreter.Result {
+        ) Error!execution.ExecutionResult {
             var preparation_checkpoint = try context.checkpoint();
             defer preparation_checkpoint.deinit();
 
@@ -263,7 +262,7 @@ pub fn bind(
 
             var result = outcome.result;
             gas.foldInto(&result);
-            if (executionRolledBack(result.status)) {
+            if (executionRolledBack(result.outcome.status)) {
                 preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
             } else {
                 preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
@@ -276,14 +275,14 @@ pub fn bind(
             context: *Context,
             executable: PreparedTransaction,
             gas: execution.ExecutionGas,
-        ) Error!interpreter.Result {
+        ) Error!execution.ExecutionResult {
             const outcome = try context.runPayload(transaction.executionRequest(
                 executable.scope.context,
                 executable.message,
                 gas,
             ));
             const result = outcome.result;
-            if (!executionRolledBack(result.status)) {
+            if (!executionRolledBack(result.outcome.status)) {
                 try context.finalizeState();
             }
             return result;
@@ -307,7 +306,7 @@ pub fn bind(
             context: *Context,
             sender: Address,
             plan: tx_settlement.DefaultPlan,
-            result: interpreter.Result,
+            result: execution.ExecutionResult,
         ) !transaction.ResultGas {
             const settlement_planner = settlementPlanner(context);
             const costs = try settlement_planner.planCosts(plan, .{
@@ -466,7 +465,7 @@ pub fn bind(
             }
         }
 
-        fn executionRolledBack(status: interpreter.Status) bool {
+        fn executionRolledBack(status: execution.Status) bool {
             return switch (status) {
                 .success => false,
                 .revert, .invalid, .out_of_gas => true,

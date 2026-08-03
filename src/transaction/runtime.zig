@@ -133,7 +133,7 @@ pub fn runPayload(
     defer checkpoint.deinit();
 
     const outcome = try executor.executeTransactionRequestPhased(request);
-    if (outcome.stage == .preparation or executionRolledBack(outcome.result.status)) {
+    if (outcome.stage == .preparation or executionRolledBack(outcome.result.outcome.status)) {
         try checkpoint.restore();
     } else {
         try checkpoint.commit();
@@ -167,7 +167,7 @@ pub fn runPrelude(
     var checkpoint = try executor.checkpoint();
     defer checkpoint.deinit();
     const result = try executor.executeTransactionRequest(request);
-    if (executionRolledBack(result.status)) {
+    if (executionRolledBack(result.outcome.status)) {
         try checkpoint.restore();
     } else {
         try executor.finalizeTransactionState();

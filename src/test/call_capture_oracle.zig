@@ -125,7 +125,7 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
     )).expectCall();
     const span = try capture.finish();
 
-    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, evmz.Host.max_call_depth) + 2, span.rows.len);
     for (span.rows, 0..) |row, row_index| {
         try std.testing.expectEqual(@as(u16, @intCast(row_index)), row.depth);

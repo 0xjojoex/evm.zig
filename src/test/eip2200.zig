@@ -48,12 +48,17 @@ test "EIP-2200 child frame refunds merge only from committed frames" {
     var frame = try testingFrame();
     defer frame.deinit();
 
-    try frame.frame.resumeCallResult(.{
+    const call_continuation = Interpreter.CallResume{
         .gas_limit = 50,
         .out_offset = 0,
         .out_size = 0,
-    }, .{
-        .status = .success,
+    };
+    frame.frame.suspendWith(.{ .call = .{
+        .msg = frame.frame.msg.*,
+        .continuation = call_continuation,
+    } });
+    try frame.frame.resumeWithCall(.{
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 30,
         .gas_refund = 4_800,
@@ -61,8 +66,12 @@ test "EIP-2200 child frame refunds merge only from committed frames" {
     try std.testing.expectEqual(@as(i64, 80), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 4_800), frame.frame.gas_refund);
 
-    try frame.frame.resumeCreateResult(.{ .gas_limit = 10 }, .{
-        .status = .success,
+    frame.frame.suspendWith(.{ .create = .{
+        .msg = frame.frame.msg.*,
+        .continuation = .{ .gas_limit = 10 },
+    } });
+    try frame.frame.resumeWithCreate(.{
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 4,
         .gas_refund = 7,
@@ -71,12 +80,16 @@ test "EIP-2200 child frame refunds merge only from committed frames" {
     try std.testing.expectEqual(@as(i64, 74), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 4_807), frame.frame.gas_refund);
 
-    try frame.frame.resumeCallResult(.{
-        .gas_limit = 10,
-        .out_offset = 0,
-        .out_size = 0,
-    }, .{
-        .status = .revert,
+    frame.frame.suspendWith(.{ .call = .{
+        .msg = frame.frame.msg.*,
+        .continuation = .{
+            .gas_limit = 10,
+            .out_offset = 0,
+            .out_size = 0,
+        },
+    } });
+    try frame.frame.resumeWithCall(.{
+        .outcome = .{ .status = .revert, .cause = .revert },
         .output_data = &.{},
         .gas_left = 8,
         .gas_refund = 99,
@@ -90,10 +103,10 @@ test "EIP-2200 reverted frames discard local refund counter" {
     defer frame.deinit();
 
     frame.frame.gas_refund = 4_800;
-    frame.frame.status = .revert;
+    frame.frame.state = .{ .halted = .revert };
 
-    const result = frame.frame.getResult();
-    try std.testing.expectEqual(Interpreter.Status.revert, result.status);
+    const result = frame.frame.result();
+    try std.testing.expectEqual(Interpreter.Status.revert, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_refund);
 }
 
@@ -142,6 +155,6 @@ fn testingFrame() !evmz.Evm.Interpreter.OwnedCallFrame {
     return evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
 }

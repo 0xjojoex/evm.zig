@@ -5,10 +5,10 @@ const std = @import("std");
 const CallFrame = Interpreter.CallFrame;
 
 pub fn mstore(frame: *CallFrame) !void {
-    const offset, const value = try frame.stack.popN(2);
+    const offset, const value = frame.popN(2) orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
@@ -22,10 +22,10 @@ pub fn mstore(frame: *CallFrame) !void {
 }
 
 pub fn mstore8(frame: *CallFrame) !void {
-    const offset, const value = try frame.stack.popN(2);
+    const offset, const value = frame.popN(2) orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 1) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
@@ -39,22 +39,22 @@ pub fn mstore8(frame: *CallFrame) !void {
 }
 
 pub fn mload(frame: *CallFrame) !void {
-    const offset = try frame.stack.pop();
+    const offset = frame.pop() orelse return;
     const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
     const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.failWithStatus(.out_of_gas);
+        frame.halt(.out_of_gas);
         return;
     };
 
     if (end <= frame.memory.len()) {
         const value = frame.memory.read(offset_usize);
-        frame.stack.pushUnchecked(value);
+        frame.stack.push(value);
         return;
     }
 
     if (!try frame.expandMemory(offset_usize, 32)) return;
     const value = frame.memory.read(offset_usize);
-    frame.stack.pushUnchecked(value);
+    frame.stack.push(value);
 }
 
 test "MSTORE overwrites already expanded memory" {
@@ -71,11 +71,11 @@ test "MSTORE overwrites already expanded memory" {
 
 pub fn msize(frame: *CallFrame) !void {
     const size = frame.memory.len();
-    try frame.stack.push(size);
+    _ = frame.push(size);
 }
 
 pub fn mcopy(frame: *CallFrame) !void {
-    const dest, const offset, const size = try frame.stack.popN(3);
+    const dest, const offset, const size = frame.popN(3) orelse return;
     if (size == 0) return;
 
     const dest_usize = frame.wordToUsizeOrOog(dest) orelse return;
@@ -84,7 +84,7 @@ pub fn mcopy(frame: *CallFrame) !void {
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     if (!try frame.expandMemory(dest_usize, size_usize)) return;
-    const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
+    const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
     const word_copied_cost = evmz.calcWordSize(i64, size_i64) * 3;
     if (!frame.trackGas(word_copied_cost)) return;
 

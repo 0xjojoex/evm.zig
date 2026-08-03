@@ -51,9 +51,59 @@ pub fn callKindToEvmc(kind: evmz.Host.CallKind) evmc.evmc_call_kind {
     };
 }
 
+pub fn statusCodeFromOutcome(outcome: evmz.execution.ExecutionOutcome) evmc.evmc_status_code {
+    return switch (outcome.status) {
+        .success => evmc.EVMC_SUCCESS,
+        .revert => evmc.EVMC_REVERT,
+        .out_of_gas => evmc.EVMC_OUT_OF_GAS,
+        .invalid => switch (outcome.cause) {
+            .invalid_opcode => evmc.EVMC_INVALID_INSTRUCTION,
+            .stack_underflow => evmc.EVMC_STACK_UNDERFLOW,
+            .stack_overflow => evmc.EVMC_STACK_OVERFLOW,
+            .invalid_jump => evmc.EVMC_BAD_JUMP_DESTINATION,
+            .write_protection => evmc.EVMC_STATIC_MODE_VIOLATION,
+            .return_data_out_of_bounds => evmc.EVMC_INVALID_MEMORY_ACCESS,
+            .call_depth_exceeded => evmc.EVMC_CALL_DEPTH_EXCEEDED,
+            .insufficient_balance => evmc.EVMC_INSUFFICIENT_BALANCE,
+            .max_code_size_exceeded, .invalid_code => evmc.EVMC_CONTRACT_VALIDATION_FAILURE,
+            .none,
+            .revert,
+            .out_of_gas,
+            .invalid,
+            .nonce_overflow,
+            .contract_address_collision,
+            .code_store_out_of_gas,
+            => evmc.EVMC_FAILURE,
+        },
+    };
+}
+
 test "EVMC exports STATICCALL as CALL plus the static flag" {
     const expected: @TypeOf(callKindToEvmc(.staticcall)) = @intCast(evmc.EVMC_CALL);
     try std.testing.expectEqual(expected, callKindToEvmc(.staticcall));
+}
+
+test "EVMC status projection preserves precise execution causes" {
+    const cases = [_]struct {
+        outcome: evmz.execution.ExecutionOutcome,
+        expected: evmc.evmc_status_code,
+    }{
+        .{ .outcome = .{ .status = .invalid, .cause = .invalid_opcode }, .expected = evmc.EVMC_INVALID_INSTRUCTION },
+        .{ .outcome = .{ .status = .invalid, .cause = .stack_underflow }, .expected = evmc.EVMC_STACK_UNDERFLOW },
+        .{ .outcome = .{ .status = .invalid, .cause = .stack_overflow }, .expected = evmc.EVMC_STACK_OVERFLOW },
+        .{ .outcome = .{ .status = .invalid, .cause = .invalid_jump }, .expected = evmc.EVMC_BAD_JUMP_DESTINATION },
+        .{ .outcome = .{ .status = .invalid, .cause = .write_protection }, .expected = evmc.EVMC_STATIC_MODE_VIOLATION },
+        .{ .outcome = .{ .status = .invalid, .cause = .return_data_out_of_bounds }, .expected = evmc.EVMC_INVALID_MEMORY_ACCESS },
+        .{ .outcome = .{ .status = .invalid, .cause = .call_depth_exceeded }, .expected = evmc.EVMC_CALL_DEPTH_EXCEEDED },
+        .{ .outcome = .{ .status = .invalid, .cause = .insufficient_balance }, .expected = evmc.EVMC_INSUFFICIENT_BALANCE },
+        .{ .outcome = .{ .status = .invalid, .cause = .invalid_code }, .expected = evmc.EVMC_CONTRACT_VALIDATION_FAILURE },
+        // The final status owns fork-specific interpretation of this cause.
+        .{ .outcome = .{ .status = .success, .cause = .code_store_out_of_gas }, .expected = evmc.EVMC_SUCCESS },
+        .{ .outcome = .{ .status = .out_of_gas, .cause = .code_store_out_of_gas }, .expected = evmc.EVMC_OUT_OF_GAS },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, statusCodeFromOutcome(case.outcome));
+    }
 }
 
 pub fn evmcInputData(input_data: [*c]const u8, input_size: usize) ![]const u8 {

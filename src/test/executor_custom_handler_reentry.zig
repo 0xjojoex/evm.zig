@@ -33,7 +33,7 @@ const ReentrantInstruction = struct {
                     .real_sender = frame.msg.real_sender,
                     .code_address = child,
                 })).expectCall();
-                if (result.status != .success) return error.ReentrantChildFailed;
+                if (result.status() != .success) return error.ReentrantChildFailed;
                 call_count += 1;
             }
 
@@ -42,8 +42,8 @@ const ReentrantInstruction = struct {
                 const capture = capture_context orelse return error.MissingTestCaptureContext;
                 root_capture_stable = root_capture_before.? == @intFromPtr(&capture.frame_captures.items[0]);
             }
-            const sentinel = try frame.stack.pop();
-            try frame.stack.push(sentinel + 1);
+            const sentinel = frame.pop() orelse return;
+            _ = frame.push(sentinel + 1);
         }
     };
 };
@@ -118,7 +118,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;
 
-    try std.testing.expectEqual(ReentrantVm.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(ReentrantVm.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, ReentrantInstruction.max_depth), ReentrantInstruction.call_count);
     try std.testing.expect(ReentrantInstruction.root_stack_moved);
     try std.testing.expect(ReentrantInstruction.root_capture_stable);

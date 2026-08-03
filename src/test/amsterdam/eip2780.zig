@@ -18,7 +18,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
         .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
     }, 1);
 
-    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
     try std.testing.expect(!try executor.state.accountExists(recipient));
 }
 
@@ -34,7 +34,7 @@ test "Amsterdam top-frame value-to-empty account spends state gas on success" {
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
     }, 1);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
@@ -166,7 +166,7 @@ test "Amsterdam top-frame delegated target honors transaction warmth" {
         .regular_left = 10_000,
     }, 0);
 
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 9_900), result.gas_left);
 }
 

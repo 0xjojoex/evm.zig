@@ -370,7 +370,7 @@ fn measureEvmzCaptureExact(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = code,
+        .source = .{ .code = code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -385,7 +385,7 @@ fn measureEvmzCaptureExact(
     try tape.resolve(captured.span);
 
     try common.rejectNullHostTouches(.null, counting_host.counters);
-    if (captured.result.status != .success) return error.KernelFailed;
+    if (captured.result.status() != .success) return error.KernelFailed;
 
     return .{
         .elapsed_ns = end_ns - start_ns,
@@ -438,7 +438,7 @@ fn measureEvmzExact(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = code,
+        .source = .{ .code = code },
     });
     errdefer frame.deinit();
     var interpreter = frame.interpreter();
@@ -450,7 +450,7 @@ fn measureEvmzExact(
     frame.deinit();
 
     try common.rejectNullHostTouches(.null, counting_host.counters);
-    if (result.status != .success) return error.KernelFailed;
+    if (result.status() != .success) return error.KernelFailed;
 
     return .{
         .elapsed_ns = end_ns - start_ns,

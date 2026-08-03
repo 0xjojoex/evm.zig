@@ -7,6 +7,8 @@ pub const Storage = [capacity]u256;
 
 /// Stack is an offset-indexed view over a caller-owned arena.
 /// The owner must rebind `base` after arena relocation.
+/// Execution semantics validate stack effects on `CallFrame`; operations here
+/// assert those already-proven bounds.
 base: [*]u256,
 base_word: u32,
 len: u16 = 0,
@@ -19,17 +21,12 @@ inline fn swapSlot(a: *u256, b: *u256) void {
     b.* = tmp;
 }
 
-fn PopN(comptime n: usize) type {
+pub fn PopN(comptime n: usize) type {
     if (n == 0) {
         @compileError("PopN requires at least one value");
     }
     return std.meta.Tuple(&([_]type{u256} ** n));
 }
-
-pub const Error = error{
-    StackOverflow,
-    StackUnderflow,
-};
 
 comptime {
     if (@sizeOf(usize) == 8 and @sizeOf(Stack) != 16) {
@@ -49,44 +46,25 @@ pub fn rebind(self: *Stack, words: []u256) void {
     self.base = words.ptr + self.base_word;
 }
 
-pub fn push(self: *Stack, value: u256) Error!void {
-    if (self.len >= capacity) {
-        return Error.StackOverflow;
-    }
-    self.base[self.len] = value;
-    self.len += 1;
-}
-
-pub inline fn pushUnchecked(self: *Stack, value: u256) void {
+pub inline fn push(self: *Stack, value: u256) void {
     std.debug.assert(self.len < capacity);
     self.base[self.len] = value;
     self.len += 1;
 }
 
-pub inline fn replaceTop(self: *Stack, value: u256) Error!void {
-    if (self.len == 0) {
-        return Error.StackUnderflow;
-    }
-    self.replaceTopUnchecked(value);
-}
-
-pub inline fn replaceTopUnchecked(self: *Stack, value: u256) void {
+pub inline fn replaceTop(self: *Stack, value: u256) void {
     std.debug.assert(self.len != 0);
     self.base[self.len - 1] = value;
 }
 
-pub inline fn pop(self: *Stack) Error!u256 {
-    if (self.len == 0) {
-        return Error.StackUnderflow;
-    }
+pub inline fn pop(self: *Stack) u256 {
+    std.debug.assert(self.len != 0);
     self.len -= 1;
     return self.base[self.len];
 }
 
-pub inline fn popN(self: *Stack, comptime n: usize) Error!PopN(n) {
-    if (self.len < n) {
-        return Error.StackUnderflow;
-    }
+pub inline fn popN(self: *Stack, comptime n: usize) PopN(n) {
+    std.debug.assert(self.len >= n);
     self.len -= n;
 
     var values: PopN(n) = undefined;
@@ -101,44 +79,31 @@ pub fn peek(self: *Stack) ?u256 {
 }
 
 /// Swap the nth element from the top of the stack with the top element
-pub inline fn swap(self: *Stack, comptime n: usize) Error!void {
-    if (self.len <= n) {
-        return Error.StackUnderflow;
-    }
-
+pub inline fn swap(self: *Stack, comptime n: usize) void {
+    std.debug.assert(self.len > n);
     const target = self.len - 1 - n;
     swapSlot(&self.base[target], &self.base[self.len - 1]);
 }
 
-pub inline fn swapDepth(self: *Stack, n: usize) Error!void {
-    if (self.len <= n) {
-        return Error.StackUnderflow;
-    }
-
+pub inline fn swapDepth(self: *Stack, n: usize) void {
+    std.debug.assert(self.len > n);
     const target = self.len - 1 - n;
     swapSlot(&self.base[target], &self.base[self.len - 1]);
 }
 
 /// Duplicate the nth element from the top of the stack
-pub fn dup(self: *Stack, comptime n: usize) Error!void {
-    if (self.len < n) {
-        return Error.StackUnderflow;
-    }
-    try self.push(self.base[self.len - n]);
+pub fn dup(self: *Stack, comptime n: usize) void {
+    std.debug.assert(self.len >= n);
+    self.push(self.base[self.len - n]);
 }
 
-pub fn dupDepth(self: *Stack, n: usize) Error!void {
-    if (self.len < n) {
-        return Error.StackUnderflow;
-    }
-    try self.push(self.base[self.len - n]);
+pub fn dupDepth(self: *Stack, n: usize) void {
+    std.debug.assert(self.len >= n);
+    self.push(self.base[self.len - n]);
 }
 
-pub inline fn exchangeDepths(self: *Stack, n: usize, m: usize) Error!void {
-    if (self.len <= n or self.len <= m) {
-        return Error.StackUnderflow;
-    }
-
+pub inline fn exchangeDepths(self: *Stack, n: usize, m: usize) void {
+    std.debug.assert(self.len > n and self.len > m);
     swapSlot(&self.base[self.len - 1 - n], &self.base[self.len - 1 - m]);
 }
 
@@ -162,8 +127,8 @@ test "arena offset selects a disjoint stack range and supports rebinding" {
     var lower = Stack.init(&first, 0);
     var upper = Stack.init(&first, capacity);
 
-    try lower.push(11);
-    try upper.push(41);
+    lower.push(11);
+    upper.push(41);
     try testing.expectEqual(@as(u256, 11), first[0]);
     try testing.expectEqual(@as(u256, 41), first[capacity]);
 
@@ -182,9 +147,9 @@ test "push pop and peek use the top stack slot" {
 
     try testing.expectEqual(null, stack.peek());
 
-    try stack.push(1);
-    try stack.push(2);
-    try stack.push(3);
+    stack.push(1);
+    stack.push(2);
+    stack.push(3);
     try testing.expectEqual(@as(u16, 3), stack.len);
     try testing.expectEqual(@as(u256, 3), stack.peek().?);
     try testing.expectEqual(@as(u256, 3), stack.peekN(1).?);
@@ -192,28 +157,23 @@ test "push pop and peek use the top stack slot" {
     try testing.expectEqual(@as(u256, 1), stack.peekN(3).?);
     try testing.expectEqual(null, stack.peekN(4));
 
-    try testing.expectEqual(@as(u256, 3), try stack.pop());
-    try testing.expectEqual(@as(u256, 2), try stack.pop());
-    try testing.expectEqual(@as(u256, 1), try stack.pop());
+    try testing.expectEqual(@as(u256, 3), stack.pop());
+    try testing.expectEqual(@as(u256, 2), stack.pop());
+    try testing.expectEqual(@as(u256, 1), stack.pop());
     try testing.expectEqual(@as(u16, 0), stack.len);
     try testing.expectEqual(null, stack.peek());
-    try testing.expectError(Error.StackUnderflow, stack.pop());
 }
 
-test "popN checks underflow and preserves repeated-pop operand order" {
+test "popN preserves repeated-pop operand order" {
     {
         var storage: Storage = undefined;
         var stack = Stack.init(&storage, 0);
 
-        try testing.expectError(Error.StackUnderflow, stack.popN(2));
+        stack.push(1);
+        stack.push(2);
+        stack.push(3);
 
-        try stack.push(1);
-        try testing.expectError(Error.StackUnderflow, stack.popN(2));
-
-        try stack.push(2);
-        try stack.push(3);
-
-        const top, const next = try stack.popN(2);
+        const top, const next = stack.popN(2);
         try testing.expectEqual(@as(u256, 3), top);
         try testing.expectEqual(@as(u256, 2), next);
         try testing.expectEqual(@as(u16, 1), stack.len);
@@ -224,17 +184,13 @@ test "popN checks underflow and preserves repeated-pop operand order" {
         var storage: Storage = undefined;
         var stack = Stack.init(&storage, 0);
 
-        try testing.expectError(Error.StackUnderflow, stack.popN(3));
+        stack.push(1);
+        stack.push(2);
+        stack.push(3);
+        stack.push(4);
+        stack.push(5);
 
-        try stack.push(1);
-        try stack.push(2);
-        try testing.expectError(Error.StackUnderflow, stack.popN(3));
-
-        try stack.push(3);
-        try stack.push(4);
-        try stack.push(5);
-
-        const top, const next, const third = try stack.popN(3);
+        const top, const next, const third = stack.popN(3);
         try testing.expectEqual(@as(u256, 5), top);
         try testing.expectEqual(@as(u256, 4), next);
         try testing.expectEqual(@as(u256, 3), third);
@@ -247,21 +203,21 @@ test "popN checks underflow and preserves repeated-pop operand order" {
         var stack = Stack.init(&storage, 0);
 
         for (1..8) |value| {
-            try stack.push(@intCast(value));
+            stack.push(@intCast(value));
         }
 
-        const p4_0, const p4_1, const p4_2, const p4_3 = try stack.popN(4);
+        const p4_0, const p4_1, const p4_2, const p4_3 = stack.popN(4);
         try testing.expectEqual(@as(u256, 7), p4_0);
         try testing.expectEqual(@as(u256, 6), p4_1);
         try testing.expectEqual(@as(u256, 5), p4_2);
         try testing.expectEqual(@as(u256, 4), p4_3);
         try testing.expectEqual(@as(u16, 3), stack.len);
 
-        try stack.push(4);
-        try stack.push(5);
-        try stack.push(6);
+        stack.push(4);
+        stack.push(5);
+        stack.push(6);
 
-        const p6_0, const p6_1, const p6_2, const p6_3, const p6_4, const p6_5 = try stack.popN(6);
+        const p6_0, const p6_1, const p6_2, const p6_3, const p6_4, const p6_5 = stack.popN(6);
         try testing.expectEqual(@as(u256, 6), p6_0);
         try testing.expectEqual(@as(u256, 5), p6_1);
         try testing.expectEqual(@as(u256, 4), p6_2);
@@ -272,16 +228,13 @@ test "popN checks underflow and preserves repeated-pop operand order" {
     }
 }
 
-test "swap checks depth before computing target slot" {
+test "swap exchanges the selected slot" {
     var storage: Storage = undefined;
     var stack = Stack.init(&storage, 0);
 
-    try testing.expectError(Error.StackUnderflow, stack.swap(1));
-    try stack.push(1);
-    try testing.expectError(Error.StackUnderflow, stack.swap(1));
-
-    try stack.push(2);
-    try stack.swap(1);
+    stack.push(1);
+    stack.push(2);
+    stack.swap(1);
     try testing.expectEqual(@as(u256, 1), stack.peek().?);
 }
 
@@ -289,19 +242,16 @@ test "runtime-depth swaps exchange stack slots" {
     var storage: Storage = undefined;
     var stack = Stack.init(&storage, 0);
 
-    try stack.push(1);
-    try stack.push(2);
-    try stack.push(3);
-    try stack.push(4);
+    stack.push(1);
+    stack.push(2);
+    stack.push(3);
+    stack.push(4);
 
-    try stack.swapDepth(2);
+    stack.swapDepth(2);
     try testing.expectEqual(@as(u256, 2), stack.peek().?);
     try testing.expectEqual(@as(u256, 4), stack.peekN(3).?);
 
-    try stack.exchangeDepths(0, 3);
+    stack.exchangeDepths(0, 3);
     try testing.expectEqual(@as(u256, 1), stack.peek().?);
     try testing.expectEqual(@as(u256, 2), stack.peekN(4).?);
-
-    try testing.expectError(Error.StackUnderflow, stack.swapDepth(4));
-    try testing.expectError(Error.StackUnderflow, stack.exchangeDepths(0, 4));
 }

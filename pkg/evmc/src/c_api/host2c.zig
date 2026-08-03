@@ -1,7 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
 const Host = evmz.Host;
-const Interpreter = evmz.Interpreter;
 
 const common = @import("common.zig");
 const evmc = common.evmc;
@@ -186,7 +185,10 @@ fn call(
     }
 
     return evmc.evmc_result{
-        .status_code = statusToEvmc(result.status()),
+        .status_code = common.statusCodeFromOutcome(switch (result) {
+            .call => |value| value.outcome,
+            .create => |value| value.outcome,
+        }),
         .gas_left = result.gasLeft(),
         .gas_refund = result.gasRefund(),
         .output_data = output_ptr,
@@ -241,15 +243,6 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
         .blob_hashes = if (blob_hashes.len == 0) null else blob_hashes.ptr,
         .blob_hashes_count = blob_hashes.len,
         .block_slot_number = execution_context.block.slot_number,
-    };
-}
-
-fn statusToEvmc(status: Interpreter.Status) evmc.evmc_status_code {
-    return switch (status) {
-        .success => evmc.EVMC_SUCCESS,
-        .revert => evmc.EVMC_REVERT,
-        .out_of_gas => evmc.EVMC_OUT_OF_GAS,
-        .invalid => evmc.EVMC_INVALID_INSTRUCTION,
     };
 }
 

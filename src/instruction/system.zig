@@ -16,35 +16,35 @@ fn nextDepth(depth: u16) u16 {
 }
 
 pub inline fn stop(frame: *CallFrame) !void {
-    frame.status = .success;
+    frame.halt(.success);
 }
 
 pub inline fn invalid(frame: *CallFrame) !void {
-    frame.failWithFrameStatus(.invalid_opcode);
+    frame.halt(.invalid_opcode);
 }
 
 /// `RETURN` Halt the execution returning the output data
 pub inline fn ret(frame: *CallFrame) !void {
-    const offset, const size = try frame.stack.popN(2);
+    const offset, const size = frame.popN(2) orelse return;
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     frame.setOutputRange(offset_usize, size_usize);
-    frame.status = .success;
+    frame.halt(.success);
 }
 
 /// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
 pub inline fn revert(frame: *CallFrame) !void {
-    const offset, const size = try frame.stack.popN(2);
+    const offset, const size = frame.popN(2) orelse return;
 
     const size_usize = frame.wordToUsizeOrOog(size) orelse return;
     const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
 
     if (!try frame.expandMemory(offset_usize, size_usize)) return;
     frame.setOutputRange(offset_usize, size_usize);
-    frame.status = .revert;
+    frame.halt(.revert);
 }
 
 pub fn bind(comptime spec: ExactSpec) type {
@@ -55,8 +55,8 @@ pub fn bind(comptime spec: ExactSpec) type {
             comptime std.debug.assert(op == Opcode.CALL or op == Opcode.STATICCALL or op == Opcode.DELEGATECALL or op == Opcode.CALLCODE);
 
             const gas, const address_word, const value, const in_offset, const in_size, const out_offset, const out_size =
-                if (op == Opcode.CALL or op == Opcode.CALLCODE) try frame.stack.popN(7) else blk: {
-                    const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = try frame.stack.popN(6);
+                if (op == Opcode.CALL or op == Opcode.CALLCODE) frame.popN(7) orelse return else blk: {
+                    const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = frame.popN(6) orelse return;
                     break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
                 };
             const address = evmz.address.fromWord(address_word);
@@ -67,7 +67,7 @@ pub fn bind(comptime spec: ExactSpec) type {
             const out_offset_usize = if (out_size_usize == 0) 0 else frame.wordToUsizeOrOog(out_offset) orelse return;
 
             if (frame.msg.is_static and op == Opcode.CALL and value > 0) {
-                frame.failWithFrameStatus(.write_protection);
+                frame.halt(.write_protection);
                 return;
             }
 
@@ -127,7 +127,7 @@ pub fn bind(comptime spec: ExactSpec) type {
             });
             if (child_gas.out_of_gas) {
                 @branchHint(.unlikely);
-                frame.failWithStatus(.out_of_gas);
+                frame.halt(.out_of_gas);
                 return;
             }
             msg.gas = child_gas.gas;
@@ -150,7 +150,7 @@ pub fn bind(comptime spec: ExactSpec) type {
                 .out_size = out_size_usize,
                 .state_gas_charged = account_state_gas,
             };
-            frame.setPendingAction(.{ .call = .{
+            frame.suspendWith(.{ .call = .{
                 .msg = msg,
                 .continuation = continuation,
             } });
@@ -166,12 +166,12 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         fn createImpl(frame: *CallFrame, comptime is_create2: bool) !void {
             if (frame.msg.is_static) {
-                frame.failWithFrameStatus(.write_protection);
+                frame.halt(.write_protection);
                 return;
             }
 
-            const value, const offset, const size, const salt = if (is_create2) try frame.stack.popN(4) else blk: {
-                const value, const offset, const size = try frame.stack.popN(3);
+            const value, const offset, const size, const salt = if (is_create2) frame.popN(4) orelse return else blk: {
+                const value, const offset, const size = frame.popN(3) orelse return;
                 break :blk .{ value, offset, size, 0 };
             };
 
@@ -181,17 +181,17 @@ pub fn bind(comptime spec: ExactSpec) type {
             if (spec.create.initcode_size_limit) |limit| {
                 if (size_usize > limit) {
                     @branchHint(.unlikely);
-                    frame.failWithStatus(.out_of_gas);
+                    frame.halt(.out_of_gas);
                     return;
                 }
             }
 
             if (!try frame.expandMemory(offset_usize, size_usize)) return;
 
-            const size_i64 = frame.wordToIntOrStatus(i64, size, .out_of_gas) orelse return;
+            const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
             const init_code_word_cost = spec.create.initcodeWordGas(is_create2);
             const init_code_cost = std.math.mul(i64, init_code_word_cost, evmz.calcWordSize(i64, size_i64)) catch {
-                frame.failWithStatus(.out_of_gas);
+                frame.halt(.out_of_gas);
                 return;
             };
             if (!frame.trackGas(init_code_cost)) return;
@@ -280,7 +280,7 @@ pub fn bind(comptime spec: ExactSpec) type {
             });
             if (child_gas.out_of_gas) {
                 @branchHint(.unlikely);
-                frame.failWithStatus(.out_of_gas);
+                frame.halt(.out_of_gas);
                 return;
             }
             msg.gas = child_gas.gas;
@@ -289,7 +289,7 @@ pub fn bind(comptime spec: ExactSpec) type {
                 .gas_limit = msg.gas,
                 .state_gas_charged = account_state_gas,
             };
-            frame.setPendingAction(.{ .create = .{
+            frame.suspendWith(.{ .create = .{
                 .msg = msg,
                 .continuation = continuation,
             } });
@@ -297,11 +297,11 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn selfdestruct(frame: *CallFrame) !void {
             if (frame.msg.is_static) {
-                frame.failWithFrameStatus(.write_protection);
+                frame.halt(.write_protection);
                 return;
             }
 
-            const address_word = try frame.stack.pop();
+            const address_word = frame.pop() orelse return;
 
             const address = evmz.address.fromWord(address_word);
 
@@ -328,7 +328,7 @@ pub fn bind(comptime spec: ExactSpec) type {
                 frame.gas_refund += spec.self_destruct.refund_gas;
             }
 
-            frame.status = .success;
+            frame.halt(.success);
         }
     };
 }
@@ -350,12 +350,14 @@ test "CREATE initcode limit is independent from transaction validation" {
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(2);
-    try frame.frame.stack.push(0);
-    try frame.frame.stack.push(0);
+    // Direct handler tests must model a frame that is still executing.
+    frame.frame.state = .running;
+    frame.frame.stack.push(2);
+    frame.frame.stack.push(0);
+    frame.frame.stack.push(0);
     try bind(spec).create(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.out_of_gas, frame.frame.status);
+    try std.testing.expectEqual(Interpreter.FrameHalt.out_of_gas, frame.frame.haltReason().?);
 }
 
 test "RETURN zero length ignores oversized offset" {

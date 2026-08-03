@@ -11,7 +11,7 @@ fn finishCanonical(controlled: anytype) !Host.Result {
     while (true) {
         switch (pause) {
             .opcode => pause = try controlled.step(),
-            .action => pause = try controlled.dispatchAction(),
+            .suspended => pause = try controlled.dispatchSuspension(),
             .finished => |finished| return switch (finished) {
                 .canonical => |result| result,
                 .intervened => unreachable,
@@ -96,7 +96,7 @@ fn stepOver(controlled: anytype, current: session.Pause) !session.Pause {
                 if (event.site.depth <= depth) return next;
                 next = try controlled.step();
             },
-            .action => next = try controlled.dispatchAction(),
+            .suspended => next = try controlled.dispatchSuspension(),
             .finished => return next,
         }
     }
@@ -115,7 +115,7 @@ fn stepOut(controlled: anytype, current: session.Pause) !session.Pause {
                 if (event.site.depth < depth) return next;
                 next = try controlled.step();
             },
-            .action => next = try controlled.dispatchAction(),
+            .suspended => next = try controlled.dispatchSuspension(),
             .finished => return next,
         }
     }
@@ -199,7 +199,7 @@ test "debug session matches uninterrupted execution" {
                 opcode_count += 1;
                 pause = try controlled.step();
             },
-            .action => unreachable,
+            .suspended => unreachable,
             .finished => |finished| break :run switch (finished) {
                 .canonical => |result| result.expectCall(),
                 .intervened => unreachable,
@@ -208,7 +208,7 @@ test "debug session matches uninterrupted execution" {
     };
 
     try std.testing.expectEqual(@as(usize, 8), opcode_count);
-    try std.testing.expectEqual(normal.status, result.status);
+    try std.testing.expectEqual(normal.status(), result.status());
     try std.testing.expectEqual(normal.gas_left, result.gas_left);
     try std.testing.expectEqualSlices(u8, normal.output_data, result.output_data);
 }
@@ -314,9 +314,9 @@ test "debug session dispatches a child and resumes its parent" {
     var pause = try controlled.pause();
     while (pause == .opcode) pause = try controlled.step();
     switch (pause) {
-        .action => |event| {
+        .suspended => |event| {
             try std.testing.expectEqual(@as(u16, 0), event.site.depth);
-            const call = switch (event.value) {
+            const call = switch (event.value.*) {
                 .call => |value| value,
                 .create => unreachable,
             };
@@ -325,7 +325,7 @@ test "debug session dispatches a child and resumes its parent" {
         else => unreachable,
     }
 
-    pause = try controlled.dispatchAction();
+    pause = try controlled.dispatchSuspension();
     switch (pause) {
         .opcode => |event| try std.testing.expectEqual(@as(u16, 1), event.site.depth),
         else => unreachable,
@@ -339,14 +339,14 @@ test "debug session dispatches a child and resumes its parent" {
     const result = run: while (true) {
         switch (pause) {
             .opcode => pause = try controlled.step(),
-            .action => unreachable,
+            .suspended => unreachable,
             .finished => |finished| break :run switch (finished) {
                 .canonical => |value| value.expectCall(),
                 .intervened => unreachable,
             },
         }
     };
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
 
     var over: driver.Session = undefined;
@@ -412,7 +412,7 @@ test "debug session can substitute a call before continuing" {
     var pause = try controlled.pause();
     while (pause == .opcode) pause = try controlled.step();
     const call = switch (pause) {
-        .action => |event| switch (event.value) {
+        .suspended => |event| switch (event.value.*) {
             .call => |value| value,
             .create => unreachable,
         },
@@ -420,8 +420,8 @@ test "debug session can substitute a call before continuing" {
     };
     const replacement = [_]u8{0xbb};
     try std.testing.expect(!controlled.isIntervened());
-    pause = try controlled.substituteAction(Host.Result.fromCall(.{
-        .status = .success,
+    pause = try controlled.substituteResult(Host.Result.fromCall(.{
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = &replacement,
         .gas_left = call.continuation.gas_limit,
         .gas_refund = 0,
@@ -431,15 +431,81 @@ test "debug session can substitute a call before continuing" {
     const result = run: while (true) {
         switch (pause) {
             .opcode => pause = try controlled.step(),
-            .action => unreachable,
+            .suspended => unreachable,
             .finished => |finished| break :run switch (finished) {
                 .canonical => unreachable,
                 .intervened => |value| value.expectCall(),
             },
         }
     };
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &replacement, result.output_data);
+}
+
+test "debug session mismatch remains canonical when dispatched" {
+    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Executor = Exact.Executor;
+    const driver = session.bind(Executor);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const root_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0,
+        .PUSH0, .PUSH1, 0x01,   .GAS,
+        .CALL,  .STOP,
+    });
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 200_000),
+        sender,
+        recipient,
+    );
+    defer executor.discardStateTransition();
+    var bytecode = try executor.prepareBytecode(&root_code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var controlled: driver.Session = undefined;
+    try controlled.init(&executor, .{
+        .depth = 0,
+        .kind = .call,
+        .gas = 200_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = recipient,
+    }, bytecode.view());
+    defer controlled.deinit();
+
+    var pause = try controlled.pause();
+    while (pause == .opcode) pause = try controlled.step();
+    const suspended = switch (pause) {
+        .suspended => |event| event.value,
+        else => unreachable,
+    };
+    const call = switch (suspended.*) {
+        .call => |value| value,
+        .create => unreachable,
+    };
+
+    try std.testing.expectError(error.ResumeKindMismatch, controlled.substituteResult(
+        Host.Result.fromCreate(evmz.addr(0xdead), .{
+            .outcome = .{ .status = .success, .cause = .none },
+            .output_data = &.{},
+            .gas_left = call.continuation.gas_limit,
+            .gas_refund = 0,
+        }),
+    ));
+    try std.testing.expect(!controlled.isIntervened());
+    try std.testing.expectEqual(suspended, switch (try controlled.pause()) {
+        .suspended => |event| event.value,
+        else => unreachable,
+    });
+
+    const result = (try finishCanonical(&controlled)).expectCall();
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expect(!controlled.isIntervened());
 }
 
 test "debug session can substitute a create before continuing" {
@@ -483,15 +549,15 @@ test "debug session can substitute a create before continuing" {
     var pause = try controlled.pause();
     while (pause == .opcode) pause = try controlled.step();
     const create = switch (pause) {
-        .action => |event| switch (event.value) {
+        .suspended => |event| switch (event.value.*) {
             .call => unreachable,
             .create => |value| value,
         },
         else => unreachable,
     };
     try std.testing.expect(!controlled.isIntervened());
-    pause = try controlled.substituteAction(Host.Result.fromCreate(deployed, .{
-        .status = .success,
+    pause = try controlled.substituteResult(Host.Result.fromCreate(deployed, .{
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = create.continuation.gas_limit,
         .gas_refund = 0,
@@ -505,14 +571,14 @@ test "debug session can substitute a create before continuing" {
     const result = run: while (true) {
         switch (pause) {
             .opcode => pause = try controlled.step(),
-            .action => unreachable,
+            .suspended => unreachable,
             .finished => |finished| break :run switch (finished) {
                 .canonical => unreachable,
                 .intervened => |value| value.expectCall(),
             },
         }
     };
-    try std.testing.expectEqual(Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 32), result.output_data.len);
     try std.testing.expectEqual(
         evmz.address.toU256(deployed),
@@ -578,7 +644,7 @@ test "debug session aborts at child and action boundaries" {
 
     var pause = try controlled.pause();
     while (pause == .opcode) pause = try controlled.step();
-    pause = try controlled.dispatchAction();
+    pause = try controlled.dispatchSuspension();
     while (true) {
         switch (pause) {
             .opcode => |event| {
@@ -624,8 +690,8 @@ test "debug session resolves and executes a custom instruction" {
     const Square = struct {
         pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
             if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
-            const value = try frame.stack.pop();
-            try frame.stack.push(value *% value);
+            const value = frame.pop() orelse return;
+            _ = frame.push(value *% value);
         }
     };
     const custom_instructions = comptime instructions: {
@@ -722,14 +788,14 @@ test "debug session resolves and executes a custom instruction" {
     const result = run: while (true) {
         switch (pause) {
             .opcode => pause = try controlled.step(),
-            .action => unreachable,
+            .suspended => unreachable,
             .finished => |finished| break :run switch (finished) {
                 .canonical => |value| value.expectCall(),
                 .intervened => unreachable,
             },
         }
     };
-    try std.testing.expectEqual(normal.status, result.status);
+    try std.testing.expectEqual(normal.status(), result.status());
     try std.testing.expectEqual(normal.gas_left, result.gas_left);
     try std.testing.expectEqualSlices(u8, normal.output_data, result.output_data);
 }
@@ -829,7 +895,7 @@ test "debug session inspection rebinds to the active frame" {
     try std.testing.expectEqualSlices(u8, &root_code, controlled.code());
     try std.testing.expectEqual(@as(u8, 0xaa), controlled.memory()[0]);
 
-    pause = try controlled.dispatchAction();
+    pause = try controlled.dispatchSuspension();
     try std.testing.expectEqual(@as(u16, 1), pause.opcode.site.depth);
     try std.testing.expectEqual(child, controlled.message().recipient);
     try std.testing.expectEqualSlices(u8, &child_code, controlled.code());

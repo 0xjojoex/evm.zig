@@ -65,7 +65,7 @@ const ReentrantRuntime = struct {
         })).expectCall();
         self.called = true;
         return .{
-            .status = if (result.status == .success) .success else .failure,
+            .status = if (result.status() == .success) .success else .failure,
             // Keep this empty and unowned: this test isolates stack-arena
             // rebinding from the separate borrowed precompile-output lifetime.
             .output_data = &.{},
@@ -154,7 +154,7 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, success.status);
+    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, success.status());
     try std.testing.expectEqualSlices(u8, &.{0x7e}, success.output_data);
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulPrecompile.target, 7));
 
@@ -164,7 +164,7 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.invalid, failure.status);
+    try std.testing.expectEqual(StatefulVm.Interpreter.Status.invalid, failure.status());
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulPrecompile.target, 7));
 
     runtime.fail = false;
@@ -271,7 +271,7 @@ test "reentrant precompile call preserves parent stack across arena growth" {
     const result = (try executor.executeStandalone(request(sender, parent, &.{}), .{})).expectCall();
 
     try std.testing.expect(runtime.called);
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(parent, 0));
     try std.testing.expectEqual(@as(u256, 0x77), try executor.getStorage(child, 9));
     try std.testing.expect(executor.frame_store.maxStackBase() >= 600);

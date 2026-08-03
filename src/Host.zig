@@ -7,11 +7,14 @@
 const std = @import("std");
 const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
-const Interpreter = @import("./Interpreter.zig");
 pub const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
-const TerminalCause = @import("./execution.zig").TerminalCause;
+const execution = @import("./execution.zig");
+const ExecutionOutcome = execution.ExecutionOutcome;
+const FrameHalt = execution.FrameHalt;
+const Status = execution.Status;
+const TerminalCause = execution.TerminalCause;
 
 pub const max_call_depth: u16 = 1024;
 
@@ -67,8 +70,8 @@ pub const Message = struct {
 };
 
 pub const CallResult = struct {
-    status: Interpreter.Status,
-    cause: ?TerminalCause = null,
+    outcome: ExecutionOutcome,
+    frame_halt: ?FrameHalt = null,
     checkpoint_reverted: bool = false,
     output_data: []const u8,
     gas_left: i64,
@@ -76,11 +79,19 @@ pub const CallResult = struct {
     gas_reservoir: i64 = 0,
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
+
+    pub fn status(self: CallResult) Status {
+        return self.outcome.status;
+    }
+
+    pub fn terminalCause(self: CallResult) TerminalCause {
+        return self.outcome.cause;
+    }
 };
 
 pub const CreateResult = struct {
-    status: Interpreter.Status,
-    cause: ?TerminalCause = null,
+    outcome: ExecutionOutcome,
+    frame_halt: ?FrameHalt = null,
     checkpoint_reverted: bool = false,
     output_data: []const u8,
     gas_left: i64,
@@ -89,6 +100,14 @@ pub const CreateResult = struct {
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
     address: Address,
+
+    pub fn status(self: CreateResult) Status {
+        return self.outcome.status;
+    }
+
+    pub fn terminalCause(self: CreateResult) TerminalCause {
+        return self.outcome.cause;
+    }
 };
 
 pub const Result = union(enum) {
@@ -101,8 +120,8 @@ pub const Result = union(enum) {
 
     pub fn fromCreate(address: Address, result: CallResult) Result {
         return .{ .create = .{
-            .status = result.status,
-            .cause = result.cause,
+            .outcome = result.outcome,
+            .frame_halt = result.frame_halt,
             .checkpoint_reverted = result.checkpoint_reverted,
             .output_data = result.output_data,
             .gas_left = result.gas_left,
@@ -114,17 +133,17 @@ pub const Result = union(enum) {
         } };
     }
 
-    pub fn status(self: Result) Interpreter.Status {
+    pub fn status(self: Result) Status {
         return switch (self) {
-            .call => |result| result.status,
-            .create => |result| result.status,
+            .call => |result| result.outcome.status,
+            .create => |result| result.outcome.status,
         };
     }
 
     pub fn terminalCause(self: Result) TerminalCause {
         return switch (self) {
-            .call => |result| result.cause orelse Interpreter.terminalCauseForStatus(result.status),
-            .create => |result| result.cause orelse Interpreter.terminalCauseForStatus(result.status),
+            .call => |result| result.outcome.cause,
+            .create => |result| result.outcome.cause,
         };
     }
 
@@ -199,8 +218,7 @@ pub const Result = union(enum) {
 pub fn precheckResult(msg: Message) ?Result {
     const cause = msg.precheck_failure orelse return null;
     const result = CallResult{
-        .status = .invalid,
-        .cause = cause,
+        .outcome = .{ .status = .invalid, .cause = cause },
         .output_data = &.{},
         .gas_left = msg.gas,
         .gas_refund = 0,
@@ -216,7 +234,7 @@ comptime {
     // Rerun benches if follows size changes
     std.debug.assert(@sizeOf(Message) == 160);
     std.debug.assert(@sizeOf(CallResult) == 64);
-    std.debug.assert(@sizeOf(CreateResult) == 80);
+    std.debug.assert(@sizeOf(CreateResult) == 88);
 }
 
 pub const CallKind = enum(u8) {

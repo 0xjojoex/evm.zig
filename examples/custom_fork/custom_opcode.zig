@@ -20,8 +20,8 @@ comptime {
 const Square = struct {
     pub inline fn execute(comptime Instructions: type, frame: *evmz.interpreter.CallFrame) anyerror!void {
         if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
-        const x = try frame.stack.pop();
-        try frame.stack.push(x *% x);
+        const x = frame.pop() orelse return;
+        _ = frame.push(x *% x);
     }
 };
 

@@ -350,9 +350,9 @@ test "frame store rebinds active rows after growth" {
         &host,
         &first_msg,
     );
-    try store.frame(first).stack.push(11);
-    try store.frame(first).stack.push(22);
-    try store.frame(first).stack.push(33);
+    store.frame(first).stack.push(11);
+    store.frame(first).stack.push(22);
+    store.frame(first).stack.push(33);
     try store.frame(first).memory.expandToFit(0, 32);
     store.frame(first).memory.writeBytes(0, "abc");
 
@@ -365,7 +365,7 @@ test "frame store rebinds active rows after growth" {
         &host,
         &second_msg,
     );
-    try store.frame(second).stack.push(44);
+    store.frame(second).stack.push(44);
 
     try std.testing.expect(store.frame(first).msg == &store.messages.items[first]);
     try std.testing.expectEqual(@as(u32, 0), store.frame(first).stack.base_word);
@@ -405,7 +405,7 @@ test "stack arena growth failure leaves the parent row usable" {
         &host,
         &root_msg,
     );
-    for (0..600) |word| try store.frame(root).stack.push(@intCast(word));
+    for (0..600) |word| store.frame(root).stack.push(@intCast(word));
     try store.ensureConstructedRow(std.testing.allocator, 1);
 
     var child_msg = root_msg;
@@ -484,7 +484,7 @@ test "packed stack arena advances by suspended live words" {
         &host,
         &root_msg,
     );
-    for (0..1000) |word| try store.frame(root).stack.push(@intCast(word));
+    for (0..1000) |word| store.frame(root).stack.push(@intCast(word));
 
     var child_msg = root_msg;
     child_msg.depth = 1;
@@ -527,10 +527,10 @@ test "frame store owns parent returndata and resolves output from frame memory" 
     try frame_value.memory.expandToFit(0, 32);
     frame_value.memory.writeBytes(0, "xyz");
     frame_value.setOutputRange(0, 3);
-    try std.testing.expectEqualSlices(u8, "xyz", frame_value.getResult().output_data);
+    try std.testing.expectEqualSlices(u8, "xyz", frame_value.result().output_data);
 
     try frame_value.memory.expandToFit(4096, 1);
-    try std.testing.expectEqualSlices(u8, "xyz", frame_value.getResult().output_data);
+    try std.testing.expectEqualSlices(u8, "xyz", frame_value.result().output_data);
 
     store.pop();
     try std.testing.expectEqual(@as(usize, 0), store.ios.items[0].return_data.slice().len);

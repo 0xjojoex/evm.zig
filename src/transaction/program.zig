@@ -13,7 +13,6 @@ const execution = @import("../execution.zig");
 const CaptureContext = @import("../executor/capture_context.zig").Context;
 const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
-const Interpreter = @import("../Interpreter.zig");
 const state = @import("../state.zig");
 const runtime_ops = @import("runtime.zig");
 const tx = @import("types.zig");
@@ -211,7 +210,7 @@ fn PreludeContext(
             return runtime.executor.getCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!Interpreter.Result {
+        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!execution.ExecutionResult {
             const runtime = self.runtimeState();
             runtime.requireActive();
             return runtime_ops.runPrelude(runtime.executor, request) catch |err| return executor_errors.normalize(err);

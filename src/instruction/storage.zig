@@ -49,10 +49,10 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn sstore(frame: *CallFrame) !void {
             if (frame.msg.is_static) {
-                frame.failWithFrameStatus(.write_protection);
+                frame.halt(.write_protection);
                 return;
             }
-            const key, const value = try frame.stack.popN(2);
+            const key, const value = frame.popN(2) orelse return;
 
             try Self.sstoreAfterPop(frame, key, value);
         }
@@ -63,7 +63,7 @@ pub fn bind(comptime spec: ExactSpec) type {
             if (spec.storage.sstore_minimum_gas) |minimum_gas| {
                 if (frame.gas_left <= minimum_gas) {
                     @branchHint(.unlikely);
-                    frame.failWithStatus(.out_of_gas);
+                    frame.halt(.out_of_gas);
                     return;
                 }
             }
@@ -99,9 +99,9 @@ pub fn bind(comptime spec: ExactSpec) type {
         }
 
         pub fn sload(frame: *CallFrame) !void {
-            const key = try frame.stack.pop();
+            const key = frame.pop() orelse return;
             const value = (try Self.sloadAfterPop(frame, key)) orelse return;
-            frame.stack.pushUnchecked(value);
+            frame.stack.push(value);
         }
 
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
@@ -127,18 +127,18 @@ pub fn bind(comptime spec: ExactSpec) type {
 }
 
 pub fn tload(frame: *CallFrame) !void {
-    const key = try frame.stack.pop();
+    const key = frame.pop() orelse return;
     const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
-    frame.stack.pushUnchecked(value);
+    frame.stack.push(value);
 }
 
 pub fn tstore(frame: *CallFrame) !void {
     if (frame.msg.is_static) {
-        frame.failWithFrameStatus(.write_protection);
+        frame.halt(.write_protection);
         return;
     }
 
-    const key, const value = try frame.stack.popN(2);
+    const key, const value = frame.popN(2) orelse return;
 
     try frame.host.setTransientStorage(frame.msg.recipient, key, value);
 }
@@ -165,14 +165,14 @@ test "SLOAD cold storage access gas comes from the exact spec" {
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(0);
     try bind(spec).sload(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(i64, 99_989), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_loads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
@@ -212,15 +212,15 @@ test "SSTORE gas and state gas come from the exact spec" {
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
 
-    try frame.frame.stack.push(42);
-    try frame.frame.stack.push(0);
+    frame.frame.stack.push(42);
+    frame.frame.stack.push(0);
     try bind(spec).sstore(frame.frame);
 
-    try std.testing.expectEqual(Interpreter.FrameStatus.running, frame.frame.status);
+    try std.testing.expect(frame.frame.isRunning());
     try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 0), frame.frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 3), frame.frame.gas_refund);
@@ -242,13 +242,13 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
@@ -268,13 +268,13 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - 3_000 - 10_000), result.gas_left);
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas)), result.state_gas_spent);
@@ -297,13 +297,13 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status());
     try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
@@ -323,13 +323,13 @@ test "prepared SSTORE rejects static context before host access" {
     var frame = try Osaka.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.invalid, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
@@ -349,13 +349,13 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .bytecode = bytecode.view(),
+        .source = .{ .bytecode = bytecode.view() },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status);
+    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status());
     try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_loads);

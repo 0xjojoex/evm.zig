@@ -17,62 +17,16 @@ const Error = anyerror;
 
 pub const Status = evmz.execution.Status;
 
-pub const FrameStatus = enum(u8) {
+pub const FrameHalt = evmz.execution.FrameHalt;
+
+pub const FrameState = union(enum) {
     running,
-    suspended,
-    success,
-    invalid,
-    revert,
-    out_of_gas,
-    invalid_opcode,
-    stack_underflow,
-    stack_overflow,
-    invalid_jump,
-    write_protection,
-    return_data_out_of_bounds,
-
-    pub fn fromResult(status: Status) FrameStatus {
-        return switch (status) {
-            .success => .success,
-            .invalid => .invalid,
-            .revert => .revert,
-            .out_of_gas => .out_of_gas,
-        };
-    }
-
-    pub fn toResult(self: FrameStatus) Status {
-        return switch (self) {
-            .success => .success,
-            .invalid => .invalid,
-            .revert => .revert,
-            .out_of_gas => .out_of_gas,
-            .invalid_opcode,
-            .stack_underflow,
-            .stack_overflow,
-            .invalid_jump,
-            .write_protection,
-            .return_data_out_of_bounds,
-            => .invalid,
-            .running, .suspended => unreachable,
-        };
-    }
-
-    pub fn specificCause(self: FrameStatus) ?TerminalCause {
-        return switch (self) {
-            .invalid_opcode => .invalid_opcode,
-            .stack_underflow => .stack_underflow,
-            .stack_overflow => .stack_overflow,
-            .invalid_jump => .invalid_jump,
-            .write_protection => .write_protection,
-            .return_data_out_of_bounds => .return_data_out_of_bounds,
-            .running, .suspended, .success, .invalid, .revert, .out_of_gas => null,
-        };
-    }
+    suspended: Action,
+    halted: FrameHalt,
 };
 
-pub const Result = struct {
-    status: Status,
-    cause: ?TerminalCause = null,
+pub const FrameResult = struct {
+    halt: FrameHalt,
     gas_left: i64,
     gas_refund: i64,
     gas_reservoir: i64 = 0,
@@ -82,55 +36,30 @@ pub const Result = struct {
     /// output into their retained result storage before releasing the frame.
     output_data: []u8,
 
-    pub fn terminalCause(self: Result) TerminalCause {
-        return self.cause orelse terminalCauseForStatus(self.status);
+    pub fn status(self: FrameResult) Status {
+        return self.halt.status();
     }
 
-    pub fn trackStateGas(self: *Result, gas: i64) void {
-        if (gas <= 0) return;
-        const reservoir_available = @max(self.gas_reservoir, 0);
-        const from_reservoir = @min(reservoir_available, gas);
-        const from_regular = gas - from_reservoir;
-        if (from_regular > self.gas_left) {
-            self.status = .out_of_gas;
-            self.gas_left = 0;
-            return;
-        }
-        self.gas_reservoir -= from_reservoir;
-        self.gas_left -= from_regular;
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+    pub fn terminalCause(self: FrameResult) TerminalCause {
+        return self.halt.terminalCause();
     }
 
-    pub fn finalizeFrameStateGas(self: *Result) void {
-        switch (self.status) {
-            .success => {},
-            .revert => self.unwindFrameStateGas(true),
-            .invalid, .out_of_gas => self.unwindFrameStateGas(false),
-        }
-    }
-
-    fn unwindFrameStateGas(self: *Result, restore_regular_gas: bool) void {
-        const max_i64 = @as(i64, std.math.maxInt(i64));
-        const min_i64 = @as(i64, std.math.minInt(i64));
-        const reservoir_delta = std.math.sub(i64, self.state_gas_spent, self.state_gas_from_gas_left) catch if (self.state_gas_spent >= 0) max_i64 else min_i64;
-        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, reservoir_delta) catch if (reservoir_delta >= 0) max_i64 else min_i64;
-        if (restore_regular_gas) {
-            self.gas_left = std.math.add(i64, self.gas_left, self.state_gas_from_gas_left) catch if (self.state_gas_from_gas_left >= 0) max_i64 else min_i64;
-        }
-        self.state_gas_spent = 0;
-        self.state_gas_from_gas_left = 0;
+    pub fn executionResult(self: FrameResult) evmz.execution.ExecutionResult {
+        return .{
+            .outcome = .{
+                .status = self.status(),
+                .cause = self.terminalCause(),
+            },
+            .frame_halt = self.halt,
+            .gas_left = self.gas_left,
+            .gas_refund = self.gas_refund,
+            .gas_reservoir = self.gas_reservoir,
+            .state_gas_spent = self.state_gas_spent,
+            .state_gas_from_gas_left = self.state_gas_from_gas_left,
+            .output_data = self.output_data,
+        };
     }
 };
-
-pub fn terminalCauseForStatus(status: Status) TerminalCause {
-    return switch (status) {
-        .success => .none,
-        .revert => .revert,
-        .out_of_gas => .out_of_gas,
-        .invalid => .invalid,
-    };
-}
 
 pub const CallResume = struct {
     gas_limit: i64,
@@ -160,8 +89,9 @@ pub const Action = union(enum) {
 };
 
 pub const RunResult = union(enum) {
-    finished: Result,
-    action: Action,
+    finished: FrameResult,
+    /// Borrowed from `CallFrame.state` and valid only until the frame resumes.
+    suspended: *const Action,
 };
 
 pub const Init = struct {
@@ -186,7 +116,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         pub const Status = StatusType;
         pub const OwnedCallFrame = OwnedCallFrameType;
         pub const CapturedResult = struct {
-            result: Result,
+            result: FrameResult,
             span: trace.TraceSpan,
         };
 
@@ -196,11 +126,11 @@ pub fn Interpreter(comptime spec: Spec) type {
             return .{ .call_frame = call_frame };
         }
 
-        pub fn execute(self: *Self) Error!Result {
+        pub fn execute(self: *Self) Error!FrameResult {
             while (true) {
-                switch (try self.executeUntilAction()) {
+                switch (try self.executeUntilSuspended()) {
                     .finished => |result| return result,
-                    .action => |action| try self.resolveHostAction(action),
+                    .suspended => |action| try self.resolveSuspension(action),
                 }
             }
         }
@@ -222,10 +152,10 @@ pub fn Interpreter(comptime spec: Spec) type {
                 .initial_return_data = self.call_frame.return_data,
             });
             while (true) {
-                switch (try self.executeCapturedUntilAction(&frame_capture)) {
+                switch (try self.executeCapturedUntilSuspended(&frame_capture)) {
                     .finished => |result| {
                         try frame_capture.finishFrame(.{
-                            .outcome = traceFrameOutcome(result.status),
+                            .outcome = traceFrameOutcome(result.status()),
                             .memory_size = self.call_frame.memory.len(),
                         });
                         return .{
@@ -233,14 +163,20 @@ pub fn Interpreter(comptime spec: Spec) type {
                             .span = try tape.finish(mark),
                         };
                     },
-                    .action => |action| {
-                        try self.resolveHostAction(action);
-                        switch (action) {
-                            .call => |call_action| frame_capture.setPendingMemoryWrite(.{
+                    .suspended => |action| {
+                        const pending_memory_write: ?struct { offset: usize, size: usize } = switch (action.*) {
+                            .call => |call_action| .{
                                 .offset = call_action.continuation.out_offset,
-                                .size = @min(call_action.continuation.out_size, self.call_frame.return_data.len),
-                            }),
-                            .create => {},
+                                .size = call_action.continuation.out_size,
+                            },
+                            .create => null,
+                        };
+                        try self.resolveSuspension(action);
+                        if (pending_memory_write) |write| {
+                            frame_capture.setPendingMemoryWrite(.{
+                                .offset = write.offset,
+                                .size = @min(write.size, self.call_frame.return_data.len),
+                            });
                         }
                         try frame_capture.replaceReturnData(self.call_frame.return_data);
                     },
@@ -248,20 +184,20 @@ pub fn Interpreter(comptime spec: Spec) type {
             }
         }
 
-        pub fn executeUntilAction(self: *Self) Error!RunResult {
+        pub fn executeUntilSuspended(self: *Self) Error!RunResult {
             try self.executeUntraced();
 
-            if (self.call_frame.pending_action) |action| {
-                return .{ .action = action };
+            if (self.call_frame.suspendedAction()) |action| {
+                return .{ .suspended = action };
             }
-            return .{ .finished = self.call_frame.getResult() };
+            return .{ .finished = self.call_frame.result() };
         }
 
         /// Execute one captured segment through the exact spec's fixed trace
         /// tail table. A CALL/CREATE suspension leaves its step open until the
         /// captured runtime applies the child result and resumes this frame.
-        pub fn executeCapturedUntilAction(self: *Self, frame_capture: *trace.TraceCapture) Error!RunResult {
-            if (self.call_frame.status == .running or frame_capture.pending_step != null) {
+        pub fn executeCapturedUntilSuspended(self: *Self, frame_capture: *trace.TraceCapture) Error!RunResult {
+            if (self.call_frame.isRunning() or frame_capture.pending_step != null) {
                 try tail_dispatch.Dispatch(spec, .{ .traced = true }).executeTraced(
                     frame_capture,
                     self.call_frame,
@@ -269,44 +205,38 @@ pub fn Interpreter(comptime spec: Spec) type {
                 );
             }
 
-            if (self.call_frame.status == .running) {
-                self.call_frame.status = .success;
+            if (self.call_frame.isRunning()) {
+                self.call_frame.halt(.success);
             }
-            if (self.call_frame.pending_action) |action| {
-                return .{ .action = action };
+            if (self.call_frame.suspendedAction()) |action| {
+                return .{ .suspended = action };
             }
-            return .{ .finished = self.call_frame.getResult() };
+            return .{ .finished = self.call_frame.result() };
         }
 
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
-            if (frame.status == .running) {
+            if (frame.isRunning()) {
                 try TailDispatch.execute(frame, frame.readBytes());
             }
 
-            if (frame.status == .running) {
-                frame.status = .success;
+            if (frame.isRunning()) {
+                frame.halt(.success);
             }
         }
 
-        fn resolveHostAction(self: *Self, action: Action) Error!void {
-            const result = switch (action) {
-                .call => |call_action| blk: {
-                    const result = (try self.call_frame.host.call(call_action.msg)).expectCall();
-                    break :blk Host.Result{ .call = result };
-                },
-                .create => |create_action| blk: {
-                    const result = (try self.call_frame.host.call(create_action.msg)).expectCreate();
-                    break :blk Host.Result{ .create = result };
-                },
+        fn resolveSuspension(self: *Self, action: *const Action) Error!void {
+            const msg = switch (action.*) {
+                .call => |call_action| call_action.msg,
+                .create => |create_action| create_action.msg,
             };
-            _ = try self.call_frame.resumePendingAction(result);
+            try self.call_frame.resumeWith(try self.call_frame.host.call(msg));
         }
     };
 }
 
 pub const CallFrame = struct {
-    status: FrameStatus,
+    state: FrameState,
     host: *Host,
     msg: *Host.Message,
     stack: Stack,
@@ -323,7 +253,6 @@ pub const CallFrame = struct {
     output_range: Memory.Range = .{},
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
     needs_action_loop: bool = false,
-    pending_action: ?Action = null,
 
     pub fn init(
         self: *CallFrame,
@@ -357,9 +286,8 @@ pub const CallFrame = struct {
         self.return_data = self.io.return_data.slice();
         self.output_range = .{};
         self.jumpdest_masks = options.bytecode.jumpdest_masks;
-        self.status = if (code.len == 0) .success else .running;
+        self.state = if (code.len == 0) .{ .halted = .success } else .running;
         self.needs_action_loop = options.bytecode.needs_action_loop;
-        self.pending_action = null;
     }
 
     pub fn deinit(self: *CallFrame) void {
@@ -390,71 +318,111 @@ pub const CallFrame = struct {
         return self.memory.readRange(self.output_range);
     }
 
-    pub fn setPendingAction(self: *CallFrame, action: Action) void {
-        self.pending_action = action;
-        self.status = .suspended;
+    pub fn isRunning(self: *const CallFrame) bool {
+        return self.state == .running;
     }
 
-    pub fn resumePendingAction(self: *CallFrame, result: Host.Result) !Action {
-        const action = self.pending_action orelse unreachable;
-        self.pending_action = null;
-        self.status = .running;
-        switch (action) {
-            .call => |call_action| try self.resumeCallResult(
-                call_action.continuation,
-                result.expectCall(),
-            ),
-            .create => |create_action| try self.resumeCreateResult(
-                create_action.continuation,
-                result.expectCreate(),
-            ),
+    pub fn isSuspended(self: *const CallFrame) bool {
+        return self.state == .suspended;
+    }
+
+    /// Borrow the frame-owned action until the frame resumes.
+    pub fn suspendedAction(self: *const CallFrame) ?*const Action {
+        return switch (self.state) {
+            .suspended => |*action| action,
+            else => null,
+        };
+    }
+
+    pub fn haltReason(self: *const CallFrame) ?FrameHalt {
+        return switch (self.state) {
+            .halted => |reason| reason,
+            else => null,
+        };
+    }
+
+    pub fn suspendWith(self: *CallFrame, action: Action) void {
+        std.debug.assert(self.isRunning());
+        self.state = .{ .suspended = action };
+    }
+
+    /// Resume from an engine result while preserving its CALL/CREATE type.
+    pub fn resumeWith(self: *CallFrame, child: Host.Result) !void {
+        switch (child) {
+            .call => |call_result| try self.resumeWithCall(call_result),
+            .create => |create_result| try self.resumeWithCreate(create_result),
         }
-        return action;
     }
 
-    pub fn resumeCallResult(self: *CallFrame, continuation: CallResume, result: Host.CallResult) !void {
-        const child_gas_left = @max(result.gas_left, 0);
+    /// Resume only a CALL action. A mismatch leaves the frame suspended.
+    pub fn resumeWithCall(self: *CallFrame, child: Host.CallResult) !void {
+        const continuation = switch (self.state) {
+            .suspended => |action| switch (action) {
+                .call => |call_action| call_action.continuation,
+                .create => return error.ResumeKindMismatch,
+            },
+            else => return error.FrameNotSuspended,
+        };
+        self.state = .running;
+        try self.applyCallResult(continuation, child);
+    }
+
+    /// Resume only a CREATE action. A mismatch leaves the frame suspended.
+    pub fn resumeWithCreate(self: *CallFrame, child: Host.CreateResult) !void {
+        const continuation = switch (self.state) {
+            .suspended => |action| switch (action) {
+                .call => return error.ResumeKindMismatch,
+                .create => |create_action| create_action.continuation,
+            },
+            else => return error.FrameNotSuspended,
+        };
+        self.state = .running;
+        try self.applyCreateResult(continuation, child);
+    }
+
+    fn applyCallResult(self: *CallFrame, continuation: CallResume, child: Host.CallResult) !void {
+        const child_gas_left = @max(child.gas_left, 0);
         const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
-        self.gas_reservoir = result.gas_reservoir;
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
-        if (result.status != .success) {
+        self.gas_reservoir = child.gas_reservoir;
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, child.state_gas_spent) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, child.state_gas_from_gas_left) catch std.math.maxInt(i64);
+        if (child.outcome.status != .success) {
             self.refillStateGas(continuation.state_gas_charged);
         }
         if (!gas_charged) return;
-        if (result.status == .success) {
+        if (child.outcome.status == .success) {
             // EIP-2200: child call-frame refunds only survive committed frames.
-            self.gas_refund += result.gas_refund;
+            self.gas_refund += child.gas_refund;
         }
 
-        const output_size = @min(continuation.out_size, result.output_data.len);
-        self.memory.writeBytes(continuation.out_offset, result.output_data[0..output_size]);
+        const output_size = @min(continuation.out_size, child.output_data.len);
+        self.memory.writeBytes(continuation.out_offset, child.output_data[0..output_size]);
 
-        try self.replaceReturnData(result.output_data);
-        self.stack.pushUnchecked(if (result.status == .success) 1 else 0);
+        try self.replaceReturnData(child.output_data);
+        self.stack.push(if (child.outcome.status == .success) 1 else 0);
     }
 
-    pub fn resumeCreateResult(self: *CallFrame, continuation: CreateResume, result: Host.CreateResult) !void {
-        const child_gas_left = @max(result.gas_left, 0);
+    fn applyCreateResult(self: *CallFrame, continuation: CreateResume, child: Host.CreateResult) !void {
+        const child_gas_left = @max(child.gas_left, 0);
         const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
-        self.gas_reservoir = result.gas_reservoir;
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, result.state_gas_spent) catch std.math.maxInt(i64);
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, result.state_gas_from_gas_left) catch std.math.maxInt(i64);
-        if (result.status != .success) {
+        self.gas_reservoir = child.gas_reservoir;
+        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, child.state_gas_spent) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, child.state_gas_from_gas_left) catch std.math.maxInt(i64);
+        if (child.outcome.status != .success) {
             self.refillStateGas(continuation.state_gas_charged);
         }
         if (!gas_charged) return;
-        if (result.status == .success) {
+        if (child.outcome.status == .success) {
             // EIP-2200: child call-frame refunds only survive committed frames.
-            self.gas_refund += result.gas_refund;
+            self.gas_refund += child.gas_refund;
         }
 
-        if (result.status == .success) {
+        if (child.outcome.status == .success) {
             try self.replaceReturnData(&.{});
-            self.stack.pushUnchecked(evmz.address.toU256(result.address));
+            self.stack.push(evmz.address.toU256(child.address));
         } else {
-            try self.replaceReturnData(result.output_data);
-            self.stack.pushUnchecked(0);
+            try self.replaceReturnData(child.output_data);
+            self.stack.push(0);
         }
     }
 
@@ -462,7 +430,7 @@ pub const CallFrame = struct {
     pub fn trackGas(self: *CallFrame, gas: i64) bool {
         if (gas > self.gas_left) {
             @branchHint(.unlikely);
-            self.failWithStatus(.out_of_gas);
+            self.halt(.out_of_gas);
             return false;
         }
         self.gas_left -= gas;
@@ -479,7 +447,7 @@ pub const CallFrame = struct {
         const from_regular = gas - from_reservoir;
         if (from_regular > self.gas_left) {
             @branchHint(.unlikely);
-            self.failWithStatus(.out_of_gas);
+            self.halt(.out_of_gas);
             return false;
         }
         self.gas_reservoir -= from_reservoir;
@@ -501,16 +469,81 @@ pub const CallFrame = struct {
         self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, gas) catch std.math.minInt(i64);
     }
 
-    pub fn failWithStatus(self: *CallFrame, status: Status) void {
-        self.failWithFrameStatus(FrameStatus.fromResult(status));
+    /// Terminal EVM transition. Fault halts consume all remaining gas;
+    /// successful and reverting halts preserve it.
+    pub fn halt(self: *CallFrame, reason: FrameHalt) void {
+        std.debug.assert(self.isRunning());
+        self.state = .{ .halted = reason };
+        if (reason.consumesAllGas()) self.gas_left = 0;
     }
 
-    pub fn failWithFrameStatus(self: *CallFrame, status: FrameStatus) void {
-        self.status = status;
-        switch (status.toResult()) {
-            .invalid, .out_of_gas => self.gas_left = 0,
-            .success, .revert => {},
+    inline fn requireStack(self: *CallFrame, needed: usize) bool {
+        if (self.stack.len < needed) {
+            self.halt(.stack_underflow);
+            return false;
         }
+        return true;
+    }
+
+    inline fn requireStackRoom(self: *CallFrame) bool {
+        if (self.stack.len >= Stack.capacity) {
+            self.halt(.stack_overflow);
+            return false;
+        }
+        return true;
+    }
+
+    /// Semantic stack boundary: malformed bytecode halts the frame; the
+    /// invariant-only `Stack` operations below never return Zig errors.
+    pub inline fn push(self: *CallFrame, value: u256) bool {
+        if (!self.requireStackRoom()) return false;
+        self.stack.push(value);
+        return true;
+    }
+
+    pub inline fn pop(self: *CallFrame) ?u256 {
+        if (!self.requireStack(1)) return null;
+        return self.stack.pop();
+    }
+
+    pub inline fn popN(self: *CallFrame, comptime n: usize) ?Stack.PopN(n) {
+        if (!self.requireStack(n)) return null;
+        return self.stack.popN(n);
+    }
+
+    pub inline fn peek(self: *CallFrame) ?u256 {
+        if (!self.requireStack(1)) return null;
+        return self.stack.peek().?;
+    }
+
+    pub inline fn dup(self: *CallFrame, comptime n: usize) bool {
+        if (!self.requireStack(n) or !self.requireStackRoom()) return false;
+        self.stack.dup(n);
+        return true;
+    }
+
+    pub inline fn dupDepth(self: *CallFrame, n: usize) bool {
+        if (!self.requireStack(n) or !self.requireStackRoom()) return false;
+        self.stack.dupDepth(n);
+        return true;
+    }
+
+    pub inline fn swap(self: *CallFrame, comptime n: usize) bool {
+        if (!self.requireStack(n + 1)) return false;
+        self.stack.swap(n);
+        return true;
+    }
+
+    pub inline fn swapDepth(self: *CallFrame, n: usize) bool {
+        if (!self.requireStack(n + 1)) return false;
+        self.stack.swapDepth(n);
+        return true;
+    }
+
+    pub inline fn exchangeDepths(self: *CallFrame, n: usize, m: usize) bool {
+        if (!self.requireStack(@max(n, m) + 1)) return false;
+        self.stack.exchangeDepths(n, m);
+        return true;
     }
 
     pub fn isValidJumpDest(self: *CallFrame, target: usize) !bool {
@@ -526,7 +559,7 @@ pub const CallFrame = struct {
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
-        return self.wordToIntOrStatus(usize, value, .out_of_gas);
+        return self.wordToIntOrHalt(usize, value, .out_of_gas);
     }
 
     pub fn memoryOffsetToUsizeOrOog(self: *CallFrame, offset: u256, byte_size: usize) ?usize {
@@ -534,10 +567,10 @@ pub const CallFrame = struct {
         return self.wordToUsizeOrOog(offset);
     }
 
-    pub fn wordToIntOrStatus(self: *CallFrame, comptime T: type, value: u256, status: Status) ?T {
+    pub fn wordToIntOrHalt(self: *CallFrame, comptime T: type, value: u256, reason: FrameHalt) ?T {
         return std.math.cast(T, value) orelse {
             @branchHint(.unlikely);
-            self.failWithStatus(status);
+            self.halt(reason);
             return null;
         };
     }
@@ -546,37 +579,35 @@ pub const CallFrame = struct {
         if (byte_size == 0) return true;
         const end = std.math.add(usize, offset, byte_size) catch {
             @branchHint(.unlikely);
-            self.failWithStatus(.out_of_gas);
+            self.halt(.out_of_gas);
             return false;
         };
         if (end <= self.memory.len()) return true;
 
-        const expansion = self.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
-            error.OutOfMemory => {
-                @branchHint(.unlikely);
-                self.failWithStatus(.out_of_gas);
-                return false;
-            },
+        const expansion = self.memory.planExpansion(offset, byte_size) orelse {
+            @branchHint(.unlikely);
+            self.halt(.out_of_gas);
+            return false;
         };
         if (!self.trackGas(expansion.cost)) return false;
-        try self.memory.expandPrepared(expansion);
+        try self.memory.applyExpansion(expansion);
         return true;
     }
 
-    pub fn getResult(self: *const CallFrame) Result {
-        var result = Result{
+    pub fn result(self: *const CallFrame) FrameResult {
+        const halt_reason = self.haltReason() orelse unreachable;
+        var frame_result = FrameResult{
             .gas_left = self.gas_left,
             // EIP-2200: a frame-local refund counter is discarded on revert.
-            .gas_refund = if (self.status == .success) self.gas_refund else 0,
+            .gas_refund = if (halt_reason == .success) self.gas_refund else 0,
             .gas_reservoir = self.gas_reservoir,
             .state_gas_spent = self.state_gas_spent,
             .state_gas_from_gas_left = self.state_gas_from_gas_left,
             .output_data = self.outputData(),
-            .status = self.status.toResult(),
-            .cause = self.status.specificCause(),
+            .halt = halt_reason,
         };
-        result.finalizeFrameStateGas();
-        return result;
+        evmz.execution.finalizeStateGas(&frame_result);
+        return frame_result;
     }
 
     pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) !void {
@@ -650,7 +681,7 @@ test "call frame can execute with externally supplied stack storage" {
     var interpreter = evmz.Evm.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(Status.success, result.status());
     try std.testing.expectEqual(@as(u256, 5), frame.stack.peek().?);
     try std.testing.expectEqual(@as(u256, 5), stack_storage[0]);
 }
@@ -687,7 +718,7 @@ test "call frame can execute with externally supplied memory storage" {
     var interpreter = evmz.Evm.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
-    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 32), memory_storage.items.len);
     try std.testing.expectEqual(@as(u8, 0x2a), memory_storage.items[31]);
 }
@@ -711,7 +742,7 @@ test "interpreter trace cursor records step start and end" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -756,7 +787,7 @@ test "interpreter trace cursor records step start and end" {
         .frame_enter, .frame_leave => {},
     };
 
-    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(Status.success, result.status());
     try std.testing.expectEqual(@as(u8, 2), starts);
     try std.testing.expectEqual(@as(u8, 2), ends);
 }
@@ -779,15 +810,15 @@ test "interpreter captured tail table records a replay span" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
 
-    const run_result = try interpreter.executeCapturedUntilAction(&capture);
+    const run_result = try interpreter.executeCapturedUntilSuspended(&capture);
     const result = switch (run_result) {
         .finished => |finished| finished,
-        .action => unreachable,
+        .suspended => unreachable,
     };
     try capture.finishFrame(.{
         .outcome = .success,
@@ -796,7 +827,7 @@ test "interpreter captured tail table records a replay span" {
     const span = try tape.finish(mark);
     defer tape.resolve(span) catch unreachable;
 
-    try std.testing.expectEqual(Status.success, result.status);
+    try std.testing.expectEqual(Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.steps.len);
     try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), span.steps[0].opcode);
     try std.testing.expectEqual(@as(u32, 2), span.steps[0].pc_next);
@@ -857,8 +888,8 @@ test "captured tail memory exhaustion remains a resource error" {
     });
     var interpreter = evmz.Evm.Interpreter.init(&frame);
 
-    try std.testing.expectError(error.OutOfMemory, interpreter.executeCapturedUntilAction(&capture));
-    try std.testing.expectEqual(FrameStatus.running, frame.status);
+    try std.testing.expectError(error.OutOfMemory, interpreter.executeCapturedUntilSuspended(&capture));
+    try std.testing.expect(frame.isRunning());
     try tape.abort(mark);
 
     const reuse_mark = try tape.begin(.{});
@@ -873,7 +904,7 @@ test "interpreter captured tail table records optional memory writes" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -904,6 +935,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
     const invalid = [_]u8{0xfe};
     const stack_fault = [_]u8{@intFromEnum(Opcode.POP)};
     const out_of_gas = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a };
+    const memory_offset_overflow = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE });
     const Case = struct {
         code: []const u8,
         gas: i64,
@@ -919,6 +951,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         .{ .code = &invalid, .gas = 100, .status = .invalid, .cause = .invalid_opcode, .outcome = .invalid, .step_outcome = .invalid },
         .{ .code = &stack_fault, .gas = 100, .status = .invalid, .cause = .stack_underflow, .outcome = .invalid, .step_outcome = .invalid },
         .{ .code = &out_of_gas, .gas = 2, .status = .out_of_gas, .cause = .out_of_gas, .outcome = .out_of_gas, .step_outcome = .out_of_gas },
+        .{ .code = &memory_offset_overflow, .gas = 100, .status = .out_of_gas, .cause = .out_of_gas, .outcome = .out_of_gas, .step_outcome = .out_of_gas },
     };
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -930,13 +963,13 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,
-            .code = case.code,
+            .source = .{ .code = case.code },
         });
         defer frame.deinit();
         var interpreter = frame.interpreter();
 
         const captured = try interpreter.capture(&tape, .{});
-        try std.testing.expectEqual(case.status, captured.result.status);
+        try std.testing.expectEqual(case.status, captured.result.status());
         try std.testing.expectEqual(case.cause, captured.result.terminalCause());
         try std.testing.expectEqual(@as(usize, 1), captured.span.frames.len);
         try std.testing.expectEqual(case.outcome, captured.span.frames[0].outcome);
@@ -951,6 +984,28 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
     }
 }
 
+test "tail memory offset overflow halts exactly once" {
+    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE });
+    var host: Host = undefined;
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
+    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .code = &code },
+    });
+    defer frame.deinit();
+    var interpreter = frame.interpreter();
+
+    const result = try interpreter.execute();
+
+    try std.testing.expectEqual(FrameHalt.out_of_gas, frame.frame.haltReason().?);
+    try std.testing.expectEqual(Status.out_of_gas, result.status());
+    try std.testing.expectEqual(FrameHalt.out_of_gas, result.halt);
+    try std.testing.expectEqual(TerminalCause.out_of_gas, result.terminalCause());
+    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
+}
+
 test "interpreter capture replays minimal EIP-3155 JSONL" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
     var host: Host = undefined;
@@ -959,7 +1014,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
-        .code = &code,
+        .source = .{ .code = &code },
     });
     defer frame.deinit();
     var interpreter = frame.interpreter();
@@ -995,61 +1050,121 @@ test "yielded action stays in the call frame until resume" {
         .out_size = 0,
         .state_gas_charged = 0,
     };
-    owned.frame.status = .running;
-    owned.frame.setPendingAction(.{ .call = .{
+    owned.frame.state = .running;
+    owned.frame.suspendWith(.{ .call = .{
         .msg = msg,
         .continuation = continuation,
     } });
 
     var interpreter = owned.interpreter();
-    const yielded = try interpreter.executeUntilAction();
+    const yielded = try interpreter.executeUntilSuspended();
     const action = switch (yielded) {
-        .action => |value| value,
+        .suspended => |value| value,
         .finished => return error.ExpectedAction,
     };
-    try std.testing.expectEqual(FrameStatus.suspended, owned.frame.status);
-    try std.testing.expect(owned.frame.pending_action != null);
-    const yielded_continuation = switch (action) {
+    try std.testing.expect(owned.frame.isSuspended());
+    try std.testing.expectEqual(owned.frame.suspendedAction().?, action);
+    const yielded_continuation = switch (action.*) {
         .call => |call| call.continuation,
         .create => return error.ExpectedCallAction,
     };
     try std.testing.expectEqual(continuation, yielded_continuation);
 
-    _ = try owned.frame.resumePendingAction(.{ .call = .{
-        .status = .success,
+    try owned.frame.resumeWithCall(.{
+        .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 10,
         .gas_refund = 0,
-    } });
-    try std.testing.expectEqual(FrameStatus.running, owned.frame.status);
-    try std.testing.expect(owned.frame.pending_action == null);
+    });
+    try std.testing.expect(owned.frame.isRunning());
+    try std.testing.expect(owned.frame.suspendedAction() == null);
     try std.testing.expectEqualSlices(u256, &.{1}, owned.frame.stack.asSlice());
+}
+
+test "call and create resumes reject mismatched suspended actions" {
+    var host: Host = undefined;
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
+    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+    });
+    defer owned.deinit();
+
+    const call_result = Host.CallResult{
+        .outcome = .{ .status = .success, .cause = .none },
+        .output_data = &.{},
+        .gas_left = 10,
+        .gas_refund = 0,
+    };
+    const create_result = Host.CreateResult{
+        .outcome = .{ .status = .success, .cause = .none },
+        .output_data = &.{},
+        .gas_left = 10,
+        .gas_refund = 0,
+        .address = evmz.addr(0xbeef),
+    };
+
+    owned.frame.state = .running;
+    owned.frame.suspendWith(.{ .call = .{
+        .msg = msg,
+        .continuation = .{
+            .gas_limit = 10,
+            .out_offset = 0,
+            .out_size = 0,
+        },
+    } });
+    const borrowed_call = owned.frame.suspendedAction().?;
+    try std.testing.expectError(error.ResumeKindMismatch, owned.frame.resumeWithCreate(create_result));
+    try std.testing.expect(owned.frame.isSuspended());
+    try std.testing.expectEqual(borrowed_call, owned.frame.suspendedAction().?);
+    try owned.frame.resumeWithCall(call_result);
+    try std.testing.expect(owned.frame.isRunning());
+
+    owned.frame.suspendWith(.{ .create = .{
+        .msg = msg,
+        .continuation = .{ .gas_limit = 10 },
+    } });
+    const borrowed_create = owned.frame.suspendedAction().?;
+    var interpreter = owned.interpreter();
+    const yielded_create = switch (try interpreter.executeUntilSuspended()) {
+        .suspended => |action| action,
+        .finished => return error.ExpectedAction,
+    };
+    try std.testing.expectEqual(borrowed_create, yielded_create);
+    try std.testing.expectError(error.ResumeKindMismatch, owned.frame.resumeWithCall(call_result));
+    try std.testing.expect(owned.frame.isSuspended());
+    try std.testing.expectEqual(borrowed_create, owned.frame.suspendedAction().?);
+    try owned.frame.resumeWithCreate(create_result);
+    try std.testing.expect(owned.frame.isRunning());
+
+    try std.testing.expectError(error.FrameNotSuspended, owned.frame.resumeWithCall(call_result));
 }
 
 test "interpreter gas charge reports whether execution may continue" {
     var frame: CallFrame = undefined;
-    frame.status = .running;
+    frame.state = .running;
     frame.gas_left = 10;
 
     try std.testing.expect(frame.trackGas(4));
     try std.testing.expectEqual(@as(i64, 6), frame.gas_left);
-    try std.testing.expectEqual(FrameStatus.running, frame.status);
+    try std.testing.expect(frame.isRunning());
 
     try std.testing.expect(!frame.trackGas(7));
     try std.testing.expectEqual(@as(i64, 0), frame.gas_left);
-    try std.testing.expectEqual(FrameStatus.out_of_gas, frame.status);
+    try std.testing.expectEqual(FrameHalt.out_of_gas, frame.haltReason().?);
 }
 
 test "interpreter state gas charges reservoir before gas left and refills LIFO" {
     var frame: CallFrame = undefined;
-    frame.status = .running;
+    frame.state = .running;
     frame.gas_left = 10;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
 
     try std.testing.expect(frame.trackStateGas(8));
-    try std.testing.expectEqual(FrameStatus.running, frame.status);
+    try std.testing.expect(frame.isRunning());
     try std.testing.expectEqual(@as(i64, 7), frame.gas_left);
     try std.testing.expectEqual(@as(i64, 0), frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 8), frame.state_gas_spent);
@@ -1064,36 +1179,23 @@ test "interpreter state gas charges reservoir before gas left and refills LIFO" 
 
 test "interpreter state gas charge is atomic on out of gas" {
     var frame: CallFrame = undefined;
-    frame.status = .running;
+    frame.state = .running;
     frame.gas_left = 2;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
 
     try std.testing.expect(!frame.trackStateGas(8));
-    try std.testing.expectEqual(FrameStatus.out_of_gas, frame.status);
+    try std.testing.expectEqual(FrameHalt.out_of_gas, frame.haltReason().?);
     try std.testing.expectEqual(@as(i64, 0), frame.gas_left);
     try std.testing.expectEqual(@as(i64, 5), frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), frame.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), frame.state_gas_from_gas_left);
 }
 
-test "terminal cause fallback follows the final result status" {
-    var result = Result{
-        .status = .success,
-        .gas_left = 1,
-        .gas_refund = 0,
-        .output_data = &.{},
-    };
-    try std.testing.expectEqual(TerminalCause.none, result.terminalCause());
-
-    result.status = .out_of_gas;
-    try std.testing.expectEqual(TerminalCause.out_of_gas, result.terminalCause());
-}
-
 test "interpreter reverts frame-local state gas" {
     var frame: CallFrame = undefined;
-    frame.status = .running;
+    frame.state = .running;
     frame.gas_left = 10;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
@@ -1101,10 +1203,10 @@ test "interpreter reverts frame-local state gas" {
     frame.output_range = .{};
 
     try std.testing.expect(frame.trackStateGas(8));
-    frame.failWithStatus(.revert);
-    const result = frame.getResult();
+    frame.halt(.revert);
+    const result = frame.result();
 
-    try std.testing.expectEqual(Status.revert, result.status);
+    try std.testing.expectEqual(Status.revert, result.status());
     try std.testing.expectEqual(@as(i64, 10), result.gas_left);
     try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
@@ -1113,7 +1215,7 @@ test "interpreter reverts frame-local state gas" {
 
 test "interpreter exceptional halt unwinds state gas without restoring regular gas" {
     var frame: CallFrame = undefined;
-    frame.status = .running;
+    frame.state = .running;
     frame.gas_left = 10;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
@@ -1121,51 +1223,52 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     frame.output_range = .{};
 
     try std.testing.expect(frame.trackStateGas(8));
-    frame.failWithStatus(.invalid);
-    const result = frame.getResult();
+    frame.halt(.invalid_opcode);
+    const result = frame.result();
 
-    try std.testing.expectEqual(Status.invalid, result.status);
+    try std.testing.expectEqual(Status.invalid, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(i64, 5), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
-pub const OwnedInit = struct {
-    host: *Host,
-    msg: *const Host.Message,
-    /// Convenience byte input. The owned frame prepares it before execution.
-    code: ?[]const u8 = null,
-    /// Borrow an already prepared artifact instead of owning a temporary one.
-    bytecode: ?Bytecode.View = null,
-    memory_allocator: ?std.mem.Allocator = null,
-    memory_retain_capacity: bool = false,
-};
-
 fn OwnedCallFrameFor(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 
-        pub const Init = OwnedInit;
+        pub const Options = struct {
+            /// Where the executed bytecode comes from.
+            pub const Source = union(enum) {
+                /// Raw bytes. The frame prepares an artifact and owns it.
+                code: []const u8,
+                /// An already prepared artifact the caller keeps alive.
+                bytecode: Bytecode.View,
+            };
+
+            host: *Host,
+            msg: *const Host.Message,
+            source: Source = .{ .code = &.{} },
+            memory_allocator: ?std.mem.Allocator = null,
+            memory_retain_capacity: bool = false,
+        };
 
         allocator: std.mem.Allocator,
         slot: *CallFrameSlot,
         frame: *CallFrame,
         owned_bytecode: ?Bytecode,
 
-        pub fn init(allocator: std.mem.Allocator, options: OwnedInit) !Self {
-            if (options.code != null and options.bytecode != null) {
-                return error.AmbiguousBytecodeInput;
-            }
-
+        pub fn init(allocator: std.mem.Allocator, options: Options) !Self {
             var owned_bytecode: ?Bytecode = null;
             errdefer if (owned_bytecode) |*bytecode| bytecode.deinit(allocator);
-            const bytecode = options.bytecode orelse prepared: {
-                const code = options.code orelse &.{};
-                if (code.len == 0) break :prepared Bytecode.View.empty;
-                const prepared = try Bytecode.init(allocator, code);
-                owned_bytecode = prepared;
-                break :prepared prepared.view();
+            const bytecode = switch (options.source) {
+                .bytecode => |view| view,
+                .code => |code| prepared: {
+                    if (code.len == 0) break :prepared Bytecode.View.empty;
+                    const prepared = try Bytecode.init(allocator, code);
+                    owned_bytecode = prepared;
+                    break :prepared prepared.view();
+                },
             };
 
             const slot = try allocator.create(CallFrameSlot);
@@ -1200,7 +1303,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
 
 comptime {
     // If any of the following size/align/offset changes, rerun VM-loop canary benches
-    std.debug.assert(@sizeOf(Result) == 64);
+    std.debug.assert(@sizeOf(FrameResult) == 64);
     std.debug.assert(@sizeOf(CallFrame) == 400);
     std.debug.assert(@alignOf(CallFrame) == 16);
     std.debug.assert(@offsetOf(CallFrame, "stack") == 240);

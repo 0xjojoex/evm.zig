@@ -289,11 +289,11 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     // real final step at the logical boundary and never record
                     // the padded STOP.
                     if (pc >= ctx.frame.code.len) {
-                        ctx.frame.status = .success;
+                        ctx.frame.halt(.success);
                         ctx.capture.finishStep(.{
                             .pc_next = pc,
                             .gas_after = gas,
-                            .outcome = tapeStepOutcome(ctx.frame.status),
+                            .outcome = tapeStepOutcome(&ctx.frame.state),
                             .stack = ctx.stackSlice(sp),
                             .memory = ctx.frame.memory.readBytes(0, ctx.frame.memory.len()),
                         }) catch |err| {
@@ -307,7 +307,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     ctx.capture.finishStep(.{
                         .pc_next = pc,
                         .gas_after = gas,
-                        .outcome = tapeStepOutcome(ctx.frame.status),
+                        .outcome = tapeStepOutcome(&ctx.frame.state),
                         .stack = ctx.stackSlice(sp),
                         .memory = ctx.frame.memory.readBytes(0, ctx.frame.memory.len()),
                     }) catch |err| {
@@ -364,7 +364,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
                 .out_of_gas => {
                     ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
-                    frame.failWithStatus(.out_of_gas);
+                    frame.halt(.out_of_gas);
                 },
                 .thrown => return ctx.err.?,
             }
@@ -376,18 +376,18 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             // A resumed CALL/CREATE completes its parent step before its next
             // opcode begins. Suspended frames retain the pending step until the
             // runtime applies the child result.
-            if (frame.status != .suspended) {
+            if (!frame.isSuspended()) {
                 try capture.finishStep(.{
                     .pc_next = frame.pc,
                     .gas_after = frame.gas_left,
-                    .outcome = tapeStepOutcome(frame.status),
+                    .outcome = tapeStepOutcome(&frame.state),
                     .stack = frame.stack.asSlice(),
                     .memory = frame.memory.readBytes(0, frame.memory.len()),
                 });
             }
-            if (frame.status != .running) return;
+            if (!frame.isRunning()) return;
             if (frame.pc >= frame.code.len) {
-                frame.status = .success;
+                frame.halt(.success);
                 return;
             }
 
@@ -409,16 +409,16 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
                 .out_of_gas => {
                     ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas);
-                    frame.failWithStatus(.out_of_gas);
+                    frame.halt(.out_of_gas);
                 },
                 .thrown => return ctx.err.?,
             }
 
-            if (frame.status != .suspended) {
+            if (!frame.isSuspended()) {
                 try capture.finishStep(.{
                     .pc_next = frame.pc,
                     .gas_after = frame.gas_left,
-                    .outcome = tapeStepOutcome(frame.status),
+                    .outcome = tapeStepOutcome(&frame.state),
                     .stack = frame.stack.asSlice(),
                     .memory = frame.memory.readBytes(0, frame.memory.len()),
                 });
@@ -454,17 +454,17 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         inline fn requireOpcode(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?TailStatus {
             if (comptime Instructions.tailFastPathBuiltin(opcode)) return null;
-            return fail(ctx, ip, sp, gas, .invalid_opcode);
+            return halt(ctx, ip, sp, gas, .invalid_opcode);
         }
 
-        // All fail() exits are exceptional (invalid opcode/stack/static, OOG).
+        // All halt() exits are exceptional (invalid opcode/stack/static, OOG).
         // noinline + cold marks every call site unlikely, so LLVM sinks the
         // exit blocks below each handler's fall-through fast path; an inline
         // @branchHint does not propagate to the caller's branch.
-        noinline fn fail(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: Interpreter.FrameStatus) TailStatus {
+        noinline fn halt(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, reason: Interpreter.FrameHalt) TailStatus {
             @branchHint(.cold);
             _ = gas;
-            ctx.frame.failWithFrameStatus(status);
+            ctx.frame.halt(reason);
             return ctx.finish(ip, sp, 0, .done);
         }
 
@@ -475,7 +475,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         }
 
         fn tailStop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            ctx.frame.status = .success;
+            ctx.frame.halt(.success);
             return ctx.finish(ip, sp, gas, .done);
         }
 
@@ -487,7 +487,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 return .thrown;
             };
             ctx.refreshStackBase();
-            if (ctx.frame.status != .running) {
+            if (!ctx.frame.isRunning()) {
                 return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
             }
             return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx);
@@ -512,7 +512,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.SLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const key_slot = sp - 1;
             ctx.frame.gas_left = next_gas;
@@ -528,8 +528,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         fn tailSstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             // Canonical SSTORE has no static-gas charge; all accounting is
             // performed by sstoreAfterPop after the static/stack checks.
-            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, gas, .write_protection);
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .stack_underflow);
+            if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, gas, .write_protection);
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, gas, .stack_underflow);
 
             const next_sp = sp - 2;
             const key = (sp - 1)[0];
@@ -540,7 +540,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 ctx.err = err;
                 return .thrown;
             };
-            if (ctx.frame.status != .running) {
+            if (!ctx.frame.isRunning()) {
                 return ctx.finish(ip, next_sp, ctx.frame.gas_left, .done);
             }
             return tailNext(ip, next_sp, ctx.frame.gas_left, ctx);
@@ -549,7 +549,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         fn tailTload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.TLOAD, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.TLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const slot = sp - 1;
             const value = ctx.frame.host.getTransientStorage(ctx.frame.msg.recipient, slot[0]) catch |err| {
@@ -563,8 +563,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         fn tailTstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.TSTORE, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.TSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .write_protection);
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const nsp = sp - 2;
             const key = (sp - 1)[0];
@@ -578,7 +578,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         fn tailMcopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.MCOPY, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.MCOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 3)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const nsp = sp - 3;
             const dest_word = (sp - 1)[0];
@@ -586,14 +586,14 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             const size_word = nsp[0];
             if (size_word == 0) return tailNext(ip, nsp, next_gas, ctx);
 
-            const dest = wordToUsizeOrOog(dest_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
-            const source = wordToUsizeOrOog(source_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
-            const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+            const dest = wordToUsizeOrOog(dest_word, ip, nsp, next_gas, ctx) orelse return .done;
+            const source = wordToUsizeOrOog(source_word, ip, nsp, next_gas, ctx) orelse return .done;
+            const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .done;
 
             // Canonical MCOPY expands the source range before the destination.
             const source_gas = expandMemory(source, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const dest_gas = expandMemory(dest, size, ip, nsp, source_gas, ctx) orelse return memoryFailureStatus(ctx);
-            const copy_gas = copyWordGas(size, ip, nsp, dest_gas, ctx) orelse return .out_of_gas;
+            const copy_gas = copyWordGas(size, ip, nsp, dest_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, nsp, dest_gas, ctx, copy_gas) orelse return .out_of_gas;
 
             ctx.frame.memory.copy(dest, source, size);
@@ -603,7 +603,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         fn tailExp(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.EXP, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.EXP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const base = (sp - 1)[0];
             const exponent = (sp - 2)[0];
@@ -619,7 +619,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const a = (sp - 1)[0];
                     const b = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -651,7 +651,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
                     sp[0] = switch (value) {
                         .address => evmz.address.toU256(ctx.frame.msg.recipient),
                         .caller => evmz.address.toU256(ctx.frame.msg.sender),
@@ -670,16 +670,16 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 3)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, 3)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
                     const nsp = sp - 3;
                     const dest_offset_word = (sp - 1)[0];
                     const source_offset_word = (sp - 2)[0];
                     const size_word = nsp[0];
-                    const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
-                    const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .out_of_gas;
+                    const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .done;
+                    const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .done;
                     const memory_gas = expandMemory(dest_offset, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
-                    const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .out_of_gas;
+                    const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .done;
                     const final_gas = chargeGas(ip, nsp, memory_gas, ctx, copy_gas) orelse return .out_of_gas;
 
                     switch (source_kind) {
@@ -695,9 +695,9 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                         ),
                         .return_data => {
                             const source_offset = std.math.cast(usize, source_offset_word) orelse
-                                return fail(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
+                                return halt(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
                             if (source_offset > ctx.frame.return_data.len or size > ctx.frame.return_data.len - source_offset) {
-                                return fail(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
+                                return halt(ctx, ip, nsp, final_gas, .return_data_out_of_bounds);
                             }
                             ctx.frame.memory.writeBytes(
                                 dest_offset,
@@ -714,19 +714,19 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, gas, .stack_underflow);
 
                     const nsp = sp - 2;
                     const offset_word = (sp - 1)[0];
                     const size_word = nsp[0];
-                    const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .out_of_gas;
-                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, nsp, gas, ctx) orelse return .out_of_gas;
+                    const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .done;
+                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, nsp, gas, ctx) orelse return .done;
                     const final_gas = expandMemory(offset, size, ip, nsp, gas, ctx) orelse return memoryFailureStatus(ctx);
                     ctx.frame.setOutputRange(offset, size);
-                    ctx.frame.status = switch (terminal_status) {
+                    ctx.frame.halt(switch (terminal_status) {
                         .success => .success,
                         .revert => .revert,
-                    };
+                    });
                     return ctx.finish(ip, nsp, final_gas, .done);
                 }
             };
@@ -738,18 +738,18 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (ctx.frame.msg.is_static) return fail(ctx, ip, sp, next_gas, .write_protection);
-                    if (!ctx.hasStack(sp, 2 + topic_count)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
+                    if (!ctx.hasStack(sp, 2 + topic_count)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
                     // Canonical logging pops offset/size before dynamic gas, then
                     // topics only after memory and data gas have succeeded.
                     const args_sp = sp - 2;
                     const offset_word = (sp - 1)[0];
                     const size_word = args_sp[0];
-                    const size = wordToUsizeOrOog(size_word, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
-                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, next_gas, ctx) orelse return .out_of_gas;
+                    const size = wordToUsizeOrOog(size_word, ip, args_sp, next_gas, ctx) orelse return .done;
+                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, next_gas, ctx) orelse return .done;
                     const memory_gas = expandMemory(offset, size, ip, args_sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
-                    const data_gas = logDataGas(size, ip, args_sp, memory_gas, ctx) orelse return .out_of_gas;
+                    const data_gas = logDataGas(size, ip, args_sp, memory_gas, ctx) orelse return .done;
                     const final_gas = chargeGas(ip, args_sp, memory_gas, ctx, data_gas) orelse return .out_of_gas;
 
                     var topics: [topic_count]u256 = undefined;
@@ -776,7 +776,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const slot = sp - 1;
                     slot[0] = switch (op) {
                         .iszero => @intFromBool(slot[0] == 0),
@@ -789,14 +789,14 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailPop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.POP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             return tailNext(ip, sp - 1, next_gas, ctx);
         }
 
         fn tailPush0(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             if (requireOpcode(.PUSH0, ip, sp, gas, ctx)) |status| return status;
             const next_gas = charge(.PUSH0, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = 0;
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
@@ -805,7 +805,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
                     const immediate_len: usize = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
                     // read_bytes carries Bytecode.zero_padding_len (33) trailing zero
                     // bytes, so a full-width big-endian load is always in bounds and
@@ -823,8 +823,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.DUP1) + 1;
-                    if (!ctx.hasStack(sp, depth)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
-                    if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (!ctx.hasStack(sp, depth)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
                     sp[0] = (sp - depth)[0];
                     return tailNext(ip, sp + 1, next_gas, ctx);
                 }
@@ -836,7 +836,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.SWAP1) + 1;
-                    if (!ctx.hasStack(sp, depth + 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, depth + 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const top = sp - 1;
                     const target = top - depth;
                     const tmp = target[0];
@@ -852,7 +852,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const shift = (sp - 1)[0];
                     const value = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -876,40 +876,40 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailJump(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.JUMP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 1;
-            const target = std.math.cast(usize, nsp[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid_jump);
-            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid_jump);
+            const target = std.math.cast(usize, nsp[0]) orelse return halt(ctx, ip, nsp, next_gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, next_gas, .invalid_jump);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
         }
 
         fn tailJumpi(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.JUMPI, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 2;
             if (nsp[0] == 0) return tailNext(ip, nsp, next_gas, ctx);
-            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return fail(ctx, ip, nsp, next_gas, .invalid_jump);
-            if (!ctx.isValidJumpTarget(target)) return fail(ctx, ip, nsp, next_gas, .invalid_jump);
+            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return halt(ctx, ip, nsp, next_gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, next_gas, .invalid_jump);
             return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
         }
 
         fn tailPc(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.PC, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = ctx.pcOf(ip) - 1;
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
 
         fn tailMsize(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSIZE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = ctx.frame.memory.len();
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
 
         fn tailGas(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.GAS, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return fail(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
             sp[0] = @intCast(next_gas);
             return tailNext(ip, sp + 1, next_gas, ctx);
         }
@@ -921,7 +921,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailCalldataLoad(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.CALLDATALOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             var buffer: [32]u8 = [_]u8{0} ** 32;
             if (std.math.cast(usize, offset_word)) |offset| {
@@ -938,8 +938,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailMload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 1)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             (sp - 1)[0] = ctx.frame.memory.read(offset);
             return tailNext(ip, sp, mem_gas, ctx);
@@ -947,8 +947,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailMstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.write(offset, nsp[0]);
@@ -957,8 +957,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailMstore8(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.MSTORE8, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 1, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.write8(offset, nsp[0]);
@@ -967,13 +967,13 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         fn tailKeccak256(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const next_gas = charge(.KECCAK256, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!ctx.hasStack(sp, 2)) return fail(ctx, ip, sp, next_gas, .stack_underflow);
+            if (!ctx.hasStack(sp, 2)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             const size_word = (sp - 2)[0];
-            const size = wordToUsizeOrOog(size_word, ip, sp, next_gas, ctx) orelse return .out_of_gas;
-            const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, sp, next_gas, ctx) orelse return .out_of_gas;
+            const size = wordToUsizeOrOog(size_word, ip, sp, next_gas, ctx) orelse return .done;
+            const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, size, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
-            const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .out_of_gas;
+            const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
             const input = ctx.frame.memory.readBytes(offset, size);
             const result = if (input.len == 0) evmz.crypto.keccak256_empty else evmz.crypto.keccak256(input);
@@ -984,7 +984,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         inline fn wordToUsizeOrOog(value: u256, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?usize {
             return std.math.cast(usize, value) orelse {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
         }
@@ -995,24 +995,23 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         }
 
         inline fn memoryFailureStatus(ctx: *const Context) TailStatus {
-            return if (ctx.err != null) .thrown else .out_of_gas;
+            if (ctx.err != null) return .thrown;
+            return if (ctx.frame.isRunning()) .out_of_gas else .done;
         }
 
         inline fn expandMemory(offset: usize, byte_size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             if (byte_size == 0) return gas;
             const end = std.math.add(usize, offset, byte_size) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             if (end <= ctx.frame.memory.len()) return gas;
-            const expansion = ctx.frame.memory.expansionFor(offset, byte_size) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    _ = fail(ctx, ip, sp, gas, .out_of_gas);
-                    return null;
-                },
+            const expansion = ctx.frame.memory.planExpansion(offset, byte_size) orelse {
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
+                return null;
             };
             const next_gas = chargeGas(ip, sp, gas, ctx, expansion.cost) orelse return null;
-            ctx.frame.memory.expandPrepared(expansion) catch |err| switch (err) {
+            ctx.frame.memory.applyExpansion(expansion) catch |err| switch (err) {
                 error.OutOfMemory => {
                     recordError(ctx, ip, sp, next_gas, err);
                     return null;
@@ -1023,43 +1022,43 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         inline fn keccakWordGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             const padded = std.math.add(usize, size, 31) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             const words = padded / 32;
             const gas_usize = std.math.mul(usize, 6, words) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             return std.math.cast(i64, gas_usize) orelse {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
         }
 
         inline fn copyWordGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             const padded = std.math.add(usize, size, 31) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             const words = padded / 32;
             const gas_usize = std.math.mul(usize, 3, words) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             return std.math.cast(i64, gas_usize) orelse {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
         }
 
         inline fn logDataGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
             const gas_usize = std.math.mul(usize, 8, size) catch {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
             return std.math.cast(i64, gas_usize) orelse {
-                _ = fail(ctx, ip, sp, gas, .out_of_gas);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
         }
@@ -1120,19 +1119,21 @@ noinline fn expOutlined(base: u256, exponent: u256) u256 {
     return arithmetic_instruction.wrapExp(base, exponent);
 }
 
-fn tapeStepOutcome(status: Interpreter.FrameStatus) trace.TraceStepOutcome {
-    return switch (status) {
-        .running, .suspended, .success => .success,
-        .invalid,
-        .invalid_opcode,
-        .stack_underflow,
-        .stack_overflow,
-        .invalid_jump,
-        .write_protection,
-        .return_data_out_of_bounds,
-        => .invalid,
-        .revert => .revert,
-        .out_of_gas => .out_of_gas,
+fn tapeStepOutcome(state: *const Interpreter.FrameState) trace.TraceStepOutcome {
+    return switch (state.*) {
+        .running, .suspended => .success,
+        .halted => |reason| switch (reason) {
+            .success => .success,
+            .invalid_opcode,
+            .stack_underflow,
+            .stack_overflow,
+            .invalid_jump,
+            .write_protection,
+            .return_data_out_of_bounds,
+            => .invalid,
+            .revert => .revert,
+            .out_of_gas => .out_of_gas,
+        },
     };
 }
 

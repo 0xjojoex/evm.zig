@@ -207,7 +207,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
             } else {
                 const result = (try context.runPayload(prepared.request)).result;
                 try context.finalizeState();
-                status = result.status;
+                status = result.status();
                 gas_result = .{
                     .gas_left = result.gas_left,
                     .gas_refund = result.gas_refund,
