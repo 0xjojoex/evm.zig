@@ -1356,16 +1356,6 @@ fn serialFold(
             break :blk null;
         }
     };
-    // const excess_blob_gas = if (effective_parent_blob_gas) |parent_blob_gas|
-    //     if (input.env.blob_params) |params|
-    //         transaction.calcExcessBlobGasForSchedule(
-    //             effectiveBlobSchedule(Engine, params) orelse return error.BlobGasOverflow,
-    //             parent_blob_gas,
-    //         ) orelse return error.BlobGasOverflow
-    //     else
-    //         calcProtocolExcessBlobGas(Engine, parent_blob_gas) orelse return error.BlobGasOverflow
-    // else
-    //     null;
 
     observation_collector.block_access_index =
         try eth_bal.postExecutionSystemIndex(block_access_transaction_count);
