@@ -106,17 +106,14 @@ fn BalDifferentialOperations(
             return trie.receiptRoot(allocator, receipts);
         }
 
-        pub fn candidateTransactionBlobGasUsed(
-            blob_schedule: ?transaction.BlobSchedule,
-            tx: transaction.Transaction,
-        ) !u64 {
-            return transactionBlobGasUsed(revision, Engine, blob_schedule, tx);
+        pub fn candidateTransactionBlobGasUsed(tx: transaction.Transaction) !u64 {
+            return transactionBlobGasUsed(revision, Engine, tx);
         }
 
         pub fn candidateBlockBlobGasLimit(
-            blob_schedule: ?transaction.BlobSchedule,
+            blob_params: ?transaction.BlobParams,
         ) !u64 {
-            return blockBlobGasLimit(revision, Engine, blob_schedule);
+            return blockBlobGasLimit(revision, Engine, blob_params);
         }
     };
 }
@@ -1162,7 +1159,7 @@ fn serialFold(
     defer deposit_request_data.deinit(allocator);
     var block_logs_bloom = empty_logs_bloom;
     var blob_gas_used: u64 = 0;
-    const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_schedule);
+    const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_params);
 
     for (input.transactions, 0..) |entry, tx_index| {
         if (capture_steps) try capture_context.beginTrace(.{
@@ -1174,7 +1171,7 @@ fn serialFold(
 
         observation_collector.block_access_index =
             try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index));
-        const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, input.env.blob_schedule, entry.tx);
+        const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
         const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
         if (next_blob_gas_used > blob_gas_limit) {
             const progress = block.progress();
@@ -1346,13 +1343,19 @@ fn serialFold(
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
     else
         input.parent_blob_gas;
-    const excess_blob_gas = if (effective_parent_blob_gas) |parent_blob_gas|
-        if (input.env.blob_schedule) |schedule|
-            transaction.calcExcessBlobGasForSchedule(schedule, parent_blob_gas) orelse return error.BlobGasOverflow
-        else
-            calcProtocolExcessBlobGas(Engine, parent_blob_gas) orelse return error.BlobGasOverflow
-    else
-        null;
+
+    const excess_blob_gas = blk: {
+        if (effective_parent_blob_gas) |parent_blob_gas| {
+            if (input.env.blob_params) |params| {
+                const schedule = effectiveBlobSchedule(Engine, params) orelse return error.BlobGasOverflow;
+                break :blk schedule.calcExcessBlobGasForSchedule(parent_blob_gas) orelse return error.BlobGasOverflow;
+            } else {
+                break :blk calcProtocolExcessBlobGas(Engine, parent_blob_gas) orelse return error.BlobGasOverflow;
+            }
+        } else {
+            break :blk null;
+        }
+    };
 
     observation_collector.block_access_index =
         try eth_bal.postExecutionSystemIndex(block_access_transaction_count);
@@ -1959,12 +1962,11 @@ fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void
 fn transactionBlobGasUsed(
     comptime revision: Revision,
     comptime Engine: type,
-    blob_schedule: ?transaction.BlobSchedule,
     tx: transaction.Transaction,
 ) !u64 {
     if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;
-    const schedule = blob_schedule orelse Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
+    const schedule = Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
     const gas_per_blob = schedule.gas_per_blob;
     return std.math.mul(u64, blob_count, gas_per_blob) catch error.BlobGasOverflow;
 }
@@ -1972,16 +1974,26 @@ fn transactionBlobGasUsed(
 fn blockBlobGasLimit(
     comptime revision: Revision,
     comptime Engine: type,
-    blob_schedule: ?transaction.BlobSchedule,
+    blob_params: ?transaction.BlobParams,
 ) !u64 {
     if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
+    const schedule = effectiveBlobScheduleOptional(Engine, blob_params) orelse return error.BlobGasOverflow;
     return std.math.mul(u64, schedule.max, schedule.gas_per_blob) catch error.BlobGasOverflow;
 }
 
 fn calcProtocolExcessBlobGas(comptime Engine: type, input: ParentBlobGas) ?u256 {
     const schedule = Engine.specification.transaction.blob_schedule orelse return 0;
-    return transaction.calcExcessBlobGasForSchedule(schedule, input);
+    return schedule.calcExcessBlobGasForSchedule(input);
+}
+
+fn effectiveBlobSchedule(comptime Engine: type, params: transaction.BlobParams) ?transaction.BlobSchedule {
+    const schedule = Engine.specification.transaction.blob_schedule orelse return null;
+    return schedule.withParams(params);
+}
+
+fn effectiveBlobScheduleOptional(comptime Engine: type, params: ?transaction.BlobParams) ?transaction.BlobSchedule {
+    const schedule = Engine.specification.transaction.blob_schedule orelse return null;
+    return if (params) |value| schedule.withParams(value) else schedule;
 }
 
 const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {

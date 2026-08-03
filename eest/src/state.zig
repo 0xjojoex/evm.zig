@@ -181,6 +181,7 @@ fn runFixture(
                 &fixture_obj,
                 vectors,
                 summary,
+                fork_name,
             ),
         }
     }
@@ -192,10 +193,12 @@ fn runForkVectors(
     fixture: *const std.json.ObjectMap,
     vectors: std.json.Array,
     summary: *Summary,
+    /// The `post` key naming this fork; several BPO forks share one revision.
+    fork_name: []const u8,
 ) !void {
     for (vectors.items) |post| {
         summary.vectors += 1;
-        runVectorExact(revision, allocator, fixture, post, summary) catch |err| {
+        runVectorExact(revision, allocator, fixture, post, summary, fork_name) catch |err| {
             summary.countFail(switch (err) {
                 error.UnsupportedFixtureKey => .unsupported_fixture_key,
                 else => .malformed_fixture,
@@ -210,6 +213,7 @@ fn runVectorExact(
     fixture: *const std.json.ObjectMap,
     post: JsonValue,
     summary: *Summary,
+    fork_name: []const u8,
 ) !void {
     const post_obj = asObject(post) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&post_obj, &.{ "hash", "logs", "receipt", "txbytes", "indexes", "state", "expectException" });
@@ -253,7 +257,7 @@ fn runVectorExact(
         "currentChainId",
     });
     try rejectUnknownKeys(&indexes, &.{ "data", "gas", "value" });
-    const config = try parseFixtureConfig(fixture, revision);
+    const config = try parseFixtureConfig(fixture, revision, fork_name);
 
     const data_index = try jsonIndex(indexes.get("data") orelse return error.MalformedFixture);
     const gas_index = try jsonIndex(indexes.get("gas") orelse return error.MalformedFixture);
@@ -512,7 +516,7 @@ fn comparePostState(
 const FixtureConfig = fixture_common.FixtureConfig;
 const parseFixtureConfig = fixture_common.parseFixtureConfig;
 
-test "EEST fixture config selects Amsterdam blob schedule" {
+test "EEST fixture config selects Amsterdam blob params" {
     const fixture =
         \\{
         \\  "config": {
@@ -533,16 +537,35 @@ test "EEST fixture config selects Amsterdam blob schedule" {
     defer parsed.deinit();
     const obj = asObject(parsed.value) orelse return error.MalformedFixture;
 
-    const osaka = try parseFixtureConfig(&obj, .osaka);
-    try std.testing.expectEqual(@as(u64, 9), osaka.blob_schedule.?.target);
-    try std.testing.expectEqual(@as(u64, 12), osaka.blob_schedule.?.max);
-    try std.testing.expectEqual(evmz.eth.transaction.min_blob_base_fee, osaka.blob_schedule.?.min_base_fee);
-    try std.testing.expectEqual(evmz.eth.transaction.blob_base_cost, osaka.blob_schedule.?.execution_base_cost);
+    // No name: the revision cascade still picks the newest entry it can carry.
+    const osaka = try parseFixtureConfig(&obj, .osaka, null);
+    try std.testing.expectEqual(@as(u64, 9), osaka.blob_params.?.target);
+    try std.testing.expectEqual(@as(u64, 12), osaka.blob_params.?.max);
 
-    const amsterdam = try parseFixtureConfig(&obj, .amsterdam);
+    const amsterdam = try parseFixtureConfig(&obj, .amsterdam, null);
     try std.testing.expectEqual(@as(u256, 42), amsterdam.chain_id);
-    try std.testing.expectEqual(@as(u64, 12), amsterdam.blob_schedule.?.target);
-    try std.testing.expectEqual(@as(u64, 15), amsterdam.blob_schedule.?.max);
+    try std.testing.expectEqual(@as(u64, 12), amsterdam.blob_params.?.target);
+    try std.testing.expectEqual(@as(u64, 15), amsterdam.blob_params.?.max);
+
+    // A BPO fork runs Osaka rules, so the revision cannot distinguish it. The
+    // declared fork name must select the BPO entry rather than Osaka's.
+    const bpo2 = try parseFixtureConfig(&obj, .osaka, "BPO2");
+    try std.testing.expectEqual(@as(u64, 18), bpo2.blob_params.?.target);
+    try std.testing.expectEqual(@as(u64, 21), bpo2.blob_params.?.max);
+    try std.testing.expectEqual(@as(u256, 6), bpo2.blob_params.?.base_fee_update_fraction);
+
+    const bpo1 = try parseFixtureConfig(&obj, .osaka, "BPO1");
+    try std.testing.expectEqual(@as(u64, 15), bpo1.blob_params.?.target);
+    try std.testing.expectEqual(@as(u256, 5), bpo1.blob_params.?.base_fee_update_fraction);
+
+    // An unknown name (transition network) falls back, never fails.
+    const transition = try parseFixtureConfig(&obj, .osaka, "OsakaToBPO1AtTime15k");
+    try std.testing.expectEqual(@as(u64, 9), transition.blob_params.?.target);
+}
+
+test "EEST fork parser maps BPO names onto Osaka execution" {
+    try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO1"));
+    try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO2"));
 }
 
 fn parseVmEnv(
@@ -587,11 +610,7 @@ fn parseBlobBaseFee(
 ) !u256 {
     if (env.get("currentBlobBaseFee")) |value| return parseU256FromValue(value);
     const excess_blob_gas = if (env.get("currentExcessBlobGas")) |value| try parseU256FromValue(value) else 0;
-    if (config.blob_schedule) |schedule| {
-        return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
-    }
-    const schedule = evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
-    return transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas) orelse error.Overflow;
+    return fixture_common.blobBaseFee(revision, config.blob_params, excess_blob_gas) orelse error.Overflow;
 }
 
 fn selectedU256(tx: *const std.json.ObjectMap, key: []const u8, index: usize) !u256 {

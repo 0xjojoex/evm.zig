@@ -135,13 +135,10 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
         }
 
         pub fn blobGasAdmission(self: *const Self, tx: Engine.Transaction) anyerror!BlobGasAdmission {
-            const transaction_blob_gas = try Operations.candidateTransactionBlobGasUsed(
-                self.env.blob_schedule,
-                tx,
-            );
+            const transaction_blob_gas = try Operations.candidateTransactionBlobGasUsed(tx);
             const next = std.math.add(u64, self.blob_gas_used, transaction_blob_gas) catch
                 return error.BlobGasOverflow;
-            const limit = try Operations.candidateBlockBlobGasLimit(self.env.blob_schedule);
+            const limit = try Operations.candidateBlockBlobGasLimit(self.env.blob_params);
             return .{ .next = next, .exceeds_limit = next > limit };
         }
     };

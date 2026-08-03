@@ -785,7 +785,8 @@ test "BlockSTF validates blob gas header fields" {
         @as(u256, 0x01) << 248,
         (@as(u256, 0x01) << 248) | 1,
     };
-    const expected_blob_gas_used: u64 = 2 * eth_spec.prague.transaction.blob_schedule.?.gas_per_blob;
+    const prague_schedule = eth_spec.prague.transaction.blob_schedule.?;
+    const expected_blob_gas_used: u64 = 2 * prague_schedule.gas_per_blob;
     const starting_balance: u256 = 1_000_000;
 
     const account_key = trie.hashedAddressKey(sender);
@@ -819,11 +820,14 @@ test "BlockSTF validates blob gas header fields" {
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const expected_excess_blob_gas = transaction.calcExcessBlobGasForSchedule(vm.Vm(eth_spec.prague).specification.transaction.blob_schedule.?, parent_blob_gas).?;
-    var custom_blob_schedule = eth_spec.prague.transaction.blob_schedule.?;
-    custom_blob_schedule.target = 10;
-    custom_blob_schedule.max = 12;
-    const expected_custom_excess_blob_gas = transaction.calcExcessBlobGasForSchedule(custom_blob_schedule, parent_blob_gas).?;
+    const blob_schedule = vm.Vm(eth_spec.prague).specification.transaction.blob_schedule.?;
+    const expected_excess_blob_gas = blob_schedule.calcExcessBlobGasForSchedule(parent_blob_gas).?;
+    const custom_blob_params = transaction.BlobParams{
+        .target = 10,
+        .max = 12,
+        .base_fee_update_fraction = prague_schedule.base_fee_update_fraction,
+    };
+    const expected_custom_excess_blob_gas = prague_schedule.withParams(custom_blob_params).calcExcessBlobGasForSchedule(parent_blob_gas).?;
 
     const first_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
@@ -858,7 +862,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(Status.valid, result.status);
 
     const custom_schedule_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
-        .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_blob_schedule },
+        .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
@@ -904,7 +908,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(Status.excess_blob_gas_mismatch, excess_blob_gas_mismatch.status);
 }
 
-test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
+test "BlockSTF rejects cumulative blob gas above the block params cap" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -994,10 +998,14 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
     try std.testing.expectEqual(Status.transaction_rejected, pre_cancun_result.status);
     try std.testing.expectEqual(@as(?usize, 0), pre_cancun_result.tx_index);
 
-    var custom_schedule = eth_spec.cancun.transaction.blob_schedule.?;
-    custom_schedule.max = 1;
+    const cancun_schedule = eth_spec.cancun.transaction.blob_schedule.?;
+    const custom_blob_params = transaction.BlobParams{
+        .target = cancun_schedule.target,
+        .max = 1,
+        .base_fee_update_fraction = cancun_schedule.base_fee_update_fraction,
+    };
     const custom_schedule_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
-        .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_schedule = custom_schedule },
+        .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
         .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = transactions[0..1],
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -1012,10 +1020,9 @@ test "BlockSTF rejects cumulative blob gas above the block schedule cap" {
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
 
-    const schedule = eth_spec.cancun.transaction.blob_schedule.?;
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, result.status);
     try std.testing.expectEqual(@as(?usize, 1), result.tx_index);
-    try std.testing.expectEqual(schedule.max * schedule.gas_per_blob, result.blob_gas_used);
+    try std.testing.expectEqual(cancun_schedule.max * cancun_schedule.gas_per_blob, result.blob_gas_used);
 }
 
 test "BlockSTF applies withdrawals to state balances" {

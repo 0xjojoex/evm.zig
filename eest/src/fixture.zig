@@ -109,12 +109,26 @@ pub fn rejectUnknownKeys(object: *const std.json.ObjectMap, allowed_keys: []cons
 
 pub const FixtureConfig = struct {
     chain_id: u256 = 1,
-    blob_schedule: ?evmz.transaction.BlobSchedule = null,
+    blob_params: ?evmz.transaction.BlobParams = null,
 };
+
+/// The fork a fixture declares. EEST moved `network` under `config` and marked
+/// the root copy for deprecation, so accept either placement.
+pub fn fixtureForkName(fixture: *const std.json.ObjectMap) ?[]const u8 {
+    if (fixture.get("config")) |config_value| {
+        if (asObject(config_value)) |config| {
+            if (config.get("network")) |value| {
+                if (jsonString(value)) |name| return name;
+            }
+        }
+    }
+    return jsonString(fixture.get("network") orelse return null);
+}
 
 pub fn parseFixtureConfig(
     fixture: *const std.json.ObjectMap,
     comptime revision: evmz.eth.Revision,
+    fork_name: ?[]const u8,
 ) !FixtureConfig {
     const config_value = fixture.get("config") orelse return .{};
     const config = asObject(config_value) orelse return error.MalformedFixture;
@@ -131,7 +145,28 @@ pub fn parseFixtureConfig(
     const schedule_value = config.get("blobSchedule") orelse return result;
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
-    const schedule_key: ?[]const u8 = if (revision.isImpl(.amsterdam))
+    if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
+        result.blob_params = try parseBlobParams(value);
+    }
+    return result;
+}
+
+/// EEST ships the schedule cumulatively, one entry per fork name, and the
+/// fixture's own fork is the entry it wants. Selecting by execution revision
+/// instead cannot reach a BPO entry at all: EIP-7892 forks change blob
+/// parameters without changing execution rules, so several of them project
+/// onto one revision and would silently resolve to that revision's numbers.
+fn blobScheduleEntry(
+    schedules: std.json.ObjectMap,
+    comptime revision: evmz.eth.Revision,
+    fork_name: ?[]const u8,
+) ?JsonValue {
+    if (fork_name) |name| {
+        if (schedules.get(name)) |value| return value;
+    }
+    // Names outside the schedule (`Paris`, transition networks) fall back to
+    // the newest entry the revision can carry.
+    const revision_key: ?[]const u8 = if (revision.isImpl(.amsterdam))
         "Amsterdam"
     else if (revision.isImpl(.osaka))
         "Osaka"
@@ -141,23 +176,28 @@ pub fn parseFixtureConfig(
         "Cancun"
     else
         null;
-    if (schedule_key) |key| {
-        if (schedules.get(key)) |value| result.blob_schedule = try parseBlobSchedule(revision, value);
-    }
-    return result;
+    return schedules.get(revision_key orelse return null);
 }
 
-fn parseBlobSchedule(
+fn parseBlobParams(value: JsonValue) !evmz.transaction.BlobParams {
+    const params = asObject(value) orelse return error.MalformedFixture;
+    try rejectUnknownKeys(&params, &.{ "target", "max", "baseFeeUpdateFraction" });
+    return .{
+        .target = try parseU64FromValue(params.get("target") orelse return error.MalformedFixture),
+        .max = try parseU64FromValue(params.get("max") orelse return error.MalformedFixture),
+        .base_fee_update_fraction = try parseU256FromValue(params.get("baseFeeUpdateFraction") orelse return error.MalformedFixture),
+    };
+}
+
+pub fn blobBaseFee(
     comptime revision: evmz.eth.Revision,
-    value: JsonValue,
-) !evmz.transaction.BlobSchedule {
-    const schedule = asObject(value) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&schedule, &.{ "target", "max", "baseFeeUpdateFraction" });
-    var result = evmz.eth.specAt(revision).transaction.blob_schedule orelse return error.MalformedFixture;
-    result.target = try parseU64FromValue(schedule.get("target") orelse return error.MalformedFixture);
-    result.max = try parseU64FromValue(schedule.get("max") orelse return error.MalformedFixture);
-    result.base_fee_update_fraction = try parseU256FromValue(schedule.get("baseFeeUpdateFraction") orelse return error.MalformedFixture);
-    return result;
+    blob_params: ?evmz.transaction.BlobParams,
+    excess_blob_gas: u256,
+) ?u256 {
+    if (!revision.isImpl(.cancun)) return 0;
+    const spec_schedule = evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
+    const schedule = if (blob_params) |params| spec_schedule.withParams(params) else spec_schedule;
+    return schedule.blobBaseFeeForSchedule(excess_blob_gas);
 }
 
 pub fn parseAddressFromValue(value: JsonValue) !Address {
@@ -401,6 +441,12 @@ pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
     if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
     if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
+    // EIP-7892 BPO forks carry no execution change; EEST derives every one of
+    // them from Osaka, so they run Osaka rules and differ only in the blob
+    // schedule entry chosen by name. Revisit if a BPO is ever based on a later
+    // fork, which would make this mapping wrong rather than merely coarse.
+    if (std.ascii.eqlIgnoreCase(name, "BPO1")) return .osaka;
+    if (std.ascii.eqlIgnoreCase(name, "BPO2")) return .osaka;
     return null;
 }
 

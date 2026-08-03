@@ -398,7 +398,7 @@ fn runPayloadExact(
     const payload_number = try u64Field(&payload, "blockNumber");
     try validateChildNumber(parent.number, payload_number);
 
-    const fixture_config = try parseFixtureConfig(fixture, revision);
+    const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
     const transactions = try parseTransactions(scratch, asArray(payload.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
     try validateBlobVersionedHashes(revision, params, transactions);
     const withdrawals = if (revision.isImpl(.shanghai))
@@ -430,8 +430,12 @@ fn runPayloadExact(
             .gas_limit = try u64Field(&payload, "gasLimit"),
             .prev_randao = try u256HashField(&payload, "prevRandao"),
             .base_fee = try optionalU256Field(&payload, "baseFeePerGas") orelse 0,
-            .blob_base_fee = try blobBaseFee(revision, fixture_config.blob_schedule, excess_blob_gas),
-            .blob_schedule = fixture_config.blob_schedule,
+            .blob_base_fee = fixture_common.blobBaseFee(
+                revision,
+                fixture_config.blob_params,
+                excess_blob_gas orelse 0,
+            ) orelse return error.BlobGasOverflow,
+            .blob_params = fixture_config.blob_params,
         },
         .block_hash_source = block_hash_source,
         .block_header = block_header,
@@ -499,7 +503,7 @@ fn runBlockBodyExact(
     const block_number = try u64Field(&header, "number");
     try validateChildNumber(parent.number, block_number);
 
-    const fixture_config = try parseFixtureConfig(fixture, revision);
+    const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
     const block_rlp = try parseBytesFromValue(scratch, entry.get("rlp") orelse return error.MalformedFixture);
     const transactions = try parseBlockBodyTransactions(scratch, block_rlp);
     const withdrawals = if (revision.isImpl(.shanghai))
@@ -536,8 +540,12 @@ fn runBlockBodyExact(
             .gas_limit = try u64Field(&header, "gasLimit"),
             .prev_randao = try u256HashField(&header, "mixHash"),
             .base_fee = try optionalU256Field(&header, "baseFeePerGas") orelse 0,
-            .blob_base_fee = try blobBaseFee(revision, fixture_config.blob_schedule, excess_blob_gas),
-            .blob_schedule = fixture_config.blob_schedule,
+            .blob_base_fee = fixture_common.blobBaseFee(
+                revision,
+                fixture_config.blob_params,
+                excess_blob_gas orelse 0,
+            ) orelse return error.BlobGasOverflow,
+            .blob_params = fixture_config.blob_params,
         },
         .block_hash_source = block_hash_source,
         .block_header = block_header,
@@ -732,7 +740,7 @@ const FixtureBlockHashes = struct {
 };
 
 fn fixtureRevision(fixture: *const JsonObject) !evmz.eth.Revision {
-    const network = jsonString(fixture.get("network") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
+    const network = fixture_common.fixtureForkName(fixture) orelse return error.MalformedFixture;
     const revision = parseStateFork(network) orelse return error.UnsupportedFork;
     if (!revision.isImpl(.merge)) return error.UnsupportedFork;
     return revision;
@@ -807,16 +815,6 @@ fn parseByteList(allocator: std.mem.Allocator, array: JsonArray) ![]const []cons
 fn parentBeaconBlockRoot(params: JsonArray) !?[32]u8 {
     if (params.items.len < 3) return null;
     return try parseHashFromValue(params.items[2]);
-}
-
-fn blobBaseFee(
-    comptime revision: evmz.eth.Revision,
-    blob_schedule: ?evmz.transaction.BlobSchedule,
-    excess_blob_gas: ?u256,
-) !u256 {
-    if (!revision.isImpl(.cancun)) return 0;
-    const schedule = blob_schedule orelse evmz.eth.specAt(revision).transaction.blob_schedule orelse return 0;
-    return evmz.transaction.blobBaseFeeForSchedule(schedule, excess_blob_gas orelse 0) orelse error.BlobGasOverflow;
 }
 
 fn fieldAny(object: *const JsonObject, keys: []const []const u8) !JsonValue {

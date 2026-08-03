@@ -36,7 +36,6 @@ pub const DefaultFees = struct {
     value: u256 = 0,
     blob_base_fee: u256 = 0,
     blob_count: usize = 0,
-    blob_schedule: ?tx_blob.BlobSchedule = null,
 };
 
 pub const ExecutionGasResult = struct {
@@ -148,7 +147,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
         }
 
         pub fn defaultPlanFromGasPlan(_: Self, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
-            const upfront_debit = prechargeCost(transaction.blob_schedule, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count, fees.blob_schedule) orelse std.math.maxInt(u256);
+            const upfront_debit = prechargeCost(transaction.blob_schedule, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count) orelse std.math.maxInt(u256);
             return .{
                 .payer = fees.payer,
                 .gas_limit = gas_limit,
@@ -194,17 +193,17 @@ fn runtime(comptime spec: ExactSpec) Runtime(spec) {
     return .{};
 }
 
-fn prechargeCost(spec_schedule: ?tx_blob.BlobSchedule, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn prechargeCost(blob_schedule: ?tx_blob.BlobSchedule, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
     const gas_cost = checkedGasCost(gas_limit, gas_price) catch return null;
-    const blob_gas = blobGasForCount(spec_schedule, blob_count, blob_schedule) orelse return null;
+    const blob_gas = blobGasForCount(blob_schedule, blob_count) orelse return null;
     const blob_cost = std.math.mul(u256, blob_gas, blob_base_fee) catch return null;
     return std.math.add(u256, gas_cost, blob_cost) catch null;
 }
 
-fn blobGasForCount(spec_schedule: ?tx_blob.BlobSchedule, blob_count: usize, blob_schedule: ?tx_blob.BlobSchedule) ?u256 {
+fn blobGasForCount(blob_schedule: ?tx_blob.BlobSchedule, blob_count: usize) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = blob_schedule orelse spec_schedule orelse return null;
-    return tx_blob.blobGasForSchedule(schedule, blob_count);
+    const schedule = blob_schedule orelse return null;
+    return schedule.blobGasForSchedule(blob_count);
 }
 
 fn calculateDefaultCosts(

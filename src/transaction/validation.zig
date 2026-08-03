@@ -69,7 +69,7 @@ pub const ValidationInput = struct {
     block_gas_limit: u64 = 0,
     block_progress: Transaction.PreparationBlockProgress = .{},
     blob_base_fee: u256 = 0,
-    blob_schedule: ?blob.BlobSchedule = null,
+    blob_params: ?blob.BlobParams = null,
     max_fee_per_gas: ?u256 = null,
     max_priority_fee_per_gas: ?u256 = null,
     max_fee_per_blob_gas: ?u256 = null,
@@ -134,7 +134,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             }
             if (self.exceedsBlockGasAllowance(input)) return .gas_allowance_exceeded;
             if (input.kind == .blob) {
-                const schedule = effectiveBlobSchedule(transaction.blob_schedule, input.blob_schedule) orelse
+                const schedule = effectiveBlobSchedule(transaction.blob_schedule, input.blob_params) orelse
                     return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCount(schedule)) return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCountPerTransaction(schedule)) return .type_3_tx_blob_count_exceeded;
@@ -166,7 +166,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 if (max_blob_fee < input.blob_base_fee) return .insufficient_max_fee_per_blob_gas;
                 if (!transaction.allowsContractCreation(input.kind) and input.is_create) return .type_3_tx_contract_creation;
                 if (input.blob_hashes.len == 0) return .type_3_tx_zero_blobs;
-                if (effectiveBlobSchedule(transaction.blob_schedule, input.blob_schedule)) |schedule| {
+                if (effectiveBlobSchedule(transaction.blob_schedule, input.blob_params)) |schedule| {
                     for (input.blob_hashes) |hash| {
                         if (blob.blobVersion(hash) != schedule.hash_version) return .type_3_tx_invalid_blob_versioned_hash;
                     }
@@ -203,11 +203,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             };
             const blob_fee = if (input.kind == .blob) input.max_fee_per_blob_gas orelse return null else 0;
             const gas_cost = uint256.checkedMul(@as(u256, input.gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(
-                transaction.blob_schedule,
-                input.blob_schedule,
-                if (input.kind == .blob) input.blob_hashes.len else 0,
-            ) orelse return null;
+            const blob_gas = blobGasForCount(transaction.blob_schedule, if (input.kind == .blob) input.blob_hashes.len else 0) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_fee) orelse return null;
             const transaction_cost = uint256.checkedAdd(gas_cost, blob_cost) orelse return null;
             return uint256.checkedAdd(transaction_cost, input.value);
@@ -215,7 +211,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
 
         pub fn prepaymentCost(_: Self, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
             const gas_cost = uint256.checkedMul(@as(u256, gas_limit), gas_price) orelse return null;
-            const blob_gas = blobGasForCount(transaction.blob_schedule, null, blob_count) orelse return null;
+            const blob_gas = blobGasForCount(transaction.blob_schedule, blob_count) orelse return null;
             const blob_cost = uint256.checkedMul(blob_gas, blob_base_fee) orelse return null;
             return uint256.checkedAdd(gas_cost, blob_cost);
         }
@@ -249,8 +245,9 @@ fn runtime(comptime spec: ExactSpec) Runtime(spec) {
     return .{};
 }
 
-fn effectiveBlobSchedule(spec_schedule: ?blob.BlobSchedule, override: ?blob.BlobSchedule) ?blob.BlobSchedule {
-    return override orelse spec_schedule;
+fn effectiveBlobSchedule(spec_schedule: ?blob.BlobSchedule, params: ?blob.BlobParams) ?blob.BlobSchedule {
+    const schedule = spec_schedule orelse return null;
+    return if (params) |value| schedule.withParams(value) else schedule;
 }
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
@@ -261,10 +258,10 @@ fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
     return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
 }
 
-fn blobGasForCount(spec_schedule: ?blob.BlobSchedule, override: ?blob.BlobSchedule, blob_count: usize) ?u256 {
+fn blobGasForCount(spec_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {
     if (blob_count == 0) return 0;
-    const schedule = effectiveBlobSchedule(spec_schedule, override) orelse return null;
-    return blob.blobGasForSchedule(schedule, blob_count);
+    const schedule = spec_schedule orelse return null;
+    return schedule.blobGasForSchedule(blob_count);
 }
 
 fn testRuntime(comptime spec: ExactSpec) Runtime(spec) {
@@ -308,36 +305,37 @@ test "transaction prepayment uses comptime blob gas" {
     try std.testing.expectEqual(default + @as(u256, eth_transaction.blob_gas_per_blob * hashes.len * 5), custom);
 }
 
-test "transaction validation uses runtime blob schedule" {
-    const eth_transaction = @import("../eth/transaction.zig");
-    var schedule = @import("../eth/spec.zig").cancun.transaction.blob_schedule.?;
+test "transaction validation uses runtime blob params" {
+    var params = blob.BlobParams{
+        .target = 3,
+        .max = 1,
+        .base_fee_update_fraction = @import("../eth/transaction.zig").cancun_blob_base_fee_update_fraction,
+    };
     const hashes = [_]u256{
         @as(u256, 0x01) << 248,
         (@as(u256, 0x01) << 248) | 1,
     };
 
-    schedule.max = 1;
     try std.testing.expectEqual(ValidationError.type_3_tx_max_blob_gas_allowance_exceeded, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
         .kind = .blob,
         .gas_limit = 21_000,
         .max_fee_per_gas = 1,
         .max_fee_per_blob_gas = 1,
-        .blob_schedule = schedule,
+        .blob_params = params,
         .blob_hashes = &hashes,
         .sender_balance = 1_000_000,
     }).?);
 
-    schedule.max = 6;
-    schedule.gas_per_blob = eth_transaction.blob_gas_per_blob * 2;
+    params.max = 6;
     const cost = testRuntime(@import("../eth/spec.zig").cancun).maxPrepaymentCost(.{
         .kind = .blob,
         .gas_limit = 500_000,
         .max_fee_per_gas = 7,
         .max_fee_per_blob_gas = 5,
-        .blob_schedule = schedule,
+        .blob_params = params,
         .blob_hashes = &hashes,
     }).?;
-    try std.testing.expectEqual(@as(u256, 500_000 * 7 + eth_transaction.blob_gas_per_blob * 2 * hashes.len * 5), cost);
+    try std.testing.expectEqual(@as(u256, 500_000 * 7 + @import("../eth/transaction.zig").blob_gas_per_blob * hashes.len * 5), cost);
 }
 
 test "transaction validation rejects intrinsic gas below limit" {

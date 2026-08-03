@@ -9,7 +9,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const execution = @import("../execution.zig");
-const BlobSchedule = @import("./blob.zig").BlobSchedule;
+const BlobParams = @import("./blob.zig").BlobParams;
 const BlockGas = @import("./settlement.zig").BlockGas;
 const ExecutionGas = execution.ExecutionGas;
 
@@ -125,10 +125,9 @@ pub const Env = struct {
     prev_randao: u256 = 0,
     base_fee: u256 = 0,
     blob_base_fee: u256 = 0,
-    /// Optional dynamic chain/fixture override for blob gas rules.
-    /// When null, transaction validation and settlement use the exact spec schedule.
-    // TODO: consider removing it in favor of policy
-    blob_schedule: ?BlobSchedule = null,
+    /// Optional EIP-7892 runtime override for target, maximum, and fee update.
+    /// Other blob behavior remains owned by the exact spec schedule.
+    blob_params: ?BlobParams = null,
 
     /// Project these facts into the engine's opcode-visible context.
     ///

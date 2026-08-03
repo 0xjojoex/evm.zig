@@ -1298,7 +1298,7 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
         &.{};
     return .{
         .chain_id = input.chain_config.chain_id,
-        .blob_schedule = null,
+        .blob_params = null,
         .block = .{
             .parent_hash = payload.parent_hash,
             .fee_recipient = payload.fee_recipient,

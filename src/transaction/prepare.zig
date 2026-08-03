@@ -44,7 +44,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .block_gas_limit = input.env.gas_limit,
                 .block_progress = input.block,
                 .blob_base_fee = input.env.blob_base_fee,
-                .blob_schedule = input.env.blob_schedule,
+                .blob_params = input.env.blob_params,
                 .max_fee_per_gas = view.fee.max_fee_per_gas,
                 .max_priority_fee_per_gas = view.fee.max_priority_fee_per_gas,
                 .max_fee_per_blob_gas = view.fee.max_fee_per_blob_gas,
@@ -100,7 +100,6 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .value = view.value,
                 .blob_base_fee = input.env.blob_base_fee,
                 .blob_count = view.blob_hashes.len,
-                .blob_schedule = input.env.blob_schedule,
             });
 
             const created_address = if (view.to == null)

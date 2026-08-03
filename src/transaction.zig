@@ -14,6 +14,7 @@ pub const signing = @import("./transaction/signing.zig");
 const transaction_mod = @import("./transaction/types.zig");
 
 pub const AccessListCounts = transaction_mod.AccessListCounts;
+pub const BlobParams = blob_mod.BlobParams;
 pub const BlobSchedule = blob_mod.BlobSchedule;
 pub const ExcessBlobGasInput = blob_mod.ExcessBlobGasInput;
 pub const TxKind = transaction_mod.TxKind;
@@ -48,8 +49,6 @@ pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
 // no free-function form to re-export here.
 pub const executionRequest = transaction_mod.executionRequest;
 pub const accessListCounts = gas_mod.accessListCounts;
-pub const blobBaseFeeForSchedule = blob_mod.blobBaseFeeForSchedule;
-pub const calcExcessBlobGasForSchedule = blob_mod.calcExcessBlobGasForSchedule;
 pub const fakeExponential = blob_mod.fakeExponential;
 pub const checkedGasCost = settlement_mod.checkedGasCost;
 pub const Prepared = transaction_mod.Prepared;
