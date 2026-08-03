@@ -300,6 +300,7 @@ pub fn build(b: *std.Build) void {
             .name = "rlp-fuzz",
             .root_module = rlp_fuzz_mod,
         });
+        rlp_fuzz_tests.use_llvm = true;
         const run_rlp_fuzz_tests = b.addRunArtifact(rlp_fuzz_tests);
 
         const mpt_fuzz_mod = b.createModule(.{
@@ -313,6 +314,7 @@ pub fn build(b: *std.Build) void {
             .name = "mpt-fuzz",
             .root_module = mpt_fuzz_mod,
         });
+        mpt_fuzz_tests.use_llvm = true;
         const run_mpt_fuzz_tests = b.addRunArtifact(mpt_fuzz_tests);
 
         const fuzz_step = b.step("fuzz", "Run fuzzable pure-Zig unit tests");
@@ -326,6 +328,12 @@ pub fn build(b: *std.Build) void {
 
         const modexp_fuzz_step = b.step("fuzz-modexp", "Run modexp fuzz tests");
         modexp_fuzz_step.dependOn(&run_modexp_fuzz_tests.step);
+
+        const rlp_fuzz_step = b.step("fuzz-rlp", "Run RLP fuzz tests");
+        rlp_fuzz_step.dependOn(&run_rlp_fuzz_tests.step);
+
+        const mpt_fuzz_step = b.step("fuzz-mpt", "Run MPT fuzz tests");
+        mpt_fuzz_step.dependOn(&run_mpt_fuzz_tests.step);
     }
 
     const optimize_name = @tagName(optimize);
@@ -370,7 +378,18 @@ pub fn build(b: *std.Build) void {
         addEvmcDelegate(b, "evmc-example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
     }
 
-    const guest_payload_steps = addGuestPayloadTests(b, target, optimize, native_evmz_mod);
+    const guest_heap_bytes = b.option(
+        u64,
+        "guest-heap-bytes",
+        "Fixed guest payload heap capacity in bytes",
+    ) orelse 32 * 1024 * 1024;
+    const guest_zisk_ram_bytes = b.option(
+        u64,
+        "guest-zisk-ram-bytes",
+        "ZisK guest RAM envelope in bytes",
+    ) orelse 48 * 1024 * 1024;
+
+    const guest_payload_steps = addGuestPayloadTests(b, target, optimize, native_evmz_mod, guest_heap_bytes);
     ci_step.dependOn(guest_payload_steps.tests);
     ci_step.dependOn(guest_payload_steps.abi);
     const ziskos_staticlib_path = b.option(
@@ -403,6 +422,8 @@ pub fn build(b: *std.Build) void {
         omit_frame_pointer,
         guest_zisk_profile_tags,
         guest_heap_metrics,
+        guest_heap_bytes,
+        guest_zisk_ram_bytes,
     );
     addGuest(
         b,
@@ -416,6 +437,8 @@ pub fn build(b: *std.Build) void {
         omit_frame_pointer,
         false,
         guest_heap_metrics,
+        guest_heap_bytes,
+        null,
     );
 
     // examples
@@ -663,10 +686,16 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     };
 }
 
-fn guestOptions(b: *std.Build, backend: GuestBackend, heap_metrics: bool) *std.Build.Step.Options {
+fn guestOptions(
+    b: *std.Build,
+    backend: GuestBackend,
+    heap_metrics: bool,
+    heap_bytes: u64,
+) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(GuestBackend, "backend", backend);
     options.addOption(bool, "heap_metrics", heap_metrics);
+    options.addOption(u64, "heap_bytes", heap_bytes);
     return options;
 }
 
@@ -764,8 +793,9 @@ fn addGuestPayloadTests(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     evmz_mod: *std.Build.Module,
+    heap_bytes: u64,
 ) GuestPayloadSteps {
-    const guest_options = guestOptions(b, .native, false);
+    const guest_options = guestOptions(b, .native, false, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -812,6 +842,8 @@ fn addGuestPayloadTests(
         .optimize = optimize,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "guest_allocator", .module = guest_allocator_mod },
+            .{ .name = "guest_options", .module = guest_options_mod },
             .{ .name = "guest_payload_basic", .module = basic_payload_mod },
             .{ .name = "guest_payload_stateless_ere", .module = stateless_ere_payload_mod },
         },
@@ -857,16 +889,28 @@ fn addGuest(
     omit_frame_pointer: bool,
     profile_tags: bool,
     heap_metrics: bool,
+    heap_bytes: u64,
+    ram_bytes: ?u64,
 ) void {
     const config = backend.config();
-    const provider_path = provider_path_option orelse {
-        const fail = b.addFail(config.missing_provider);
+    // A zero heap_bytes collapses _evmz_heap_bottom onto _evmz_heap_top, which the
+    // allocator reads as unreachable. Every other memory bound is left to the linker
+    // script, which unlike this function knows the guest's own data and bss sizes.
+    const unbuildable: ?[]const u8 = if (provider_path_option == null)
+        config.missing_provider
+    else if (heap_bytes == 0)
+        "guest-heap-bytes must be greater than zero"
+    else
+        null;
+    if (unbuildable) |message| {
+        const fail = b.addFail(message);
         const guest_step = b.step(config.build_step, config.build_description);
         guest_step.dependOn(&fail.step);
         const run_step = b.step(config.run_step, config.run_description);
         run_step.dependOn(&fail.step);
         return;
-    };
+    }
+    const provider_path = provider_path_option.?;
 
     const target = b.resolveTargetQuery(std.Target.Query.parse(.{
         .arch_os_abi = "riscv64-freestanding",
@@ -879,7 +923,7 @@ fn addGuest(
         .strip = strip,
     };
     const build_options = buildOptions(b, .zkvm, .std, .std);
-    const guest_options = guestOptions(b, backend, heap_metrics);
+    const guest_options = guestOptions(b, backend, heap_metrics, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();
     const stateless_profile_mod = policy.module(
@@ -931,6 +975,25 @@ fn addGuest(
         config.runtime_root,
         &.{.{ .name = "guest_payload", .module = payload_mod }},
     );
+    const memory_symbols_source = if (ram_bytes) |bytes|
+        b.fmt(
+            \\.global _evmz_payload_heap_size
+            \\.set _evmz_payload_heap_size, {d}
+            \\.global _evmz_ram_size
+            \\.set _evmz_ram_size, {d}
+            \\
+        , .{ heap_bytes, bytes })
+    else
+        b.fmt(
+            \\.global _evmz_payload_heap_size
+            \\.set _evmz_payload_heap_size, {d}
+            \\
+        , .{heap_bytes});
+    const memory_symbols = b.addWriteFiles().add(
+        b.fmt("evmz-guest-memory-{s}.S", .{@tagName(backend)}),
+        memory_symbols_source,
+    );
+    root_mod.addAssemblyFile(memory_symbols);
     root_mod.addObjectFile(.{ .cwd_relative = provider_path });
     if (backend == .sp1) {
         const atomics_mod = policy.module(b, "guest/runtime/sp1/atomics.zig", &.{});

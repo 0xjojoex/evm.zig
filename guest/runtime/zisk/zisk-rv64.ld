@@ -1,8 +1,15 @@
 ENTRY(_start)
 
+/*
+ * _evmz_ram_size and _evmz_payload_heap_size are absolute symbols defined by the
+ * assembly stub build.zig generates from -Dguest-zisk-ram-bytes and
+ * -Dguest-heap-bytes. They are deliberately left undefined here: without a
+ * fallback, an unlinked stub is a link error rather than a silently stale size.
+ */
+
 MEMORY {
   rom (xa) : ORIGIN = 0x80000000, LENGTH = 0x08000000
-  ram (wxa) : ORIGIN = 0xA0030000, LENGTH = 0x2000000
+  ram (wxa) : ORIGIN = 0xA0030000, LENGTH = _evmz_ram_size
 }
 
 PHDRS {
@@ -12,8 +19,7 @@ PHDRS {
   bss PT_LOAD FLAGS(6);
 }
 
-_evmz_payload_heap_size = 0x1000000; /* 16 MiB */
-_stack_size = 0x100000;              /* 1 MiB */
+_stack_size = 0x100000; /* 1 MiB */
 
 SECTIONS
 {

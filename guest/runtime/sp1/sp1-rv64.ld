@@ -1,6 +1,6 @@
 /*
  * Adapted from SP1 v6.3.1 zkevm/zkvm.ld.
- * SP1 owns _start; Zig exports main and uses a bounded 16 MiB payload heap.
+ * SP1 owns _start; Zig exports main and uses a build-time bounded payload heap.
  */
 OUTPUT_FORMAT("elf64-littleriscv")
 OUTPUT_ARCH(riscv)
@@ -15,7 +15,12 @@ MEMORY
     RAM (rwx) : ORIGIN = 0x78000000, LENGTH = 0x1B88000000
 }
 
-_evmz_payload_heap_size = 0x1000000;
+/*
+ * _evmz_payload_heap_size is an absolute symbol defined by the assembly stub
+ * build.zig generates from -Dguest-heap-bytes. It is deliberately left undefined
+ * here: without a fallback, an unlinked stub is a link error rather than a
+ * silently stale size.
+ */
 
 SECTIONS
 {

@@ -2,8 +2,6 @@ const std = @import("std");
 const evmz = @import("evmz");
 const guest_options = @import("guest_options");
 
-const native_heap_size = 16 * 1024 * 1024;
-
 pub const MeteredFixedBufferAllocator = evmz.fixed_buffer_meter.MeteredFixedBufferAllocator;
 
 extern var _evmz_heap_bottom: u8;
@@ -18,7 +16,7 @@ const NativeHeap = if (guest_options.backend != .native) struct {
 
     fn buffer() []u8 {
         if (backing) |existing| return existing;
-        const allocated = std.heap.page_allocator.alignedAlloc(u8, .@"16", native_heap_size) catch {
+        const allocated = std.heap.page_allocator.alignedAlloc(u8, .@"16", guest_options.heap_bytes) catch {
             @panic("failed to allocate native guest heap");
         };
         backing = allocated;

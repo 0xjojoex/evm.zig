@@ -97,6 +97,12 @@ jobs:
       - name: Fuzz modexp
         run: zig build fuzz-modexp --fuzz=10K --summary all
 
+      - name: Fuzz RLP
+        run: zig build fuzz-rlp --fuzz=100K --summary all
+
+      - name: Fuzz MPT
+        run: zig build fuzz-mpt --fuzz=25K --summary all
+
   cross-compile:
     name: Cross compile ${{ matrix.target }}
     runs-on: ubuntu-24.04
