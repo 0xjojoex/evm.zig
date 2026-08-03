@@ -224,6 +224,9 @@ pub fn buildWitnessCatalog(
     errdefer storage_roots.deinit(allocator);
     var accounts: std.ArrayList(CatalogAccount) = .empty;
     errdefer accounts.deinit(allocator);
+    var first_storage_root_account: ?u32 = null;
+    var storage_root_accounts: std.ArrayList(u32) = .empty;
+    defer storage_root_accounts.deinit(allocator);
 
     for (0..state_node_count) |raw_id| {
         const id: mpt.catalog.NodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
@@ -233,19 +236,36 @@ pub fn buildWitnessCatalog(
         const entry = try accounts.addOne(allocator);
         entry.node = id;
         try decodeAccountValueInto(encoded, &entry.decoded);
-        if (std.mem.eql(u8, &entry.decoded.storage_root, &empty_root_hash) or
-            containsStorageRoot(storage_roots.items, entry.decoded.storage_root))
-        {
-            continue;
+        if (std.mem.eql(u8, &entry.decoded.storage_root, &empty_root_hash)) continue;
+        const account_index: u32 = @intCast(accounts.items.len - 1);
+        if (first_storage_root_account == null) {
+            first_storage_root_account = account_index;
+        } else if (storage_root_accounts.items.len == 0) {
+            try storage_root_accounts.ensureUnusedCapacity(allocator, 2);
+            storage_root_accounts.appendAssumeCapacity(first_storage_root_account.?);
+            storage_root_accounts.appendAssumeCapacity(account_index);
+        } else {
+            try storage_root_accounts.append(allocator, account_index);
         }
-        const root_ref = builder.authenticateRoot(entry.decoded.storage_root) catch |err| switch (err) {
+    }
+
+    var single_storage_root_account: [1]u32 = undefined;
+    const candidates = if (storage_root_accounts.items.len != 0)
+        storage_root_accounts.items
+    else if (first_storage_root_account) |account_index| blk: {
+        single_storage_root_account[0] = account_index;
+        break :blk single_storage_root_account[0..];
+    } else single_storage_root_account[0..0];
+    const unique_len = sortDeduplicateStorageRootAccounts(candidates, accounts.items);
+    for (candidates[0..unique_len]) |account_index| {
+        const storage_root = accounts.items[account_index].decoded.storage_root;
+        const root_ref = builder.authenticateRoot(storage_root) catch |err| switch (err) {
             error.MissingNode => continue,
             else => return err,
         };
-        try storage_roots.append(allocator, .{ .hash = entry.decoded.storage_root, .root = root_ref });
+        try storage_roots.append(allocator, .{ .hash = storage_root, .root = root_ref });
     }
 
-    std.mem.sort(StorageCatalogRoot, storage_roots.items, {}, storageCatalogRootLessThan);
     return .{
         .allocator = allocator,
         .topology = try builder.finishAssumeCollisionResistant(),
@@ -262,15 +282,29 @@ fn catalogValue(result: mpt.Lookup) ?[]const u8 {
     };
 }
 
-fn containsStorageRoot(roots: []const StorageCatalogRoot, digest: [32]u8) bool {
-    for (roots) |entry| {
-        if (std.mem.eql(u8, &entry.hash, &digest)) return true;
+fn sortDeduplicateStorageRootAccounts(
+    account_indices: []u32,
+    accounts: []const CatalogAccount,
+) usize {
+    if (account_indices.len < 2) return account_indices.len;
+    std.mem.sort(u32, account_indices, accounts, storageRootAccountLessThan);
+    var unique_len: usize = 1;
+    for (account_indices[1..]) |account_index| {
+        const previous = accounts[account_indices[unique_len - 1]].decoded.storage_root;
+        const current = accounts[account_index].decoded.storage_root;
+        if (std.mem.eql(u8, &previous, &current)) continue;
+        account_indices[unique_len] = account_index;
+        unique_len += 1;
     }
-    return false;
+    return unique_len;
 }
 
-fn storageCatalogRootLessThan(_: void, lhs: StorageCatalogRoot, rhs: StorageCatalogRoot) bool {
-    return std.mem.order(u8, &lhs.hash, &rhs.hash) == .lt;
+fn storageRootAccountLessThan(accounts: []const CatalogAccount, lhs: u32, rhs: u32) bool {
+    return std.mem.order(
+        u8,
+        &accounts[lhs].decoded.storage_root,
+        &accounts[rhs].decoded.storage_root,
+    ) == .lt;
 }
 
 pub const Proof = struct {
@@ -1195,19 +1229,42 @@ test "witness catalog links state and witness-present storage roots" {
     try std.testing.expectError(error.MissingNode, state_only.storage(storage_root, &slot_key));
 }
 
+test "witness catalog storage-root accounts sort and deduplicate in place" {
+    const first = [_]u8{0x11} ** 32;
+    const second = [_]u8{0x22} ** 32;
+    const third = [_]u8{0x33} ** 32;
+    const accounts = [_]CatalogAccount{
+        .{ .node = @enumFromInt(0), .decoded = .{ .storage_root = first } },
+        .{ .node = @enumFromInt(1), .decoded = .{ .storage_root = second } },
+        .{ .node = @enumFromInt(2), .decoded = .{ .storage_root = third } },
+    };
+    var account_indices = [_]u32{ 2, 0, 1, 0, 2 };
+
+    const len = sortDeduplicateStorageRootAccounts(&account_indices, &accounts);
+    try std.testing.expectEqual(@as(usize, 3), len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, account_indices[0..len]);
+}
+
 test "witness catalog cleans every allocation failure position" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
+    const slot_key = hashedStorageKey(3);
+    const slot_value = try storageValue(scratch, 42);
+    const storage_node = try encodedRootForTest(
+        scratch,
+        &.{.{ .key = &slot_key, .value = slot_value }},
+    );
+    const storage_root = crypto.keccak256(storage_node);
     const account_key = hashedAddressKey(address.addr(0x2000));
-    const account_value = try accountValueFrom(scratch, .{});
+    const account_value = try accountValueFrom(scratch, .{ .storage_root = storage_root });
     const state_node = try encodedRootForTest(
         scratch,
         &.{.{ .key = &account_key, .value = account_value }},
     );
     const state_root = crypto.keccak256(state_node);
-    const nodes = [_][]const u8{state_node};
+    const nodes = [_][]const u8{ state_node, storage_node };
 
     const Harness = struct {
         fn run(
@@ -1220,6 +1277,7 @@ test "witness catalog cleans every allocation failure position" {
             var catalog = try buildWitnessCatalog(allocator, root_hash, indexed);
             defer catalog.deinit();
             try std.testing.expectEqual(@as(usize, 1), catalog.accounts.items.len);
+            try std.testing.expectEqual(@as(usize, 1), catalog.storage_roots.items.len);
         }
     };
     try std.testing.checkAllAllocationFailures(
