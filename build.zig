@@ -300,6 +300,7 @@ pub fn build(b: *std.Build) void {
             .name = "rlp-fuzz",
             .root_module = rlp_fuzz_mod,
         });
+        rlp_fuzz_tests.use_llvm = true;
         const run_rlp_fuzz_tests = b.addRunArtifact(rlp_fuzz_tests);
 
         const mpt_fuzz_mod = b.createModule(.{
@@ -313,6 +314,7 @@ pub fn build(b: *std.Build) void {
             .name = "mpt-fuzz",
             .root_module = mpt_fuzz_mod,
         });
+        mpt_fuzz_tests.use_llvm = true;
         const run_mpt_fuzz_tests = b.addRunArtifact(mpt_fuzz_tests);
 
         const fuzz_step = b.step("fuzz", "Run fuzzable pure-Zig unit tests");
@@ -326,6 +328,12 @@ pub fn build(b: *std.Build) void {
 
         const modexp_fuzz_step = b.step("fuzz-modexp", "Run modexp fuzz tests");
         modexp_fuzz_step.dependOn(&run_modexp_fuzz_tests.step);
+
+        const rlp_fuzz_step = b.step("fuzz-rlp", "Run RLP fuzz tests");
+        rlp_fuzz_step.dependOn(&run_rlp_fuzz_tests.step);
+
+        const mpt_fuzz_step = b.step("fuzz-mpt", "Run MPT fuzz tests");
+        mpt_fuzz_step.dependOn(&run_mpt_fuzz_tests.step);
     }
 
     const optimize_name = @tagName(optimize);
