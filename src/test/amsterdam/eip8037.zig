@@ -141,6 +141,45 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     try std.testing.expect(found);
 }
 
+test "Amsterdam wrong-chain authorization authority is never accessed" {
+    // EELS `validate_authorization` returns before `accessed_addresses.add` on
+    // chain-id and max-nonce rejection, so the authority of a tuple rejected at
+    // those bounds must not reach the BAL. Only tuples that pass them and fail
+    // the later code/nonce checks are accessed-without-effect.
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const target = evmz.addr(0xdddd);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, authority, .{ .nonce = 1 });
+
+    var wrong_chain = evmz.t.testAuthorization(authority, target);
+    wrong_chain.chain_id = 0xdead;
+    const authorization_list = [_]transaction.AuthorizationTuple{wrong_chain};
+    var vm = evmz.Evm.init(&executor);
+    const executed = try evmz.t.expectExecuted(try vm.transactObserved(.{
+        .env = .{ .gas_limit = 300_000 },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 300_000,
+            .max_fee_per_gas = 1,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+
+    const accounts = executed.observations().accounts;
+    var index: u32 = 0;
+    while (index < accounts.len()) : (index += 1) {
+        try std.testing.expect(!std.mem.eql(u8, &accounts.at(index).address, &authority));
+    }
+}
+
 test "Amsterdam CREATE collision with alive target skips state charge before child gas" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);

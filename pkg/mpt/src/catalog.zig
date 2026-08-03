@@ -260,7 +260,7 @@ pub const Catalog = struct {
 
 /// Ingestion-only owner. Node IDs returned by `authenticateRoot` remain stable
 /// after further roots are added and after `finish` seals the catalog.
-pub const CatalogBuilder = struct {
+pub const Builder = struct {
     allocator: std.mem.Allocator,
     index: *const proof.NodeIndex,
     positions: []u32,
@@ -275,7 +275,7 @@ pub const CatalogBuilder = struct {
     const pending: u32 = 0;
     const decoded: u32 = 1;
 
-    pub fn init(allocator: std.mem.Allocator, index: *const proof.NodeIndex) std.mem.Allocator.Error!CatalogBuilder {
+    pub fn init(allocator: std.mem.Allocator, index: *const proof.NodeIndex) std.mem.Allocator.Error!Builder {
         return initWithLimits(allocator, index, .{}) catch |err| switch (err) {
             error.ResourceLimitExceeded => unreachable,
             error.OutOfMemory => error.OutOfMemory,
@@ -286,14 +286,14 @@ pub const CatalogBuilder = struct {
         allocator: std.mem.Allocator,
         index: *const proof.NodeIndex,
         limits: Limits,
-    ) InitError!CatalogBuilder {
+    ) InitError!Builder {
         if (proof.nodeCount(index) > limits.indexed_nodes) return error.ResourceLimitExceeded;
         const positions = try allocator.alloc(u32, proof.nodeCount(index));
         @memset(positions, no_node);
         return .{ .allocator = allocator, .index = index, .positions = positions, .limits = limits };
     }
 
-    pub fn deinit(self: *CatalogBuilder) void {
+    pub fn deinit(self: *Builder) void {
         self.allocator.free(self.positions);
         self.nodes.deinit(self.allocator);
         self.branches.deinit(self.allocator);
@@ -302,7 +302,7 @@ pub const CatalogBuilder = struct {
         self.* = undefined;
     }
 
-    pub fn authenticateRoot(self: *CatalogBuilder, digest: hash.Root) BuildError!RootRef {
+    pub fn authenticateRoot(self: *Builder, digest: hash.Root) BuildError!RootRef {
         std.debug.assert(!self.sealed);
         if (std.mem.eql(u8, &digest, &hash.empty_root)) return .empty;
         const indexed = proof.findIndexed(self.index, digest) orelse return error.MissingNode;
@@ -313,19 +313,19 @@ pub const CatalogBuilder = struct {
 
     /// Inspect authenticated nodes between root additions. Returned descriptors
     /// are copies because adding another root may reallocate builder storage.
-    pub fn nodeCount(self: *const CatalogBuilder) usize {
+    pub fn nodeCount(self: *const Builder) usize {
         std.debug.assert(!self.sealed and self.work.items.len == 0);
         return self.nodes.items.len;
     }
 
-    pub fn node(self: *const CatalogBuilder, id: NodeId) ?Node {
+    pub fn node(self: *const Builder, id: NodeId) ?Node {
         std.debug.assert(!self.sealed and self.work.items.len == 0);
         const index = @intFromEnum(id);
         if (index >= self.nodes.items.len or self.states.items[index] != decoded) return null;
         return self.nodes.items[index];
     }
 
-    pub fn finish(self: *CatalogBuilder) BuildError!Catalog {
+    pub fn finish(self: *Builder) BuildError!Catalog {
         std.debug.assert(!self.sealed);
         try self.decodePending();
         try self.validateLocalTopology();
@@ -337,14 +337,14 @@ pub const CatalogBuilder = struct {
     /// re-proving acyclicity. Embedded references are finite by construction;
     /// a hashed cycle requires a digest fixed point or collision. Local link
     /// bounds and canonical extension shape remain fully validated.
-    pub fn finishAssumeCollisionResistant(self: *CatalogBuilder) BuildError!Catalog {
+    pub fn finishAssumeCollisionResistant(self: *Builder) BuildError!Catalog {
         std.debug.assert(!self.sealed);
         try self.decodePending();
         try self.validateLocalTopology();
         return self.takeCatalog();
     }
 
-    fn takeCatalog(self: *CatalogBuilder) Catalog {
+    fn takeCatalog(self: *Builder) Catalog {
         self.sealed = true;
         const nodes = self.nodes;
         self.nodes = .empty;
@@ -359,7 +359,7 @@ pub const CatalogBuilder = struct {
         return .{ .allocator = self.allocator, .nodes = nodes, .branches = branches };
     }
 
-    fn decodePending(self: *CatalogBuilder) BuildError!void {
+    fn decodePending(self: *Builder) BuildError!void {
         while (self.work.pop()) |id| {
             const index = @intFromEnum(id);
             if (self.states.items[index] == decoded) continue;
@@ -371,7 +371,7 @@ pub const CatalogBuilder = struct {
     }
 
     fn linkChildren(
-        self: *CatalogBuilder,
+        self: *Builder,
         encoded: []const u8,
         references: [16]node_codec.Reference,
     ) BuildError!u32 {
@@ -387,7 +387,7 @@ pub const CatalogBuilder = struct {
         return index;
     }
 
-    fn linkReference(self: *CatalogBuilder, reference: node_codec.Reference) BuildError!Link {
+    fn linkReference(self: *Builder, reference: node_codec.Reference) BuildError!Link {
         return switch (reference) {
             .empty => .empty,
             .embedded => |encoded| Link.fromNode(try self.appendNode(encoded)),
@@ -401,7 +401,7 @@ pub const CatalogBuilder = struct {
         };
     }
 
-    fn linkIndexed(self: *CatalogBuilder, indexed: proof.IndexedNode) BuildError!NodeId {
+    fn linkIndexed(self: *Builder, indexed: proof.IndexedNode) BuildError!NodeId {
         if (self.positions[indexed.position] != no_node) {
             return @enumFromInt(self.positions[indexed.position]);
         }
@@ -410,7 +410,7 @@ pub const CatalogBuilder = struct {
         return id;
     }
 
-    fn appendNode(self: *CatalogBuilder, encoded: []const u8) BuildError!NodeId {
+    fn appendNode(self: *Builder, encoded: []const u8) BuildError!NodeId {
         if (self.nodes.items.len >= self.limits.linked_nodes) return error.ResourceLimitExceeded;
         if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
         const id: NodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
@@ -432,7 +432,7 @@ pub const CatalogBuilder = struct {
         return id;
     }
 
-    fn compactNode(self: *CatalogBuilder, encoded: []const u8, decoded_node: node_codec.Node) BuildError!Node {
+    fn compactNode(self: *Builder, encoded: []const u8, decoded_node: node_codec.Node) BuildError!Node {
         if (encoded.len > std.math.maxInt(u16)) return error.ResourceLimitExceeded;
         var compact: Node = .{
             .encoded = encoded,
@@ -508,7 +508,7 @@ pub const CatalogBuilder = struct {
         return (try compactSpan(encoded, span)).offset;
     }
 
-    fn validateLocalTopology(self: *CatalogBuilder) BuildError!void {
+    fn validateLocalTopology(self: *Builder) BuildError!void {
         for (self.nodes.items) |entry| {
             switch (entry.kind) {
                 .leaf => {},
@@ -528,7 +528,7 @@ pub const CatalogBuilder = struct {
         }
     }
 
-    fn validateAcyclic(self: *CatalogBuilder) BuildError!void {
+    fn validateAcyclic(self: *Builder) BuildError!void {
         @memset(self.states.items, 0);
         for (self.nodes.items) |entry| switch (entry.kind) {
             .leaf => {},
@@ -562,12 +562,12 @@ pub const CatalogBuilder = struct {
         if (visited != self.nodes.items.len) return error.InvalidNodeReference;
     }
 
-    fn branchData(self: *CatalogBuilder, entry: Node) errors.LookupError!*const Branch {
+    fn branchData(self: *Builder, entry: Node) errors.LookupError!*const Branch {
         if (entry.kind != .branch or entry.payload >= self.branches.items.len) return error.InvalidNodeReference;
         return &self.branches.items[entry.payload];
     }
 
-    fn removeIncoming(self: *CatalogBuilder, link: Link) BuildError!void {
+    fn removeIncoming(self: *Builder, link: Link) BuildError!void {
         const id = link.node() orelse return;
         const index = @intFromEnum(id);
         if (self.states.items[index] == 0) return error.InvalidNodeReference;
@@ -594,6 +594,6 @@ test "compact catalog spans reject unrepresentable lengths" {
     defer std.testing.allocator.free(encoded);
     try std.testing.expectError(
         error.ResourceLimitExceeded,
-        CatalogBuilder.compactSpan(encoded, encoded),
+        Builder.compactSpan(encoded, encoded),
     );
 }

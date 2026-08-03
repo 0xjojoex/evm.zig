@@ -194,23 +194,13 @@ the generic proof and sparse-update APIs. Guest integrations must still apply an
 admitted practical node bound before enabling eager catalog construction; the
 wire's theoretical maximum is not an allocation target.
 
-`zig build mpt-catalog-measure -Doptimize=ReleaseFast -- <input>...` measures
-this gate without changing execution. It accepts raw schema-v1 or ZisK-framed
-stateless inputs and reports witness/index counts, reachable state and storage
-nodes, branch density, retained capacities, isolated catalog high-water, normal
-one-shot validation high-water, and a conservative run retaining the catalog
-beside the unchanged validator.
-
 `catalogBuilderWithLimits` bounds the catalog's hash-position array by indexed
 node count, linked nodes (including embedded occurrences), and branch rows.
 Exceeding a bound returns `ResourceLimitExceeded`; applications can retain the
 ordinary proof reader as a correctness-preserving fallback. This happens after
 the witness index exists, so surrounding wire admission must separately bound
 raw witness count/bytes before index construction. The package does not choose
-policy numbers for either layer. `zig build mpt-catalog-adversary --
-<branch|embedded|embedded-dense|unreachable> <power-of-two>...` generates
-canonical structural pressure shapes and measures them against the current
-16 MiB guest heap.
+policy numbers for either layer.
 
 ## Keccak execution context
 

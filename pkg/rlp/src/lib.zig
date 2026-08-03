@@ -25,6 +25,7 @@ pub const Decoder = decoder.Decoder;
 
 pub const Encoder = codec.Encoder;
 pub const encodedLen = codec.encodedLen;
+pub const listEncodedLen = codec.listEncodedLen;
 pub const encodedLenAs = codec.encodedLenAs;
 pub const encode = codec.encode;
 pub const encodeAs = codec.encodeAs;
@@ -37,6 +38,8 @@ pub const encodeList = emitter.encodeList;
 pub const encodeListAlloc = emitter.encodeListAlloc;
 pub const decode = codec.decode;
 pub const decodeAs = codec.decodeAs;
+pub const decodeInto = codec.decodeInto;
+pub const decodeIntoAs = codec.decodeIntoAs;
 pub const decodeWithBudget = codec.decodeWithBudget;
 pub const decodeWithBudgetAs = codec.decodeWithBudgetAs;
 pub const decodeAlloc = codec.decodeAlloc;

@@ -5,7 +5,6 @@ const std = @import("std");
 
 const block_stf = @import("block_stf.zig");
 const address = @import("../address.zig");
-const build_options = @import("build_options");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const eip6110 = @import("eip/6110.zig");
@@ -23,6 +22,7 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
+const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
@@ -119,7 +119,7 @@ test "BlockSTF validates a single witnessed transaction" {
 
     const first_result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -188,7 +188,7 @@ test "BlockSTF validates a single witnessed transaction" {
 
     const result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .capture = .{
             .observations = trace_recorder.observationTarget(),
@@ -219,7 +219,7 @@ test "BlockSTF validates a single witnessed transaction" {
 
     const gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -232,7 +232,7 @@ test "BlockSTF validates a single witnessed transaction" {
 
     const block_gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -245,7 +245,7 @@ test "BlockSTF validates a single witnessed transaction" {
 
     const logs_bloom_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -314,7 +314,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
 
     const first_result = try Exact(.merge).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -326,7 +326,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
 
     const result = try Exact(.merge).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -358,7 +358,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
 
     const mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             [_]u8{0xff} ** 32,
@@ -368,17 +368,9 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
 
-    if (comptime build_options.mpt_catalog_reader) {
-        try std.testing.expectError(
-            error.InvalidNode,
-            state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
-        );
-        return;
-    }
-
     const invalid = try Exact(.frontier).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             pre_state_root,
@@ -421,7 +413,7 @@ test "BlockSTF validates withdrawals root" {
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
     const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
@@ -436,7 +428,7 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
     const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
@@ -477,7 +469,7 @@ test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL 
     });
 
     const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .block_access_list = claim,
@@ -539,7 +531,7 @@ test "BlockSTF applies Cancun block-start system contract" {
             .parent_hash = parent_hash,
             .parent_beacon_block_root = parent_beacon_root,
         },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &.{},
         .parent_header = .{
             .hash = parent_hash,
@@ -558,7 +550,7 @@ test "BlockSTF applies Cancun block-start system contract" {
 test "BlockSTF rejects missing or inconsistent parent context" {
     const missing = try Exact(.cancun).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2 },
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
@@ -573,7 +565,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
             .parent_hash = parent_hash,
             .parent_beacon_block_root = [_]u8{0} ** 32,
         },
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_header = .{
             .hash = parent_hash,
@@ -594,7 +586,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     const scratch = arena.allocator();
 
     const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
         .header_claims = .{ .requests_hash = empty_requests_hash },
@@ -619,7 +611,7 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
         const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
 
         const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-            .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+            .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
             .transactions = &.{},
             .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
             .header_claims = .{ .requests_hash = claimed_requests_hash },
@@ -671,7 +663,7 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
             .gas_limit = 30_000_000,
             .base_fee = 7,
         },
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
             .parent_excess_blob_gas = 0,
@@ -706,7 +698,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
     const valid = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -718,7 +710,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
     const artifact_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -726,7 +718,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
     const hash_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -735,7 +727,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
     const malformed_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -744,7 +736,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const oversized_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -769,7 +761,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
     const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .block_access_list = claimed_bal,
@@ -840,7 +832,7 @@ test "BlockSTF validates blob gas header fields" {
 
     const first_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -855,7 +847,7 @@ test "BlockSTF validates blob gas header fields" {
 
     const result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -872,7 +864,7 @@ test "BlockSTF validates blob gas header fields" {
 
     const custom_schedule_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -890,7 +882,7 @@ test "BlockSTF validates blob gas header fields" {
 
     const blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -904,7 +896,7 @@ test "BlockSTF validates blob gas header fields" {
 
     const excess_blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .parent_blob_gas = parent_blob_gas,
         .root_checks = testRootChecks(
@@ -990,7 +982,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
 
     const oversized_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
@@ -1000,7 +992,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
 
     const pre_cancun_result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
@@ -1015,7 +1007,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
     };
     const custom_schedule_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = transactions[0..1],
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
@@ -1024,7 +1016,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
 
     const result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 42_000, .blob_base_fee = 1 },
-        .state_backend = try state.Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &transactions,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
@@ -1054,7 +1046,7 @@ test "BlockSTF applies withdrawals to state balances" {
     const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
     const result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
@@ -1075,7 +1067,7 @@ test "BlockSTF applies withdrawals to state balances" {
     }};
     const mutated_withdrawals_root = try trie.withdrawalsRoot(scratch, &mutated_withdrawals);
     const mutated = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
-        .state_backend = try state.Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &mutated_withdrawals,
         .root_checks = testRootChecksWithWithdrawals(
@@ -1098,7 +1090,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     const roots = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash);
 
     const pre_shanghai = try Exact(.merge).applyAssumeDecoded(std.testing.allocator, .{
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &.{withdrawal},
         .root_checks = roots,
@@ -1106,7 +1098,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     try std.testing.expectEqual(Status.invalid_block_body, pre_shanghai.status);
 
     const pre_cancun = try Exact(.shanghai).applyAssumeDecoded(std.testing.allocator, .{
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
             .parent_excess_blob_gas = 0,
@@ -1118,7 +1110,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     try std.testing.expectEqual(Status.invalid_block_body, pre_cancun.status);
 
     const pre_amsterdam = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{},
         .root_checks = roots,
@@ -1130,7 +1122,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     // valid and simply report `.not_run`.
     var report = block_stf.BalDifferentialReport{};
     const pre_amsterdam_differential = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .bal_differential = &report,
         .root_checks = roots,

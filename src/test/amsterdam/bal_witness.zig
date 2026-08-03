@@ -1,6 +1,5 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
-const build_options = @import("build_options");
 
 const bal = evmz.eth.bal;
 const block_stf = evmz.eth.block_stf;
@@ -32,22 +31,9 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
     const encoded = try bal.encodeAlloc(std.testing.allocator, &claim);
     defer std.testing.allocator.free(encoded);
 
-    if (comptime build_options.mpt_catalog_reader) {
-        try std.testing.expectError(
-            error.InvalidNode,
-            evmz.state.Backend.fromWitness(
-                std.testing.allocator,
-                [_]u8{0xab} ** 32,
-                &.{},
-                &.{},
-            ),
-        );
-        return;
-    }
-
     const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
-        .state_backend = try evmz.state.Backend.fromWitness(
+        .state_backend = try evmz.Backend.fromWitness(
             std.testing.allocator,
             [_]u8{0xab} ** 32,
             &.{},
@@ -84,7 +70,7 @@ test "BlockSTF forwards the validated BAL resource plan to a successful preparer
     var preparer = RecordingPreparer{};
     const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
-        .state_backend = try evmz.state.Backend.fromWitness(
+        .state_backend = try evmz.Backend.fromWitness(
             std.testing.allocator,
             trie.empty_root_hash,
             &.{},
@@ -117,7 +103,7 @@ test "BlockSTF resource preparation failure falls back to lazy execution" {
     var preparer = RecordingPreparer{ .fail = true };
     const result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 30_000_000 },
-        .state_backend = try evmz.state.Backend.fromWitness(
+        .state_backend = try evmz.Backend.fromWitness(
             std.testing.allocator,
             trie.empty_root_hash,
             &.{},

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 
-const BalClaimReader = @import("../../../state/BalClaimReader.zig");
+const ClaimReader = @import("../ClaimReader.zig");
 const Reader = @import("../../../state/Reader.zig");
 const batch_scheduler = @import("../../../io/batch_scheduler.zig");
 const vm = @import("../../../vm.zig");
@@ -99,7 +99,7 @@ pub const Report = struct {
 /// Classify a reader-side failure. Executor boundaries normalize type-erased
 /// reader errors, so the claim reader's own detail is the only way to tell a
 /// coverage gap from an infrastructure fault.
-pub fn statusForError(err: anyerror, strategy_failure: ?BalClaimReader.StrategyFailure) Status {
+pub fn statusForError(err: anyerror, strategy_failure: ?ClaimReader.StrategyFailure) Status {
     if (err == error.StateReaderStrategyFailure) {
         const failure = strategy_failure orelse return .diagnostic_failure;
         return switch (failure) {

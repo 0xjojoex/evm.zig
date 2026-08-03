@@ -7,6 +7,7 @@
 //! transaction sidecar; normal execution does not allocate or journal them.
 
 const std = @import("std");
+const checkpoint_types = @import("checkpoint.zig");
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
@@ -31,6 +32,9 @@ const ScopeStorageMap = SparseHashMap(StorageKey, ScopeStorage);
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 const CodeMap = SparseHashMap(CodeHash, CodeEntry);
 const minimum_code_chunk_bytes = 4096;
+
+/// Ordinary VM executors can construct this state directly from a reader.
+pub const standalone_reader_initialization = true;
 
 pub const AccountId = TransactionAccountMap.EntryId;
 pub const StorageId = TransactionStorageMap.EntryId;
@@ -100,7 +104,7 @@ cached_tx: ?Transaction,
 transaction_reuse_active: bool,
 retained_logs: LogBuffer,
 
-pub const AttemptId = enum(u64) { _ };
+pub const AttemptId = checkpoint_types.AttemptId;
 
 pub const FinalizationRules = struct {
     existing_account: execution.SelfDestructFinalization = .{},
@@ -673,11 +677,7 @@ pub const LogBuffer = struct {
         data: ByteRange,
     };
 
-    pub const Checkpoint = struct {
-        rows_len: u32,
-        topics_len: u32,
-        data_len: u32,
-    };
+    pub const Checkpoint = checkpoint_types.LogCheckpoint;
 
     fn init() LogBuffer {
         return .{ .rows = .empty, .topics = .empty, .data = .empty };
@@ -767,6 +767,13 @@ pub const LogView = union(enum) {
         return switch (self) {
             .arena => |arena| arena.rows.len,
             .flat => |logs| logs.len,
+        };
+    }
+
+    pub fn contiguous(self: LogView) ?[]const Host.Log {
+        return switch (self) {
+            .arena => null,
+            .flat => |logs| logs,
         };
     }
 
@@ -1118,15 +1125,7 @@ pub const Journal = struct {
     }
 };
 
-pub const Checkpoint = struct {
-    attempt_id: AttemptId,
-    scope_generation: u64,
-    journal_len: u32,
-    changed_accounts_len: u32,
-    changed_storage_len: u32,
-    storage_wipes_len: u32,
-    logs: LogBuffer.Checkpoint,
-};
+pub const Checkpoint = checkpoint_types.Checkpoint;
 
 const AcceptedBranchCheckpoint = struct {
     generation: u64,
@@ -1259,6 +1258,20 @@ pub const Transaction = struct {
 
 pub fn init(allocator: std.mem.Allocator) TrackedState {
     return initWithStateReader(allocator, null);
+}
+
+/// Construct the tracked representation for one exact execution spec.
+pub fn initForSpec(
+    allocator: std.mem.Allocator,
+    comptime spec: anytype,
+    reader: ?StateReader,
+) TrackedState {
+    var state = if (reader) |value|
+        initWithStateReader(allocator, value)
+    else
+        init(allocator);
+    state.retains_empty_accounts = spec.retains_empty_accounts;
+    return state;
 }
 
 pub fn initWithStateReader(allocator: std.mem.Allocator, reader: ?StateReader) TrackedState {

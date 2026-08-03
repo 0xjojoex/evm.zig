@@ -13,16 +13,18 @@ const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const eth_spec = @import("../../eth/spec.zig");
-const vm = @import("../../vm.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
 const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const revision: Revision = .amsterdam;
-const AmsterdamValidator = stateless_validate.Exact(revision);
-/// The guest engine: identical consensus spec, no step-capture dispatch.
-const SlimVm = vm.VmWithOptions(eth_spec.specAt(revision), .{ .step_capture = false });
-const AmsterdamOneShotValidator = stateless_validate.Bind(block_stf.Bind(revision, SlimVm));
+const specification = eth_spec.specAt(revision);
+const AmsterdamValidator = stateless_validate.Validator(specification);
+const AmsterdamCaptureValidator = stateless_validate.TrackedValidator(specification);
+const AmsterdamOneShotValidator = stateless_validate.ValidatorWithOptions(
+    specification,
+    .{ .step_capture = false },
+);
 
 pub const schema_id: u16 = 0x1501;
 pub const schema_id_size = 2;
@@ -1229,7 +1231,11 @@ pub fn validateStatelessResultBytesWithCaptureAndOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    return AmsterdamValidator.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
+    const result = if (capture == null)
+        AmsterdamValidator.validate(scratch, normalized)
+    else
+        AmsterdamCaptureValidator.validateWithCapture(scratch, normalized, capture);
+    return result catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
         else => .{ .status = .invalid_witness },
@@ -1260,10 +1266,11 @@ fn validateStatelessWithOptionsImpl(
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, request_root),
     };
+    const execution_options: stateless_validate.Options = .{};
     const native_result = (if (comptime reuse_scratch)
-        Validator.validateOneShot(allocator, normalized)
+        Validator.validateOneShotWithOptions(allocator, normalized, execution_options)
     else
-        Validator.validate(allocator, normalized)) catch |err| switch (err) {
+        Validator.validateWithOptions(allocator, normalized, execution_options)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };

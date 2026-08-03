@@ -34,7 +34,6 @@ const prepared_code = evmz.prepared_code;
 const execution_values = @import("./execution.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
-const TrackedState = evmz.state.TrackedState;
 pub const EvmResult = Host.Result;
 const EvmResultType = EvmResult;
 
@@ -69,7 +68,7 @@ const uint256 = @import("./uint256.zig");
 const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
 
 const IgnorePending = struct {
-    pub fn observe(_: IgnorePending, _: TrackedState.PendingView) !void {}
+    pub fn observe(_: IgnorePending, _: anytype) !void {}
 };
 
 const ScopeRoot = struct {
@@ -95,12 +94,11 @@ pub const code_deposit_gas: i64 = 200;
 
 /// Construction options for the execution substrate.
 ///
-/// `state_reader` is optional so tests and ephemeral executors can run purely
-/// from the in-memory overlay. `block_hash_source` is separate because native
-/// BLOCKHASH reads chain history, not account/trie state. Capture is selected
-/// by an explicit transaction entrypoint, not construction.
-const InitOptions = struct {
-    state_reader: ?evmz.state.Reader = null,
+/// State admission belongs to the selected VM/domain. `block_hash_source` is a
+/// separate execution service because native BLOCKHASH reads chain history,
+/// not account/trie state. Capture is selected by an explicit transaction
+/// entrypoint, not construction.
+const ExecutorServices = struct {
     /// Caller-owned derived-artifact service. Its allocation, I/O,
     /// synchronization, and capacity policy are outside executor bounds.
     prepared_code_backend: ?prepared_code.Backend = null,
@@ -143,16 +141,16 @@ pub const CompileOptions = struct {
     step_capture: bool = true,
 };
 
-/// The execution engine bound to one exact execution specification.
+/// Compile one exact executor over a concrete state representation.
 ///
-/// Returns the `Executor` struct type described in the module doc above: it
-/// carries the fork-specific message/result aliases and call/create lifecycle
-/// methods. A `Vm` closes it over one complete spec at comptime.
-pub fn Executor(comptime spec: ExactSpec) type {
-    return ExecutorWithOptions(spec, .{});
-}
-
-pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: CompileOptions) type {
+/// `initOwned` and `resetOwned` take ownership of `StateModel`. Admission,
+/// authenticated facts, and commitment construction remain outside this
+/// executor boundary.
+pub fn ExecutorType(
+    comptime spec: ExactSpec,
+    comptime StateModel: type,
+    comptime options_value: CompileOptions,
+) type {
     return struct {
         const Self = @This();
         const runtime = call_runtime.bind(Self);
@@ -160,11 +158,28 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
 
         pub const specification = spec;
         pub const compile_options = options_value;
-        pub const State = TrackedState;
-        pub const ScopeCheckpoint = TrackedState.Checkpoint;
-        pub const BranchCheckpoint = TrackedState.BranchCheckpoint;
+        pub const State = StateModel;
+        pub const ScopeCheckpoint = StateModel.Checkpoint;
+        pub const BranchCheckpoint = StateModel.BranchCheckpoint;
         pub const Error = ErrorType;
-        pub const Init = InitOptions;
+        pub const Services = ExecutorServices;
+        pub const Init = if (StateModel.standalone_reader_initialization)
+            struct {
+                state_reader: ?state_io.StateReader = null,
+                prepared_code_backend: ?prepared_code.Backend = null,
+                block_hash_source: ?BlockHashSource = null,
+                precompile_runtime: ?execution_values.PrecompileRuntime = null,
+            }
+        else
+            Services;
+        pub const init = if (StateModel.standalone_reader_initialization)
+            initTracked
+        else
+            initOwned;
+        pub const reset = if (StateModel.standalone_reader_initialization)
+            resetTracked
+        else
+            resetOwned;
         pub const PreparedCallTransaction = PreparedCallTransactionType;
         pub const Call = CallType;
         pub const Create = CreateType;
@@ -175,7 +190,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
         pub const default_max_live_frames = default_max_live_frames_value;
 
         allocator: std.mem.Allocator,
-        state: TrackedState,
+        state: StateModel,
         frame_store: FrameStore,
         call_scratch_slots: CallScratchSlots,
         prepared_code_scratch: call_scratch_storage.Slot,
@@ -214,12 +229,12 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
         };
 
         const ManualStateAttempt = struct {
-            id: TrackedState.AttemptId,
+            id: StateModel.AttemptId,
             mode: ExecutionMode,
         };
 
         const TransactionRuntimeState = struct {
-            state_attempt_id: TrackedState.AttemptId,
+            state_attempt_id: StateModel.AttemptId,
             generation: u64,
             mode: ExecutionMode,
             phase: enum { active, pending } = .active,
@@ -240,7 +255,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
 
                 pub const View = struct {
                     output: *const Output,
-                    logs: TrackedState.LogView,
+                    logs: StateModel.LogView,
                 };
 
                 /// Borrow family output and logs while this result is unresolved.
@@ -264,7 +279,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 }
 
                 /// Borrow transaction logs while this result is unresolved.
-                pub fn logs(self: Execution) TrackedState.LogView {
+                pub fn logs(self: Execution) StateModel.LogView {
                     return self.pendingView().logs();
                 }
 
@@ -275,18 +290,18 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 }
 
                 /// Borrow the complete sealed state view before resolution.
-                pub fn pendingView(self: Execution) TrackedState.PendingView {
+                pub fn pendingView(self: Execution) StateModel.PendingView {
                     _ = self.state();
                     return self.executor.state.pendingView();
                 }
 
                 /// Borrow net state changes before resolution.
-                pub fn changes(self: Execution) TrackedState.ChangesView {
+                pub fn changes(self: Execution) StateModel.ChangesView {
                     return self.pendingView().changes();
                 }
 
                 /// Borrow retained state observations before resolution.
-                pub fn observations(self: Execution) TrackedState.ObservationsView {
+                pub fn observations(self: Execution) StateModel.ObservationsView {
                     return self.pendingView().observations();
                 }
 
@@ -370,7 +385,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Self,
-            journal_checkpoint: TrackedState.Checkpoint,
+            journal_checkpoint: StateModel.Checkpoint,
             id: usize,
             parent_id: usize,
             open: bool = true,
@@ -407,15 +422,9 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             }
         };
 
-        /// Initialize an executor with empty tracked state.
-        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
-            var state = if (options.state_reader) |state_reader|
-                TrackedState.initWithStateReader(allocator, state_reader)
-            else
-                TrackedState.init(allocator);
-            state.retains_empty_accounts = spec.retains_empty_accounts;
-
-            const executor: Self = .{
+        /// Take exclusive ownership of an already-admitted state value.
+        pub fn initOwned(allocator: std.mem.Allocator, state: State, options: Services) Self {
+            return .{
                 .allocator = allocator,
                 .state = state,
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
@@ -426,7 +435,22 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
                 .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
             };
-            return executor;
+        }
+
+        fn initTracked(allocator: std.mem.Allocator, options: Init) Self {
+            return initOwned(
+                allocator,
+                State.initForSpec(allocator, spec, options.state_reader),
+                servicesFromTrackedOptions(options),
+            );
+        }
+
+        fn servicesFromTrackedOptions(options: Init) Services {
+            return .{
+                .prepared_code_backend = options.prepared_code_backend,
+                .block_hash_source = options.block_hash_source,
+                .precompile_runtime = options.precompile_runtime,
+            };
         }
 
         pub fn currentCaptureContext(self: *Self) ?*CaptureContext {
@@ -446,8 +470,27 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             try self.state.observeAccountAccess(account_address);
         }
 
-        /// Rebind fixture/benchmark inputs and reset tracked state.
-        pub fn reset(self: *Self, options: Init) !void {
+        /// Replace the owned state after verifying the current executor is idle.
+        pub fn resetOwned(self: *Self, state: State, options: Services) void {
+            std.debug.assert(!self.hasActiveBlockExecution());
+            std.debug.assert(self.frame_store.len() == 0);
+            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.state.scopeActive());
+            std.debug.assert(self.prepared_code_execution_depth == 0);
+
+            self.state.deinit();
+            self.state = state;
+            self.execution_context = null;
+            self.scope_root = null;
+            self.manual_state_attempt = null;
+            self.block_hash_source = options.block_hash_source;
+            self.precompile_runtime = options.precompile_runtime;
+            self.prepared_code_backend = options.prepared_code_backend;
+            self.clearLastOutput();
+        }
+
+        fn resetTracked(self: *Self, options: Init) !void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
             std.debug.assert(self.checkpoint_top == 0);
@@ -500,7 +543,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             self.endPreparedCodeExecution();
         }
 
-        pub fn reserveAcceptedAccessHint(self: *Self, hint: TrackedState.AccessHint) !void {
+        pub fn reserveAcceptedAccessHint(self: *Self, hint: StateModel.AccessHint) !void {
             try self.state.reserveAcceptedAccessHint(hint);
         }
 
@@ -730,11 +773,11 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             try self.state.setCode(address, code);
         }
 
-        pub fn logView(self: *const Self) TrackedState.LogView {
+        pub fn logView(self: *const Self) StateModel.LogView {
             return self.state.logView();
         }
 
-        pub fn logs(self: *const Self) TrackedState.LogView {
+        pub fn logs(self: *const Self) StateModel.LogView {
             return self.logView();
         }
 
@@ -781,7 +824,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
             return self.active_block_execution_generation != null;
         }
 
-        pub fn acceptedView(self: *const Self) TrackedState.AcceptedView {
+        pub fn acceptedView(self: *const Self) StateModel.AcceptedView {
             return self.state.acceptedView();
         }
 
@@ -902,7 +945,7 @@ pub fn ExecutorWithOptions(comptime spec: ExactSpec, comptime options_value: Com
         }
 
         /// Borrow the cumulative accepted changes relative to the state reader.
-        pub fn acceptedChanges(self: *const Self) TrackedState.ChangesView {
+        pub fn acceptedChanges(self: *const Self) StateModel.ChangesView {
             std.debug.assert(self.transaction_runtime_state == null);
             return self.acceptedView().changes();
         }

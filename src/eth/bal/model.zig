@@ -168,11 +168,248 @@ pub fn validateGasLimit(block_access_list: BlockAccessList, block_gas_limit: u64
     if (item_count > max_items) return error.BlockAccessListGasLimitExceeded;
 }
 
+const AccountLens = struct {
+    storage_changes: usize,
+    storage_reads: usize,
+    balance_changes: usize,
+    nonce_changes: usize,
+    code_changes: usize,
+    payload: usize,
+};
+
+const SlotLens = struct {
+    changes: usize,
+    payload: usize,
+};
+
+fn changePayloadLen(
+    comptime T: type,
+    change_index: BlockAccessIndex,
+    value: T,
+) rlp.EncodeError!usize {
+    return (try rlp.encodedLen(BlockAccessIndex, change_index)) +
+        (try rlp.encodedLen(T, value));
+}
+
+/// Length-memoized canonical encode, byte-identical to the reflection codec.
+///
+/// The generic codec recomputes every nested payload length once per
+/// enclosing prefix — about tree-depth times per leaf. One bottom-up sizing
+/// pass into per-account/per-slot memo tables writes the same bytes with a
+/// single aggregate length walk; leaf encoding still goes through the shared
+/// `rlp.Encoder` primitives, so canonical scalar rules are not duplicated.
+// TODO: redesign the memo and rlp lane
 pub fn encodeAlloc(
     allocator: Allocator,
     block_access_list: BlockAccessList,
 ) (rlp.EncodeError || Allocator.Error)![]u8 {
-    return rlp.encodeAlloc(BlockAccessList, allocator, block_access_list);
+    const counts = count(block_access_list);
+    // Both memo tables share one transient allocation, freed before return;
+    // the returned encoding is the only surviving allocation.
+    const account_memo_bytes = block_access_list.len * @sizeOf(AccountLens);
+    const memo_bytes_len = account_memo_bytes + counts.storage_write_keys * @sizeOf(SlotLens);
+    const memo_bytes: []align(@alignOf(AccountLens)) u8 = if (memo_bytes_len == 0)
+        &.{}
+    else
+        try allocator.alignedAlloc(u8, .of(AccountLens), memo_bytes_len);
+    defer if (memo_bytes.len != 0) allocator.free(memo_bytes);
+    var account_lens: []AccountLens = &.{};
+    var slot_lens: []SlotLens = &.{};
+    if (memo_bytes.len != 0) {
+        account_lens = @as(
+            [*]AccountLens,
+            @ptrCast(memo_bytes.ptr),
+        )[0..block_access_list.len];
+        slot_lens = @as(
+            [*]SlotLens,
+            @ptrCast(@alignCast(memo_bytes.ptr + account_memo_bytes)),
+        )[0..counts.storage_write_keys];
+    }
+
+    var top_payload: usize = 0;
+    var slot_index: usize = 0;
+    for (block_access_list, account_lens) |account, *lens| {
+        var storage_changes_payload: usize = 0;
+        for (account.storage_changes) |slot_changes| {
+            var changes_payload: usize = 0;
+            for (slot_changes.changes) |change| {
+                changes_payload += try rlp.listEncodedLen(
+                    try changePayloadLen(u256, change.block_access_index, change.new_value),
+                );
+            }
+            const slot_payload = (try rlp.encodedLen(u256, slot_changes.slot)) +
+                (try rlp.listEncodedLen(changes_payload));
+            slot_lens[slot_index] = .{ .changes = changes_payload, .payload = slot_payload };
+            slot_index += 1;
+            storage_changes_payload += try rlp.listEncodedLen(slot_payload);
+        }
+        var storage_reads_payload: usize = 0;
+        for (account.storage_reads) |slot| {
+            storage_reads_payload += try rlp.encodedLen(u256, slot);
+        }
+        var balance_payload: usize = 0;
+        for (account.balance_changes) |change| {
+            balance_payload += try rlp.listEncodedLen(
+                try changePayloadLen(u256, change.block_access_index, change.post_balance),
+            );
+        }
+        var nonce_payload: usize = 0;
+        for (account.nonce_changes) |change| {
+            nonce_payload += try rlp.listEncodedLen(
+                try changePayloadLen(u64, change.block_access_index, change.new_nonce),
+            );
+        }
+        var code_payload: usize = 0;
+        for (account.code_changes) |change| {
+            code_payload += try rlp.listEncodedLen(
+                try changePayloadLen([]const u8, change.block_access_index, change.new_code),
+            );
+        }
+        lens.* = .{
+            .storage_changes = storage_changes_payload,
+            .storage_reads = storage_reads_payload,
+            .balance_changes = balance_payload,
+            .nonce_changes = nonce_payload,
+            .code_changes = code_payload,
+            .payload = (try rlp.encodedLen(Address, account.address)) +
+                (try rlp.listEncodedLen(storage_changes_payload)) +
+                (try rlp.listEncodedLen(storage_reads_payload)) +
+                (try rlp.listEncodedLen(balance_payload)) +
+                (try rlp.listEncodedLen(nonce_payload)) +
+                (try rlp.listEncodedLen(code_payload)),
+        };
+        top_payload += try rlp.listEncodedLen(lens.payload);
+    }
+    std.debug.assert(slot_index == slot_lens.len);
+
+    const out = try allocator.alloc(u8, try rlp.listEncodedLen(top_payload));
+    errdefer allocator.free(out);
+    var encoder = rlp.Encoder.init(out);
+    try encoder.listPrefix(top_payload);
+    slot_index = 0;
+    for (block_access_list, account_lens) |account, lens| {
+        try encoder.listPrefix(lens.payload);
+        try encoder.bytes(&account.address);
+        try encoder.listPrefix(lens.storage_changes);
+        for (account.storage_changes) |slot_changes| {
+            const memo = slot_lens[slot_index];
+            slot_index += 1;
+            try encoder.listPrefix(memo.payload);
+            try encoder.uint(u256, slot_changes.slot);
+            try encoder.listPrefix(memo.changes);
+            for (slot_changes.changes) |change| {
+                try encoder.listPrefix(
+                    try changePayloadLen(u256, change.block_access_index, change.new_value),
+                );
+                try encoder.uint(BlockAccessIndex, change.block_access_index);
+                try encoder.uint(u256, change.new_value);
+            }
+        }
+        try encoder.listPrefix(lens.storage_reads);
+        for (account.storage_reads) |slot| try encoder.uint(u256, slot);
+        try encoder.listPrefix(lens.balance_changes);
+        for (account.balance_changes) |change| {
+            try encoder.listPrefix(
+                try changePayloadLen(u256, change.block_access_index, change.post_balance),
+            );
+            try encoder.uint(BlockAccessIndex, change.block_access_index);
+            try encoder.uint(u256, change.post_balance);
+        }
+        try encoder.listPrefix(lens.nonce_changes);
+        for (account.nonce_changes) |change| {
+            try encoder.listPrefix(
+                try changePayloadLen(u64, change.block_access_index, change.new_nonce),
+            );
+            try encoder.uint(BlockAccessIndex, change.block_access_index);
+            try encoder.uint(u64, change.new_nonce);
+        }
+        try encoder.listPrefix(lens.code_changes);
+        for (account.code_changes) |change| {
+            try encoder.listPrefix(
+                try changePayloadLen([]const u8, change.block_access_index, change.new_code),
+            );
+            try encoder.uint(BlockAccessIndex, change.block_access_index);
+            try encoder.bytes(change.new_code);
+        }
+    }
+    std.debug.assert(encoder.written().len == out.len);
+    return out;
+}
+
+test "memoized encodeAlloc is byte-identical to the reflection codec" {
+    var prng = std.Random.DefaultPrng.init(0xba1);
+    const random = prng.random();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    // Boundary-biased scalar pool: RLP single-byte/short/long string edges.
+    const values = [_]u256{
+        0,                     1,        0x7f, 0x80,    0xff,
+        0x100,                 56,       55,   1 << 63, (1 << 64) - 1,
+        std.math.maxInt(u256), 1 << 255,
+    };
+    const code_sizes = [_]usize{ 0, 1, 54, 55, 56, 200 };
+
+    for (0..64) |_| {
+        const account_count = random.uintLessThan(usize, 4);
+        const accounts = try scratch.alloc(AccountChanges, account_count);
+        for (accounts) |*account| {
+            var target: Address = undefined;
+            random.bytes(&target);
+            const slot_count = random.uintLessThan(usize, 3);
+            const slots = try scratch.alloc(SlotChanges, slot_count);
+            for (slots) |*slot_changes| {
+                const change_count = random.uintLessThan(usize, 3);
+                const changes = try scratch.alloc(StorageChange, change_count);
+                for (changes) |*change| change.* = .{
+                    .block_access_index = random.uintLessThan(u32, 300),
+                    .new_value = values[random.uintLessThan(usize, values.len)],
+                };
+                slot_changes.* = .{
+                    .slot = values[random.uintLessThan(usize, values.len)],
+                    .changes = changes,
+                };
+            }
+            const read_count = random.uintLessThan(usize, 3);
+            const reads = try scratch.alloc(u256, read_count);
+            for (reads) |*slot| slot.* = values[random.uintLessThan(usize, values.len)];
+            const balance_count = random.uintLessThan(usize, 3);
+            const balances = try scratch.alloc(BalanceChange, balance_count);
+            for (balances) |*change| change.* = .{
+                .block_access_index = random.uintLessThan(u32, 300),
+                .post_balance = values[random.uintLessThan(usize, values.len)],
+            };
+            const nonce_count = random.uintLessThan(usize, 3);
+            const nonces = try scratch.alloc(NonceChange, nonce_count);
+            for (nonces) |*change| change.* = .{
+                .block_access_index = random.uintLessThan(u32, 300),
+                .new_nonce = @truncate(values[random.uintLessThan(usize, values.len)]),
+            };
+            const code_count = random.uintLessThan(usize, 2);
+            const codes = try scratch.alloc(CodeChange, code_count);
+            for (codes) |*change| {
+                const code = try scratch.alloc(u8, code_sizes[random.uintLessThan(usize, code_sizes.len)]);
+                random.bytes(code);
+                change.* = .{
+                    .block_access_index = random.uintLessThan(u32, 300),
+                    .new_code = code,
+                };
+            }
+            account.* = .{
+                .address = target,
+                .storage_changes = slots,
+                .storage_reads = reads,
+                .balance_changes = balances,
+                .nonce_changes = nonces,
+                .code_changes = codes,
+            };
+        }
+
+        const expected = try rlp.encodeAlloc(BlockAccessList, scratch, @as(BlockAccessList, accounts));
+        const actual = try encodeAlloc(scratch, accounts);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
 }
 
 pub fn hash(allocator: Allocator, block_access_list: BlockAccessList) (rlp.EncodeError || Allocator.Error)![32]u8 {
@@ -453,7 +690,7 @@ test "BAL RLP round trips model data" {
     try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x00, 0x56 }, decoded.accounts[1].code_changes[0].new_code);
 }
 
-test "BAL typed codec writes directly and encodeAlloc allocates once" {
+test "BAL typed codec writes directly and encodeAlloc leaves only the result allocated" {
     const input = sampleBlockAccessList();
     var direct_buffer: [512]u8 = undefined;
     const direct = try rlp.encode(BlockAccessList, &direct_buffer, input);
@@ -463,8 +700,18 @@ test "BAL typed codec writes directly and encodeAlloc allocates once" {
     const allocated = try encodeAlloc(counted.allocator(), input);
     defer counted.allocator().free(allocated);
 
-    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    // One transient length-memo allocation (freed inside the call) plus the
+    // returned encoding; nothing else may allocate or survive.
+    try std.testing.expectEqual(before + 2, counted.alloc_index);
+    try std.testing.expectEqual(allocated.len + memoBytesForTest(input), counted.allocated_bytes);
+    try std.testing.expectEqual(memoBytesForTest(input), counted.freed_bytes);
     try std.testing.expectEqualSlices(u8, direct, allocated);
+}
+
+fn memoBytesForTest(block_access_list: BlockAccessList) usize {
+    const counts = count(block_access_list);
+    return block_access_list.len * @sizeOf(AccountLens) +
+        counts.storage_write_keys * @sizeOf(SlotLens);
 }
 
 test "BAL typed decode applies block-derived budget before materialization" {

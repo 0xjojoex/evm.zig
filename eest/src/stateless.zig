@@ -475,7 +475,7 @@ fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
         std.debug.print("    trace normalize failed: {s}\n", .{@errorName(err)});
         return;
     };
-    _ = evmz.stateless.Exact(.amsterdam).validateWithCaptureOptions(scratch, normalized, .{
+    _ = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validateWithCaptureOptions(scratch, normalized, .{
         .observations = printer.observationTarget(),
         .steps = .{
             .tape = &tape,

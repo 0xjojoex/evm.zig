@@ -519,10 +519,10 @@ test "catalog rejects a resolved content-addressed cycle" {
 }
 
 test "catalog link representation remains four bytes" {
-    try std.testing.expectEqual(@as(usize, 4), @sizeOf(mpt.CatalogLink));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(mpt.CatalogNode));
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf([16]mpt.CatalogLink));
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(mpt.CatalogBranch));
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(mpt.catalog.Link));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(mpt.catalog.Node));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf([16]mpt.catalog.Link));
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(mpt.catalog.Branch));
 }
 
 test "catalog admission bounds indexed, linked, and branch counts" {

@@ -2,8 +2,8 @@
 //!
 //! This lane never owns canonical block state. Block-start work runs serially
 //! over the authenticated base, each transaction runs in an isolated `lane`
-//! over `BalClaimReader(base, claim, tx_index)`, and block-final work runs
-//! serially over `BalClaimReader(base, claim, transaction_count)`, which is
+//! over `ClaimReader(base, claim, tx_index)`, and block-final work runs
+//! serially over `ClaimReader(base, claim, transaction_count)`, which is
 //! already parent state plus every write through the last transaction. Only
 //! the coordinator mutates `accumulator` state. The first coverage failure or mismatch disables the
 //! complete claim lane; callers continue on their independently owned canonical
@@ -25,7 +25,7 @@ const report_types = @import("report.zig");
 const schedule_types = @import("schedule.zig");
 const execution_values = @import("../../../execution.zig");
 const prepared_code = @import("../../../prepared_code.zig");
-const BalClaimReader = @import("../../../state/BalClaimReader.zig");
+const ClaimReader = @import("../ClaimReader.zig");
 const Reader = @import("../../../state/Reader.zig");
 const vm = @import("../../../vm.zig");
 
@@ -141,8 +141,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
         fn verifyBeforeBlockFallible(self: *Self, header: ?Operations.BlockHeader) !void {
             var execution: Lane.CapturedExecution = undefined;
-            try execution.init(self.allocator, .{
-                .state_reader = self.base_reader,
+            try execution.init(self.allocator, self.base_reader, .{
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             });
@@ -329,13 +328,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
 
             const block_access_index = std.math.cast(bal.BlockAccessIndex, candidate_tx_index) orelse
                 return error.BlockAccessIndexOverflow;
-            var claim_reader = BalClaimReader.init(self.base_reader, self.claim, block_access_index);
-            const executor_options: Engine.Executor.Init = .{
-                .state_reader = claim_reader.reader(),
+            var claim_reader = ClaimReader.init(self.base_reader, self.claim, block_access_index);
+            const executor_options: Engine.Executor.Services = .{
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             };
-            self.verifyRejectedAgainstClaim(rejected, executor_options) catch |err| {
+            self.verifyRejectedAgainstClaim(rejected, claim_reader.reader(), executor_options) catch |err| {
                 self.stopForRejectedError(err, rejected.tx_index, claim_reader.strategy_failure);
             };
         }
@@ -343,12 +341,20 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         fn verifyRejectedAgainstClaim(
             self: *Self,
             rejected: Rejected,
-            executor_options: Engine.Executor.Init,
+            reader: Reader,
+            executor_options: Engine.Executor.Services,
         ) !void {
             if (self.claim_executor) |*executor|
-                try executor.reset(executor_options)
+                executor.resetOwned(
+                    Engine.BlockState.initState(self.allocator, reader),
+                    executor_options,
+                )
             else
-                self.claim_executor = Engine.Executor.init(self.allocator, executor_options);
+                self.claim_executor = Engine.Executor.initOwned(
+                    self.allocator,
+                    Engine.BlockState.initState(self.allocator, reader),
+                    executor_options,
+                );
 
             const progress = self.accumulator.progress;
             var runtime = Engine.init(&self.claim_executor.?);
@@ -428,10 +434,9 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             // transaction write. Rebuilding that view by folding observed
             // transitions produced the same thing at the cost of a whole
             // candidate-state layer.
-            var post_reader = BalClaimReader.init(self.base_reader, self.claim, transaction_count);
+            var post_reader = ClaimReader.init(self.base_reader, self.claim, transaction_count);
             var execution: Lane.CapturedExecution = undefined;
-            try execution.init(self.allocator, .{
-                .state_reader = post_reader.reader(),
+            try execution.init(self.allocator, post_reader.reader(), .{
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             });
@@ -492,7 +497,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self: *Self,
             err: anyerror,
             tx_index: usize,
-            strategy_failure: ?BalClaimReader.StrategyFailure,
+            strategy_failure: ?ClaimReader.StrategyFailure,
         ) void {
             self.stop(report_types.statusForError(err, strategy_failure), tx_index, err);
         }
@@ -509,7 +514,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self: *Self,
             err: anyerror,
             tx_index: usize,
-            strategy_failure: ?BalClaimReader.StrategyFailure,
+            strategy_failure: ?ClaimReader.StrategyFailure,
         ) void {
             if (report_types.candidateErrorIsSemantic(err))
                 self.stopForCandidateError(err, tx_index)

@@ -20,6 +20,8 @@ pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
 pub const stateless = @import("./stateless.zig");
+/// Block-lifetime state capability selecting the tracked or stateless lane.
+pub const Backend = @import("./backend.zig").Backend;
 pub const t = @import("./t.zig");
 pub const trace = @import("./trace.zig");
 pub const transaction = @import("./transaction.zig");
@@ -29,6 +31,9 @@ const vm = @import("./vm.zig");
 /// Compile one complete exact engine specification.
 pub const Vm = vm.Vm;
 pub const VmWithOptions = vm.VmWithOptions;
+pub const EngineType = vm.EngineType;
+pub const BalStatelessVm = vm.BalStatelessVm;
+pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
 
 /// The latest exact Ethereum engine — the usual ready-to-use entry point.
 pub const Evm = Vm(eth.latest);
@@ -50,6 +55,7 @@ pub const PreparedCodeBackend = prepared_code.Backend;
 pub const InMemoryPreparedPool = prepared_code.InMemoryPreparedPool;
 pub const ExecutionResourcePlan = execution_resources.Plan;
 pub const ExecutionResourcePreparer = execution_resources.Preparer;
+pub const RootProvider = state.RootProvider;
 pub const StateReader = vm.StateReader;
 pub const ConcurrentStateReader = state.ConcurrentReader;
 pub const ConcurrentBlockHashSource = BlockHashSource.Concurrent;

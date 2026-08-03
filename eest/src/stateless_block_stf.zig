@@ -378,7 +378,7 @@ fn runBlockExact(
             .parent_hash = parent_hash,
             .parent_beacon_block_root = try optionalHashField(&block_header, "parentBeaconBlockRoot"),
         },
-        .state_backend = try evmz.state.Backend.fromWitness(
+        .state_backend = try .fromWitness(
             allocator,
             try hashField(&genesis_header, "stateRoot"),
             witness_nodes,

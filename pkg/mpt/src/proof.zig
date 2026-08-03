@@ -10,15 +10,6 @@ const hash = @import("hash.zig");
 const nibble = @import("nibble.zig");
 const node = @import("node.zig");
 
-pub const ProfileEvent = enum {
-    index_hash,
-    index_sort,
-    index_deduplicate,
-    lookup_root_resolve,
-    lookup_decode,
-    lookup_child_resolve,
-};
-
 /// Why a key resolved to no value during a lookup.
 pub const Absence = enum {
     empty_trie,
@@ -162,51 +153,6 @@ pub fn indexNodes(
     return indexFromData(&index_storage.sealed);
 }
 
-pub fn indexNodesProfiled(
-    keccak_context: anytype,
-    index_storage: *IndexStorage,
-    storage: []NodeRecord,
-    encoded_nodes: []const []const u8,
-    profile: anytype,
-) InternalIndexError!*const NodeIndex {
-    if (storage.len < encoded_nodes.len) return error.WorkspaceTooSmall;
-
-    {
-        profile.begin(.index_hash);
-        defer profile.end(.index_hash);
-        for (encoded_nodes, 0..) |encoded, index| {
-            storage[index] = .{ .hash = keccak_context.keccak256(encoded), .encoded = encoded };
-        }
-    }
-
-    const records = storage[0..encoded_nodes.len];
-    {
-        profile.begin(.index_sort);
-        defer profile.end(.index_sort);
-        std.sort.heap(NodeRecord, records, {}, recordLessThan);
-    }
-
-    var unique_len: usize = 0;
-    {
-        profile.begin(.index_deduplicate);
-        defer profile.end(.index_deduplicate);
-        for (records) |record| {
-            if (unique_len > 0 and std.mem.eql(u8, &records[unique_len - 1].hash, &record.hash)) {
-                if (!std.mem.eql(u8, records[unique_len - 1].encoded, record.encoded)) {
-                    return error.ConflictingNode;
-                }
-                continue;
-            }
-            records[unique_len] = record;
-            unique_len += 1;
-        }
-    }
-    index_storage.sealed = .{
-        .records = records[0..unique_len],
-    };
-    return indexFromData(&index_storage.sealed);
-}
-
 pub fn emptyIndex(storage: *const IndexStorage) *const NodeIndex {
     return indexFromData(&storage.sealed);
 }
@@ -241,18 +187,6 @@ pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupE
     };
 }
 
-pub fn lookupProfiled(
-    root: hash.Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    profile: anytype,
-) LookupError!Lookup {
-    return lookupWithCacheProfiled(root, index, key, null, profile) catch |err| switch (err) {
-        error.OutOfMemory => unreachable,
-        else => |lookup_err| return lookup_err,
-    };
-}
-
 pub fn lookupCached(
     root: hash.Root,
     index: *const NodeIndex,
@@ -260,16 +194,6 @@ pub fn lookupCached(
     cache: *LookupCache,
 ) (std.mem.Allocator.Error || LookupError)!Lookup {
     return lookupWithCache(root, index, key, cache);
-}
-
-pub fn lookupCachedProfiled(
-    root: hash.Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    cache: *LookupCache,
-    profile: anytype,
-) (std.mem.Allocator.Error || LookupError)!Lookup {
-    return lookupWithCacheProfiled(root, index, key, cache, profile);
 }
 
 fn lookupWithCache(
@@ -340,82 +264,6 @@ fn lookupWithCache(
     }
 }
 
-fn lookupWithCacheProfiled(
-    root: hash.Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    cache: ?*LookupCache,
-    profile: anytype,
-) (std.mem.Allocator.Error || LookupError)!Lookup {
-    if (std.mem.eql(u8, &root, &hash.empty_root)) return .{ .absent = .empty_trie };
-    const key_nibbles = std.math.mul(usize, key.len, 2) catch
-        return error.ResourceLimitExceeded;
-    const step_capacity = std.math.add(usize, key_nibbles, 1) catch
-        return error.ResourceLimitExceeded;
-
-    profile.begin(.lookup_root_resolve);
-    const root_node = dataFromIndex(index).find(root);
-    profile.end(.lookup_root_resolve);
-    const present_root = root_node orelse return error.MissingNode;
-    var resolved = ResolvedReference{
-        .encoded = present_root.encoded,
-        .position = present_root.position,
-    };
-    var depth: usize = 0;
-    var steps: usize = 0;
-    var extension_parent = false;
-
-    while (true) {
-        steps = std.math.add(usize, steps, 1) catch return error.ResourceLimitExceeded;
-        if (steps > step_capacity) return error.ResourceLimitExceeded;
-
-        const decoded = decoded: {
-            profile.begin(.lookup_decode);
-            defer profile.end(.lookup_decode);
-            break :decoded if (cache) |active|
-                if (resolved.position) |position|
-                    try active.decode(index, position, resolved.encoded, extension_parent)
-                else
-                    try decodeForPath(resolved.encoded, extension_parent, key, depth)
-            else
-                try decodeForPath(resolved.encoded, extension_parent, key, depth);
-        };
-        switch (decoded) {
-            .leaf => |leaf| {
-                const path = leaf.path;
-                if (!path.matchesKey(key, depth)) return .{ .absent = .divergent_path };
-                if (depth + path.len != nibble.keyNibbleLen(key)) {
-                    return .{ .absent = .divergent_path };
-                }
-                return .{ .present = leaf.value };
-            },
-            .extension => |extension| {
-                if (!extension.path.matchesKey(key, depth)) {
-                    return .{ .absent = .divergent_path };
-                }
-                resolved = try resolveRequiredReferenceProfiled(index, extension.child, profile);
-                depth += extension.path.len;
-                extension_parent = true;
-            },
-            .branch => |branch| {
-                if (depth == nibble.keyNibbleLen(key)) {
-                    return if (branch.value) |value|
-                        .{ .present = value }
-                    else
-                        .{ .absent = .empty_branch_value };
-                }
-                if (depth > nibble.keyNibbleLen(key)) return error.InvalidNode;
-
-                const selected = branch.children[nibble.keyNibbleAt(key, depth)];
-                resolved = (try resolveReferenceProfiled(index, selected, profile)) orelse
-                    return .{ .absent = .missing_branch_child };
-                depth += 1;
-                extension_parent = false;
-            },
-        }
-    }
-}
-
 fn decodeForPath(
     encoded: []const u8,
     require_branch: bool,
@@ -450,33 +298,6 @@ fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupEr
     };
 }
 
-fn resolveRequiredReferenceProfiled(
-    index: *const NodeIndex,
-    reference: node.Reference,
-    profile: anytype,
-) LookupError!ResolvedReference {
-    return (try resolveReferenceProfiled(index, reference, profile)) orelse return error.InvalidNodeReference;
-}
-
-fn resolveReferenceProfiled(
-    index: *const NodeIndex,
-    reference: node.Reference,
-    profile: anytype,
-) LookupError!?ResolvedReference {
-    return switch (reference) {
-        .empty => null,
-        .embedded => |embedded| .{ .encoded = embedded, .position = null },
-        .hashed => |digest| {
-            profile.begin(.lookup_child_resolve);
-            const found = dataFromIndex(index).find(digest.*);
-            profile.end(.lookup_child_resolve);
-            const indexed = found orelse return error.MissingNode;
-            if (indexed.encoded.len < 32) return error.InvalidNodeReference;
-            return .{ .encoded = indexed.encoded, .position = indexed.position };
-        },
-    };
-}
-
 fn recordLessThan(_: void, lhs: NodeRecord, rhs: NodeRecord) bool {
     return std.mem.order(u8, &lhs.hash, &rhs.hash) == .lt;
 }
@@ -501,48 +322,4 @@ test "decoded-node cache indexes many witness positions" {
         try std.testing.expect((try cache.decode(index, position, &encoded_leaf, false)) == .leaf);
     }
     try std.testing.expectEqual(@as(usize, node_count), cache.entries.items.len);
-}
-
-test "profile events distinguish index phases and root lookup" {
-    const Counts = struct {
-        index_hash: usize = 0,
-        index_sort: usize = 0,
-        index_deduplicate: usize = 0,
-        lookup_root_resolve: usize = 0,
-        lookup_decode: usize = 0,
-        lookup_child_resolve: usize = 0,
-    };
-    const CountingProfile = struct {
-        counts: *Counts,
-
-        inline fn begin(self: @This(), comptime event: ProfileEvent) void {
-            @field(self.counts, @tagName(event)) += 1;
-        }
-
-        inline fn end(_: @This(), comptime _: ProfileEvent) void {}
-    };
-
-    var counts: Counts = .{};
-    const profile = CountingProfile{ .counts = &counts };
-    const encoded_leaf = [_]u8{ 0xc2, 0x20, 0x01 };
-    const encoded_nodes = [_][]const u8{&encoded_leaf};
-    var records: [1]NodeRecord = undefined;
-    var storage: IndexStorage = .{};
-    const index = try indexNodesProfiled(
-        hash.StdKeccak256Context{},
-        &storage,
-        &records,
-        &encoded_nodes,
-        profile,
-    );
-    const root = (hash.StdKeccak256Context{}).keccak256(&encoded_leaf);
-    const result = try lookupProfiled(root, index, "", profile);
-
-    try std.testing.expectEqualSlices(u8, &.{0x01}, result.present);
-    try std.testing.expectEqual(@as(usize, 1), counts.index_hash);
-    try std.testing.expectEqual(@as(usize, 1), counts.index_sort);
-    try std.testing.expectEqual(@as(usize, 1), counts.index_deduplicate);
-    try std.testing.expectEqual(@as(usize, 1), counts.lookup_root_resolve);
-    try std.testing.expectEqual(@as(usize, 1), counts.lookup_decode);
-    try std.testing.expectEqual(@as(usize, 0), counts.lookup_child_resolve);
 }

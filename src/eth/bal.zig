@@ -3,9 +3,11 @@
 
 const std = @import("std");
 const model = @import("bal/model.zig");
+const claim_plan = @import("bal/ClaimPlan.zig");
 const block_stf = @import("block_stf.zig");
 const trie = @import("trie.zig");
 const state = @import("../state.zig");
+const Backend = @import("../backend.zig").Backend;
 
 pub const tracked_state_projector = @import("bal/tracked_state_projector.zig");
 
@@ -25,6 +27,12 @@ pub const ValidationError = model.ValidationError;
 pub const Counts = model.Counts;
 pub const Decoded = model.Decoded;
 pub const IndexError = model.IndexError;
+pub const ClaimPlan = claim_plan.ClaimPlan;
+pub const AccountId = claim_plan.AccountId;
+pub const StorageId = claim_plan.StorageId;
+pub const AccountClaim = claim_plan.AccountClaim;
+pub const StorageClaim = claim_plan.StorageClaim;
+pub const ClaimPlanInitError = claim_plan.InitError;
 
 pub const transactionIndex = model.transactionIndex;
 pub const postExecutionSystemIndex = model.postExecutionSystemIndex;
@@ -58,7 +66,7 @@ test "BAL executor releases an unconsumed state backend" {
         std.testing.io,
         std.testing.allocator,
         .{
-            .state_backend = try state.Backend.fromWitness(
+            .state_backend = try Backend.fromWitness(
                 std.testing.allocator,
                 trie.empty_root_hash,
                 &.{},
@@ -80,5 +88,6 @@ test "BAL executor releases an unconsumed state backend" {
 }
 
 test {
+    std.testing.refAllDecls(claim_plan);
     std.testing.refAllDecls(tracked_state_projector);
 }

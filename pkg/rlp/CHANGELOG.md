@@ -9,6 +9,13 @@ Releases are cut from `pkg/rlp` on evmz `main` and published to the generated
 
 ## [Unreleased]
 
+### Added
+
+- `decodeInto`/`decodeIntoAs` decode a nonallocating value directly into
+  caller-owned storage, leaving the destination undefined on failure.
+- `listEncodedLen` sizes a list from its payload length, so callers can reserve
+  exact output storage before encoding.
+
 ### Changed
 
 - Simplified encoding to reduce cycles

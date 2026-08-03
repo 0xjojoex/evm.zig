@@ -67,7 +67,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
 
     var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = producer_state.backend(),
+        .state_backend = .fromMemoryStore(&producer_state),
         .transactions = &transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -93,7 +93,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
         allocator,
         .{
             .env = .{ .gas_limit = 2_000_000 },
-            .state_backend = verifier_state.backend(),
+            .state_backend = .fromMemoryStore(&verifier_state),
             .transactions = &transactions,
             .parent_blob_gas = parentBlobGas(),
             .block_access_list = produced.encoded_block_access_list,

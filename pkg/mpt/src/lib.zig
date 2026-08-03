@@ -11,11 +11,13 @@
 
 const std = @import("std");
 const hash = @import("hash.zig");
-const catalog = @import("catalog.zig");
 const root_mod = @import("root.zig");
 const proof = @import("proof.zig");
 const sparse = @import("sparse.zig");
 const stateless = @import("stateless.zig");
+
+pub const catalog = @import("catalog.zig");
+pub const fixed_key = @import("fixed_key.zig");
 
 const errors = @import("error.zig");
 pub const Error = errors.Error;
@@ -33,17 +35,7 @@ pub const Absence = proof.Absence;
 pub const Lookup = proof.Lookup;
 pub const LookupCache = proof.LookupCache;
 pub const NodeIndex = proof.NodeIndex;
-pub const ProfileEvent = proof.ProfileEvent;
 pub const Catalog = catalog.Catalog;
-pub const CatalogBranch = catalog.Branch;
-pub const CatalogBoundLookup = catalog.BoundLookup;
-pub const CatalogBoundValue = catalog.BoundValue;
-pub const CatalogBuilder = catalog.CatalogBuilder;
-pub const CatalogLink = catalog.Link;
-pub const CatalogLimits = catalog.Limits;
-pub const CatalogNode = catalog.Node;
-pub const CatalogNodeId = catalog.NodeId;
-pub const CatalogRoot = catalog.RootRef;
 pub const CatalogUpdateWorkspace = sparse.CatalogUpdateWorkspace;
 pub const StatelessWorkspace = stateless.Workspace;
 pub const StatelessUpdate = stateless.Update;
@@ -201,38 +193,6 @@ pub fn Trie(comptime KeccakContext: type) type {
             return indexedNodesFromData(data);
         }
 
-        /// Diagnostic variant of `indexNodes`; `profile` receives typed,
-        /// compile-time events and must provide inline `begin` and `end`.
-        pub fn indexNodesProfiled(
-            self: Self,
-            encoded_nodes: []const []const u8,
-            profile: anytype,
-        ) AllocIndexError!*IndexedNodes {
-            if (encoded_nodes.len == 0) {
-                return indexedNodesFromData(@constCast(&empty_indexed_nodes));
-            }
-            const storage = try self.allocator.alloc(proof.NodeRecord, encoded_nodes.len);
-            errdefer self.allocator.free(storage);
-            const data = try self.allocator.create(IndexedNodesData);
-            errdefer self.allocator.destroy(data);
-            data.* = .{
-                .allocator = self.allocator,
-                .storage = storage,
-                .index_storage = .{},
-            };
-            _ = proof.indexNodesProfiled(
-                self.keccak_context,
-                &data.index_storage,
-                storage,
-                encoded_nodes,
-                profile,
-            ) catch |err| switch (err) {
-                error.WorkspaceTooSmall => unreachable,
-                error.ConflictingNode => return error.ConflictingNode,
-            };
-            return indexedNodesFromData(data);
-        }
-
         /// Resolve `key` against the witness index rooted at `root_hash`,
         /// returning the stored value or the reason the key is absent.
         pub fn lookup(
@@ -271,7 +231,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             self: Self,
             root_hash: Root,
             topology: *const Catalog,
-            root_ref: CatalogRoot,
+            root_ref: catalog.RootRef,
             updates: []const Update,
         ) AllocUpdateError!Root {
             try sparse.validateCatalogRoot(root_hash, root_ref);
@@ -293,7 +253,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             workspace: *CatalogUpdateWorkspace,
             root_hash: Root,
             topology: *const Catalog,
-            root_ref: CatalogRoot,
+            root_ref: catalog.RootRef,
             updates: []const Update,
         ) AllocUpdateError!Root {
             try sparse.validateCatalogRoot(root_hash, root_ref);
@@ -315,7 +275,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             workspace: *StatelessWorkspace,
             root_hash: Root,
             topology: *const Catalog,
-            root_ref: CatalogRoot,
+            root_ref: catalog.RootRef,
             updates: []const StatelessUpdate,
         ) AllocUpdateError!Root {
             return stateless.updateSorted(
@@ -335,7 +295,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             self: Self,
             root_hash: Root,
             topology: *const Catalog,
-            root_ref: CatalogRoot,
+            root_ref: catalog.RootRef,
             updates: []const Update,
         ) AllocUpdateError!Root {
             try sparse.validateCatalogRoot(root_hash, root_ref);
@@ -353,9 +313,9 @@ pub fn Trie(comptime KeccakContext: type) type {
 
         /// Start a root-scoped authenticated catalog over an existing sealed
         /// witness index. Additional state or storage roots may be linked
-        /// before `CatalogBuilder.finish` seals the immutable topology.
-        pub fn catalogBuilder(self: Self, index: *const NodeIndex) std.mem.Allocator.Error!CatalogBuilder {
-            return CatalogBuilder.init(self.allocator, index);
+        /// before `catalog.Builder.finish` seals the immutable topology.
+        pub fn catalogBuilder(self: Self, index: *const NodeIndex) std.mem.Allocator.Error!catalog.Builder {
+            return catalog.Builder.init(self.allocator, index);
         }
 
         /// Admission-bounded catalog ingestion. A surrounding application may
@@ -363,9 +323,9 @@ pub fn Trie(comptime KeccakContext: type) type {
         pub fn catalogBuilderWithLimits(
             self: Self,
             index: *const NodeIndex,
-            limits: CatalogLimits,
-        ) catalog.InitError!CatalogBuilder {
-            return CatalogBuilder.initWithLimits(self.allocator, index, limits);
+            limits: catalog.Limits,
+        ) catalog.InitError!catalog.Builder {
+            return catalog.Builder.initWithLimits(self.allocator, index, limits);
         }
 
         /// Build a typed-key facade over this configured structural trie.
@@ -467,7 +427,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                     self: KeyedSelf,
                     root_hash: Root,
                     topology: *const Catalog,
-                    root_ref: CatalogRoot,
+                    root_ref: catalog.RootRef,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
@@ -499,7 +459,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                     workspace: *CatalogUpdateWorkspace,
                     root_hash: Root,
                     topology: *const Catalog,
-                    root_ref: CatalogRoot,
+                    root_ref: catalog.RootRef,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
@@ -530,7 +490,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                     workspace: *StatelessWorkspace,
                     root_hash: Root,
                     topology: *const Catalog,
-                    root_ref: CatalogRoot,
+                    root_ref: catalog.RootRef,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
@@ -559,7 +519,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                     self: KeyedSelf,
                     root_hash: Root,
                     topology: *const Catalog,
-                    root_ref: CatalogRoot,
+                    root_ref: catalog.RootRef,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
@@ -609,15 +569,6 @@ pub fn lookup(root_hash: Root, index: *const NodeIndex, key: []const u8) LookupE
     return proof.lookup(root_hash, index, key);
 }
 
-pub fn lookupProfiled(
-    root_hash: Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    profile: anytype,
-) LookupError!Lookup {
-    return proof.lookupProfiled(root_hash, index, key, profile);
-}
-
 pub fn lookupCached(
     root_hash: Root,
     index: *const NodeIndex,
@@ -625,16 +576,6 @@ pub fn lookupCached(
     cache: *LookupCache,
 ) (std.mem.Allocator.Error || LookupError)!Lookup {
     return proof.lookupCached(root_hash, index, key, cache);
-}
-
-pub fn lookupCachedProfiled(
-    root_hash: Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    cache: *LookupCache,
-    profile: anytype,
-) (std.mem.Allocator.Error || LookupError)!Lookup {
-    return proof.lookupCachedProfiled(root_hash, index, key, cache, profile);
 }
 
 /// Advanced fixed-scratch `rootSorted` using the default Keccak context.

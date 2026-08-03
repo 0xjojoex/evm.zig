@@ -6,6 +6,7 @@ const block_stf = evmz.eth.block_stf;
 const trie = evmz.eth.trie;
 const fixture = @import("bal_execution_fixture.zig");
 const bal_parallel = @import("bal_parallel_test_support.zig");
+const Backend = @import("../../backend.zig").Backend;
 
 const coinbase = fixture.coinbase;
 const sender = fixture.sender;
@@ -319,7 +320,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     var rejected_report = bal.Report{};
     const rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = rejected_store.backend(),
+        .state_backend = Backend.fromMemoryStore(&rejected_store),
         .transactions = &transactions,
         .block_access_list = encoded_claim,
         .root_checks = roots(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -347,7 +348,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
         std.testing.allocator,
         .{
             .env = .{ .gas_limit = 2_000_000 },
-            .state_backend = parallel_rejected_store.backend(),
+            .state_backend = Backend.fromMemoryStore(&parallel_rejected_store),
             .transactions = &transactions,
             .block_access_list = encoded_claim,
             .root_checks = roots(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -390,7 +391,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     var lied_report = bal.Report{};
     const lied_rejected = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = lied_store.backend(),
+        .state_backend = Backend.fromMemoryStore(&lied_store),
         .transactions = &transactions,
         .block_access_list = lied_encoded_claim,
         .root_checks = roots(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -434,7 +435,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
             .blob_base_fee = 1,
             .blob_params = blob_params,
         },
-        .state_backend = blob_store.backend(),
+        .state_backend = Backend.fromMemoryStore(&blob_store),
         .transactions = &oversized_blob_transactions,
         .block_access_list = empty_claim,
         .root_checks = roots(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -455,7 +456,7 @@ fn blockInput(
 ) block_stf.AssumeDecodedBlockInput {
     return .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = store.backend(),
+        .state_backend = Backend.fromMemoryStore(store),
         .transactions = &txs,
         .block_access_list = encoded_claim,
         .root_checks = root_checks,

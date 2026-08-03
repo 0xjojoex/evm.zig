@@ -1,18 +1,19 @@
 //! In-memory state store for tests, demos, fixtures, and lightweight embeds.
 //!
 //! `reader()` exposes the read-only `StateReader` adapter. `committer()` applies
-//! borrowed final changes back into this canonical memory store. It is not the
-//! execution state: speculative writes, checkpoints, reverts, logs, warmth,
-//! and the journal live in `TrackedState`.
+//! borrowed final changes back into this canonical memory store, and
+//! `rootProvider()` derives their post-state root without applying them.
+//!
+//! It is not the execution state: speculative writes, checkpoints, reverts,
+//! logs, warmth, and the journal live in `TrackedState`.
 
 const std = @import("std");
 
 const evmz = @import("../evm.zig");
 const Account = @import("./Account.zig");
-const Backend = @import("./Backend.zig").Backend;
-const RootProvider = @import("./Backend.zig").RootProvider;
 const MemoryAccount = @import("./MemoryAccount.zig");
 const Committer = @import("./Committer.zig");
+const RootProvider = @import("./RootProvider.zig");
 const TrackedState = @import("./TrackedState.zig");
 const StateReader = @import("./Reader.zig");
 const ConcurrentReader = @import("./ConcurrentReader.zig");
@@ -90,20 +91,10 @@ pub fn committer(self: *MemoryStore) Committer {
     } };
 }
 
-pub fn backend(self: *MemoryStore) Backend {
-    return Backend.fromExternal(self.reader(), .{
-        .ptr = self,
-        .vtable = &root_provider_vtable,
-    }, self.committer());
-}
-
-const root_provider_vtable = RootProvider.VTable{
-    .afterChanges = stateRootAfterChangesProvider,
-};
-
-fn stateRootAfterChangesProvider(ptr: *anyopaque, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
-    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    return self.stateRootAfterChanges(allocator, changes);
+pub fn rootProvider(self: *MemoryStore) RootProvider {
+    return .{ .ptr = self, .vtable = &.{
+        .afterChanges = rootAfterChanges,
+    } };
 }
 
 pub fn getAccount(self: *MemoryStore, address: Address) ?*MemoryAccount {
@@ -305,6 +296,11 @@ fn applyChangesInPlace(self: *MemoryStore, changes: ChangesView) !void {
 fn commit(ptr: *anyopaque, changes: ChangesView) !void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     try self.applyChanges(changes);
+}
+
+fn rootAfterChanges(ptr: *anyopaque, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    return self.stateRootAfterChanges(allocator, changes);
 }
 
 fn accountExists(ptr: *anyopaque, address: Address) !bool {

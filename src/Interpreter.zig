@@ -1304,13 +1304,16 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
 comptime {
     // If any of the following size/align/offset changes, rerun VM-loop canary benches
     std.debug.assert(@sizeOf(FrameResult) == 64);
-    std.debug.assert(@sizeOf(CallFrame) == 400);
+    // Layout repinned after Host.Message address fields gained align(8)
+    // (guest-step keeper). Rerun the VM-loop canary benches before relying
+    // on native numbers measured against the previous pins.
+    std.debug.assert(@sizeOf(CallFrame) == 416);
     std.debug.assert(@alignOf(CallFrame) == 16);
-    std.debug.assert(@offsetOf(CallFrame, "stack") == 240);
-    std.debug.assert(@offsetOf(CallFrame, "memory") == 256);
-    std.debug.assert(@offsetOf(CallFrame, "gas_left") == 304);
-    std.debug.assert(@offsetOf(CallFrame, "msg") == 232);
-    std.debug.assert(@sizeOf(CallFrameSlot) == 33408);
+    std.debug.assert(@offsetOf(CallFrame, "stack") == 256);
+    std.debug.assert(@offsetOf(CallFrame, "memory") == 272);
+    std.debug.assert(@offsetOf(CallFrame, "gas_left") == 320);
+    std.debug.assert(@offsetOf(CallFrame, "msg") == 248);
+    std.debug.assert(@sizeOf(CallFrameSlot) == 33440);
     std.debug.assert(@offsetOf(CallFrameSlot, "frame") == 0);
     std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
     std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));

@@ -7,6 +7,7 @@ const state = evmz.state;
 const Withdrawal = evmz.eth.Withdrawal;
 const fixture = @import("bal_execution_fixture.zig");
 const bal_parallel = @import("bal_parallel_test_support.zig");
+const Backend = @import("../../backend.zig").Backend;
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 const recipient = evmz.addr(0x7928);
@@ -74,7 +75,7 @@ test "BlockSTF produce returns the owned canonical empty BAL" {
 
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
-        .state_backend = try state.Backend.fromWitness(
+        .state_backend = try Backend.fromWitness(
             std.testing.allocator,
             evmz.eth.trie.empty_root_hash,
             &.{},
@@ -103,7 +104,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
 
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .parent_blob_gas = parentBlobGas(),
@@ -144,7 +145,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
     var differential_report = bal.Report{};
     const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
-        .state_backend = verifier_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&verifier_state),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .parent_blob_gas = parentBlobGas(),
@@ -211,7 +212,7 @@ test "BlockSTF BAL differential rejects correlated claimed values" {
     defer producer_state.deinit();
     var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(3_000_000),
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -252,7 +253,7 @@ test "BlockSTF BAL differential rejects correlated claimed values" {
     var report = bal.Report{};
     const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(3_000_000),
-        .state_backend = verifier_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&verifier_state),
         .transactions = &transactions,
         .parent_blob_gas = parentBlobGas(),
         .block_access_list = hostile_encoded,
@@ -315,7 +316,7 @@ test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as abs
     defer producer_state.deinit();
     var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(3_000_000),
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -341,7 +342,7 @@ test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as abs
     var report = bal.Report{};
     const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = blockEnv(3_000_000),
-        .state_backend = verifier_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&verifier_state),
         .transactions = &transactions,
         .parent_blob_gas = parentBlobGas(),
         .block_access_list = produced.encoded_block_access_list,
@@ -382,7 +383,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
 
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
-        .state_backend = memory.backend(),
+        .state_backend = Backend.fromMemoryStore(&memory),
         .transactions = &raw_transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -405,7 +406,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
 
     const verified = try block_stf.Exact(.amsterdam).apply(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
-        .state_backend = verifier_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&verifier_state),
         .transactions = &raw_transactions,
         .parent_blob_gas = parentBlobGas(),
         .block_access_list = produced.encoded_block_access_list,
@@ -424,7 +425,7 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
         std.testing.allocator,
         .{
             .env = blockEnv(30_000_000),
-            .state_backend = parallel_verifier_state.backend(),
+            .state_backend = Backend.fromMemoryStore(&parallel_verifier_state),
             .transactions = &raw_transactions,
             .parent_blob_gas = parentBlobGas(),
             .block_access_list = produced.encoded_block_access_list,
@@ -459,7 +460,7 @@ test "BlockSTF parallel raw API owns decode failure cleanup" {
             std.testing.io,
             std.testing.allocator,
             .{
-                .state_backend = try state.Backend.fromWitness(
+                .state_backend = try Backend.fromWitness(
                     std.testing.allocator,
                     evmz.eth.trie.empty_root_hash,
                     &.{},
@@ -534,7 +535,7 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
     var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = env,
         .block_header = header,
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &transactions,
         .parent_header = parent,
     });
@@ -556,7 +557,7 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
         .{
             .env = env,
             .block_header = header,
-            .state_backend = verifier_state.backend(),
+            .state_backend = Backend.fromMemoryStore(&verifier_state),
             .transactions = &transactions,
             .parent_header = parent,
             .block_access_list = produced.encoded_block_access_list,
@@ -585,7 +586,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
 
     var outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &fixture.transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -602,7 +603,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     var serial_capture_report = bal.Report{};
     const serial_capture_result = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = serial_capture_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&serial_capture_state),
         .transactions = &fixture.transactions,
         .parent_blob_gas = parentBlobGas(),
         .block_access_list = produced.encoded_block_access_list,
@@ -627,7 +628,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
             std.testing.allocator,
             .{
                 .env = .{ .gas_limit = 2_000_000 },
-                .state_backend = verifier_state.backend(),
+                .state_backend = Backend.fromMemoryStore(&verifier_state),
                 .transactions = &fixture.transactions,
                 .parent_blob_gas = parentBlobGas(),
                 .block_access_list = produced.encoded_block_access_list,
@@ -670,7 +671,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.allocator,
         .{
             .env = .{ .gas_limit = 2_000_000 },
-            .state_backend = fallback_state.backend(),
+            .state_backend = Backend.fromMemoryStore(&fallback_state),
             .transactions = &fixture.transactions,
             .parent_blob_gas = parentBlobGas(),
             .block_access_list = produced.encoded_block_access_list,
@@ -701,7 +702,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.allocator,
         .{
             .env = .{ .gas_limit = 2_000_000 },
-            .state_backend = concurrent_state.backend(),
+            .state_backend = Backend.fromMemoryStore(&concurrent_state),
             .transactions = &fixture.transactions,
             .parent_blob_gas = parentBlobGas(),
             .block_access_list = produced.encoded_block_access_list,
@@ -740,7 +741,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
     try fixture.initState(&oom_producer_state);
     var oom_outcome = try block_stf.Exact(.amsterdam).produceAssumeDecoded(std.testing.allocator, .{
         .env = .{ .gas_limit = 2_000_000 },
-        .state_backend = oom_producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&oom_producer_state),
         .transactions = &oom_transactions,
         .parent_blob_gas = parentBlobGas(),
     });
@@ -766,7 +767,7 @@ test "BlockSTF parallel BAL lane preserves serial truth across strategies" {
         std.testing.allocator,
         .{
             .env = .{ .gas_limit = 2_000_000 },
-            .state_backend = oom_state.backend(),
+            .state_backend = Backend.fromMemoryStore(&oom_state),
             .transactions = &oom_transactions,
             .parent_blob_gas = parentBlobGas(),
             .block_access_list = oom_produced.encoded_block_access_list,
@@ -852,7 +853,7 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = env,
         .block_header = header,
-        .state_backend = producer_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&producer_state),
         .transactions = &.{},
         .parent_header = parent,
     });
@@ -869,7 +870,7 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
     const verified = try block_stf.Exact(.amsterdam).applyAssumeDecoded(std.testing.allocator, .{
         .env = env,
         .block_header = header,
-        .state_backend = verifier_state.backend(),
+        .state_backend = Backend.fromMemoryStore(&verifier_state),
         .transactions = &.{},
         .parent_header = parent,
         .block_access_list = produced.encoded_block_access_list,
@@ -888,7 +889,7 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
 
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(bal.item_cost - 1),
-        .state_backend = memory.backend(),
+        .state_backend = Backend.fromMemoryStore(&memory),
         .transactions = &.{},
         .withdrawals = &withdrawals,
         .parent_blob_gas = parentBlobGas(),
@@ -907,7 +908,7 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
 
 test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
     var outcome = try block_stf.Exact(.prague).produce(std.testing.allocator, .{
-        .state_backend = try state.Backend.fromWitness(
+        .state_backend = try Backend.fromWitness(
             std.testing.allocator,
             evmz.eth.trie.empty_root_hash,
             &.{},

@@ -159,6 +159,10 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             return std.math.cast(Index, self.entries.len) orelse std.math.maxInt(Index);
         }
 
+        pub fn allocationBytes(self: Self) usize {
+            return self.index.len * @sizeOf(Index) + self.entries.len * @sizeOf(Row);
+        }
+
         pub fn contains(self: Self, key: K) bool {
             return self.findSlot(key) != null;
         }

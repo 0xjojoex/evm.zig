@@ -10,6 +10,36 @@ const MemoryStore = support.MemoryStore;
 const transact = support.transact;
 const expectRejected = support.expectRejected;
 
+test "supported state domains analyze as complete engine products" {
+    const Tracked = evmz.Vm(evmz.eth.amsterdam);
+    const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
+
+    analyzeEngineProduct(Tracked);
+    analyzeEngineProduct(Dense);
+
+    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Tracked));
+    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
+}
+
+test "ordinary VM constructs its tracked executor without exposing the state domain" {
+    const ExactVm = evmz.Vm(evmz.eth.amsterdam);
+
+    comptime {
+        std.debug.assert(ExactVm.BlockState.State == evmz.state.TrackedState);
+        std.debug.assert(@hasField(ExactVm.Executor.Init, "state_reader"));
+    }
+
+    var executor = ExactVm.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try std.testing.expect(executor.state.reader == null);
+}
+
+fn analyzeEngineProduct(comptime Engine: type) void {
+    std.testing.refAllDecls(Engine.BlockState.State);
+    std.testing.refAllDecls(Engine.Executor);
+    std.testing.refAllDecls(Engine);
+}
+
 test "Env execution context derives opcode-visible gas limit from the environment" {
     const origin = addr(0xaaaa);
     const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };
@@ -32,7 +62,11 @@ test "exact VM closes the complete spec without revision state" {
         std.debug.assert(!@hasField(Cancun.Executor, "revision_id"));
         std.debug.assert(Cancun.specification.transaction.max_initcode_size == evmz.eth.cancun.transaction.max_initcode_size);
         std.debug.assert(@typeInfo(TransitionContextPointer).pointer.child == Context);
-        std.debug.assert(Cancun.Executor == evmz.executor.Executor(Cancun.specification));
+        std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
+            Cancun.specification,
+            Cancun.BlockState.State,
+            Cancun.compile_options,
+        ));
     }
 
     try std.testing.expect(@hasDecl(Cancun, "transact"));
@@ -105,7 +139,11 @@ test "custom transaction program remains bound to the exact Executor" {
 
     comptime {
         std.debug.assert(Program.Executor == Default.Executor);
-        std.debug.assert(Program.Executor == evmz.executor.Executor(Program.specification));
+        std.debug.assert(Program.Executor == evmz.executor.ExecutorType(
+            Program.specification,
+            Default.BlockState.State,
+            Default.compile_options,
+        ));
         std.debug.assert(Program.Context == Context);
         std.debug.assert(Program.Transaction == Default.Transaction);
         std.debug.assert(Program.Output == Default.Output);

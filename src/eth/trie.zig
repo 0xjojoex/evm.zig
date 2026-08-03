@@ -10,11 +10,8 @@ const rlp = @import("rlp");
 const mpt = @import("mpt");
 const uint256 = @import("../uint256.zig");
 const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
-const TrackedState = @import("../state/TrackedState.zig");
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
-const ChangesView = TrackedState.ChangesView;
-const stateless_profile = @import("stateless_profile");
 const Allocator = std.mem.Allocator;
 
 /// Evmz execution backend for the MPT's fixed structural Keccak-256 rule.
@@ -24,31 +21,6 @@ const KeccakContext = struct {
     }
 };
 
-const MptProfile = struct {
-    pub inline fn begin(_: @This(), comptime event: mpt.ProfileEvent) void {
-        switch (event) {
-            .index_hash => stateless_profile.begin(.mpt_index_hash),
-            .index_sort => stateless_profile.begin(.mpt_index_sort),
-            .index_deduplicate => stateless_profile.begin(.mpt_index_deduplicate),
-            .lookup_root_resolve => stateless_profile.begin(.mpt_lookup_root_resolve),
-            .lookup_decode => stateless_profile.begin(.mpt_lookup_decode),
-            .lookup_child_resolve => stateless_profile.begin(.mpt_lookup_child_resolve),
-        }
-    }
-
-    pub inline fn end(_: @This(), comptime event: mpt.ProfileEvent) void {
-        switch (event) {
-            .index_hash => stateless_profile.end(.mpt_index_hash),
-            .index_sort => stateless_profile.end(.mpt_index_sort),
-            .index_deduplicate => stateless_profile.end(.mpt_index_deduplicate),
-            .lookup_root_resolve => stateless_profile.end(.mpt_lookup_root_resolve),
-            .lookup_decode => stateless_profile.end(.mpt_lookup_decode),
-            .lookup_child_resolve => stateless_profile.end(.mpt_lookup_child_resolve),
-        }
-    }
-};
-
-const mpt_profile = MptProfile{};
 const StructuralTrie = mpt.Trie(KeccakContext);
 
 const AddressKeyContext = struct {
@@ -76,6 +48,26 @@ fn accountTrie(allocator: Allocator) AccountTrie {
 
 fn storageTrie(allocator: Allocator) StorageTrie {
     return StorageTrie.init(structuralTrie(allocator), .{});
+}
+
+/// Internal hashed-key seam for the dense commit module. Keeping the
+/// structural trie context here avoids instantiating a second Keccak-backed
+/// MPT implementation merely because commit lives in its own source file.
+pub inline fn updateStatelessCatalogHashed(
+    workspace: *mpt.StatelessWorkspace,
+    allocator: Allocator,
+    root_hash: [32]u8,
+    catalog: *const WitnessCatalog,
+    root_ref: mpt.catalog.RootRef,
+    updates: []const mpt.StatelessUpdate,
+) UpdateError![32]u8 {
+    return structuralTrie(allocator).updateStatelessCatalog(
+        workspace,
+        root_hash,
+        &catalog.topology,
+        root_ref,
+        updates,
+    );
 }
 
 pub const Error = Allocator.Error || mpt.Error;
@@ -118,11 +110,11 @@ pub const ProofCache = mpt.LookupCache;
 
 const StorageCatalogRoot = struct {
     hash: [32]u8,
-    root: mpt.CatalogRoot,
+    root: mpt.catalog.RootRef,
 };
 
 const CatalogAccount = struct {
-    node: mpt.CatalogNodeId,
+    node: mpt.catalog.NodeId,
     decoded: Account,
 };
 
@@ -132,7 +124,7 @@ const CatalogAccount = struct {
 pub const WitnessCatalog = struct {
     allocator: Allocator,
     topology: mpt.Catalog,
-    state_root: mpt.CatalogRoot,
+    state_root: mpt.catalog.RootRef,
     storage_roots: std.ArrayList(StorageCatalogRoot),
     accounts: std.ArrayList(CatalogAccount),
 
@@ -187,19 +179,19 @@ pub const WitnessCatalog = struct {
         return self.topology.branchCount();
     }
 
-    pub fn stateCatalogRoot(self: WitnessCatalog) mpt.CatalogRoot {
+    pub fn stateCatalogRoot(self: WitnessCatalog) mpt.catalog.RootRef {
         return self.state_root;
     }
 
     pub fn storageCatalogRoot(
         self: WitnessCatalog,
         digest: [32]u8,
-    ) mpt.LookupError!mpt.CatalogRoot {
+    ) mpt.LookupError!mpt.catalog.RootRef {
         if (std.mem.eql(u8, &digest, &empty_root_hash)) return .empty;
         return self.findStorageRoot(digest) orelse error.MissingNode;
     }
 
-    fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.CatalogRoot {
+    fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.catalog.RootRef {
         var low: usize = 0;
         var high = self.storage_roots.items.len;
         while (low < high) {
@@ -234,22 +226,23 @@ pub fn buildWitnessCatalog(
     errdefer accounts.deinit(allocator);
 
     for (0..state_node_count) |raw_id| {
-        const id: mpt.CatalogNodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
+        const id: mpt.catalog.NodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
         const node = builder.node(id) orelse return error.InvalidNodeReference;
         if (node.kind != .leaf) continue;
         const encoded = node.value() orelse return error.InvalidNode;
-        const account = try decodeAccountValue(encoded);
-        try accounts.append(allocator, .{ .node = id, .decoded = account });
-        if (std.mem.eql(u8, &account.storage_root, &empty_root_hash) or
-            containsStorageRoot(storage_roots.items, account.storage_root))
+        const entry = try accounts.addOne(allocator);
+        entry.node = id;
+        try decodeAccountValueInto(encoded, &entry.decoded);
+        if (std.mem.eql(u8, &entry.decoded.storage_root, &empty_root_hash) or
+            containsStorageRoot(storage_roots.items, entry.decoded.storage_root))
         {
             continue;
         }
-        const root_ref = builder.authenticateRoot(account.storage_root) catch |err| switch (err) {
+        const root_ref = builder.authenticateRoot(entry.decoded.storage_root) catch |err| switch (err) {
             error.MissingNode => continue,
             else => return err,
         };
-        try storage_roots.append(allocator, .{ .hash = account.storage_root, .root = root_ref });
+        try storage_roots.append(allocator, .{ .hash = entry.decoded.storage_root, .root = root_ref });
     }
 
     std.mem.sort(StorageCatalogRoot, storage_roots.items, {}, storageCatalogRootLessThan);
@@ -286,22 +279,10 @@ pub const Proof = struct {
     cache: ?*ProofCache = null,
 
     pub fn get(self: Proof, key: []const u8) (Allocator.Error || ProofLookupError)!?[]const u8 {
-        if (comptime stateless_profile.enabled) return self.getProfiled(key);
         const result = if (self.cache) |cache|
             try mpt.lookupCached(self.root_hash, self.index, key, cache)
         else
             try mpt.lookup(self.root_hash, self.index, key);
-        return switch (result) {
-            .present => |value| value,
-            .absent => null,
-        };
-    }
-
-    fn getProfiled(self: Proof, key: []const u8) (Allocator.Error || ProofLookupError)!?[]const u8 {
-        const result = if (self.cache) |cache|
-            try mpt.lookupCachedProfiled(self.root_hash, self.index, key, cache, mpt_profile)
-        else
-            try mpt.lookupProfiled(self.root_hash, self.index, key, mpt_profile);
         return switch (result) {
             .present => |value| value,
             .absent => null,
@@ -314,8 +295,7 @@ pub fn root(allocator: Allocator, pairs: []const Pair) Error![32]u8 {
 }
 
 pub fn indexNodes(allocator: Allocator, nodes: []const []const u8) Error!*IndexedNodes {
-    if (comptime !stateless_profile.enabled) return structuralTrie(allocator).indexNodes(nodes);
-    return structuralTrie(allocator).indexNodesProfiled(nodes, mpt_profile);
+    return structuralTrie(allocator).indexNodes(nodes);
 }
 
 pub fn proof(root_hash: [32]u8, indexed: *const IndexedNodes) Proof {
@@ -344,42 +324,15 @@ pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8)
 }
 
 pub fn transactionRoot(allocator: Allocator, encoded_transactions: []const []const u8) Error![32]u8 {
-    if (comptime !stateless_profile.enabled) return orderedTrieRoot(allocator, encoded_transactions);
-    stateless_profile.begin(.mpt_transaction_root);
-    return stateless_profile.finish(
-        .mpt_transaction_root,
-        orderedTrieRoot(allocator, encoded_transactions),
-    );
+    return orderedTrieRoot(allocator, encoded_transactions);
 }
 
 pub fn receiptRoot(allocator: Allocator, encoded_receipts: []const []const u8) Error![32]u8 {
-    if (comptime !stateless_profile.enabled) return orderedTrieRoot(allocator, encoded_receipts);
-    stateless_profile.begin(.mpt_receipt_root);
-    return stateless_profile.finish(
-        .mpt_receipt_root,
-        orderedTrieRoot(allocator, encoded_receipts),
-    );
+    return orderedTrieRoot(allocator, encoded_receipts);
 }
 
 pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Error![32]u8 {
-    if (comptime !stateless_profile.enabled) {
-        if (withdrawals.len == 0) return empty_root_hash;
-
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const scratch = arena.allocator();
-
-        const values = try scratch.alloc([]const u8, withdrawals.len);
-        for (values, withdrawals) |*value, withdrawal| {
-            value.* = try withdrawalValue(scratch, withdrawal);
-        }
-        return orderedTrieRoot(allocator, values);
-    }
-
-    stateless_profile.begin(.mpt_withdrawals_root);
-    if (withdrawals.len == 0) {
-        return stateless_profile.finish(.mpt_withdrawals_root, empty_root_hash);
-    }
+    if (withdrawals.len == 0) return empty_root_hash;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -389,10 +342,7 @@ pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Er
     for (values, withdrawals) |*value, withdrawal| {
         value.* = try withdrawalValue(scratch, withdrawal);
     }
-    return stateless_profile.finish(
-        .mpt_withdrawals_root,
-        orderedTrieRoot(allocator, values),
-    );
+    return orderedTrieRoot(allocator, values);
 }
 
 pub fn updateRoot(allocator: Allocator, root_hash: [32]u8, nodes: []const []const u8, updates: []const Update) UpdateError![32]u8 {
@@ -418,7 +368,7 @@ fn storageRootAfterChangesIndexed(
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
-    changes: ChangesView,
+    changes: anytype,
     target: address.Address,
 ) UpdateError![32]u8 {
     const scratch = allocator;
@@ -442,14 +392,7 @@ fn storageRootAfterChangesIndexed(
         empty_root_hash
     else
         root_hash;
-    if (comptime !stateless_profile.enabled) {
-        return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
-    }
-    stateless_profile.begin(.mpt_storage_commit);
-    return stateless_profile.finish(
-        .mpt_storage_commit,
-        storageTrie(allocator).update(base_root, indexed.index(), updates.items),
-    );
+    return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
 }
 
 fn storageRootAfterChangesCatalog(
@@ -457,7 +400,7 @@ fn storageRootAfterChangesCatalog(
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
-    changes: ChangesView,
+    changes: anytype,
     target: address.Address,
 ) UpdateError![32]u8 {
     var updates: std.ArrayList(StorageTrie.Update) = .empty;
@@ -477,29 +420,16 @@ fn storageRootAfterChangesCatalog(
     const wiped = changesWipeStorage(changes, target);
     const base_root = if (wiped) empty_root_hash else root_hash;
     if (updates.items.len == 0) return base_root;
-    const root_ref: mpt.CatalogRoot = if (wiped)
+    const root_ref: mpt.catalog.RootRef = if (wiped)
         .empty
     else
         try catalog.storageCatalogRoot(root_hash);
-    if (comptime !stateless_profile.enabled) {
-        return storageTrie(allocator).updateStatelessCatalog(
-            workspace,
-            base_root,
-            &catalog.topology,
-            root_ref,
-            updates.items,
-        );
-    }
-    stateless_profile.begin(.mpt_storage_commit);
-    return stateless_profile.finish(
-        .mpt_storage_commit,
-        storageTrie(allocator).updateStatelessCatalog(
-            workspace,
-            base_root,
-            &catalog.topology,
-            root_ref,
-            updates.items,
-        ),
+    return storageTrie(allocator).updateStatelessCatalog(
+        workspace,
+        base_root,
+        &catalog.topology,
+        root_ref,
+        updates.items,
     );
 }
 
@@ -507,7 +437,7 @@ pub fn stateRootAfterChanges(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
-    changes: ChangesView,
+    changes: anytype,
 ) UpdateError![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -522,7 +452,7 @@ pub fn stateRootAfterChangesIndexed(
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
     authenticated_accounts: ?*const AccountFacts,
-    changes: ChangesView,
+    changes: anytype,
 ) UpdateError![32]u8 {
     const scratch = allocator;
 
@@ -598,14 +528,7 @@ pub fn stateRootAfterChangesIndexed(
         try updates.append(scratch, .{ .key = change.address, .value = null });
     }
 
-    if (comptime !stateless_profile.enabled) {
-        return accounts.update(root_hash, indexed.index(), updates.items);
-    }
-    stateless_profile.begin(.mpt_account_commit);
-    return stateless_profile.finish(
-        .mpt_account_commit,
-        accounts.update(root_hash, indexed.index(), updates.items),
-    );
+    return accounts.update(root_hash, indexed.index(), updates.items);
 }
 
 pub fn stateRootAfterChangesCatalog(
@@ -613,7 +536,7 @@ pub fn stateRootAfterChangesCatalog(
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
     authenticated_accounts: *const AccountFacts,
-    changes: ChangesView,
+    changes: anytype,
 ) UpdateError![32]u8 {
     var workspace = mpt.StatelessWorkspace.init(allocator);
     defer workspace.deinit();
@@ -681,25 +604,12 @@ pub fn stateRootAfterChangesCatalog(
         try updates.append(allocator, .{ .key = change.address, .value = null });
     }
 
-    if (comptime !stateless_profile.enabled) {
-        return accountTrie(allocator).updateStatelessCatalog(
-            &workspace,
-            root_hash,
-            &catalog.topology,
-            catalog.stateCatalogRoot(),
-            updates.items,
-        );
-    }
-    stateless_profile.begin(.mpt_account_commit);
-    return stateless_profile.finish(
-        .mpt_account_commit,
-        accountTrie(allocator).updateStatelessCatalog(
-            &workspace,
-            root_hash,
-            &catalog.topology,
-            catalog.stateCatalogRoot(),
-            updates.items,
-        ),
+    return accountTrie(allocator).updateStatelessCatalog(
+        &workspace,
+        root_hash,
+        &catalog.topology,
+        catalog.stateCatalogRoot(),
+        updates.items,
     );
 }
 
@@ -741,6 +651,47 @@ pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
     return rlp.decode(Account, encoded);
 }
 
+pub fn decodeAccountValueInto(encoded: []const u8, account: *Account) ProofLookupError!void {
+    try rlp.decodeInto(Account, encoded, account);
+}
+
+test "decodeAccountValue matches the fixed account schema" {
+    var prng = std.Random.DefaultPrng.init(0xacc7);
+    const random = prng.random();
+    const scalars = [_]u256{ 0, 1, 0x7f, 0x80, 0xff, 0x100, std.math.maxInt(u64), 1 << 255, std.math.maxInt(u256) };
+    for (0..256) |_| {
+        var account = Account{
+            .nonce = @truncate(scalars[random.uintLessThan(usize, scalars.len)]),
+            .balance = scalars[random.uintLessThan(usize, scalars.len)],
+        };
+        random.bytes(&account.storage_root);
+        random.bytes(&account.code_hash);
+        const encoded = try encodeFixedRlp(Account, std.testing.allocator, account);
+        defer std.testing.allocator.free(encoded);
+        const decoded = try decodeAccountValue(encoded);
+        try std.testing.expectEqual(account, decoded);
+        var decoded_into: Account = undefined;
+        try decodeAccountValueInto(encoded, &decoded_into);
+        try std.testing.expectEqual(account, decoded_into);
+        // Truncation must be rejected by typed decode.
+        try std.testing.expectError(
+            error.InputTooShort,
+            decodeAccountValue(encoded[0 .. encoded.len - 1]),
+        );
+        try std.testing.expectError(
+            error.InputTooShort,
+            decodeAccountValueInto(encoded[0 .. encoded.len - 1], &decoded_into),
+        );
+    }
+}
+
+pub fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
+    var cursor = rlp.Cursor.init(encoded);
+    const value = try cursor.nextInt(u256);
+    try cursor.expectDone();
+    return value;
+}
+
 pub fn withdrawalValue(allocator: Allocator, withdrawal: Withdrawal) Allocator.Error![]u8 {
     return encodeFixedRlp(Withdrawal, allocator, withdrawal);
 }
@@ -771,7 +722,7 @@ fn loadCatalogAccountOrEmpty(
     return try catalog.decodedAccount(&hashedAddressKey(target)) orelse .{};
 }
 
-fn changesAccount(changes: ChangesView, target: address.Address) ?TrackedState.AccountChange {
+fn changesAccount(changes: anytype, target: address.Address) ?@TypeOf(changes.accounts.at(0)) {
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
@@ -780,12 +731,12 @@ fn changesAccount(changes: ChangesView, target: address.Address) ?TrackedState.A
     return null;
 }
 
-fn changesDeleteAccount(changes: ChangesView, target: address.Address) bool {
+fn changesDeleteAccount(changes: anytype, target: address.Address) bool {
     const change = changesAccount(changes, target) orelse return false;
     return change.account == null;
 }
 
-fn changesWipeStorage(changes: ChangesView, target: address.Address) bool {
+fn changesWipeStorage(changes: anytype, target: address.Address) bool {
     var index: u32 = 0;
     while (index < changes.storage_wipes.len()) : (index += 1) {
         const wiped = changes.storage_wipes.at(index);
@@ -1463,6 +1414,7 @@ test "MPT batch inserts before deletes to avoid unnecessary sibling witness" {
 }
 
 test "MPT state root consumes tracked changes" {
+    const TrackedState = @import("../state/TrackedState.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1516,6 +1468,7 @@ test "MPT state root consumes tracked changes" {
 }
 
 test "MPT state root reuses authenticated present account" {
+    const TrackedState = @import("../state/TrackedState.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();

@@ -251,6 +251,8 @@ const ParsedAuthorizationList = struct {
     count: usize,
 };
 
+// TODO: perf check
+// the guest pays a full secp recovery for tuples it will discard. ecrecover is the most expensive thing in the guest
 fn nextAuthorizationList(allocator: std.mem.Allocator, fields: *rlp.Cursor) Error!ParsedAuthorizationList {
     var list = try fields.nextList();
     var entries: std.ArrayList(transaction.AuthorizationTuple) = .empty;

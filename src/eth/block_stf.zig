@@ -33,6 +33,7 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
+const Backend = @import("../backend.zig").Backend;
 
 fn BalDifferentialOperations(
     comptime revision: Revision,
@@ -494,7 +495,7 @@ fn BlockInputType(comptime Transactions: type) type {
         env: Env = .{},
         block_hash_source: ?BlockHashSource = null,
         block_header: ?BlockHeader = null,
-        state_backend: state.Backend,
+        state_backend: Backend,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
         prepared_code_backend: ?prepared_code.Backend = null,
         /// Optional caller-owned service for the validated BAL-derived resource
@@ -529,7 +530,7 @@ pub const AssumeDecodedBlockInput = BlockInputType([]const TransactionInput);
 
 fn assumeDecodedBlockInput(
     input: BlockInput,
-    state_backend: state.Backend,
+    state_backend: Backend,
     transactions: []const TransactionInput,
 ) AssumeDecodedBlockInput {
     return .{
@@ -562,7 +563,7 @@ fn ProduceInputType(comptime Transactions: type) type {
         env: Env = .{},
         block_hash_source: ?BlockHashSource = null,
         block_header: ?BlockHeader = null,
-        state_backend: state.Backend,
+        state_backend: Backend,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
         prepared_code_backend: ?prepared_code.Backend = null,
         transactions: Transactions,
@@ -771,12 +772,16 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
         pub const ProduceInput = ProduceInputAlias;
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
-        /// Lazily instantiated: referencing this on a fork without a block
-        /// access list is a compile error, not a silently idle executor.
-        pub const BalExecutor = BalExecutorType(revision, ExactVm);
+        /// Dense state is already bound to the accepted claim and therefore
+        /// cannot run the tracked-state differential lane.
+        pub const BalExecutor = if (ExactVm.BlockState.external_observation_capture)
+            BalExecutorType(revision, ExactVm)
+        else
+            struct {};
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
-            try requireStepCaptureSupport(compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
+            try requireDifferentialSupport(ExactVm.BlockState, input.bal_differential);
             return applyExact(revision, ExactVm, allocator, input);
         }
 
@@ -784,12 +789,13 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedBlockInputAlias,
         ) !Result {
-            try requireStepCaptureSupport(compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
+            try requireDifferentialSupport(ExactVm.BlockState, input.bal_differential);
             return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
 
         pub fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
-            try requireStepCaptureSupport(compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
             return produceExact(revision, ExactVm, allocator, input);
         }
 
@@ -797,7 +803,7 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedProduceInputAlias,
         ) !ProduceOutcome {
-            try requireStepCaptureSupport(compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
             return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
@@ -809,6 +815,27 @@ fn requireStepCaptureSupport(
 ) !void {
     if (!options.step_capture and capture != null and capture.?.steps != null)
         return error.StepCaptureUnavailable;
+}
+
+fn requireCaptureSupport(
+    comptime BlockState: type,
+    comptime options: vm.CompileOptions,
+    capture: ?ExecutionCapture,
+) !void {
+    try requireStepCaptureSupport(options, capture);
+    if (!BlockState.external_observation_capture and
+        capture != null and capture.?.observations != null)
+    {
+        return error.ObservationCaptureUnavailable;
+    }
+}
+
+fn requireDifferentialSupport(
+    comptime BlockState: type,
+    differential: ?*BalDifferentialReport,
+) !void {
+    if (!BlockState.external_observation_capture and differential != null)
+        return error.BalDifferentialUnavailable;
 }
 
 test "slim exact STF rejects unavailable step capture" {
@@ -871,19 +898,24 @@ fn applyAssumeDecodedExact(
 ) !Result {
     resetBalReport(input);
     var no_produced_bal: ?[]u8 = null;
-    const result = if (input.bal_differential) |report| blk: {
-        var observer = BalDifferentialObserver(revision, Engine).init(
-            allocator,
-            input.env,
-            lifecycleExecutionContext(input.env),
-            input.prepared_code_backend,
-            input.block_hash_source,
-            report,
-            null,
-        );
-        defer observer.deinit();
+    const result = if (comptime Engine.BlockState.external_observation_capture) blk: {
+        if (input.bal_differential) |report| {
+            var observer = BalDifferentialObserver(revision, Engine).init(
+                allocator,
+                input.env,
+                lifecycleExecutionContext(input.env),
+                input.prepared_code_backend,
+                input.block_hash_source,
+                report,
+                null,
+            );
+            defer observer.deinit();
+            break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        }
+        var observer = NoBlockObserver{};
         break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
     } else blk: {
+        std.debug.assert(input.bal_differential == null);
         var observer = NoBlockObserver{};
         break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
     };
@@ -972,24 +1004,30 @@ fn produceAssumeDecodedExact(
 
 const FoldMode = enum { compare, produce };
 
-const ObservationCollector = struct {
-    builder: ?*tracked_state_projector.BlockBuilder,
-    target: ?ObservationTarget,
-    block_access_index: eth_bal.BlockAccessIndex = 0,
+fn ObservationCollector(comptime BlockState: type) type {
+    return struct {
+        builder: ?*tracked_state_projector.BlockBuilder,
+        target: ?ObservationTarget,
+        block_access_index: eth_bal.BlockAccessIndex = 0,
 
-    pub fn observe(
-        self: *ObservationCollector,
-        pending: state.TrackedState.PendingView,
-    ) !void {
-        const observations = pending.observations();
-        if (self.builder) |builder| {
-            try builder.append(observations, self.block_access_index);
+        pub fn observe(
+            self: *@This(),
+            pending: BlockState.State.PendingView,
+        ) !void {
+            const observations = pending.observations();
+            if (self.builder) |builder| {
+                try builder.append(observations, self.block_access_index);
+            }
+            if (self.target) |target| {
+                try BlockState.consumeObservationTarget(
+                    target,
+                    self.block_access_index,
+                    observations,
+                );
+            }
         }
-        if (self.target) |target| {
-            try target.consume(self.block_access_index, observations);
-        }
-    }
-};
+    };
+}
 
 /// Shared authoritative serial fold for validation and block production.
 fn serialFold(
@@ -1049,7 +1087,7 @@ fn serialFold(
         };
         claimed_block_access_list_hash = crypto.keccak256(encoded_claim);
 
-        if (input.execution_resource_preparer != null or input.precheck_block_access_list_state) {
+        if (input.execution_resource_preparer) |preparer| {
             var plan = try bal_witness.planAllocAssumeValidated(
                 allocator,
                 claimed_block_access_list.?.accounts,
@@ -1059,18 +1097,7 @@ fn serialFold(
             // This BlockSTF hook is an optimization. A caller that requires
             // eager availability can invoke the preparer before `apply` and
             // choose its own retry/error policy.
-            if (input.execution_resource_preparer) |preparer| {
-                preparer.prepare(plan.resources) catch {};
-            }
-            if (input.precheck_block_access_list_state) {
-                bal_witness.probeState(
-                    state_backend.reader(),
-                    plan.resources.state,
-                ) catch |err| switch (err) {
-                    error.InvalidWitness => return .{ .status = .invalid_witness },
-                    else => return err,
-                };
-            }
+            preparer.prepare(plan.resources) catch {};
         }
     }
 
@@ -1081,8 +1108,16 @@ fn serialFold(
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    var executor = Engine.Executor.init(allocator, .{
-        .state_reader = state_backend.reader(),
+    const admitted_state = Engine.BlockState.admit(allocator, .{
+        .backend = &state_backend,
+        .validated_claim = if (claimed_block_access_list) |*claim| claim.accounts else null,
+        .precheck_claim_state = input.precheck_block_access_list_state,
+    }) catch |err| switch (err) {
+        error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
+        error.InvalidWitness => return .{ .status = .invalid_witness },
+        else => return err,
+    };
+    var executor = Engine.Executor.initOwned(allocator, admitted_state, .{
         .prepared_code_backend = input.prepared_code_backend,
         .block_hash_source = input.block_hash_source,
     });
@@ -1097,7 +1132,7 @@ fn serialFold(
 
     var observation_builder = tracked_state_projector.BlockBuilder.init(allocator);
     defer observation_builder.deinit();
-    var observation_collector = ObservationCollector{
+    var observation_collector = ObservationCollector(Engine.BlockState){
         .builder = if (record_block_access_list) &observation_builder else null,
         .target = if (input.capture) |capture| capture.observations else null,
     };
@@ -1267,9 +1302,9 @@ fn serialFold(
                 .blob_gas_used_after = next_blob_gas_used,
             });
         }
-        mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
+        mergeLogsBloom(&block_logs_bloom, logsBloomView(receipt.logs));
         if (revision.isImpl(.prague)) {
-            eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
+            eip6110.appendRequestDataFromLogView(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
                 error.InvalidRequest => {
                     const progress = block.progress();
                     return .{
@@ -1285,7 +1320,7 @@ fn serialFold(
             };
         }
         blob_gas_used = next_blob_gas_used;
-        const encoded_receipt = try encodeReceipt(allocator, entry.tx.kind, receipt);
+        const encoded_receipt = try encodeReceiptView(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
         const after_context: Executor.system_contracts.AfterTransactionContext = .{
@@ -1372,9 +1407,11 @@ fn serialFold(
             lifecycleExecutionContext(input.env),
             input.withdrawals,
         );
-    withdrawals_result catch |err| switch (err) {
-        error.InvalidWitness => return .{ .status = .invalid_witness },
-        else => return err,
+    withdrawals_result catch |err| {
+        return switch (Executor.errors.normalize(err)) {
+            error.InvalidWitness => .{ .status = .invalid_witness },
+            else => |normalized| normalized,
+        };
     };
 
     const derived_requests_result = deriveRequestsMode(
@@ -1386,10 +1423,12 @@ fn serialFold(
         observe_state,
         &observation_collector,
     );
-    const derived_requests = derived_requests_result catch |err| switch (err) {
-        error.InvalidWitness => return .{ .status = .invalid_witness },
-        error.SystemCallFailed => return .{ .status = .system_contract_failed },
-        else => return err,
+    const derived_requests = derived_requests_result catch |err| {
+        return switch (Executor.errors.normalize(err)) {
+            error.InvalidWitness => .{ .status = .invalid_witness },
+            error.SystemCallFailed => .{ .status = .system_contract_failed },
+            else => |normalized| normalized,
+        };
     };
     defer freeRequests(allocator, derived_requests);
 
@@ -1434,14 +1473,18 @@ fn serialFold(
     observer.finishCandidate(input.withdrawals);
 
     const block_result = block.finish();
-    const changes = executor.acceptedChanges();
+    const accepted_state = executor.acceptedView();
 
     var result = Result{
         .status = .valid,
         .gas_used = block_result.gas_used,
         .block_gas_used = block_result.block_gas.total,
         .block_state_gas_used = block_result.block_gas.state,
-        .state_root = state_backend.stateRootAfterChanges(allocator, changes) catch |err| switch (err) {
+        .state_root = Engine.BlockState.stateRoot(
+            allocator,
+            &state_backend,
+            accepted_state,
+        ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,
         },
@@ -1509,7 +1552,7 @@ fn serialFold(
         if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
     }
     if (result.status == .valid) {
-        try state_backend.commit(changes);
+        try Engine.BlockState.commit(&state_backend, accepted_state);
         if (mode == .produce) {
             produced_bal.* = observed_block_access_list_encoded.?;
             observed_block_access_list_encoded = null;
@@ -2023,21 +2066,22 @@ pub const ReceiptPayload = struct {
 };
 
 pub fn encodeReceipt(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: TxReceiptView) ![]u8 {
+    return encodeReceiptView(allocator, kind, receipt);
+}
+
+fn encodeReceiptView(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: anytype) ![]u8 {
     var owned_logs: ?[]Log = null;
     defer if (owned_logs) |logs| allocator.free(logs);
-    const logs: []const Log = switch (receipt.logs) {
-        .flat => |flat| flat,
-        .arena => blk: {
-            const materialized = try allocator.alloc(Log, receipt.logs.len());
-            owned_logs = materialized;
-            for (materialized, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
-            break :blk materialized;
-        },
+    const logs: []const Log = receipt.logs.contiguous() orelse blk: {
+        const materialized = try allocator.alloc(Log, receipt.logs.len());
+        owned_logs = materialized;
+        for (materialized, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
+        break :blk materialized;
     };
     const payload: ReceiptPayload = .{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
-        .logs_bloom = logsBloom(receipt.logs),
+        .logs_bloom = logsBloomView(receipt.logs),
         .logs = logs,
     };
     const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
@@ -2072,6 +2116,10 @@ fn transactionType(kind: transaction.TxKind) ?u8 {
 }
 
 pub fn logsBloom(logs: state.TrackedState.LogView) [256]u8 {
+    return logsBloomView(logs);
+}
+
+fn logsBloomView(logs: anytype) [256]u8 {
     var bloom = [_]u8{0} ** 256;
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);
@@ -2110,7 +2158,7 @@ test "BlockSTF validates parent-derived header rules before execution" {
             .gas_used = 5_000_000,
             .base_fee_per_gas = 7,
         },
-        .state_backend = try state.Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = .{
             .payload_header = .{

@@ -18,6 +18,7 @@ const Host = @import("./Host.zig");
 const interpreter_module = @import("./Interpreter.zig");
 const instruction_module = @import("./instruction.zig");
 const state_module = @import("./state.zig");
+const block_state = @import("./vm/block_state.zig");
 const transaction = @import("./transaction.zig");
 const transaction_program = @import("./transaction/program.zig");
 
@@ -65,13 +66,6 @@ pub const TxReceiptView = struct {
     logs: state_module.TrackedState.LogView = .empty,
 };
 
-/// Borrowed facts for a transaction already included by a block program.
-/// Output and logs remain valid until the next mutation of the same Executor.
-const IncludedTransactionViewType = struct {
-    result: TxExecutionResult,
-    receipt: TxReceiptView,
-};
-
 /// Summary of included transactions in a `BlockExecution`.
 pub const BlockResult = struct {
     /// Cumulative receipt gas.
@@ -116,9 +110,53 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
 }
 
 pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: CompileOptions) type {
+    return EngineType(spec, block_state.Tracked(spec), options_value);
+}
+
+pub fn BalStatelessVm(comptime spec: engine_spec.Spec) type {
+    return BalStatelessVmWithOptions(spec, .{});
+}
+
+pub fn BalStatelessVmWithOptions(
+    comptime spec: engine_spec.Spec,
+    comptime options_value: CompileOptions,
+) type {
+    return EngineType(spec, block_state.BalStateless, options_value);
+}
+
+pub fn EngineType(
+    comptime spec: engine_spec.Spec,
+    comptime BlockState: type,
+    comptime options_value: CompileOptions,
+) type {
+    BlockState.checkSpec(spec);
+    return VmCore(
+        spec,
+        options_value,
+        BlockState,
+        executor_module.ExecutorType(spec, BlockState.State, options_value),
+    );
+}
+
+fn VmCore(
+    comptime spec: engine_spec.Spec,
+    comptime options_value: CompileOptions,
+    comptime BlockStateType: type,
+    comptime ExecutorType: type,
+) type {
     const InstructionType = instruction_module.Instruction(spec);
-    const ExecutorType = executor_module.ExecutorWithOptions(spec, options_value);
     const InterpreterType = interpreter_module.Interpreter(spec);
+    const ReceiptType = struct {
+        status: TxStatus,
+        gas_used: u64 = 0,
+        cumulative_gas_used: u64 = 0,
+        created_address: ?Address = null,
+        logs: ExecutorType.State.LogView = .empty,
+    };
+    const IncludedTransactionType = struct {
+        result: TxExecutionResult,
+        receipt: ReceiptType,
+    };
     const PublicTransactInput = struct {
         env: Env,
         tx: transaction.Transaction,
@@ -142,7 +180,7 @@ pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: Co
     const EthereumBlock = ethereum_block_program.bind(
         TransactionRuntime,
         Env,
-        IncludedTransactionViewType,
+        IncludedTransactionType,
         BlockResult,
     );
     const BlockTransactionRuntime = transaction_program.bindWithPreludeError(
@@ -162,7 +200,7 @@ pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: Co
         TxExecutionResult,
         transaction_validation.ValidationError,
         Env,
-        IncludedTransactionViewType,
+        IncludedTransactionType,
         BlockResult,
         EthereumBlock.Implementation,
     );
@@ -175,6 +213,7 @@ pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: Co
 
         pub const specification = spec;
         pub const compile_options = options_value;
+        pub const BlockState = BlockStateType;
         pub const Instruction = InstructionType;
         pub const Executor = ExecutorType;
         pub const Interpreter = InterpreterType;
