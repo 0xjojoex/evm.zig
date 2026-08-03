@@ -133,6 +133,7 @@ pub const AccountRow = struct {
     current: AccountValue,
     code_ref: artifacts.CodeRef,
     flags: AccountFlags = .{},
+    lifecycle_tracked: bool = false,
     journal_scope_generation: u32 = 0,
     warm_generation: u32 = 0,
     observation_generation: u32 = 0,
@@ -366,6 +367,7 @@ block_changed_accounts: std.ArrayList(AccountId) = .empty,
 dirty_storage: std.ArrayList(StorageId) = .empty,
 changed_accounts: std.ArrayList(AccountId) = .empty,
 changed_storage: std.ArrayList(StorageId) = .empty,
+lifecycle_accounts: std.ArrayList(AccountId) = .empty,
 block_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
 transaction_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
 observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
@@ -525,6 +527,7 @@ pub fn deinit(self: *StatelessBlockState) void {
     self.dirty_storage.deinit(self.allocator);
     self.changed_accounts.deinit(self.allocator);
     self.changed_storage.deinit(self.allocator);
+    self.lifecycle_accounts.deinit(self.allocator);
     self.block_introduced_codes.deinit(self.allocator);
     self.transaction_introduced_codes.deinit(self.allocator);
     self.observed_accounts.deinit(self.allocator);
@@ -622,6 +625,7 @@ fn beginTransactionMode(self: *StatelessBlockState, observed: bool) AttemptId {
     self.transaction_introduced_codes_start = index32(self.block_introduced_codes.items.len);
     self.changed_accounts.clearRetainingCapacity();
     self.changed_storage.clearRetainingCapacity();
+    std.debug.assert(self.lifecycle_accounts.items.len == 0);
     self.transaction_introduced_codes.clearRetainingCapacity();
     self.observed_accounts.clearRetainingCapacity();
     self.observed_storage.clearRetainingCapacity();
@@ -1008,14 +1012,14 @@ pub fn writeAccount(
 
 pub fn markCreatedId(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
-    const row = try self.prepareAccountMutation(id);
+    const row = try self.prepareLifecycleMutation(id);
     row.flags.created = true;
     self.observed_accounts.items[row.observation_index].effect.created_contract = true;
 }
 
 pub fn markSelfdestructedId(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
-    const row = try self.prepareAccountMutation(id);
+    const row = try self.prepareLifecycleMutation(id);
     row.flags.selfdestructed = true;
     self.observed_accounts.items[row.observation_index].effect.selfdestruct = true;
 }
@@ -1048,12 +1052,13 @@ pub fn wasSelfdestructed(self: *const StatelessBlockState, target: address.Addre
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.selfdestructed;
 }
 
-// TODO: check TrackedState for reference parity
 pub fn finalize(self: *StatelessBlockState, rules: anytype) Allocator.Error!void {
     self.assertTransaction();
-    for (self.accounts, 0..) |row_value, index| {
+    if (self.lifecycle_accounts.items.len == 0) return;
+    for (self.lifecycle_accounts.items) |id| {
+        const index = @intFromEnum(id);
+        const row_value = self.accounts[index];
         if (!row_value.flags.created and !row_value.flags.selfdestructed) continue;
-        const id: AccountId = @enumFromInt(@as(u32, @intCast(index)));
         if (!row_value.flags.selfdestructed) {
             const row = try self.prepareAccountMutation(id);
             row.flags.created = false;
@@ -1517,6 +1522,7 @@ pub fn allocationBytes(self: *const StatelessBlockState) usize {
         self.dirty_storage.capacity * @sizeOf(StorageId) +
         self.changed_accounts.capacity * @sizeOf(AccountId) +
         self.changed_storage.capacity * @sizeOf(StorageId) +
+        self.lifecycle_accounts.capacity * @sizeOf(AccountId) +
         self.block_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
         self.transaction_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
         self.observed_accounts.capacity * @sizeOf(AccountObservationRow) +
@@ -1659,6 +1665,22 @@ fn prepareAccountMutation(
     return row;
 }
 
+fn prepareLifecycleMutation(
+    self: *StatelessBlockState,
+    id: AccountId,
+) Allocator.Error!*AccountRow {
+    const row = &self.accounts[@intFromEnum(id)];
+    const first_lifecycle = !row.lifecycle_tracked;
+    if (first_lifecycle)
+        try self.lifecycle_accounts.ensureUnusedCapacity(self.allocator, 1);
+    const mutable = try self.prepareAccountMutation(id);
+    if (first_lifecycle) {
+        mutable.lifecycle_tracked = true;
+        self.lifecycle_accounts.appendAssumeCapacity(id);
+    }
+    return mutable;
+}
+
 fn appendAccountUndo(self: *StatelessBlockState, id: AccountId, row: *AccountRow) void {
     const observation = &self.observed_accounts.items[row.observation_index];
     self.journal.appendAccountAssumeCapacity(.{
@@ -1778,6 +1800,9 @@ fn finishTransaction(self: *StatelessBlockState) void {
     self.transient_storage.clearRetainingCapacity();
     self.changed_accounts.clearRetainingCapacity();
     self.changed_storage.clearRetainingCapacity();
+    for (self.lifecycle_accounts.items) |id|
+        self.accounts[@intFromEnum(id)].lifecycle_tracked = false;
+    self.lifecycle_accounts.clearRetainingCapacity();
     self.transaction_introduced_codes.clearRetainingCapacity();
     self.observed_accounts.clearRetainingCapacity();
     self.observed_storage.clearRetainingCapacity();
@@ -2039,6 +2064,53 @@ test "observations survive nested revert while values warmth and dirty IDs rever
     retainTestTransaction(&state, attempt);
     try std.testing.expectEqual(@as(usize, 0), state.dirty_accounts.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.dirty_storage.items.len);
+}
+
+test "lifecycle candidates are compact and survive marker rollback" {
+    const bal = @import("../eth/bal/model.zig");
+    const claims = [_]bal.AccountChanges{
+        .{ .address = address.addr(1) },
+        .{ .address = address.addr(2) },
+    };
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .present = .{ .balance = 10 } } },
+        .{ .parent = .{ .present = .{ .balance = 20 } } },
+    };
+    var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
+    defer state.deinit();
+    const attempt = beginTestTransaction(&state);
+    const first: AccountId = @enumFromInt(0);
+    const second: AccountId = @enumFromInt(1);
+
+    const first_marker = state.checkpoint();
+    try state.markCreatedId(first);
+    try state.markSelfdestructedId(first);
+    try std.testing.expectEqual(@as(usize, 1), state.lifecycle_accounts.items.len);
+    state.revertToCheckpoint(first_marker);
+    try std.testing.expect(!state.accounts[0].flags.created);
+    try std.testing.expect(!state.accounts[0].flags.selfdestructed);
+
+    try state.markSelfdestructedId(first);
+    try std.testing.expectEqual(@as(usize, 1), state.lifecycle_accounts.items.len);
+
+    const second_marker = state.checkpoint();
+    try state.markSelfdestructedId(second);
+    try std.testing.expectEqual(@as(usize, 2), state.lifecycle_accounts.items.len);
+    state.revertToCheckpoint(second_marker);
+    try std.testing.expect(!state.accounts[1].flags.selfdestructed);
+
+    const policy = @import("../execution.zig").SelfDestructFinalization{
+        .delete_account = true,
+    };
+    try state.finalize(.{ .existing_account = policy, .created_account = policy });
+    try std.testing.expect(state.accounts[0].current == .absent);
+    try std.testing.expectEqual(@as(u256, 20), state.accounts[1].current.present.balance);
+
+    retainTestTransaction(&state, attempt);
+    try std.testing.expectEqual(@as(usize, 0), state.lifecycle_accounts.items.len);
+    try std.testing.expect(!state.accounts[0].lifecycle_tracked);
+    try std.testing.expect(!state.accounts[1].lifecycle_tracked);
 }
 
 test "execution original survives checkpoints and refreshes across execution scopes" {
