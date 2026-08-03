@@ -259,6 +259,15 @@ pub const LogBuffer = struct {
         self.* = undefined;
     }
 
+    pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBuffer {
+        var result = LogBuffer{};
+        errdefer result.deinit(allocator);
+        try result.rows.appendSlice(allocator, self.rows.items);
+        try result.topics.appendSlice(allocator, self.topics.items);
+        try result.data.appendSlice(allocator, self.data.items);
+        return result;
+    }
+
     pub fn checkpoint(self: *const LogBuffer) Checkpoint {
         return .{
             .rows_len = index32(self.rows.items.len),

@@ -171,6 +171,115 @@ test "dense introduced code is reclaimed across rollback and discard" {
     try std.testing.expectEqualSlices(u8, &first_code, state.code.view(first_ref).?.bytes);
 }
 
+test "discarding accepted dense state reclaims code for a clean retry" {
+    const target = address.addr(1);
+    const claims = [_]bal.AccountChanges{.{ .address = target }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
+    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    defer state.deinit();
+
+    const code = [_]u8{ 0x60, 0x01 };
+    const code_hash = crypto.keccak256(&code);
+    const first = state.beginObservedTransaction();
+    state.beginScope();
+    try state.setCode(target, &code);
+    state.closeScope();
+    state.seal(first);
+    state.retain(first);
+    try std.testing.expect(state.acceptedView().changes().introducedCode(code_hash) != null);
+
+    state.discardAccepted();
+    try std.testing.expectEqual(@as(usize, 0), state.code.introducedLen());
+    try std.testing.expect(state.acceptedView().changes().introducedCode(code_hash) == null);
+
+    const retry = state.beginObservedTransaction();
+    state.beginScope();
+    try state.setCode(target, &code);
+    state.closeScope();
+    state.seal(retry);
+    state.retain(retry);
+    try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
+    try std.testing.expectEqualSlices(
+        u8,
+        &code,
+        state.acceptedView().changes().introducedCode(code_hash).?.bytes,
+    );
+}
+
+test "dense branch restore preserves retained logs" {
+    const target = address.addr(1);
+    const claims = [_]bal.AccountChanges{.{ .address = target }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
+    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    defer state.deinit();
+
+    const original_topics = [_]u256{1};
+    const original_data = [_]u8{2};
+    const accepted = state.beginObservedTransaction();
+    state.beginScope();
+    try state.emitLog(.{ .address = target, .topics = &original_topics, .data = &original_data });
+    state.closeScope();
+    state.seal(accepted);
+    state.retain(accepted);
+
+    var checkpoint_value = try state.branchCheckpoint();
+    defer checkpoint_value.deinit();
+    var restore_value = try checkpoint_value.clone();
+    defer restore_value.deinit();
+
+    const replacement_topics = [_]u256{3};
+    const replacement_data = [_]u8{4};
+    const replacement = state.beginObservedTransaction();
+    state.beginScope();
+    try state.emitLog(.{ .address = target, .topics = &replacement_topics, .data = &replacement_data });
+    state.closeScope();
+    state.seal(replacement);
+    state.retain(replacement);
+    state.restoreBranch(&restore_value);
+
+    const restored = state.logView();
+    try std.testing.expectEqual(@as(usize, 1), restored.len());
+    try std.testing.expectEqual(target, restored.get(0).address);
+    try std.testing.expectEqualSlices(u256, &original_topics, restored.get(0).topics);
+    try std.testing.expectEqualSlices(u8, &original_data, restored.get(0).data);
+}
+
+test "introduced code satisfies a later optional witness code read" {
+    const parent = address.addr(1);
+    const created = address.addr(2);
+    const code = [_]u8{0x00};
+    const code_hash = crypto.keccak256(&code);
+    const claims = [_]bal.AccountChanges{
+        .{ .address = parent },
+        .{ .address = created },
+    };
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .present = .{ .nonce = 1, .code_hash = code_hash } } },
+        .{ .parent = .{ .absent = .empty_trie } },
+    };
+    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    defer state.deinit();
+
+    const introduced = state.beginObservedTransaction();
+    state.beginScope();
+    try state.setCode(created, &code);
+    state.closeScope();
+    state.seal(introduced);
+    state.retain(introduced);
+
+    const read = state.beginObservedTransaction();
+    state.beginScope();
+    try std.testing.expectEqualSlices(u8, &code, try state.getCode(parent));
+    state.closeScope();
+    state.discard(read);
+}
+
 test "dense code reference preserves lazy missing-code rejection" {
     const target = address.addr(1);
     const missing_hash = [_]u8{0x77} ** 32;

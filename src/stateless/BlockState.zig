@@ -183,6 +183,7 @@ pub const BranchCheckpoint = struct {
     allocator: Allocator,
     accounts: []AccountRow,
     storage: []StorageRow,
+    retained_logs: artifacts.LogBuffer,
     dirty_accounts_len: u32,
     block_changed_accounts_len: u32,
     block_storage_wipes_len: u32,
@@ -196,11 +197,14 @@ pub const BranchCheckpoint = struct {
         std.debug.assert(!self.resolved);
         const accounts = try self.allocator.dupe(AccountRow, self.accounts);
         errdefer self.allocator.free(accounts);
+        const storage = try self.allocator.dupe(StorageRow, self.storage);
+        errdefer self.allocator.free(storage);
         return .{
             .owner = self.owner,
             .allocator = self.allocator,
             .accounts = accounts,
-            .storage = try self.allocator.dupe(StorageRow, self.storage),
+            .storage = storage,
+            .retained_logs = try self.retained_logs.clone(self.allocator),
             .dirty_accounts_len = self.dirty_accounts_len,
             .block_changed_accounts_len = self.block_changed_accounts_len,
             .block_storage_wipes_len = self.block_storage_wipes_len,
@@ -214,6 +218,7 @@ pub const BranchCheckpoint = struct {
     pub fn deinit(self: *BranchCheckpoint) void {
         self.allocator.free(self.accounts);
         self.allocator.free(self.storage);
+        self.retained_logs.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -313,6 +318,16 @@ const Journal = struct {
         try self.entries.ensureUnusedCapacity(allocator, 1);
         try self.storage.ensureUnusedCapacity(allocator, 1);
         if (observed) try self.storage_observations.ensureUnusedCapacity(allocator, 1);
+    }
+
+    fn ensureAccountAndStorage(self: *Journal, allocator: Allocator, observed: bool) !void {
+        try self.entries.ensureUnusedCapacity(allocator, 2);
+        try self.accounts.ensureUnusedCapacity(allocator, 1);
+        try self.storage.ensureUnusedCapacity(allocator, 1);
+        if (observed) {
+            try self.account_observations.ensureUnusedCapacity(allocator, 1);
+            try self.storage_observations.ensureUnusedCapacity(allocator, 1);
+        }
     }
 
     fn ensureWarm(self: *Journal, allocator: Allocator) !void {
@@ -733,11 +748,14 @@ pub fn branchCheckpoint(self: *StatelessBlockState) Allocator.Error!BranchCheckp
     std.debug.assert(!self.transaction_active);
     const accounts = try self.allocator.dupe(AccountRow, self.accounts);
     errdefer self.allocator.free(accounts);
+    const storage = try self.allocator.dupe(StorageRow, self.storage);
+    errdefer self.allocator.free(storage);
     return .{
         .owner = self,
         .allocator = self.allocator,
         .accounts = accounts,
-        .storage = try self.allocator.dupe(StorageRow, self.storage),
+        .storage = storage,
+        .retained_logs = try self.retained_logs.clone(self.allocator),
         .dirty_accounts_len = index32(self.dirty_accounts.items.len),
         .block_changed_accounts_len = index32(self.block_changed_accounts.items.len),
         .block_storage_wipes_len = index32(self.block_storage_wipes.items.len),
@@ -760,7 +778,7 @@ pub fn restoreBranch(self: *StatelessBlockState, value: *BranchCheckpoint) void 
     self.dirty_storage.items.len = value.dirty_storage_len;
     self.block_introduced_codes.items.len = value.block_introduced_codes_len;
     self.code.truncateIntroduced(self.allocator, value.introduced_code_len);
-    self.retained_logs.clearRetainingCapacity();
+    std.mem.swap(artifacts.LogBuffer, &self.retained_logs, &value.retained_logs);
     self.accepted_generation = value.accepted_generation;
     value.resolved = true;
 }
@@ -869,7 +887,8 @@ pub fn getCodeView(
     if (self.transaction_active)
         try self.observeAccount(id, .{ .accessed = true, .code_read = true });
     const row = self.accounts[@intFromEnum(id)];
-    const view = self.code.view(row.code_ref) orelse return error.MissingCode;
+    const view = self.code.view(row.code_ref) orelse
+        self.code.lookup(accountCodeHash(row.current)) orelse return error.MissingCode;
     std.debug.assert(std.mem.eql(u8, &view.code_hash, &accountCodeHash(row.current)));
     return view;
 }
@@ -1106,6 +1125,7 @@ pub fn finalize(self: *StatelessBlockState, rules: anytype) Allocator.Error!void
 
 pub fn discardAccepted(self: *StatelessBlockState) void {
     std.debug.assert(!self.transaction_active);
+    self.code.truncateIntroduced(self.allocator, 0);
     for (self.facts.accounts, self.accounts) |fact, *row| {
         const current = accountExecutionValue(fact);
         row.* = .{
@@ -1362,8 +1382,12 @@ pub fn writeStorage(
     const first_transaction_storage =
         storage_row.transaction_dirty_generation != self.transaction_generation;
 
-    if (account_needs_undo) try self.journal.ensureAccount(self.allocator, true);
-    if (storage_needs_undo) try self.journal.ensureStorage(self.allocator, true);
+    if (account_needs_undo and storage_needs_undo) {
+        try self.journal.ensureAccountAndStorage(self.allocator, true);
+    } else {
+        if (account_needs_undo) try self.journal.ensureAccount(self.allocator, true);
+        if (storage_needs_undo) try self.journal.ensureStorage(self.allocator, true);
+    }
     if (first_account_dirty) try self.dirty_accounts.ensureUnusedCapacity(self.allocator, 1);
     if (first_storage_dirty) try self.dirty_storage.ensureUnusedCapacity(self.allocator, 1);
     if (first_transaction_storage) try self.changed_storage.ensureUnusedCapacity(self.allocator, 1);
@@ -2301,6 +2325,33 @@ test "dense state initialization cleans every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
+}
+
+test "storage mutation reserves both journal entries atomically" {
+    const bal = @import("../eth/bal/model.zig");
+    const target = address.addr(1);
+    const claims = [_]bal.AccountChanges{.{
+        .address = target,
+        .storage_reads = &.{7},
+    }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{.{
+        .parent = .{ .present = .{ .nonce = 1 } },
+    }};
+    const storage_facts = [_]records.StorageFact{.{ .value = 3 }};
+    var state = try initTestState(
+        std.testing.allocator,
+        plan,
+        &account_facts,
+        &storage_facts,
+    );
+    defer state.deinit();
+
+    try state.journal.entries.ensureTotalCapacityPrecise(std.testing.allocator, 1);
+    const attempt = beginTestTransaction(&state);
+    try state.writeStorage(@enumFromInt(0), 9);
+    try std.testing.expectEqual(@as(usize, 2), state.journalLen());
+    discardTestTransaction(&state, attempt);
 }
 
 test "dense transaction cleans every allocation failure" {
