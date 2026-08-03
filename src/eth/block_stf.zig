@@ -762,6 +762,20 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
+    const Producer = struct {
+        fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
+            try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
+            return produceExact(revision, ExactVm, allocator, input);
+        }
+
+        fn produceAssumeDecoded(
+            allocator: std.mem.Allocator,
+            input: AssumeDecodedProduceInputAlias,
+        ) !ProduceOutcome {
+            try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
+            return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
+        }
+    };
 
     return struct {
         pub const fork = revision;
@@ -778,6 +792,17 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             BalExecutorType(revision, ExactVm)
         else
             struct {};
+        /// Block production derives the BAL from tracked observations. Dense
+        /// state requires that accepted claim before admission, so it cannot
+        /// expose either production entry point.
+        pub const produce = if (ExactVm.BlockState.block_production)
+            Producer.produce
+        else
+            struct {};
+        pub const produceAssumeDecoded = if (ExactVm.BlockState.block_production)
+            Producer.produceAssumeDecoded
+        else
+            struct {};
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
             try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
@@ -792,19 +817,6 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
             try requireDifferentialSupport(ExactVm.BlockState, input.bal_differential);
             return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
-        }
-
-        pub fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
-            return produceExact(revision, ExactVm, allocator, input);
-        }
-
-        pub fn produceAssumeDecoded(
-            allocator: std.mem.Allocator,
-            input: AssumeDecodedProduceInputAlias,
-        ) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
-            return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
 }

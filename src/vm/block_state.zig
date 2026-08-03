@@ -37,6 +37,7 @@ pub const CommitError = error{
 pub fn Tracked(comptime spec: anytype) type {
     return struct {
         pub const State = TrackedState;
+        pub const block_production = true;
         pub const external_observation_capture = true;
 
         pub fn checkSpec(_: @TypeOf(spec)) void {}
@@ -59,8 +60,7 @@ pub fn Tracked(comptime spec: anytype) type {
             input: AdmissionInput,
         ) AdmissionError!State {
             if (input.precheck_claim_state) {
-                const claim = input.validated_claim orelse return error.InvalidBlockAccessList;
-                try precheckClaim(allocator, input.backend, claim);
+                if (input.validated_claim) |claim| try precheckClaim(allocator, input.backend, claim);
             }
             return initState(allocator, input.backend.reader());
         }
@@ -100,6 +100,7 @@ pub fn Tracked(comptime spec: anytype) type {
 /// admissible, which today means Amsterdam but is not scoped to it.
 pub const BalStateless = struct {
     pub const State = BlockState;
+    pub const block_production = false;
     pub const external_observation_capture = false;
 
     pub fn checkSpec(comptime spec: anytype) void {

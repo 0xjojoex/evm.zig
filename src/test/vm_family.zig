@@ -21,6 +21,22 @@ test "supported state domains analyze as complete engine products" {
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
 }
 
+test "dense BlockSTF does not expose callable block production" {
+    const Tracked = evmz.Vm(evmz.eth.amsterdam);
+    const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
+    const TrackedBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Tracked);
+    const DenseBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Dense);
+
+    comptime {
+        std.debug.assert(Tracked.BlockState.block_production);
+        std.debug.assert(!Dense.BlockState.block_production);
+        std.debug.assert(@TypeOf(TrackedBlockStf.produce) != type);
+        std.debug.assert(@TypeOf(TrackedBlockStf.produceAssumeDecoded) != type);
+        std.debug.assert(@TypeOf(DenseBlockStf.produce) == type);
+        std.debug.assert(@TypeOf(DenseBlockStf.produceAssumeDecoded) == type);
+    }
+}
+
 test "ordinary VM constructs its tracked executor without exposing the state domain" {
     const ExactVm = evmz.Vm(evmz.eth.amsterdam);
 
