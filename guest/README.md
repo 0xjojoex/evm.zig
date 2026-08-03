@@ -8,20 +8,26 @@ zig build guest-zisk -Dguest-payload=basic -Doptimize=ReleaseFast \
   -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 ```
 
-The `stateless-ere` payload uses the unmetered fixed-buffer allocator by
-default. Its capacity defaults to 32 MiB and can be selected at artifact build
-time with `-Dguest-heap-bytes=<bytes>`. Add `-Dguest-heap-metrics=true` to meter
-peak heap usage and export
-the `evmz_guest_heap_capacity_bytes` and `evmz_guest_heap_peak_used_bytes`
-diagnostic symbols. Heap metering is independent of profile tags and changes
-the guest execution-step count.
+Every payload allocates from a fixed buffer whose capacity is chosen at artifact
+build time with `-Dguest-heap-bytes=<bytes>`, defaulting to 32 MiB. This applies
+to both guest backends and to the native payload tests. The `stateless-ere`
+payload uses the unmetered allocator by default; add `-Dguest-heap-metrics=true`
+to meter peak heap usage and export the `evmz_guest_heap_capacity_bytes` and
+`evmz_guest_heap_peak_used_bytes` diagnostic symbols. Heap metering is
+independent of profile tags and changes the guest execution-step count.
 
-ZisK separately defaults to a 48 MiB total RAM envelope. A payload heap larger
-than that default requires `-Dguest-zisk-ram-bytes=<bytes>` and must leave room
-for the 1 MiB stack, guest data, and at least 8 MiB of ZisKOS heap. The ERE RAM
-top can be matched while retaining Evmz's `0xA0030000` RAM origin with
-`-Dguest-zisk-ram-bytes=536674304`; this is a diagnostic envelope, not required
-for wire or execution correctness.
+ZisK separately defaults to a 48 MiB total RAM envelope, set with
+`-Dguest-zisk-ram-bytes=<bytes>`. The envelope holds the guest's data and bss,
+then the payload heap, then a 1 MiB stack, and the remainder is ZisKOS heap —
+which the linker script asserts is at least 8 MiB. A payload heap therefore has
+to stay roughly 9 MiB under the envelope, so the 48 MiB default admits just
+under 39 MiB of heap; anything above that needs a larger envelope. Both bounds
+are enforced by the linker script, which unlike the build script knows the
+guest's actual data and bss sizes.
+
+The ERE RAM top can be matched while retaining Evmz's `0xA0030000` RAM origin
+with `-Dguest-zisk-ram-bytes=536674304`; this is a diagnostic envelope, not
+required for wire or execution correctness.
 
 These defaults close the pinned `tests-zkevm@v0.6.2` capacity case. They are a
 conformance baseline, not a production-mainnet memory claim. Size a deployment

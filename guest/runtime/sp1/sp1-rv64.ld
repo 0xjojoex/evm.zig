@@ -15,7 +15,12 @@ MEMORY
     RAM (rwx) : ORIGIN = 0x78000000, LENGTH = 0x1B88000000
 }
 
-PROVIDE(_evmz_payload_heap_size = 0x2000000); /* 32 MiB default */
+/*
+ * _evmz_payload_heap_size is an absolute symbol defined by the assembly stub
+ * build.zig generates from -Dguest-heap-bytes. It is deliberately left undefined
+ * here: without a fallback, an unlinked stub is a link error rather than a
+ * silently stale size.
+ */
 
 SECTIONS
 {

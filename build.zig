@@ -371,13 +371,12 @@ pub fn build(b: *std.Build) void {
     }
 
     const guest_heap_bytes = b.option(
-        usize,
+        u64,
         "guest-heap-bytes",
         "Fixed guest payload heap capacity in bytes",
     ) orelse 32 * 1024 * 1024;
-    if (guest_heap_bytes == 0) @panic("guest-heap-bytes must be greater than zero");
     const guest_zisk_ram_bytes = b.option(
-        usize,
+        u64,
         "guest-zisk-ram-bytes",
         "ZisK guest RAM envelope in bytes",
     ) orelse 48 * 1024 * 1024;
@@ -683,12 +682,12 @@ fn guestOptions(
     b: *std.Build,
     backend: GuestBackend,
     heap_metrics: bool,
-    heap_bytes: usize,
+    heap_bytes: u64,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(GuestBackend, "backend", backend);
     options.addOption(bool, "heap_metrics", heap_metrics);
-    options.addOption(usize, "heap_bytes", heap_bytes);
+    options.addOption(u64, "heap_bytes", heap_bytes);
     return options;
 }
 
@@ -786,7 +785,7 @@ fn addGuestPayloadTests(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     evmz_mod: *std.Build.Module,
-    heap_bytes: usize,
+    heap_bytes: u64,
 ) GuestPayloadSteps {
     const guest_options = guestOptions(b, .native, false, heap_bytes);
     const guest_options_mod = guest_options.createModule();
@@ -882,24 +881,28 @@ fn addGuest(
     omit_frame_pointer: bool,
     profile_tags: bool,
     heap_metrics: bool,
-    heap_bytes: usize,
-    ram_bytes: ?usize,
+    heap_bytes: u64,
+    ram_bytes: ?u64,
 ) void {
     const config = backend.config();
-    const provider_path = provider_path_option orelse {
-        const fail = b.addFail(config.missing_provider);
+    // A zero heap_bytes collapses _evmz_heap_bottom onto _evmz_heap_top, which the
+    // allocator reads as unreachable. Every other memory bound is left to the linker
+    // script, which unlike this function knows the guest's own data and bss sizes.
+    const unbuildable: ?[]const u8 = if (provider_path_option == null)
+        config.missing_provider
+    else if (heap_bytes == 0)
+        "guest-heap-bytes must be greater than zero"
+    else
+        null;
+    if (unbuildable) |message| {
+        const fail = b.addFail(message);
         const guest_step = b.step(config.build_step, config.build_description);
         guest_step.dependOn(&fail.step);
         const run_step = b.step(config.run_step, config.run_description);
         run_step.dependOn(&fail.step);
         return;
-    };
-    if (ram_bytes) |bytes| {
-        const reserved_bytes = 1 * 1024 * 1024 + 8 * 1024 * 1024;
-        if (bytes <= reserved_bytes or heap_bytes > bytes - reserved_bytes) {
-            @panic("guest heap leaves less than 1 MiB stack plus 8 MiB ZisKOS heap");
-        }
     }
+    const provider_path = provider_path_option.?;
 
     const target = b.resolveTargetQuery(std.Target.Query.parse(.{
         .arch_os_abi = "riscv64-freestanding",
