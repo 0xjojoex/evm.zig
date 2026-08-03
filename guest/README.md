@@ -9,10 +9,24 @@ zig build guest-zisk -Dguest-payload=basic -Doptimize=ReleaseFast \
 ```
 
 The `stateless-ere` payload uses the unmetered fixed-buffer allocator by
-default. Add `-Dguest-heap-metrics=true` to meter peak heap usage and export
+default. Its capacity defaults to 32 MiB and can be selected at artifact build
+time with `-Dguest-heap-bytes=<bytes>`. Add `-Dguest-heap-metrics=true` to meter
+peak heap usage and export
 the `evmz_guest_heap_capacity_bytes` and `evmz_guest_heap_peak_used_bytes`
 diagnostic symbols. Heap metering is independent of profile tags and changes
 the guest execution-step count.
+
+ZisK separately defaults to a 48 MiB total RAM envelope. A payload heap larger
+than that default requires `-Dguest-zisk-ram-bytes=<bytes>` and must leave room
+for the 1 MiB stack, guest data, and at least 8 MiB of ZisKOS heap. The ERE RAM
+top can be matched while retaining Evmz's `0xA0030000` RAM origin with
+`-Dguest-zisk-ram-bytes=536674304`; this is a diagnostic envelope, not required
+for wire or execution correctness.
+
+These defaults close the pinned `tests-zkevm@v0.6.2` capacity case. They are a
+conformance baseline, not a production-mainnet memory claim. Size a deployment
+artifact from metered replay of its real witness/block workload and retain an
+explicit failure when that artifact's fixed capacity is exceeded.
 
 ## SP1 execute-only backend
 

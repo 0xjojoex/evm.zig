@@ -1,6 +1,6 @@
 /*
  * Adapted from SP1 v6.3.1 zkevm/zkvm.ld.
- * SP1 owns _start; Zig exports main and uses a bounded 16 MiB payload heap.
+ * SP1 owns _start; Zig exports main and uses a build-time bounded payload heap.
  */
 OUTPUT_FORMAT("elf64-littleriscv")
 OUTPUT_ARCH(riscv)
@@ -15,7 +15,7 @@ MEMORY
     RAM (rwx) : ORIGIN = 0x78000000, LENGTH = 0x1B88000000
 }
 
-_evmz_payload_heap_size = 0x1000000;
+PROVIDE(_evmz_payload_heap_size = 0x2000000); /* 32 MiB default */
 
 SECTIONS
 {

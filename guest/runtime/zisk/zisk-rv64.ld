@@ -1,8 +1,10 @@
 ENTRY(_start)
 
+PROVIDE(_evmz_ram_size = 0x3000000); /* 48 MiB default */
+
 MEMORY {
   rom (xa) : ORIGIN = 0x80000000, LENGTH = 0x08000000
-  ram (wxa) : ORIGIN = 0xA0030000, LENGTH = 0x2000000
+  ram (wxa) : ORIGIN = 0xA0030000, LENGTH = _evmz_ram_size
 }
 
 PHDRS {
@@ -12,7 +14,7 @@ PHDRS {
   bss PT_LOAD FLAGS(6);
 }
 
-_evmz_payload_heap_size = 0x1000000; /* 16 MiB */
+PROVIDE(_evmz_payload_heap_size = 0x2000000); /* 32 MiB default */
 _stack_size = 0x100000;              /* 1 MiB */
 
 SECTIONS
