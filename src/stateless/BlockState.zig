@@ -155,12 +155,14 @@ pub const StorageRow = struct {
     original_generation: u32 = 0,
     execution_original_scope_generation: u32 = 0,
     transaction_dirty_generation: u32 = 0,
+    transaction_undo_index: u32 = std.math.maxInt(u32),
     storage_generation: u32 = 0,
 };
 
 pub const AccountObservationRow = struct {
     account: AccountId,
     original: AccountValue,
+    original_storage_generation: u32,
     effect_current: AccountValue,
     observation: AccountObservation,
     effect: AccountEffect = .{},
@@ -183,6 +185,7 @@ pub const BranchCheckpoint = struct {
     storage: []StorageRow,
     dirty_accounts_len: u32,
     block_changed_accounts_len: u32,
+    block_storage_wipes_len: u32,
     dirty_storage_len: u32,
     block_introduced_codes_len: u32,
     introduced_code_len: u32,
@@ -200,6 +203,7 @@ pub const BranchCheckpoint = struct {
             .storage = try self.allocator.dupe(StorageRow, self.storage),
             .dirty_accounts_len = self.dirty_accounts_len,
             .block_changed_accounts_len = self.block_changed_accounts_len,
+            .block_storage_wipes_len = self.block_storage_wipes_len,
             .dirty_storage_len = self.dirty_storage_len,
             .block_introduced_codes_len = self.block_introduced_codes_len,
             .introduced_code_len = self.introduced_code_len,
@@ -253,6 +257,7 @@ const Journal = struct {
         journal_scope_generation: u32,
         storage_generation: u32,
         transaction_dirty_generation: u32,
+        transaction_undo_index: u32,
     };
 
     const AccountObservationUndo = struct {
@@ -364,9 +369,11 @@ logs: artifacts.LogBuffer = .{},
 retained_logs: artifacts.LogBuffer = .{},
 dirty_accounts: std.ArrayList(AccountId) = .empty,
 block_changed_accounts: std.ArrayList(AccountId) = .empty,
+block_storage_wipes: std.ArrayList(AccountId) = .empty,
 dirty_storage: std.ArrayList(StorageId) = .empty,
 changed_accounts: std.ArrayList(AccountId) = .empty,
 changed_storage: std.ArrayList(StorageId) = .empty,
+transaction_storage_wipes: std.ArrayList(AccountId) = .empty,
 lifecycle_accounts: std.ArrayList(AccountId) = .empty,
 block_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
 transaction_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
@@ -384,9 +391,9 @@ active_scope_generation: u32 = 0,
 execution_scope_generation: u32 = 0,
 scope_depth: u32 = 0,
 transaction_active: bool = false,
-/// Set by `revertToCheckpoint`; only then can the block-lifetime dirty lists
-/// hold stale or duplicate entries, so `retain` skips the account-list
-/// compaction for revert-free transactions.
+/// Set by `revertToCheckpoint`; only then can block or transaction ID lists
+/// hold stale or duplicate entries, so revert-free transactions skip their
+/// compaction passes.
 transaction_scope_reverted: bool = false,
 /// Admitted hot-translation execution state: two remembered address→ID
 /// entries and one (account, slot)→ID entry. `ClaimPlan` is immutable for the
@@ -413,6 +420,7 @@ translation_storage_id: StorageId = undefined,
 translation_storage_valid: bool = false,
 transaction_dirty_accounts_start: u32 = 0,
 transaction_block_changed_accounts_start: u32 = 0,
+transaction_block_storage_wipes_start: u32 = 0,
 transaction_dirty_storage_start: u32 = 0,
 transaction_introduced_codes_start: u32 = 0,
 
@@ -524,9 +532,11 @@ pub fn deinit(self: *StatelessBlockState) void {
     self.retained_logs.deinit(self.allocator);
     self.dirty_accounts.deinit(self.allocator);
     self.block_changed_accounts.deinit(self.allocator);
+    self.block_storage_wipes.deinit(self.allocator);
     self.dirty_storage.deinit(self.allocator);
     self.changed_accounts.deinit(self.allocator);
     self.changed_storage.deinit(self.allocator);
+    self.transaction_storage_wipes.deinit(self.allocator);
     self.lifecycle_accounts.deinit(self.allocator);
     self.block_introduced_codes.deinit(self.allocator);
     self.transaction_introduced_codes.deinit(self.allocator);
@@ -621,10 +631,12 @@ fn beginTransactionMode(self: *StatelessBlockState, observed: bool) AttemptId {
     self.transaction_active = true;
     self.transaction_dirty_accounts_start = index32(self.dirty_accounts.items.len);
     self.transaction_block_changed_accounts_start = index32(self.block_changed_accounts.items.len);
+    self.transaction_block_storage_wipes_start = index32(self.block_storage_wipes.items.len);
     self.transaction_dirty_storage_start = index32(self.dirty_storage.items.len);
     self.transaction_introduced_codes_start = index32(self.block_introduced_codes.items.len);
     self.changed_accounts.clearRetainingCapacity();
     self.changed_storage.clearRetainingCapacity();
+    self.transaction_storage_wipes.clearRetainingCapacity();
     std.debug.assert(self.lifecycle_accounts.items.len == 0);
     self.transaction_introduced_codes.clearRetainingCapacity();
     self.observed_accounts.clearRetainingCapacity();
@@ -660,6 +672,7 @@ pub fn seal(self: *StatelessBlockState, id: AttemptId) void {
     std.debug.assert(!self.scopeActive());
     std.debug.assert(!self.sealed);
     self.compactTransactionStorageChanges();
+    if (self.transaction_scope_reverted) self.compactTransactionStorageWipes();
     self.sealed = true;
 }
 
@@ -671,6 +684,7 @@ pub fn retain(self: *StatelessBlockState, id: AttemptId) void {
     self.journal.clearRetainingCapacity();
     std.mem.swap(artifacts.LogBuffer, &self.logs, &self.retained_logs);
     if (self.transaction_scope_reverted) self.compactAcceptedAccountChanges();
+    if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
     self.compactAcceptedStorageChanges();
     self.accepted_generation += 1;
     self.finishTransaction();
@@ -683,6 +697,7 @@ pub fn discard(self: *StatelessBlockState, id: AttemptId) void {
     self.revertJournalTo(0);
     self.dirty_accounts.items.len = self.transaction_dirty_accounts_start;
     self.block_changed_accounts.items.len = self.transaction_block_changed_accounts_start;
+    self.block_storage_wipes.items.len = self.transaction_block_storage_wipes_start;
     self.dirty_storage.items.len = self.transaction_dirty_storage_start;
     self.block_introduced_codes.items.len = self.transaction_introduced_codes_start;
     self.observed_accounts.clearRetainingCapacity();
@@ -725,6 +740,7 @@ pub fn branchCheckpoint(self: *StatelessBlockState) Allocator.Error!BranchCheckp
         .storage = try self.allocator.dupe(StorageRow, self.storage),
         .dirty_accounts_len = index32(self.dirty_accounts.items.len),
         .block_changed_accounts_len = index32(self.block_changed_accounts.items.len),
+        .block_storage_wipes_len = index32(self.block_storage_wipes.items.len),
         .dirty_storage_len = index32(self.dirty_storage.items.len),
         .block_introduced_codes_len = index32(self.block_introduced_codes.items.len),
         .introduced_code_len = index32(self.code.introducedLen()),
@@ -740,6 +756,7 @@ pub fn restoreBranch(self: *StatelessBlockState, value: *BranchCheckpoint) void 
     @memcpy(self.storage, value.storage);
     self.dirty_accounts.items.len = value.dirty_accounts_len;
     self.block_changed_accounts.items.len = value.block_changed_accounts_len;
+    self.block_storage_wipes.items.len = value.block_storage_wipes_len;
     self.dirty_storage.items.len = value.dirty_storage_len;
     self.block_introduced_codes.items.len = value.block_introduced_codes_len;
     self.code.truncateIntroduced(self.allocator, value.introduced_code_len);
@@ -955,11 +972,7 @@ pub fn setCode(
     const introduced_len = self.code.introducedLen();
     const cached = try self.code.cacheIntroduced(self.allocator, bytes);
     errdefer self.code.truncateIntroduced(self.allocator, introduced_len);
-    const track_introduction = if (cached.introduced) |introduced|
-        !containsIntroduced(self.block_introduced_codes.items, introduced)
-    else
-        false;
-    if (track_introduction) {
+    if (cached.newly_introduced != null) {
         try self.block_introduced_codes.ensureUnusedCapacity(self.allocator, 1);
         try self.transaction_introduced_codes.ensureUnusedCapacity(self.allocator, 1);
         // Two entries: prepareAccountMutation may consume one for its undo.
@@ -971,8 +984,7 @@ pub fn setCode(
         .absent => Account{},
         .present => |value| value,
     };
-    if (track_introduction) {
-        const introduced = cached.introduced.?;
+    if (cached.newly_introduced) |introduced| {
         self.block_introduced_codes.appendAssumeCapacity(introduced);
         self.transaction_introduced_codes.appendAssumeCapacity(introduced);
         self.journal.entries.appendAssumeCapacity(.introduced_code);
@@ -1106,6 +1118,7 @@ pub fn discardAccepted(self: *StatelessBlockState) void {
     }
     self.dirty_accounts.clearRetainingCapacity();
     self.block_changed_accounts.clearRetainingCapacity();
+    self.block_storage_wipes.clearRetainingCapacity();
     self.dirty_storage.clearRetainingCapacity();
     self.block_introduced_codes.clearRetainingCapacity();
     self.retained_logs.clearRetainingCapacity();
@@ -1115,7 +1128,17 @@ pub fn discardAccepted(self: *StatelessBlockState) void {
 /// Hide all parent and prior-block storage without fabricating slot accesses.
 pub fn wipeStorage(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
+    const original = &self.accounts[@intFromEnum(id)];
+    const first_block_wipe = !original.flags.storage_wiped;
+    const first_transaction_wipe = original.storage_wipe_transaction_generation !=
+        self.transaction_generation;
+    if (first_block_wipe)
+        try self.block_storage_wipes.ensureUnusedCapacity(self.allocator, 1);
+    if (first_transaction_wipe)
+        try self.transaction_storage_wipes.ensureUnusedCapacity(self.allocator, 1);
     const row = try self.prepareAccountMutation(id);
+    if (first_block_wipe) self.block_storage_wipes.appendAssumeCapacity(id);
+    if (first_transaction_wipe) self.transaction_storage_wipes.appendAssumeCapacity(id);
     row.flags.storage_dirty = true;
     row.flags.storage_wiped = true;
     row.storage_generation = nextGeneration(row.storage_generation);
@@ -1287,22 +1310,11 @@ pub fn acceptedAccountValueForView(
     self: *const StatelessBlockState,
     id: AccountId,
 ) AccountValue {
-    if (!self.transaction_active) return self.accounts[@intFromEnum(id)].current;
-    for (self.journal.accounts.items) |undo| {
-        if (undo.account == id) return undo.current;
-    }
-    return self.accounts[@intFromEnum(id)].current;
-}
-
-pub fn acceptedStorageWipedForView(
-    self: *const StatelessBlockState,
-    id: AccountId,
-) bool {
-    if (!self.transaction_active) return self.accounts[@intFromEnum(id)].flags.storage_wiped;
-    for (self.journal.accounts.items) |undo| {
-        if (undo.account == id) return undo.flags.storage_wiped;
-    }
-    return self.accounts[@intFromEnum(id)].flags.storage_wiped;
+    const row = &self.accounts[@intFromEnum(id)];
+    if (!self.transaction_active or
+        row.transaction_dirty_generation != self.transaction_generation) return row.current;
+    std.debug.assert(row.observation_generation == self.transaction_generation);
+    return self.observed_accounts.items[row.observation_index].original;
 }
 
 pub fn acceptedStorageValueForView(
@@ -1311,22 +1323,21 @@ pub fn acceptedStorageValueForView(
 ) u256 {
     if (!self.transaction_active) return self.effectiveStorage(id);
     const account = self.plan.storage[@intFromEnum(id)].account;
-    var account_generation = self.accounts[@intFromEnum(account)].storage_generation;
-    for (self.journal.accounts.items) |undo| {
-        if (undo.account == account) {
-            account_generation = undo.storage_generation;
-            break;
-        }
-    }
-    var value = self.storage[@intFromEnum(id)].current;
-    var storage_generation = self.storage[@intFromEnum(id)].storage_generation;
-    for (self.journal.storage.items) |undo| {
-        if (undo.storage == id) {
-            value = undo.current;
-            storage_generation = undo.storage_generation;
-            break;
-        }
-    }
+    const account_row = &self.accounts[@intFromEnum(account)];
+    const account_generation = if (account_row.observation_generation == self.transaction_generation)
+        self.observed_accounts.items[account_row.observation_index].original_storage_generation
+    else
+        account_row.storage_generation;
+    const row = &self.storage[@intFromEnum(id)];
+    const changed = row.transaction_dirty_generation == self.transaction_generation;
+    const value = if (changed)
+        self.journal.storage.items[row.transaction_undo_index].current
+    else
+        row.current;
+    const storage_generation = if (changed)
+        self.journal.storage.items[row.transaction_undo_index].storage_generation
+    else
+        row.storage_generation;
     return if (storage_generation == account_generation) value else 0;
 }
 
@@ -1368,6 +1379,7 @@ pub fn writeStorage(
         self.dirty_storage.appendAssumeCapacity(id);
     }
     if (first_transaction_storage) {
+        std.debug.assert(storage_row.transaction_undo_index != std.math.maxInt(u32));
         storage_row.transaction_dirty_generation = self.transaction_generation;
         self.changed_storage.appendAssumeCapacity(id);
     }
@@ -1478,6 +1490,7 @@ pub fn observeAccount(
         self.observed_accounts.appendAssumeCapacity(.{
             .account = id,
             .original = row.current,
+            .original_storage_generation = row.storage_generation,
             .effect_current = row.current,
             .observation = observation,
         });
@@ -1501,6 +1514,7 @@ pub fn observeStorage(
             self.effectiveStorage(id);
         row.observation_generation = self.transaction_generation;
         row.observation_index = index32(self.observed_storage.items.len);
+        row.transaction_undo_index = std.math.maxInt(u32);
         self.observed_storage.appendAssumeCapacity(.{
             .storage = id,
             .original = original,
@@ -1521,9 +1535,11 @@ pub fn allocationBytes(self: *const StatelessBlockState) usize {
         self.retained_logs.allocationBytes() +
         self.dirty_accounts.capacity * @sizeOf(AccountId) +
         self.block_changed_accounts.capacity * @sizeOf(AccountId) +
+        self.block_storage_wipes.capacity * @sizeOf(AccountId) +
         self.dirty_storage.capacity * @sizeOf(StorageId) +
         self.changed_accounts.capacity * @sizeOf(AccountId) +
         self.changed_storage.capacity * @sizeOf(StorageId) +
+        self.transaction_storage_wipes.capacity * @sizeOf(AccountId) +
         self.lifecycle_accounts.capacity * @sizeOf(AccountId) +
         self.block_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
         self.transaction_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
@@ -1623,6 +1639,35 @@ fn compactAcceptedAccountChanges(self: *StatelessBlockState) void {
     self.block_changed_accounts.items.len = changed_write;
 }
 
+fn compactAcceptedStorageWipes(self: *StatelessBlockState) void {
+    var write: usize = 0;
+    for (self.block_storage_wipes.items) |id| {
+        const row = &self.accounts[@intFromEnum(id)];
+        if (!row.flags.storage_wiped) continue;
+        row.flags.storage_wiped = false;
+        self.block_storage_wipes.items[write] = id;
+        write += 1;
+    }
+    for (self.block_storage_wipes.items[0..write]) |id|
+        self.accounts[@intFromEnum(id)].flags.storage_wiped = true;
+    self.block_storage_wipes.items.len = write;
+}
+
+fn compactTransactionStorageWipes(self: *StatelessBlockState) void {
+    var write: usize = 0;
+    for (self.transaction_storage_wipes.items) |id| {
+        const row = &self.accounts[@intFromEnum(id)];
+        if (row.storage_wipe_transaction_generation != self.transaction_generation) continue;
+        row.storage_wipe_transaction_generation = 0;
+        self.transaction_storage_wipes.items[write] = id;
+        write += 1;
+    }
+    for (self.transaction_storage_wipes.items[0..write]) |id|
+        self.accounts[@intFromEnum(id)].storage_wipe_transaction_generation =
+            self.transaction_generation;
+    self.transaction_storage_wipes.items.len = write;
+}
+
 fn compactTransactionStorageChanges(self: *StatelessBlockState) void {
     var write: usize = 0;
     for (self.changed_storage.items) |id| {
@@ -1704,6 +1749,7 @@ fn appendAccountUndo(self: *StatelessBlockState, id: AccountId, row: *AccountRow
 
 fn appendStorageUndo(self: *StatelessBlockState, id: StorageId, row: *StorageRow) void {
     const observation = &self.observed_storage.items[row.observation_index];
+    const undo_index = index32(self.journal.storage.items.len);
     self.journal.appendStorageAssumeCapacity(.{
         .storage = id,
         .current = row.current,
@@ -1711,11 +1757,14 @@ fn appendStorageUndo(self: *StatelessBlockState, id: StorageId, row: *StorageRow
         .journal_scope_generation = row.journal_scope_generation,
         .storage_generation = row.storage_generation,
         .transaction_dirty_generation = row.transaction_dirty_generation,
+        .transaction_undo_index = row.transaction_undo_index,
     }, .{
         .observation = row.observation_index,
         .effect_current = observation.effect_current,
         .effect = observation.effect,
     });
+    if (row.transaction_undo_index == std.math.maxInt(u32))
+        row.transaction_undo_index = undo_index;
     row.journal_scope_generation = self.active_scope_generation;
 }
 
@@ -1752,6 +1801,7 @@ fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
                 row.journal_scope_generation = undo.journal_scope_generation;
                 row.storage_generation = undo.storage_generation;
                 row.transaction_dirty_generation = undo.transaction_dirty_generation;
+                row.transaction_undo_index = undo.transaction_undo_index;
                 if (entry == .observed_storage) {
                     const observation_undo = self.journal.storage_observations.pop().?;
                     const observation = &self.observed_storage.items[observation_undo.observation];
@@ -1805,6 +1855,7 @@ fn finishTransaction(self: *StatelessBlockState) void {
     self.transient_storage.clearRetainingCapacity();
     self.changed_accounts.clearRetainingCapacity();
     self.changed_storage.clearRetainingCapacity();
+    self.transaction_storage_wipes.clearRetainingCapacity();
     for (self.lifecycle_accounts.items) |id|
         self.accounts[@intFromEnum(id)].lifecycle_tracked = false;
     self.lifecycle_accounts.clearRetainingCapacity();
@@ -1875,14 +1926,6 @@ fn accountValue(value: AccountValue) ?Account {
         .absent => null,
         .present => |account_value| account_value,
     };
-}
-
-fn containsIntroduced(
-    ids: []const artifacts.IntroducedCodeId,
-    target: artifacts.IntroducedCodeId,
-) bool {
-    for (ids) |id| if (id == target) return true;
-    return false;
 }
 
 fn recordAccountEffect(

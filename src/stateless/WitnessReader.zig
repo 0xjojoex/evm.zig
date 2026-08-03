@@ -23,6 +23,10 @@ pub fn Reader(comptime mode: Mode) type {
     return struct {
         const WitnessStateReader = @This();
         const CatalogState = if (mode == .catalog) trie.WitnessCatalog else void;
+        const IndexedState = if (mode == .indexed) struct {
+            nodes: *trie.IndexedNodes,
+            proof_cache: trie.ProofCache,
+        } else void;
 
         pub const Error = error{InvalidWitness};
         pub const RootError = std.mem.Allocator.Error || Error || error{ResourceLimitExceeded};
@@ -30,11 +34,10 @@ pub fn Reader(comptime mode: Mode) type {
 
         allocator: std.mem.Allocator,
         state_root: [32]u8,
-        indexed: *trie.IndexedNodes,
+        indexed: IndexedState,
         catalog: CatalogState,
         codes: []CodeEntry = &.{},
         accounts: trie.AccountFacts,
-        proof_cache: trie.ProofCache,
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -47,11 +50,13 @@ pub fn Reader(comptime mode: Mode) type {
                 return .{
                     .allocator = allocator,
                     .state_root = state_root,
-                    .indexed = indexed,
+                    .indexed = .{
+                        .nodes = indexed,
+                        .proof_cache = .init(allocator),
+                    },
                     .catalog = {},
                     .codes = try indexCodes(allocator, codes),
                     .accounts = trie.AccountFacts.init(allocator),
-                    .proof_cache = .init(allocator),
                 };
             }
 
@@ -59,14 +64,15 @@ pub fn Reader(comptime mode: Mode) type {
             var catalog = try buildCatalog(allocator, state_root, indexed);
             errdefer catalog.deinit();
             const indexed_codes = try indexCodes(allocator, codes);
+            // Catalog nodes borrow witness bytes, not the construction index.
+            indexed.deinit();
             return .{
                 .allocator = allocator,
                 .state_root = state_root,
-                .indexed = indexed,
+                .indexed = {},
                 .catalog = catalog,
                 .codes = indexed_codes,
                 .accounts = trie.AccountFacts.init(allocator),
-                .proof_cache = .init(allocator),
             };
         }
 
@@ -96,19 +102,17 @@ pub fn Reader(comptime mode: Mode) type {
 
         pub fn deinit(self: *WitnessStateReader) void {
             if (comptime mode == .indexed) {
-                self.proof_cache.deinit();
+                self.indexed.proof_cache.deinit();
                 self.accounts.deinit();
                 self.allocator.free(self.codes);
-                self.indexed.deinit();
+                self.indexed.nodes.deinit();
                 self.* = undefined;
                 return;
             }
 
-            self.proof_cache.deinit();
             self.accounts.deinit();
             self.allocator.free(self.codes);
             self.catalog.deinit();
-            self.indexed.deinit();
             self.* = undefined;
         }
 
@@ -178,7 +182,7 @@ pub fn Reader(comptime mode: Mode) type {
             return trie.stateRootAfterChangesIndexed(
                 scratch,
                 self.state_root,
-                self.indexed,
+                self.indexed.nodes,
                 &self.accounts,
                 changes,
             );
@@ -206,7 +210,11 @@ pub fn Reader(comptime mode: Mode) type {
             if (comptime mode == .catalog) {
                 return self.catalog.decodedAccount(&key) catch return error.InvalidWitness;
             }
-            const lookup = trie.cachedProof(self.state_root, self.indexed, &self.proof_cache);
+            const lookup = trie.cachedProof(
+                self.state_root,
+                self.indexed.nodes,
+                &self.indexed.proof_cache,
+            );
             const encoded = lookup.get(&key) catch return error.InvalidWitness;
             return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
         }
@@ -277,7 +285,11 @@ pub fn Reader(comptime mode: Mode) type {
                 const encoded = self.catalog.storage(account.storage_root, &storage_key) catch return error.InvalidWitness;
                 return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
             }
-            const lookup = trie.cachedProof(account.storage_root, self.indexed, &self.proof_cache);
+            const lookup = trie.cachedProof(
+                account.storage_root,
+                self.indexed.nodes,
+                &self.indexed.proof_cache,
+            );
             const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
             return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
         }
@@ -399,6 +411,67 @@ test "witness state reader reads storage through account storage root" {
     defer catalog.deinit();
     catalog.state_root = [_]u8{0xaa} ** 32;
     try std.testing.expectEqual(@as(u256, 42), try catalog.reader().getStorage(target, 3));
+}
+
+test "catalog witness reader releases its construction index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const target = address.addr(0x2000);
+    const account_key = trie.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = 42 });
+    const state_node = try testLeafNode(scratch, &account_key, account_value);
+    const state_root = crypto.keccak256(state_node);
+    const nodes = [_][]const u8{state_node};
+
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counted.allocator();
+    const indexed = try trie.indexNodes(allocator, &nodes);
+    const indexed_bytes = indexed.allocationBytes();
+    const freed_before = counted.freed_bytes;
+    var catalog = try Catalog.init(allocator, state_root, indexed, &.{});
+    defer catalog.deinit();
+
+    try std.testing.expect(counted.freed_bytes - freed_before >= indexed_bytes);
+    try std.testing.expect(try catalog.reader().accountExists(target));
+}
+
+test "catalog witness reader cleans every allocation failure position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const target = address.addr(0x2000);
+    const account_key = trie.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = 42 });
+    const state_node = try testLeafNode(scratch, &account_key, account_value);
+    const state_root = crypto.keccak256(state_node);
+    const nodes = [_][]const u8{state_node};
+    const code = [_]u8{0x5f};
+    const codes = [_][]const u8{&code};
+
+    const Harness = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            root: [32]u8,
+            encoded_nodes: []const []const u8,
+            code_bytes: []const []const u8,
+        ) !void {
+            var catalog = try Catalog.initFromNodes(
+                allocator,
+                root,
+                encoded_nodes,
+                code_bytes,
+            );
+            catalog.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Harness.run,
+        .{ state_root, &nodes, &codes },
+    );
 }
 
 test "witness state reader rejects missing witness nodes and code" {

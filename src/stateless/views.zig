@@ -95,39 +95,21 @@ pub fn ViewType(comptime State: type) type {
             layer: ChangeLayer,
 
             pub fn len(self: StorageWipes) u32 {
-                var count: u32 = 0;
-                for (self.accountIds()) |id| {
-                    if (self.includes(id)) count += 1;
-                }
-                return count;
+                return @intCast(self.ids().len);
             }
 
             pub fn at(self: StorageWipes, index: u32) [20]u8 {
-                var current: u32 = 0;
-                for (self.accountIds()) |id| {
-                    if (!self.includes(id)) continue;
-                    if (current == index) return self.state.plan.accounts[@intFromEnum(id)].address;
-                    current += 1;
-                }
-                unreachable;
+                const id = self.ids()[index];
+                return self.state.plan.accounts[@intFromEnum(id)].address;
             }
 
-            fn accountIds(self: StorageWipes) []const State.AccountId {
+            fn ids(self: StorageWipes) []const State.AccountId {
                 return switch (self.layer) {
                     .accepted => if (self.state.transaction_active)
-                        self.state.block_changed_accounts.items[0..self.state.transaction_block_changed_accounts_start]
+                        self.state.block_storage_wipes.items[0..self.state.transaction_block_storage_wipes_start]
                     else
-                        self.state.block_changed_accounts.items,
-                    .transaction => self.state.changed_accounts.items,
-                };
-            }
-
-            fn includes(self: StorageWipes, id: State.AccountId) bool {
-                const row = self.state.accounts[@intFromEnum(id)];
-                return switch (self.layer) {
-                    .accepted => self.state.acceptedStorageWipedForView(id),
-                    .transaction => row.storage_wipe_transaction_generation ==
-                        self.state.transaction_generation,
+                        self.state.block_storage_wipes.items,
+                    .transaction => self.state.transaction_storage_wipes.items,
                 };
             }
         };

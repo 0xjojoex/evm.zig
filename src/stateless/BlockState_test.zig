@@ -258,6 +258,7 @@ test "sealed discard preserves prior accepted storage projection" {
 
     const rejected_attempt = state.beginObservedTransaction();
     state.beginScope();
+    _ = try state.setStorage(target, 7, 10);
     try state.setBalance(target, 13);
     try state.wipeStorage(@enumFromInt(0));
     state.closeScope();
@@ -283,6 +284,53 @@ test "sealed discard preserves prior accepted storage projection" {
         @as(u256, 12),
         state.acceptedView().changes().accounts.at(0).account.?.balance,
     );
+}
+
+test "storage wipe projections deduplicate scope reverts" {
+    const target = address.addr(1);
+    const claims = [_]bal.AccountChanges{.{ .address = target }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{.{
+        .parent = .{ .present = .{ .nonce = 1 } },
+    }};
+    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    defer state.deinit();
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    const nested = state.checkpoint();
+    try state.wipeStorage(@enumFromInt(0));
+    state.revertToCheckpoint(nested);
+    try state.wipeStorage(@enumFromInt(0));
+    state.closeScope();
+    state.seal(attempt);
+
+    const pending = state.pendingView();
+    try std.testing.expectEqual(@as(u32, 0), pending.accepted().changes().storage_wipes.len());
+    try std.testing.expectEqual(@as(u32, 1), pending.changes().storage_wipes.len());
+    try std.testing.expectEqual(target, pending.changes().storage_wipes.at(0));
+    state.retain(attempt);
+
+    const accepted = state.acceptedView().changes().storage_wipes;
+    try std.testing.expectEqual(@as(u32, 1), accepted.len());
+    try std.testing.expectEqual(target, accepted.at(0));
+
+    const discarded_attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try state.wipeStorage(@enumFromInt(0));
+    state.closeScope();
+    state.seal(discarded_attempt);
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        state.pendingView().accepted().changes().storage_wipes.len(),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        state.pendingView().changes().storage_wipes.len(),
+    );
+    state.discard(discarded_attempt);
+    try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_wipes.len());
 }
 
 test "dense commit projection matches generic catalog commit across account lifecycles" {

@@ -10,9 +10,11 @@ const checkpoint_types = @import("../state/checkpoint.zig");
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const Host = @import("../Host.zig");
+const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
 
 const Allocator = std.mem.Allocator;
 const Hash = [32]u8;
+const IntroducedCodeMap = SparseHashMap(Hash, []const u8);
 
 pub const ParentCode = struct {
     hash: Hash,
@@ -48,11 +50,11 @@ pub const CodeStore = struct {
     pub const CacheResult = struct {
         view: CodeView,
         ref: CodeRef,
-        introduced: ?IntroducedCodeId,
+        newly_introduced: ?IntroducedCodeId,
     };
 
     parent: std.ArrayList(Entry) = .empty,
-    introduced: std.ArrayList(Entry) = .empty,
+    introduced: IntroducedCodeMap,
 
     pub const InitError = Allocator.Error || error{
         CodeHashCollision,
@@ -77,7 +79,7 @@ pub const CodeStore = struct {
 
     pub fn initHashed(allocator: Allocator, codes: []const ParentCode) InitError!CodeStore {
         if (codes.len > CodeRef.max_indexed) return error.ResourceLimitExceeded;
-        var result = CodeStore{};
+        var result = CodeStore{ .introduced = .init(allocator) };
         errdefer result.deinit(allocator);
         try result.parent.ensureTotalCapacity(allocator, codes.len);
         result.parent.appendSliceAssumeCapacity(codes);
@@ -92,9 +94,10 @@ pub const CodeStore = struct {
     }
 
     pub fn deinit(self: *CodeStore, allocator: Allocator) void {
-        for (self.introduced.items) |entry| allocator.free(@constCast(entry.bytes));
+        var introduced = self.introduced.valueIterator();
+        while (introduced.next()) |bytes| allocator.free(@constCast(bytes.*));
         self.parent.deinit(allocator);
-        self.introduced.deinit(allocator);
+        self.introduced.deinit();
         self.* = undefined;
     }
 
@@ -107,11 +110,8 @@ pub const CodeStore = struct {
     pub fn bind(self: *const CodeStore, hash: Hash) CodeRef {
         if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return .empty;
         if (self.parentIndex(hash)) |index| return .fromIndex(index);
-        for (self.introduced.items, 0..) |entry, index| {
-            if (std.mem.eql(u8, &entry.hash, &hash)) {
-                return .fromIndex(self.parent.items.len + index);
-            }
-        }
+        if (self.introduced.getEntryId(hash)) |id|
+            return .fromIndex(self.parent.items.len + @intFromEnum(id));
         return .missing;
     }
 
@@ -127,9 +127,9 @@ pub const CodeStore = struct {
         const entry = if (index < self.parent.items.len)
             self.parent.items[index]
         else blk: {
-            const introduced_index = index - self.parent.items.len;
-            std.debug.assert(introduced_index < self.introduced.items.len);
-            break :blk self.introduced.items[introduced_index];
+            const introduced_index: u32 = @intCast(index - self.parent.items.len);
+            const introduced = self.introduced.entryAt(introduced_index);
+            break :blk Entry{ .hash = introduced.key_ptr.*, .bytes = introduced.value_ptr.* };
         };
         return .{ .code_hash = entry.hash, .bytes = entry.bytes };
     }
@@ -146,41 +146,52 @@ pub const CodeStore = struct {
             return .{
                 .view = existing,
                 .ref = existing_ref,
-                .introduced = self.introducedId(existing_ref),
+                .newly_introduced = null,
             };
         }
 
-        if (self.parent.items.len + self.introduced.items.len == CodeRef.max_indexed)
+        if (self.parent.items.len + @as(usize, self.introduced.count()) == CodeRef.max_indexed)
             return error.ResourceLimitExceeded;
         const owned = try allocator.dupe(u8, bytes);
         errdefer allocator.free(owned);
-        try self.introduced.append(allocator, .{ .hash = hash, .bytes = owned });
+        self.introduced.ensureUnusedCapacity(1) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ResourceLimitExceeded,
+        };
+        const id: IntroducedCodeId = @enumFromInt(self.introduced.count());
+        self.introduced.putAssumeCapacityNoClobber(hash, owned);
         return .{
             .view = .{ .code_hash = hash, .bytes = owned },
-            .ref = .fromIndex(self.parent.items.len + self.introduced.items.len - 1),
-            .introduced = @enumFromInt(@as(u32, @intCast(self.introduced.items.len - 1))),
+            .ref = .fromIndex(self.parent.items.len + @intFromEnum(id)),
+            .newly_introduced = id,
         };
     }
 
     pub fn introducedView(self: *const CodeStore, id: IntroducedCodeId) CodeView {
-        const entry = self.introduced.items[@intFromEnum(id)];
-        return .{ .code_hash = entry.hash, .bytes = entry.bytes };
+        const entry = self.introduced.entryAt(@intFromEnum(id));
+        return .{ .code_hash = entry.key_ptr.*, .bytes = entry.value_ptr.* };
     }
 
     pub fn truncateIntroduced(self: *CodeStore, allocator: Allocator, len: usize) void {
-        std.debug.assert(len <= self.introduced.items.len);
-        for (self.introduced.items[len..]) |entry| allocator.free(@constCast(entry.bytes));
-        self.introduced.items.len = len;
+        std.debug.assert(len <= @as(usize, self.introduced.count()));
+        while (@as(usize, self.introduced.count()) > len) {
+            const last = self.introduced.entryAt(self.introduced.count() - 1);
+            const hash = last.key_ptr.*;
+            const bytes = last.value_ptr.*;
+            std.debug.assert(self.introduced.remove(hash));
+            allocator.free(@constCast(bytes));
+        }
     }
 
     pub fn introducedLen(self: *const CodeStore) usize {
-        return self.introduced.items.len;
+        return self.introduced.count();
     }
 
     pub fn allocationBytes(self: *const CodeStore) usize {
         var bytes = self.parent.capacity * @sizeOf(Entry) +
-            self.introduced.capacity * @sizeOf(Entry);
-        for (self.introduced.items) |entry| bytes += entry.bytes.len;
+            self.introduced.allocationBytes();
+        for (0..self.introduced.count()) |index|
+            bytes += self.introduced.entryAt(@intCast(index)).value_ptr.*.len;
         return bytes;
     }
 
@@ -196,13 +207,6 @@ pub const CodeStore = struct {
             }
         }
         return null;
-    }
-
-    fn introducedId(self: *const CodeStore, ref: CodeRef) ?IntroducedCodeId {
-        if (ref == .empty or ref == .missing) return null;
-        const index: usize = @intFromEnum(ref);
-        if (index < self.parent.items.len) return null;
-        return @enumFromInt(@as(u32, @intCast(index - self.parent.items.len)));
     }
 
     fn entryLessThan(_: void, lhs: Entry, rhs: Entry) bool {
@@ -358,14 +362,32 @@ test "code store authenticates borrowed codes and owns introduced code" {
 
     const introduced = [_]u8{0x5f};
     const cached = try store.cacheIntroduced(std.testing.allocator, &introduced);
-    try std.testing.expect(cached.introduced != null);
+    try std.testing.expect(cached.newly_introduced != null);
     try std.testing.expectEqualSlices(u8, &introduced, cached.view.bytes);
     try std.testing.expectEqualSlices(u8, &introduced, store.view(cached.ref).?.bytes);
     try std.testing.expectEqualSlices(
         u8,
         &introduced,
-        store.introducedView(cached.introduced.?).bytes,
+        store.introducedView(cached.newly_introduced.?).bytes,
     );
+
+    const duplicate = try store.cacheIntroduced(std.testing.allocator, &introduced);
+    try std.testing.expect(duplicate.newly_introduced == null);
+    try std.testing.expectEqual(cached.ref, duplicate.ref);
+    try std.testing.expectEqual(@as(usize, 1), store.introducedLen());
+
+    const second = [_]u8{ 0x60, 0x01 };
+    const second_hash = crypto.keccak256(&second);
+    const second_cached = try store.cacheIntroduced(std.testing.allocator, &second);
+    try std.testing.expect(second_cached.newly_introduced != null);
+    try std.testing.expectEqual(second_cached.ref, store.bind(second_hash));
+    store.truncateIntroduced(std.testing.allocator, 1);
+    try std.testing.expectEqual(.missing, store.bind(second_hash));
+    try std.testing.expectEqual(cached.ref, store.bind(cached.view.code_hash));
+
+    const reintroduced = try store.cacheIntroduced(std.testing.allocator, &second);
+    try std.testing.expect(reintroduced.newly_introduced != null);
+    try std.testing.expectEqual(second_cached.ref, reintroduced.ref);
 }
 
 test "packed log buffer owns callback bytes and truncates to checkpoint" {
