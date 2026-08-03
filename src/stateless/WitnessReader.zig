@@ -98,7 +98,7 @@ pub fn Reader(comptime mode: Mode) type {
             if (comptime mode == .indexed) {
                 self.proof_cache.deinit();
                 self.accounts.deinit();
-                if (self.codes.len != 0) self.allocator.free(self.codes);
+                self.allocator.free(self.codes);
                 self.indexed.deinit();
                 self.* = undefined;
                 return;
@@ -106,7 +106,7 @@ pub fn Reader(comptime mode: Mode) type {
 
             self.proof_cache.deinit();
             self.accounts.deinit();
-            if (self.codes.len != 0) self.allocator.free(self.codes);
+            self.allocator.free(self.codes);
             self.catalog.deinit();
             self.indexed.deinit();
             self.* = undefined;

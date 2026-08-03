@@ -16,6 +16,13 @@ to meter peak heap usage and export the `evmz_guest_heap_capacity_bytes` and
 `evmz_guest_heap_peak_used_bytes` diagnostic symbols. Heap metering is
 independent of profile tags and changes the guest execution-step count.
 
+The `stateless-ere` payload decodes `schema_id || payload` input, where the
+two-byte id packs `fork_index || revision`. `-Dstateless-schema=0x1501`
+(repeatable) picks which ids the build's router accepts; unset enables every
+schema evmz implements. Pin it explicitly for a shipped guest: each enabled fork
+compiles its own specialized `Validator` into the ELF, and an id the router
+cannot resolve is a compile error rather than a runtime rejection.
+
 ZisK separately defaults to a 48 MiB total RAM envelope, set with
 `-Dguest-zisk-ram-bytes=<bytes>`. The envelope holds the guest's data and bss,
 then the payload heap, then a 1 MiB stack, and the remainder is ZisKOS heap —

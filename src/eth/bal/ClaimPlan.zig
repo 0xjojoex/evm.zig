@@ -78,23 +78,17 @@ pub const ClaimPlan = struct {
             return error.ResourceLimitExceeded;
         }
 
-        var accounts: []AccountClaim = &.{};
-        if (block_access_list.len != 0) {
-            accounts = try allocator.alloc(AccountClaim, block_access_list.len);
-        }
-        errdefer if (accounts.len != 0) allocator.free(accounts);
+        const accounts = try allocator.alloc(AccountClaim, block_access_list.len);
+        errdefer allocator.free(accounts);
 
-        var storage: []StorageClaim = &.{};
-        if (storage_count != 0) storage = try allocator.alloc(StorageClaim, storage_count);
-        errdefer if (storage.len != 0) allocator.free(storage);
+        const storage = try allocator.alloc(StorageClaim, storage_count);
+        errdefer allocator.free(storage);
 
-        var account_trie_order: []AccountId = &.{};
-        if (accounts.len != 0) account_trie_order = try allocator.alloc(AccountId, accounts.len);
-        errdefer if (account_trie_order.len != 0) allocator.free(account_trie_order);
+        const account_trie_order = try allocator.alloc(AccountId, accounts.len);
+        errdefer allocator.free(account_trie_order);
 
-        var storage_trie_order: []StorageId = &.{};
-        if (storage.len != 0) storage_trie_order = try allocator.alloc(StorageId, storage.len);
-        errdefer if (storage_trie_order.len != 0) allocator.free(storage_trie_order);
+        const storage_trie_order = try allocator.alloc(StorageId, storage.len);
+        errdefer allocator.free(storage_trie_order);
 
         var storage_index: usize = 0;
         for (block_access_list, 0..) |account, account_index| {
@@ -157,10 +151,10 @@ pub const ClaimPlan = struct {
     }
 
     pub fn deinit(self: *ClaimPlan, allocator: Allocator) void {
-        if (self.accounts.len != 0) allocator.free(self.accounts);
-        if (self.storage.len != 0) allocator.free(self.storage);
-        if (self.account_trie_order.len != 0) allocator.free(self.account_trie_order);
-        if (self.storage_trie_order.len != 0) allocator.free(self.storage_trie_order);
+        allocator.free(self.accounts);
+        allocator.free(self.storage);
+        allocator.free(self.account_trie_order);
+        allocator.free(self.storage_trie_order);
         self.* = .{};
     }
 

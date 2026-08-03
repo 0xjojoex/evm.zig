@@ -1348,7 +1348,7 @@ pub fn bind(comptime Executor: type) type {
                 .service_error => |err| return err,
             };
 
-            defer if (result.output_owned and result.output_data.len != 0) scratch.allocator.free(result.output_data);
+            defer if (result.output_owned) scratch.allocator.free(result.output_data);
             const output = if (result.output_owned) output: {
                 break :output try self.setLastOutput(result.output_data);
             } else if (result.output_data.len == 0) output: {

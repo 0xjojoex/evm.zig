@@ -208,23 +208,16 @@ pub fn encodeAlloc(
     // the returned encoding is the only surviving allocation.
     const account_memo_bytes = block_access_list.len * @sizeOf(AccountLens);
     const memo_bytes_len = account_memo_bytes + counts.storage_write_keys * @sizeOf(SlotLens);
-    const memo_bytes: []align(@alignOf(AccountLens)) u8 = if (memo_bytes_len == 0)
-        &.{}
-    else
-        try allocator.alignedAlloc(u8, .of(AccountLens), memo_bytes_len);
-    defer if (memo_bytes.len != 0) allocator.free(memo_bytes);
-    var account_lens: []AccountLens = &.{};
-    var slot_lens: []SlotLens = &.{};
-    if (memo_bytes.len != 0) {
-        account_lens = @as(
-            [*]AccountLens,
-            @ptrCast(memo_bytes.ptr),
-        )[0..block_access_list.len];
-        slot_lens = @as(
-            [*]SlotLens,
-            @ptrCast(@alignCast(memo_bytes.ptr + account_memo_bytes)),
-        )[0..counts.storage_write_keys];
-    }
+    const memo_bytes = try allocator.alignedAlloc(u8, .of(AccountLens), memo_bytes_len);
+    defer allocator.free(memo_bytes);
+    const account_lens = @as(
+        [*]AccountLens,
+        @ptrCast(memo_bytes.ptr),
+    )[0..block_access_list.len];
+    const slot_lens = @as(
+        [*]SlotLens,
+        @ptrCast(@alignCast(memo_bytes.ptr + account_memo_bytes)),
+    )[0..counts.storage_write_keys];
 
     var top_payload: usize = 0;
     var slot_index: usize = 0;

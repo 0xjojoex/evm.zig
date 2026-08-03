@@ -53,12 +53,10 @@ pub fn authenticate(
     plan: claim_plan.ClaimPlan,
     catalog: *const trie.WitnessCatalog,
 ) Error!ParentFacts {
-    var accounts: []AccountFact = &.{};
-    if (plan.accounts.len != 0) accounts = try allocator.alloc(AccountFact, plan.accounts.len);
-    errdefer if (accounts.len != 0) allocator.free(accounts);
-    var storage: []StorageFact = &.{};
-    if (plan.storage.len != 0) storage = try allocator.alloc(StorageFact, plan.storage.len);
-    errdefer if (storage.len != 0) allocator.free(storage);
+    const accounts = try allocator.alloc(AccountFact, plan.accounts.len);
+    errdefer allocator.free(accounts);
+    const storage = try allocator.alloc(StorageFact, plan.storage.len);
+    errdefer allocator.free(storage);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -133,8 +131,8 @@ pub fn authenticate(
 }
 
 pub fn deinit(self: *ParentFacts, allocator: Allocator) void {
-    if (self.accounts.len != 0) allocator.free(self.accounts);
-    if (self.storage.len != 0) allocator.free(self.storage);
+    allocator.free(self.accounts);
+    allocator.free(self.storage);
     self.* = undefined;
 }
 

@@ -291,7 +291,7 @@ fn outputOwned(call: Call) bool {
 }
 
 fn freeOutput(call: Call, output: []u8) void {
-    if (outputOwned(call) and output.len != 0) call.allocator.free(output);
+    if (outputOwned(call)) call.allocator.free(output);
 }
 
 fn successOutput(call: Call, output: []u8, gas_left: i64) Result {

@@ -543,9 +543,7 @@ const AccountBuilder = struct {
     fn toOwnedStorageChanges(self: *AccountBuilder, allocator: Allocator) ![]bal.SlotChanges {
         var slots: std.ArrayList(bal.SlotChanges) = .empty;
         errdefer {
-            for (slots.items) |slot| {
-                if (slot.changes.len > 0) allocator.free(slot.changes);
-            }
+            for (slots.items) |slot| allocator.free(slot.changes);
             slots.deinit(allocator);
         }
 
@@ -712,15 +710,13 @@ fn accountBuilderFor(
 }
 
 fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void {
-    for (account.storage_changes) |slot| {
-        if (slot.changes.len > 0) allocator.free(slot.changes);
-    }
-    if (account.storage_changes.len > 0) allocator.free(account.storage_changes);
-    if (account.storage_reads.len > 0) allocator.free(account.storage_reads);
-    if (account.balance_changes.len > 0) allocator.free(account.balance_changes);
-    if (account.nonce_changes.len > 0) allocator.free(account.nonce_changes);
+    for (account.storage_changes) |slot| allocator.free(slot.changes);
+    allocator.free(account.storage_changes);
+    allocator.free(account.storage_reads);
+    allocator.free(account.balance_changes);
+    allocator.free(account.nonce_changes);
     for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
-    if (account.code_changes.len > 0) allocator.free(account.code_changes);
+    allocator.free(account.code_changes);
 }
 
 fn accountLessThan(_: void, lhs: bal.AccountChanges, rhs: bal.AccountChanges) bool {

@@ -18,10 +18,8 @@ pub const ParsedAccessList = struct {
     entries: []evmz.transaction.AccessListEntry = &.{},
 
     pub fn deinit(self: *ParsedAccessList, allocator: std.mem.Allocator) void {
-        for (self.entries) |entry| {
-            if (entry.storage_keys.len > 0) allocator.free(@constCast(entry.storage_keys));
-        }
-        if (self.entries.len > 0) allocator.free(self.entries);
+        for (self.entries) |entry| allocator.free(@constCast(entry.storage_keys));
+        allocator.free(self.entries);
         self.* = .{};
     }
 };
@@ -36,7 +34,7 @@ pub const ParsedAuthorizationList = struct {
     count: usize = 0,
 
     pub fn deinit(self: *ParsedAuthorizationList, allocator: std.mem.Allocator) void {
-        if (self.entries.len > 0) allocator.free(self.entries);
+        allocator.free(self.entries);
         self.* = .{};
     }
 };
@@ -327,9 +325,7 @@ pub fn parseAccessListEntry(value: JsonValue) !AccessListEntry {
 pub fn parseTransactionAccessList(allocator: std.mem.Allocator, list: std.json.Array) !ParsedAccessList {
     var entries: std.ArrayList(evmz.transaction.AccessListEntry) = .empty;
     errdefer {
-        for (entries.items) |entry| {
-            if (entry.storage_keys.len > 0) allocator.free(@constCast(entry.storage_keys));
-        }
+        for (entries.items) |entry| allocator.free(@constCast(entry.storage_keys));
         entries.deinit(allocator);
     }
 

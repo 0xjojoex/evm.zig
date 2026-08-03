@@ -352,15 +352,13 @@ fn u256LessThan(_: void, lhs: u256, rhs: u256) bool {
 }
 
 fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void {
-    for (account.storage_changes) |slot| {
-        if (slot.changes.len > 0) allocator.free(slot.changes);
-    }
-    if (account.storage_changes.len > 0) allocator.free(account.storage_changes);
-    if (account.storage_reads.len > 0) allocator.free(account.storage_reads);
-    if (account.balance_changes.len > 0) allocator.free(account.balance_changes);
-    if (account.nonce_changes.len > 0) allocator.free(account.nonce_changes);
+    for (account.storage_changes) |slot| allocator.free(slot.changes);
+    allocator.free(account.storage_changes);
+    allocator.free(account.storage_reads);
+    allocator.free(account.balance_changes);
+    allocator.free(account.nonce_changes);
     for (account.code_changes) |change| allocator.free(@constCast(change.new_code));
-    if (account.code_changes.len > 0) allocator.free(account.code_changes);
+    allocator.free(account.code_changes);
 }
 
 test "observation append projects reads writes and code at one index" {
