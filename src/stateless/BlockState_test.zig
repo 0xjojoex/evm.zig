@@ -102,6 +102,75 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     state.discard(next_attempt);
 }
 
+test "dense introduced code is reclaimed across rollback and discard" {
+    const targets = [_]address.Address{ address.addr(1), address.addr(2), address.addr(3) };
+    const claims = [_]bal.AccountChanges{
+        .{ .address = targets[0] },
+        .{ .address = targets[1] },
+        .{ .address = targets[2] },
+    };
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .absent = .empty_trie } },
+        .{ .parent = .{ .absent = .empty_trie } },
+        .{ .parent = .{ .absent = .empty_trie } },
+    };
+    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    defer state.deinit();
+
+    const first_code = [_]u8{ 0x60, 0x01 };
+    const first_attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try state.markCreatedContract(targets[0]);
+    try state.setCode(targets[0], &first_code);
+    const first_ref = state.accounts[0].code_ref;
+    state.closeScope();
+    state.seal(first_attempt);
+    state.retain(first_attempt);
+    try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
+
+    const second_code = [_]u8{ 0x60, 0x02 };
+    const third_code = [_]u8{ 0x60, 0x03 };
+    const discarded = state.beginObservedTransaction();
+    state.beginScope();
+    const outer = state.checkpoint();
+    try state.markCreatedContract(targets[1]);
+    try state.setCode(targets[1], &second_code);
+    const second_ref = state.accounts[1].code_ref;
+    try state.markCreatedContract(targets[2]);
+    try state.setCode(targets[2], &second_code);
+    try std.testing.expectEqual(second_ref, state.accounts[2].code_ref);
+    try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
+
+    const inner = state.checkpoint();
+    try state.setCode(targets[2], &third_code);
+    try std.testing.expectEqual(@as(usize, 3), state.code.introducedLen());
+    state.revertToCheckpoint(inner);
+    try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
+    try std.testing.expectEqual(second_ref, state.accounts[2].code_ref);
+
+    state.revertToCheckpoint(outer);
+    try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
+    try std.testing.expectEqual(first_ref, state.accounts[0].code_ref);
+    try std.testing.expectEqualSlices(u8, &first_code, state.code.view(first_ref).?.bytes);
+
+    try state.markCreatedContract(targets[1]);
+    try state.setCode(targets[1], &second_code);
+    try std.testing.expectEqual(second_ref, state.accounts[1].code_ref);
+    try state.markCreatedContract(targets[2]);
+    try state.setCode(targets[2], &second_code);
+    try std.testing.expectEqual(second_ref, state.accounts[2].code_ref);
+    try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
+
+    state.closeScope();
+    state.seal(discarded);
+    state.discard(discarded);
+    try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
+    try std.testing.expectEqual(first_ref, state.accounts[0].code_ref);
+    try std.testing.expectEqualSlices(u8, &first_code, state.code.view(first_ref).?.bytes);
+}
+
 test "dense code reference preserves lazy missing-code rejection" {
     const target = address.addr(1);
     const missing_hash = [_]u8{0x77} ** 32;

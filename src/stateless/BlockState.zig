@@ -952,7 +952,9 @@ pub fn setCode(
         .semantic_access = true,
         .value_read = true,
     });
+    const introduced_len = self.code.introducedLen();
     const cached = try self.code.cacheIntroduced(self.allocator, bytes);
+    errdefer self.code.truncateIntroduced(self.allocator, introduced_len);
     const track_introduction = if (cached.introduced) |introduced|
         !containsIntroduced(self.block_introduced_codes.items, introduced)
     else
@@ -1760,8 +1762,11 @@ fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
             .warm_account => |id| self.accounts[@intFromEnum(id)].warm_generation = 0,
             .warm_storage => |id| self.storage[@intFromEnum(id)].warm_generation = 0,
             .introduced_code => {
-                _ = self.block_introduced_codes.pop().?;
-                _ = self.transaction_introduced_codes.pop().?;
+                const block_id = self.block_introduced_codes.pop().?;
+                const transaction_id = self.transaction_introduced_codes.pop().?;
+                std.debug.assert(block_id == transaction_id);
+                std.debug.assert(@intFromEnum(block_id) + 1 == self.code.introducedLen());
+                self.code.truncateIntroduced(self.allocator, @intFromEnum(block_id));
             },
             .transient_storage => |undo_id| {
                 const index = @intFromEnum(undo_id);
