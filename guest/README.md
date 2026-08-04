@@ -95,7 +95,9 @@ add ~2M entries to the initial memory image on every run.
 
 `zkevm-ere-bench --engine sp1` emits the same ERE-shaped rows as the native
 and ZisK engines. Pass `--sp1-host`, `--sp1-elf`, and raw fixture paths. SP1
-public output is already raw, unlike ZisK's 256-byte public region.
+public output is already raw, unlike ZisK's 256-byte public region. The SP1
+execution-cycles workflow archives those rows and publishes current-versus-main
+cycle and public-output tables in the Actions job summary.
 
 ## Host semantic gate
 
@@ -263,9 +265,19 @@ cargo-zisk prove \
 cargo-zisk verify --proof /path/to/proof.bin
 ```
 
-`zkevm-ere-bench --engine zisk` writes the required framed input as
-`stdin.bin` below its `--zisk-work-dir`. Keep emulator execution steps, prover
-wall time, and standalone verification time as separate measurements.
+Build the persistent benchmark host with the same pinned ZisK revision:
+
+```sh
+cargo build --release --manifest-path guest/runtime/zisk/host/Cargo.toml
+```
+
+Pass the resulting binary with `--zisk-host`. One host process owns one
+transpiled `ZiskRom` for the entire runner invocation; each fixture still gets
+a fresh emulator and guest memory. `execution_duration` is measured inside the
+host around input framing, emulator construction, execution, and public-output
+collection. It excludes host startup, ELF reading, and ELF-to-ROM conversion.
+Keep emulator execution steps, prover wall time, and standalone verification
+time as separate measurements.
 
 The `stateless-ere` guest publishes the raw SSZ `StatelessValidationResult`,
 matching `ere-guests` and `zkevm-benchmark-workload`. ZisK pads that result to

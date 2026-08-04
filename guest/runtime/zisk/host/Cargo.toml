@@ -1,0 +1,9 @@
+[package]
+name = "evmz-zisk-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "4b9f758fabc4955cac20af837019ccc31b803a46" }
+ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "4b9f758fabc4955cac20af837019ccc31b803a46" }

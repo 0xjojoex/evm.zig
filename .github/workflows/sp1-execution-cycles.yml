@@ -2,12 +2,17 @@
 # builds one stateless Zig guest, and archives ERE-shaped rows for the pinned
 # tests-zkevm corpus. No proving key or proof generation is involved.
 # Correctness gates the run: a nonzero guest exit or a public-output mismatch
-# fails the fixture suite. Cycle counts are archived without a baseline diff,
-# unlike the ZisK lane.
+# fails the fixture suite. Cycle counts and public outputs are compared with
+# the last successful main run and published in the Actions job summary.
 name: SP1 execution cycles
 
 on:
   workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: Run ID to use as baseline (blank uses the last successful main run)
+        required: false
+        type: string
   push:
     branches: [main]
     paths:
@@ -20,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: sp1-execution-cycles-${{ github.ref }}
@@ -46,6 +52,7 @@ jobs:
           {
             echo "SP1_SDK_ROOT=${RUNNER_TEMP}/sp1-sdk"
             echo "SP1_HOST_TARGET=${RUNNER_TEMP}/sp1-host-target"
+            echo "BASELINE_ROOT=${RUNNER_TEMP}/sp1-cycle-baseline"
           } >> "${GITHUB_ENV}"
 
       - name: Install system dependencies
@@ -126,6 +133,7 @@ jobs:
 
           zig build zkevm-ere-bench --summary all -- \
             --engine sp1 \
+            --report-only \
             --output-folder "${RESULTS_ROOT}" \
             --sp1-host "${SP1_HOST_TARGET}/release/evmz-sp1-host" \
             --sp1-elf "${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf" \
@@ -139,3 +147,68 @@ jobs:
           path: ${{ env.RESULTS_ROOT }}
           if-no-files-found: error
           retention-days: 90
+
+      - name: Resolve baseline run
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+        run: |
+          run_id="${BASELINE_RUN_ID}"
+          if [[ -z "${run_id}" ]]; then
+            run_id="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/sp1-execution-cycles.yml/runs?branch=main&status=success&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')"
+          fi
+          ref="none"
+          if [[ -n "${run_id}" ]]; then
+            ref="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.head_sha')"
+          else
+            echo "no successful main run found; reporting absolute cycle counts"
+          fi
+          {
+            echo "run_id=${run_id}"
+            echo "ref=${ref}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Download baseline rows
+        if: steps.baseline.outputs.run_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sp1-cycle-results
+          run-id: ${{ steps.baseline.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.BASELINE_ROOT }}
+
+      - name: Compare execution cycles and public outputs
+        id: comparison
+        continue-on-error: true
+        run: |
+          python3 eest/scripts/report-zisk-steps.py \
+            --backend sp1 \
+            --current "${RESULTS_ROOT}" \
+            --baseline "${BASELINE_ROOT}" \
+            --output sp1-cycle-report.md \
+            --current-ref "${GITHUB_SHA}" \
+            --baseline-ref "${{ steps.baseline.outputs.ref }}" \
+            --sp1 "${SP1_VERSION}"
+
+      - name: Publish job summary
+        if: always() && hashFiles('sp1-cycle-report.md') != ''
+        run: cat sp1-cycle-report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload execution-cycle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp1-cycle-report-${{ github.sha }}
+          path: sp1-cycle-report.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Require complete public-output parity
+        if: always()
+        env:
+          COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+        run: test "${COMPARISON_OUTCOME}" = success

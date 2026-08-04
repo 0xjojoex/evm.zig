@@ -31,15 +31,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--test")) {
             const value = args.next() orelse return error.MissingTestFilter;
             options.test_filter = try arena.dupe(u8, value);
-        } else if (std.mem.eql(u8, arg, "--ziskemu")) {
-            const value = args.next() orelse return error.MissingZiskemuPath;
-            options.ziskemu_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--zisk-host")) {
+            const value = args.next() orelse return error.MissingZiskHostPath;
+            options.zisk_host_path = try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--zisk-elf")) {
             const value = args.next() orelse return error.MissingZiskElfPath;
             options.zisk_elf_path = try arena.dupe(u8, value);
-        } else if (std.mem.eql(u8, arg, "--zisk-work-dir")) {
-            const value = args.next() orelse return error.MissingZiskWorkDir;
-            options.zisk_work_dir = try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--zisk-max-steps")) {
             const value = args.next() orelse return error.MissingZiskMaxSteps;
             options.zisk_max_steps = try arena.dupe(u8, value);
@@ -63,11 +60,13 @@ pub fn main(init: std.process.Init) !void {
         try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
     }
 
+    var runner = try bench.Runner.init(init.io, allocator, options);
+    defer runner.deinit();
     var total = bench.Summary{};
     var limit = bench.SelectionLimit{ .remaining = if (options.limit == 0) null else options.limit };
     for (paths.items) |path| {
         if (limit.exhausted()) break;
-        const summary = try bench.runRoot(init.io, allocator, path, options, &limit);
+        const summary = try runner.runRoot(path, &limit);
         total.add(summary);
         printSummary(path, summary, options);
     }
