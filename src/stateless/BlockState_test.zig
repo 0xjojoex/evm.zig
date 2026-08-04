@@ -280,7 +280,7 @@ test "introduced code satisfies a later optional witness code read" {
     state.discard(read);
 }
 
-test "dense code reference preserves lazy missing-code rejection" {
+test "dense code reference preserves lazy invalid-witness rejection" {
     const target = address.addr(1);
     const missing_hash = [_]u8{0x77} ** 32;
     const claims = [_]bal.AccountChanges{.{ .address = target }};
@@ -299,9 +299,9 @@ test "dense code reference preserves lazy missing-code rejection" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expectError(error.MissingCode, state.getCode(target));
+    try std.testing.expectError(error.InvalidWitness, state.getCode(target));
     try state.setBalance(target, 1);
-    try std.testing.expectError(error.MissingCode, state.getCode(target));
+    try std.testing.expectError(error.InvalidWitness, state.getCode(target));
     try state.clearCode(target);
     try std.testing.expectEqual(@as(usize, 0), (try state.getCode(target)).len);
     state.closeScope();

@@ -882,13 +882,13 @@ pub fn setNonce(
 pub fn getCodeView(
     self: *StatelessBlockState,
     target: address.Address,
-) (ResolutionError || Allocator.Error || error{MissingCode})!CodeView {
+) (ResolutionError || Allocator.Error || error{InvalidWitness})!CodeView {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     if (self.transaction_active)
         try self.observeAccount(id, .{ .accessed = true, .code_read = true });
     const row = self.accounts[@intFromEnum(id)];
     const view = self.code.view(row.code_ref) orelse
-        self.code.lookup(accountCodeHash(row.current)) orelse return error.MissingCode;
+        self.code.lookup(accountCodeHash(row.current)) orelse return error.InvalidWitness;
     std.debug.assert(std.mem.eql(u8, &view.code_hash, &accountCodeHash(row.current)));
     return view;
 }
@@ -896,7 +896,7 @@ pub fn getCodeView(
 pub fn getCode(
     self: *StatelessBlockState,
     target: address.Address,
-) (ResolutionError || Allocator.Error || error{MissingCode})![]const u8 {
+) (ResolutionError || Allocator.Error || error{InvalidWitness})![]const u8 {
     return (try self.getCodeView(target)).bytes;
 }
 
