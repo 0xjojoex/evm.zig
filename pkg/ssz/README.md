@@ -437,3 +437,8 @@ const TreeVisitor = struct {
 var visitor = TreeVisitor{ .tree = &tree };
 const root = try ssz.walkTree(Payload.Ssz, payload, &visitor);
 ```
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.

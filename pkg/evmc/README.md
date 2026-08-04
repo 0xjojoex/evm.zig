@@ -20,3 +20,8 @@ Test and diagnostic tools can use the reverse host bridge through
 The repository manifest uses a local `../..` dependency for development. A
 published archive must replace it with the URL and hash of the matching `evmz`
 release; both packages are versioned in lockstep.
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.

@@ -135,3 +135,8 @@ than codec conformance substitutes.
 zig build test
 zig build fuzz
 ```
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.
