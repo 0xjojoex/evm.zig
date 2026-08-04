@@ -201,8 +201,10 @@ The integration patch that drives the guests is preserved at
 
 ## Devnet guest benchmark
 
-The `Guest benchmark` workflow is the single execute-only ZisK/SP1 performance
-surface. Pull requests and pushes to `main` use the immutable 100-block
+The `Guest benchmark` workflow is the single execute-only guest performance
+surface. ZisK is currently the only enabled backend; the SP1 job definition is
+retained but omitted from the matrix until its provider issue is resolved.
+Pull requests and pushes to `main` use the immutable 100-block
 `glamsterdam-devnet-7` snapshot in
 [`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json).
 The ten SHA-256-pinned R2 batches cover blocks 115170 through 115269. A nightly

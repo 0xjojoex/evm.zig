@@ -32,15 +32,6 @@ on:
         options:
           - pinned
           - rolling
-      backend:
-        description: Guest backend
-        required: true
-        default: both
-        type: choice
-        options:
-          - both
-          - zisk
-          - sp1
       zisk_max_steps:
         description: Maximum ZisK steps per block
         required: true
@@ -61,12 +52,11 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(
-        github.event_name == 'schedule' && '{"include":[{"backend":"zisk"}]}' ||
-        github.event_name == 'workflow_dispatch' && inputs.backend == 'zisk' && '{"include":[{"backend":"zisk"}]}' ||
-        github.event_name == 'workflow_dispatch' && inputs.backend == 'sp1' && '{"include":[{"backend":"sp1"}]}' ||
-        '{"include":[{"backend":"zisk"},{"backend":"sp1"}]}'
-        ) }}
+      # SP1 stays out of the matrix until its provider issue is resolved. Keep
+      # the dormant setup below so re-enabling it remains a one-line change.
+      matrix:
+        include:
+          - backend: zisk
     env:
       BACKEND: ${{ matrix.backend }}
       CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
