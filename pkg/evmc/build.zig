@@ -56,11 +56,13 @@ pub fn build(b: *std.Build) void {
     const compatibility_header = b.addInstallHeaderFile(b.path("include/evmz.h"), "evmz.h");
     const adapter_header = b.addInstallHeaderFile(b.path("include/evmz/evmc.h"), "evmz/evmc.h");
     const evmc_header = b.addInstallHeaderFile(evmone_dep.path("evmc/include/evmc/evmc.h"), "evmc/evmc.h");
-    const license = b.addInstallFile(b.path("LICENSE"), "share/licenses/evmz-evmc/LICENSE");
+    const mit_license = b.addInstallFile(b.path("LICENSE-MIT"), "share/licenses/evmz-evmc/LICENSE-MIT");
+    const apache_license = b.addInstallFile(b.path("LICENSE-APACHE"), "share/licenses/evmz-evmc/LICENSE-APACHE");
     b.getInstallStep().dependOn(&compatibility_header.step);
     b.getInstallStep().dependOn(&adapter_header.step);
     b.getInstallStep().dependOn(&evmc_header.step);
-    b.getInstallStep().dependOn(&license.step);
+    b.getInstallStep().dependOn(&mit_license.step);
+    b.getInstallStep().dependOn(&apache_license.step);
 
     const tests_mod = adapterModule(b, target, optimize, evmz_mod, evmone_dep);
     tests_mod.addCSourceFile(.{

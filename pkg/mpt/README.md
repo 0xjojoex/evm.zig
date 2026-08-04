@@ -187,3 +187,8 @@ zig build test
 zig build fuzz                 # run the seed corpus
 zig build fuzz --fuzz=10000    # run the builtin fuzzer
 ```
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.

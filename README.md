@@ -271,7 +271,12 @@ promote advisory findings.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+Licensed under either of:
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT))
+
+at your option.
 
 Bundled third-party components retain their own licenses: c-kzg-4844 and blst
 (Apache-2.0), EVMC/evmone headers (Apache-2.0), and mcl (BSD-3-Clause).

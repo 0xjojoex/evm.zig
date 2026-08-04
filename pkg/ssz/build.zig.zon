@@ -6,7 +6,8 @@
     .paths = .{
         "CHANGELOG.md",
         "README.md",
-        "LICENSE",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
         "build.zig",
         "build.zig.zon",
         "bench",
