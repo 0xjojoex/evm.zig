@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise report-only zkVM BenchmarkRun rows against an optional stored baseline."""
+"""Summarise report-only guest cycles against an optional release baseline."""
 
 from __future__ import annotations
 
@@ -14,10 +14,23 @@ from pathlib import Path
 class Row:
     name: str
     source: str
+    block_number: int | None
     steps: int | None
     public_values: str | None
     upstream_matched: bool | None
     crash: str | None
+
+
+@dataclass(frozen=True)
+class BlockAttributes:
+    gas_used: int
+    stateless_input_byte_length: int
+
+
+@dataclass(frozen=True)
+class CorpusContext:
+    attributes: dict[int, BlockAttributes]
+    digest: str | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zisk-rust", default="zisk-1.0.0")
     parser.add_argument("--sp1", default="v6.3.1")
     parser.add_argument("--fixtures", default="tests-zkevm@v0.6.2")
+    parser.add_argument("--corpus-manifest", type=Path)
     return parser.parse_args()
 
 
@@ -49,6 +63,7 @@ def load_rows(root: Path) -> dict[str, Row]:
             row = Row(
                 name=name,
                 source=metadata.get("source_path", "?"),
+                block_number=metadata.get("block_number"),
                 steps=int(success["total_num_cycles"]),
                 public_values=success.get("public_values"),
                 upstream_matched=bool(success["output_matched"]),
@@ -59,6 +74,7 @@ def load_rows(root: Path) -> dict[str, Row]:
             row = Row(
                 name=name,
                 source=metadata.get("source_path", "?"),
+                block_number=metadata.get("block_number"),
                 steps=None,
                 public_values=None,
                 upstream_matched=None,
@@ -82,6 +98,24 @@ def short_name(row: Row) -> str:
     return f"{row.source}: {row.name}"
 
 
+def load_corpus_context(path: Path | None) -> CorpusContext:
+    if path is None:
+        return CorpusContext({}, None)
+    document = json.loads(path.read_text())
+    attributes = {}
+    for block in document.get("blocks", []):
+        attributes[int(block["block_number"])] = BlockAttributes(
+            gas_used=int(block["gas_used"]),
+            stateless_input_byte_length=int(block["stateless_input_byte_length"]),
+        )
+    digest = document.get("corpus_digest")
+    return CorpusContext(attributes, str(digest) if digest else None)
+
+
+def block_attribute(row: Row, attributes: dict[int, BlockAttributes]) -> BlockAttributes | None:
+    return attributes.get(int(row.block_number)) if row.block_number is not None else None
+
+
 def metric(args: argparse.Namespace) -> str:
     return "steps" if args.backend == "zisk" else "cycles"
 
@@ -90,7 +124,7 @@ def metric_singular(args: argparse.Namespace) -> str:
     return "step" if args.backend == "zisk" else "cycle"
 
 
-def header(args: argparse.Namespace) -> list[str]:
+def header(args: argparse.Namespace, corpus: CorpusContext) -> list[str]:
     lines = [
         f"# {'ZisK' if args.backend == 'zisk' else 'SP1'} execution {metric(args)}",
         "",
@@ -101,21 +135,27 @@ def header(args: argparse.Namespace) -> list[str]:
         lines.extend((f"- ZisK: `{args.zisk}`", f"- ZisK Rust toolchain: `{args.zisk_rust}`"))
     else:
         lines.append(f"- SP1: `{args.sp1}`")
+    lines.append(f"- Fixtures: `{args.fixtures}`")
+    if corpus.digest:
+        lines.append(f"- Corpus digest: `{corpus.digest}`")
     lines.extend((
-        f"- Fixtures: `{args.fixtures}`",
         f"- Scope: execution {metric(args)} and public outputs only; no proof generation and no {metric_singular(args)}-regression threshold.",
         "",
     ))
     return lines
 
 
-def render_absolute(args: argparse.Namespace, current: dict[str, Row]) -> tuple[str, bool]:
+def render_absolute(
+    args: argparse.Namespace,
+    current: dict[str, Row],
+    corpus: CorpusContext,
+) -> tuple[str, bool]:
     names = sorted(current)
     total = sum(current[name].steps or 0 for name in names)
     crashes = sum(current[name].crash is not None for name in names)
     upstream = sum(current[name].upstream_matched is True for name in names)
 
-    lines = header(args)
+    lines = header(args, corpus)
     lines.extend((
         f"No stored baseline was available; reporting absolute {metric_singular(args)} counts only.",
         "",
@@ -125,13 +165,19 @@ def render_absolute(args: argparse.Namespace, current: dict[str, Row]) -> tuple[
         "",
         "## Per fixture",
         "",
-        f"| Fixture | {metric(args).title()} | Upstream |",
-        "| --- | ---: | :---: |",
+        f"| Fixture | Gas used | Input bytes | {metric(args).title()} | Upstream |",
+        "| --- | ---: | ---: | ---: | :---: |",
     ))
     for name in names:
         row = current[name]
+        block = block_attribute(row, corpus.attributes)
+        gas_used = f"{block.gas_used:,}" if block else "n/a"
+        input_bytes = f"{block.stateless_input_byte_length:,}" if block else "n/a"
         steps = "crash" if row.steps is None else f"{row.steps:,}"
-        lines.append(f"| `{short_name(row)}` | {steps} | {mark(row.upstream_matched is True)} |")
+        lines.append(
+            f"| `{short_name(row)}` | {gas_used} | {input_bytes} | {steps} | "
+            f"{mark(row.upstream_matched is True)} |"
+        )
     lines.append("")
     return "\n".join(lines), bool(names) and crashes == 0 and upstream == len(names)
 
@@ -140,6 +186,7 @@ def render_comparison(
     args: argparse.Namespace,
     baseline: dict[str, Row],
     current: dict[str, Row],
+    corpus: CorpusContext,
 ) -> tuple[str, bool]:
     baseline_names = set(baseline)
     current_names = set(current)
@@ -171,7 +218,7 @@ def render_comparison(
         and current_upstream == len(current_names)
     )
 
-    lines = header(args)
+    lines = header(args, corpus)
     lines.extend((
         f"| Fixtures | Public outputs equal | Crashes | Baseline upstream matches | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -187,19 +234,26 @@ def render_comparison(
     lines.extend((
         "## Per fixture",
         "",
-        "| Fixture | Baseline | Current | Delta | Delta % | Public equal | Upstream B/C |",
-        "| --- | ---: | ---: | ---: | ---: | :---: | :---: |",
+        "| Fixture | Gas used | Input bytes | Baseline | Current | Delta | Delta % | Public equal | Upstream B/C |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |",
     ))
     for name in shared:
         before = baseline[name]
         after = current[name]
+        block = block_attribute(after, corpus.attributes)
+        gas_used = f"{block.gas_used:,}" if block else "n/a"
+        input_bytes = f"{block.stateless_input_byte_length:,}" if block else "n/a"
         if before.steps is None or after.steps is None:
-            lines.append(f"| `{short_name(before)}` | crash | crash | n/a | n/a | NO | n/a |")
+            lines.append(
+                f"| `{short_name(before)}` | {gas_used} | {input_bytes} | crash | crash | "
+                "n/a | n/a | NO | n/a |"
+            )
             continue
         row_delta = after.steps - before.steps
         public_equal = before.public_values is not None and before.public_values == after.public_values
         lines.append(
-            f"| `{short_name(before)}` | {before.steps:,} | {after.steps:,} | {row_delta:+,} | "
+            f"| `{short_name(before)}` | {gas_used} | {input_bytes} | {before.steps:,} | "
+            f"{after.steps:,} | {row_delta:+,} | "
             f"{pct(row_delta, before.steps)} | {mark(public_equal)} | "
             f"{mark(before.upstream_matched is True)}/{mark(after.upstream_matched is True)} |"
         )
@@ -211,13 +265,14 @@ def main() -> int:
     args = parse_args()
     try:
         current = load_rows(args.current)
+        corpus = load_corpus_context(args.corpus_manifest)
         # A missing baseline is the first-run case, not a failure: the current
         # rows are still uploaded and become the next run's baseline.
         baseline = load_rows(args.baseline) if args.baseline and args.baseline.is_dir() else {}
         if baseline:
-            report, healthy = render_comparison(args, baseline, current)
+            report, healthy = render_comparison(args, baseline, current, corpus)
         else:
-            report, healthy = render_absolute(args, current)
+            report, healthy = render_absolute(args, current, corpus)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(report)
         sys.stdout.write(report)

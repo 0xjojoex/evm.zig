@@ -28,6 +28,8 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Run native verification
         run: >-
@@ -55,6 +57,8 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Run zkVM-profile semantic tests
         run: zig build test-evmz-zkvm -j2 --summary all
@@ -72,6 +76,8 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Build and test EVMC
         working-directory: pkg/evmc
@@ -90,6 +96,8 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Fuzz uint256
         run: zig build fuzz-uint256 --fuzz=200K --summary all
@@ -124,6 +132,8 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
           cache-key: ${{ matrix.target }}
 
       - name: Record target

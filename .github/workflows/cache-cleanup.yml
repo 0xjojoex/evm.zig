@@ -1,14 +1,9 @@
-# Actions cache is a fixed 10 GB per repository, evicted least-recently-used.
-# Every run of `build.yml` / `eest.yml` writes a fresh ~200-350 MB Zig cache per
-# job (setup-zig keys entries by run id, so they accumulate rather than
-# overwrite), and a pull request's entries stay resident long after it merges.
-# Those dead entries crowd out the eest fixture archives, which are the caches
-# that actually save wall clock -- so reclaim a PR's entries when it closes.
-name: Cache cleanup
+# Manual escape hatch for the fixed 10 GiB repository cache. Normal PR jobs are
+# restore-only (or disable setup-zig caching), so cache cleanup is maintenance,
+# not part of the pull-request lifecycle.
+name: Cache maintenance
 
 on:
-  pull_request:
-    types: [closed]
   workflow_dispatch:
 
 permissions:
@@ -20,35 +15,12 @@ concurrency:
 
 jobs:
   cleanup:
-    name: Drop caches for closed pull requests
+    name: Drop caches for deleted refs
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
-      # Fork pull requests get a read-only token, so deletion would fail. Skip
-      # them rather than fail the run; their caches age out via LRU.
-      - name: Delete this pull request's caches
-        if: >-
-          github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # Caches created by a PR run are scoped to its merge ref, not the head
-          # branch, so that is what has to be deleted.
-          CACHE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
-        run: |
-          gh cache delete --all \
-            --repo "${GITHUB_REPOSITORY}" \
-            --ref "${CACHE_REF}" \
-            --succeed-on-no-caches
-          echo "deleted cache entries for ${CACHE_REF}" \
-            >> "${GITHUB_STEP_SUMMARY}"
-
-      # Manual escape hatch: when the repository is over quota, drop every cache
-      # belonging to a ref that no longer exists. Fixture archives on `main` and
-      # live branches are left alone.
       - name: Sweep caches for deleted refs
-        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -199,44 +199,37 @@ the complete stateless guest workload, not the EVM interpreter in isolation.
 The integration patch that drives the guests is preserved at
 [`0xjojoex/zkevm-benchmark-workload@a7e2203a`](https://github.com/0xjojoex/zkevm-benchmark-workload/tree/a7e2203a2316d9a44254a8ebfe3f1d51c1baa744).
 
-## Pinned stateless fixture report
+## Devnet guest benchmark
 
-The `ZisK execution steps` workflow measures one ref on a representative
-stateless suite and compares it against the rows archived by the last
-successful `main` run. Step counts are deterministic and host-independent, so a
-stored baseline is as good as a same-runner rebuild — the workflow builds one
-guest instead of two. It runs on every push to `main`, which refreshes the
-stored baseline, and on manual dispatch from any branch. `baseline_run_id`
-overrides which run is used as the reference point.
+The `Guest benchmark` workflow is the single execute-only ZisK/SP1 performance
+surface. Pull requests and pushes to `main` use the immutable 100-block
+`glamsterdam-devnet-7` snapshot in
+[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json).
+The ten SHA-256-pinned R2 batches cover blocks 115170 through 115269. A nightly
+ZisK run resolves the latest ten complete schema-v2 R2 batches and uploads that
+resolved manifest with the metrics, so discovery remains reproducible after
+the catalog moves.
 
-Baselines are carried by the `zisk-step-results` artifact (90-day retention).
-When no successful `main` run is reachable, the workflow reports absolute step
-counts instead of failing.
+Correctness is the gate: every archive must match its catalog length and
+SHA-256, every fixture must execute, and every public output must match the
+fixture. Cycle changes never fail the workflow. When
+[`../eest/fixtures/guest-release-baseline.json`](../eest/fixtures/guest-release-baseline.json)
+names immutable release ELFs, the same runner executes those exact ELFs on the
+same pinned corpus and reports aggregate and per-block deltas annotated with
+gas used and stateless-input size. Before
+the first guest release, the report labels the missing baseline and shows
+absolute cycles.
 
-The workflow is intentionally Ubuntu-only because it provisions and builds the
-pinned ZisK toolchain before running the fixture suite.
+The workflow keeps backend measurements distinct. ZisK steps and SP1 cycles are
+not converted into one metric, and emulator execution duration is not treated
+as proving time. ZisK and SP1 retain their own pinned SDK/compiler setup while
+sharing corpus resolution, execution completeness, release-baseline semantics,
+reporting, and evidence retention.
 
-The workflow's intentional pins are:
-
-- ZisK `v1.0.0-alpha` at `4b9f758fabc4955cac20af837019ccc31b803a46`;
-- ZisK's Rust toolchain release `zisk-1.0.0`;
-- `tests-zkevm@v0.6.2`; and
-- Zig `0.16.0` with ReleaseFast guests.
-
-Both upstream pins have breaking changes relative to the archived runner. The
-compatibility surface is the v0.6.2 Amsterdam SSZ wire adapter and ZisK's
-matching `zisk-1.0.0` Rust toolchain. Because the baseline is a stored artifact
-rather than a rebuild, a change to either pin invalidates comparison against
-older runs; land it on `main` first so the next baseline is measured under the
-new pins. The selected corpus is in
-[`../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt`](../eest/fixtures/zisk-steps-tests-zkevm-v0.6.2.txt).
-
-The workflow reports aggregate and per-fixture execution-step deltas. A step
-increase is data, not a failure. Only an incomplete run, emulator crash, or
-baseline/current public-output mismatch fails the comparison. Upstream
-expected-output matches are shown separately because existing Amsterdam
-semantic gaps are outside this performance comparison. No proof generation is
-part of this workflow.
+The R2 corpus is downloaded directly rather than stored in the repository's
+10 GiB Actions cache. Pull requests never save Zig or Rust build caches. Only
+successful `main` and scheduled runs may seed backend build caches for later
+restores.
 
 ## Real proof gate
 
