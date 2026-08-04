@@ -46,6 +46,7 @@ jobs:
           set -o pipefail
           zig build -Doptimize=ReleaseFast zkevm --summary all -- \
             --jobs 8 \
+            --oracle-differential \
             ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests \
             2>&1 | tee eest-zkevm.log
 

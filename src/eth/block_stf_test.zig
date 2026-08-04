@@ -26,6 +26,7 @@ const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
+const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalStatelessVm(eth_spec.amsterdam));
 const Exact = block_stf.Exact;
 const FinalizeBlockContext = block_stf.FinalizeBlockContext;
 const ObservationTarget = block_stf.ObservationTarget;
@@ -742,6 +743,115 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.block_access_list_too_large, oversized_claim.status);
+}
+
+test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const empty_claim = try eth_bal.encodeAlloc(scratch, &.{});
+    const withdrawal = Withdrawal{
+        .index = 0,
+        .validator_index = 0,
+        .address = address.addr(0x1000),
+        .amount = 0,
+    };
+    const withdrawals = [_]Withdrawal{withdrawal};
+    const missing_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+            scratch,
+            trie.empty_root_hash,
+            &.{},
+            &.{},
+        ),
+        .transactions = &.{},
+        .withdrawals = &withdrawals,
+        .block_access_list = empty_claim,
+        .root_checks = testRootChecksWithWithdrawals(
+            trie.empty_root_hash,
+            trie.empty_root_hash,
+            trie.empty_root_hash,
+            try trie.withdrawalsRoot(scratch, &withdrawals),
+        ),
+    });
+    try std.testing.expectEqual(Status.block_access_list_mismatch, missing_account.status);
+
+    const sender = address.addr(0x2000);
+    const account_key = trie.hashedAddressKey(sender);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = 1_000_000 });
+    const account_node = try testLeafNode(scratch, &account_key, account_value);
+    const state_root = crypto.keccak256(account_node);
+    const created = address.create(sender, 0);
+    var account_claims = [_]eth_bal.AccountChanges{
+        .{ .address = sender },
+        .{ .address = created },
+    };
+    if (std.mem.order(u8, &account_claims[0].address, &account_claims[1].address) == .gt)
+        std.mem.swap(eth_bal.AccountChanges, &account_claims[0], &account_claims[1]);
+    const account_claim = try eth_bal.encodeAlloc(scratch, &account_claims);
+    const init_code = [_]u8{ 0x5f, 0x54, 0x50, 0x00 }; // PUSH0 SLOAD POP STOP
+    const transaction_input = [_]TransactionInput{.{
+        .tx = .{
+            .kind = .legacy,
+            .sender = sender,
+            .gas_limit = 100_000,
+            .to = null,
+            .input = &init_code,
+        },
+        .encoded = "tx0",
+    }};
+    const missing_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+        .env = .{ .gas_limit = 100_000 },
+        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+            scratch,
+            state_root,
+            &.{account_node},
+            &.{},
+        ),
+        .transactions = &transaction_input,
+        .block_access_list = account_claim,
+        .root_checks = testRootChecks(
+            state_root,
+            try trie.transactionRoot(scratch, &.{transaction_input[0].encoded}),
+            trie.empty_root_hash,
+        ),
+    });
+    try std.testing.expectEqual(Status.block_access_list_mismatch, missing_storage.status);
+
+    const spurious_account_claim = try eth_bal.encodeAlloc(scratch, &.{.{
+        .address = address.addr(0x3000),
+    }});
+    const spurious_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+            scratch,
+            trie.empty_root_hash,
+            &.{},
+            &.{},
+        ),
+        .transactions = &.{},
+        .block_access_list = spurious_account_claim,
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
+    });
+    try std.testing.expectEqual(Status.block_access_list_mismatch, spurious_account.status);
+
+    const spurious_slot = [_]u256{7};
+    const spurious_storage_claim = try eth_bal.encodeAlloc(scratch, &.{.{
+        .address = address.addr(0x4000),
+        .storage_reads = &spurious_slot,
+    }});
+    const spurious_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+            scratch,
+            trie.empty_root_hash,
+            &.{},
+            &.{},
+        ),
+        .transactions = &.{},
+        .block_access_list = spurious_storage_claim,
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
+    });
+    try std.testing.expectEqual(Status.block_access_list_mismatch, spurious_storage.status);
 }
 
 test "BlockSTF records zero withdrawals as block access list accesses" {

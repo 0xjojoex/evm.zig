@@ -23,6 +23,10 @@ pub const Mutation = enum {
     block_gas_claim,
     block_hash_claim,
     block_access_list_claim,
+    missing_bal_account,
+    missing_bal_storage,
+    spurious_bal_account,
+    spurious_bal_storage_read,
     withdrawal_body,
     deposit_request,
     withdrawal_request,
@@ -57,6 +61,10 @@ const cases = [_]Case{
     .{ .mutation = .block_gas_claim, .expected = .block_gas_used_mismatch },
     .{ .mutation = .block_hash_claim, .expected = .block_hash_mismatch },
     .{ .mutation = .block_access_list_claim, .expected = .block_access_list_mismatch },
+    .{ .mutation = .missing_bal_account, .expected = .block_access_list_mismatch },
+    .{ .mutation = .missing_bal_storage, .expected = .block_access_list_mismatch },
+    .{ .mutation = .spurious_bal_account, .expected = .block_access_list_mismatch },
+    .{ .mutation = .spurious_bal_storage_read, .expected = .block_access_list_mismatch },
     .{ .mutation = .withdrawal_body, .expected = .block_hash_mismatch },
     .{ .mutation = .deposit_request, .expected = .requests_hash_mismatch },
     .{ .mutation = .withdrawal_request, .expected = .requests_hash_mismatch },
@@ -174,7 +182,7 @@ fn runCase(allocator: std.mem.Allocator, input_bytes: []const u8, case: Case) !O
     var shape_arena = std.heap.ArenaAllocator.init(allocator);
     defer shape_arena.deinit();
     const shape = try wire.StatelessInput.decodeSchemaPrefixed(shape_arena.allocator(), input_bytes);
-    const variant_count = mutationVariantCount(shape, case.mutation);
+    const variant_count = mutationVariantCount(shape_arena.allocator(), shape, case.mutation);
 
     var outcome = Outcome{};
     for (0..variant_count) |variant| {
@@ -192,12 +200,21 @@ fn runCase(allocator: std.mem.Allocator, input_bytes: []const u8, case: Case) !O
     return outcome;
 }
 
-fn mutationVariantCount(input: wire.StatelessInput, mutation: Mutation) usize {
+fn mutationVariantCount(
+    allocator: std.mem.Allocator,
+    input: wire.StatelessInput,
+    mutation: Mutation,
+) usize {
     return switch (mutation) {
         .missing_state_node, .altered_state_node => @min(input.witness.state.len, max_variants),
         .missing_code, .altered_code => @min(input.witness.codes.len, max_variants),
         .missing_header, .altered_header => @min(input.witness.headers.len, max_variants),
         .altered_header_history => @min(input.witness.headers.len -| 1, max_variants),
+        .missing_bal_account,
+        .missing_bal_storage,
+        .spurious_bal_account,
+        .spurious_bal_storage_read,
+        => blockAccessListVariantCount(allocator, input, mutation),
         .altered_transaction_body => if (amsterdamRequest(&input)) |request|
             @min(request.execution_payload.v3.v2.v1.transactions.len, max_variants)
         else
@@ -248,6 +265,13 @@ fn mutate(
             keys[0][0] ^= 1;
             input.public_keys = keys;
         },
+        .missing_bal_account,
+        .missing_bal_storage,
+        .spurious_bal_account,
+        .spurious_bal_storage_read,
+        => {
+            if (!try mutateBlockAccessListCoverage(allocator, input, mutation, variant)) return false;
+        },
         else => {
             var request = amsterdamRequest(input) orelse return false;
             if (!try mutatePayload(allocator, &request, mutation, variant)) return false;
@@ -255,6 +279,138 @@ fn mutate(
         },
     }
     return true;
+}
+
+fn blockAccessListVariantCount(
+    allocator: std.mem.Allocator,
+    input: wire.StatelessInput,
+    mutation: Mutation,
+) usize {
+    const request = amsterdamRequest(&input) orelse return 0;
+    const decoded = evmz.eth.bal.decode(
+        allocator,
+        request.execution_payload.block_access_list,
+    ) catch return 0;
+    return switch (mutation) {
+        .missing_bal_account => @min(decoded.accounts.len, max_variants),
+        .missing_bal_storage => blk: {
+            var count: usize = 0;
+            for (decoded.accounts) |account| {
+                count += account.storage_changes.len + account.storage_reads.len;
+            }
+            break :blk @min(count, max_variants);
+        },
+        .spurious_bal_account => @min(decoded.accounts.len + 16, max_variants),
+        .spurious_bal_storage_read => @min(decoded.accounts.len, max_variants),
+        else => unreachable,
+    };
+}
+
+fn mutateBlockAccessListCoverage(
+    allocator: std.mem.Allocator,
+    input: *wire.StatelessInput,
+    mutation: Mutation,
+    variant: usize,
+) !bool {
+    var request = amsterdamRequest(input) orelse return false;
+    const decoded = evmz.eth.bal.decode(
+        allocator,
+        request.execution_payload.block_access_list,
+    ) catch return false;
+    const accounts = switch (mutation) {
+        .missing_bal_account => try omitBalAccount(allocator, decoded.accounts, variant),
+        .missing_bal_storage => try omitBalStorage(allocator, decoded.accounts, variant),
+        .spurious_bal_account => try appendSpuriousBalAccount(allocator, decoded.accounts, variant),
+        .spurious_bal_storage_read => try appendSpuriousBalStorageRead(allocator, decoded.accounts, variant),
+        else => unreachable,
+    } orelse return false;
+    request.execution_payload.block_access_list = try evmz.eth.bal.encodeAlloc(allocator, accounts);
+    input.new_payload_request = .{ .amsterdam = request };
+    return true;
+}
+
+fn omitBalAccount(
+    allocator: std.mem.Allocator,
+    accounts: []const evmz.eth.bal.AccountChanges,
+    variant: usize,
+) !?[]const evmz.eth.bal.AccountChanges {
+    if (variant >= accounts.len) return null;
+    return try omit(evmz.eth.bal.AccountChanges, allocator, accounts, variant);
+}
+
+fn omitBalStorage(
+    allocator: std.mem.Allocator,
+    accounts: []const evmz.eth.bal.AccountChanges,
+    variant: usize,
+) !?[]const evmz.eth.bal.AccountChanges {
+    const altered = try allocator.dupe(evmz.eth.bal.AccountChanges, accounts);
+    var remaining = variant;
+    for (altered) |*account| {
+        if (remaining < account.storage_changes.len) {
+            account.storage_changes = try omit(
+                evmz.eth.bal.SlotChanges,
+                allocator,
+                account.storage_changes,
+                remaining,
+            );
+            return altered;
+        }
+        remaining -= account.storage_changes.len;
+        if (remaining < account.storage_reads.len) {
+            account.storage_reads = try omit(u256, allocator, account.storage_reads, remaining);
+            return altered;
+        }
+        remaining -= account.storage_reads.len;
+    }
+    return null;
+}
+
+fn appendSpuriousBalAccount(
+    allocator: std.mem.Allocator,
+    accounts: []const evmz.eth.bal.AccountChanges,
+    variant: usize,
+) !?[]const evmz.eth.bal.AccountChanges {
+    const candidate = evmz.addr(0xf000 + variant);
+    var index: usize = 0;
+    while (index < accounts.len) : (index += 1) {
+        switch (std.mem.order(u8, &accounts[index].address, &candidate)) {
+            .lt => continue,
+            .eq => return null,
+            .gt => break,
+        }
+    }
+    const altered = try allocator.alloc(evmz.eth.bal.AccountChanges, accounts.len + 1);
+    @memcpy(altered[0..index], accounts[0..index]);
+    altered[index] = .{ .address = candidate };
+    @memcpy(altered[index + 1 ..], accounts[index..]);
+    return altered;
+}
+
+fn appendSpuriousBalStorageRead(
+    allocator: std.mem.Allocator,
+    accounts: []const evmz.eth.bal.AccountChanges,
+    variant: usize,
+) !?[]const evmz.eth.bal.AccountChanges {
+    if (variant >= accounts.len) return null;
+    const altered = try allocator.dupe(evmz.eth.bal.AccountChanges, accounts);
+    const account = &altered[variant];
+    var candidate: u256 = 0;
+    while (containsStorage(account.*, candidate)) candidate += 1;
+
+    var index: usize = 0;
+    while (index < account.storage_reads.len and account.storage_reads[index] < candidate) : (index += 1) {}
+    const reads = try allocator.alloc(u256, account.storage_reads.len + 1);
+    @memcpy(reads[0..index], account.storage_reads[0..index]);
+    reads[index] = candidate;
+    @memcpy(reads[index + 1 ..], account.storage_reads[index..]);
+    account.storage_reads = reads;
+    return altered;
+}
+
+fn containsStorage(account: evmz.eth.bal.AccountChanges, slot: u256) bool {
+    for (account.storage_reads) |value| if (value == slot) return true;
+    for (account.storage_changes) |value| if (value.slot == slot) return true;
+    return false;
 }
 
 /// Payload-scoped mutations. The caller unwraps the Amsterdam request and

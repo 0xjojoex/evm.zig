@@ -106,6 +106,9 @@ zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_test
 zig build zkevm -- \
   --report ../.eest/zkevm-v0.6.2.json \
   ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+zig build zkevm -- \
+  --oracle-differential \
+  ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
 zig build zkevm-mutations
 ```
 
@@ -122,13 +125,24 @@ exits nonzero for any mismatch; the report is diagnostic input for closing the
 baseline, not a waiver for known failures. Blocks without stateless input are
 reported as skips in the terminal summary and are not conformance records.
 
+`--oracle-differential` compares the dense production validator with the
+tracked-state oracle for every block without `expectException`. The comparison
+covers every consensus-derived `BlockSTF.Result` field, including status,
+roots, gas accounting, logs bloom, requests, and BAL hash. It excludes only
+`tx_index`: dense admission can reject before a transaction starts while the
+tracked oracle discovers the same invalid witness during that transaction.
+Blocks carrying `expectException` are excluded because they can contain
+several independent faults and do not define an internal rejection priority;
+the typed mutation matrix owns failure-status parity.
+
 `zkevm-mutations` is the separate adversarial gate. It starts from a bounded
 manifest of canonical v0.6.2 inputs that validate successfully, applies
 structured mutations, re-encodes and decodes valid schema-v1 SSZ, then requires
 the intended typed `BlockSTF.Status`. It covers missing and altered trie nodes,
 code, authenticated headers and pre-state roots, public keys, explicit payload
-claims, BAL, withdrawals, transaction bodies, and all five Amsterdam request
-families.
+claims, BAL coverage, withdrawals, transaction bodies, and all five Amsterdam
+request families. BAL coverage includes omitted accounts and storage slots as
+well as spurious accounts and storage reads.
 
 The gate is an existence proof, not a coverage proof: a mutation resolves on
 the first variant that reaches its expected status, so it shows each rejection

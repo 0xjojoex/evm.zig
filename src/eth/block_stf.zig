@@ -910,7 +910,7 @@ fn applyAssumeDecodedExact(
 ) !Result {
     resetBalReport(input);
     var no_produced_bal: ?[]u8 = null;
-    const result = if (comptime Engine.BlockState.external_observation_capture) blk: {
+    const result = (if (comptime Engine.BlockState.external_observation_capture) blk: {
         if (input.bal_differential) |report| {
             var observer = BalDifferentialObserver(revision, Engine).init(
                 allocator,
@@ -922,14 +922,17 @@ fn applyAssumeDecodedExact(
                 null,
             );
             defer observer.deinit();
-            break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+            break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
         }
         var observer = NoBlockObserver{};
-        break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
     } else blk: {
         std.debug.assert(input.bal_differential == null);
         var observer = NoBlockObserver{};
-        break :blk try serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+    }) catch |err| switch (Executor.errors.normalize(err)) {
+        error.StateReaderStrategyFailure => Result{ .status = .block_access_list_mismatch },
+        else => return err,
     };
     std.debug.assert(no_produced_bal == null);
     return result;

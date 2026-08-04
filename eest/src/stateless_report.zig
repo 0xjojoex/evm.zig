@@ -17,6 +17,7 @@ pub const Difference = enum {
     result_encoding,
     fixture_shape,
     execution_error,
+    oracle_result,
 };
 
 pub const Record = struct {
