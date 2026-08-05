@@ -33,6 +33,14 @@ class CorpusContext:
     digest: str | None
 
 
+@dataclass(frozen=True)
+class Aggregate:
+    fixture_count: int
+    crashes: int
+    upstream_matches: int
+    total: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--current", type=Path, required=True)
@@ -46,6 +54,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sp1", default="v6.3.1")
     parser.add_argument("--fixtures", default="tests-zkevm@v0.6.2")
     parser.add_argument("--corpus-manifest", type=Path)
+    parser.add_argument("--baseline-summary", type=Path)
+    parser.add_argument("--summary-output", type=Path)
+    parser.add_argument("--summary-only", action="store_true")
     return parser.parse_args()
 
 
@@ -124,6 +135,61 @@ def metric_singular(args: argparse.Namespace) -> str:
     return "step" if args.backend == "zisk" else "cycle"
 
 
+def aggregate(rows: dict[str, Row]) -> Aggregate:
+    return Aggregate(
+        fixture_count=len(rows),
+        crashes=sum(row.crash is not None for row in rows.values()),
+        upstream_matches=sum(row.upstream_matched is True for row in rows.values()),
+        total=sum(row.steps or 0 for row in rows.values()),
+    )
+
+
+def summary_document(
+    args: argparse.Namespace,
+    corpus: CorpusContext,
+    current: Aggregate,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "backend": args.backend,
+        "metric": metric(args),
+        "corpus": args.fixtures,
+        "corpus_digest": corpus.digest,
+        "source_ref": args.current_ref,
+        "fixture_count": current.fixture_count,
+        "crashes": current.crashes,
+        "upstream_matches": current.upstream_matches,
+        "total": current.total,
+    }
+
+
+def load_summary(args: argparse.Namespace, corpus: CorpusContext) -> Aggregate | None:
+    if args.baseline_summary is None:
+        return None
+    document = json.loads(args.baseline_summary.read_text())
+    expected = {
+        "schema_version": 1,
+        "backend": args.backend,
+        "metric": metric(args),
+        "corpus": args.fixtures,
+        "corpus_digest": corpus.digest,
+    }
+    for key, value in expected.items():
+        if document.get(key) != value:
+            raise ValueError(f"baseline summary {key} mismatch")
+    baseline = Aggregate(
+        fixture_count=int(document["fixture_count"]),
+        crashes=int(document["crashes"]),
+        upstream_matches=int(document["upstream_matches"]),
+        total=int(document["total"]),
+    )
+    if baseline.fixture_count <= 0 or baseline.crashes != 0:
+        raise ValueError("baseline summary is not a successful release run")
+    if baseline.upstream_matches != baseline.fixture_count:
+        raise ValueError("baseline summary has incomplete upstream matches")
+    return baseline
+
+
 def header(args: argparse.Namespace, corpus: CorpusContext) -> list[str]:
     lines = [
         f"# {'ZisK' if args.backend == 'zisk' else 'SP1'} execution {metric(args)}",
@@ -163,6 +229,22 @@ def render_absolute(
         "| ---: | ---: | ---: | ---: |",
         f"| {len(names)} | {crashes} | {upstream}/{len(names)} | {total:,} |",
         "",
+    ))
+    if args.summary_only:
+        failures = [
+            current[name]
+            for name in names
+            if current[name].crash is not None or current[name].upstream_matched is not True
+        ]
+        if failures:
+            lines.extend(("## Failures", ""))
+            for row in failures:
+                reason = row.crash or "upstream output mismatch"
+                lines.append(f"- `{short_name(row)}`: {reason}")
+            lines.append("")
+        return "\n".join(lines), bool(names) and crashes == 0 and upstream == len(names)
+
+    lines.extend((
         "## Per fixture",
         "",
         f"| Fixture | Gas used | Input bytes | {metric(args).title()} | Upstream |",
@@ -180,6 +262,44 @@ def render_absolute(
         )
     lines.append("")
     return "\n".join(lines), bool(names) and crashes == 0 and upstream == len(names)
+
+
+def render_aggregate_comparison(
+    args: argparse.Namespace,
+    baseline: Aggregate,
+    current: dict[str, Row],
+    corpus: CorpusContext,
+) -> tuple[str, bool]:
+    current_aggregate = aggregate(current)
+    delta = current_aggregate.total - baseline.total
+    healthy = (
+        current_aggregate.fixture_count > 0
+        and current_aggregate.crashes == 0
+        and current_aggregate.upstream_matches == current_aggregate.fixture_count
+    )
+    lines = header(args, corpus)
+    lines.extend((
+        f"| Baseline fixtures | Current fixtures | Crashes | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        f"| {baseline.fixture_count} | {current_aggregate.fixture_count} | "
+        f"{current_aggregate.crashes} | "
+        f"{current_aggregate.upstream_matches}/{current_aggregate.fixture_count} | "
+        f"{baseline.total:,} | {current_aggregate.total:,} | {delta:+,} | "
+        f"{pct(delta, baseline.total)} |",
+        "",
+    ))
+    failures = [
+        row
+        for row in current.values()
+        if row.crash is not None or row.upstream_matched is not True
+    ]
+    if failures:
+        lines.extend(("## Failures", ""))
+        for row in sorted(failures, key=lambda item: item.name):
+            reason = row.crash or "upstream output mismatch"
+            lines.append(f"- `{short_name(row)}`: {reason}")
+        lines.append("")
+    return "\n".join(lines), healthy
 
 
 def render_comparison(
@@ -226,6 +346,25 @@ def render_comparison(
         "",
     ))
 
+    if args.summary_only:
+        lines.extend((
+            f"- New since baseline: {len(added)}",
+            f"- Missing from current run: {len(dropped)}",
+            "",
+        ))
+        failures = [
+            current[name]
+            for name in sorted(current_names)
+            if current[name].crash is not None or current[name].upstream_matched is not True
+        ]
+        if failures:
+            lines.extend(("## Failures", ""))
+            for row in failures:
+                reason = row.crash or "upstream output mismatch"
+                lines.append(f"- `{short_name(row)}`: {reason}")
+            lines.append("")
+        return "\n".join(lines), healthy
+
     if added:
         lines.extend(("## New since baseline", "", *[f"- `{name}`" for name in added], ""))
     if dropped:
@@ -266,11 +405,18 @@ def main() -> int:
     try:
         current = load_rows(args.current)
         corpus = load_corpus_context(args.corpus_manifest)
-        # A missing baseline is the first-run case, not a failure: the current
-        # rows are still uploaded and become the next run's baseline.
+        current_aggregate = aggregate(current)
+        if args.summary_output:
+            args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+            args.summary_output.write_text(
+                json.dumps(summary_document(args, corpus, current_aggregate), indent=2) + "\n"
+            )
         baseline = load_rows(args.baseline) if args.baseline and args.baseline.is_dir() else {}
+        baseline_summary = load_summary(args, corpus)
         if baseline:
             report, healthy = render_comparison(args, baseline, current, corpus)
+        elif baseline_summary:
+            report, healthy = render_aggregate_comparison(args, baseline_summary, current, corpus)
         else:
             report, healthy = render_absolute(args, current, corpus)
         args.output.parent.mkdir(parents=True, exist_ok=True)

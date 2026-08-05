@@ -32,6 +32,12 @@ on:
         options:
           - pinned
           - rolling
+          - tests-zkevm
+      release_ref:
+        description: Commit on main for the tests-zkevm release gate; ignored for devnet modes
+        required: true
+        default: main
+        type: string
       zisk_max_steps:
         description: Maximum ZisK steps per block
         required: true
@@ -47,9 +53,9 @@ concurrency:
 
 jobs:
   measure:
-    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }} devnet
+    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.corpus == 'tests-zkevm' && 360 || 120 }}
     strategy:
       fail-fast: false
       # SP1 stays out of the matrix until its provider issue is resolved. Keep
@@ -77,6 +83,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.corpus == 'tests-zkevm' && inputs.release_ref || github.sha }}
+          fetch-depth: ${{ inputs.corpus == 'tests-zkevm' && 0 || 1 }}
+
+      - name: Record source commit
+        run: echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Require release source on main
+        if: inputs.corpus == 'tests-zkevm'
+        run: |
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "${SOURCE_COMMIT}" refs/remotes/origin/main
 
       - name: Resolve runner paths
         run: |
@@ -149,12 +167,118 @@ jobs:
             --output-root "${CORPUS_ROOT}" \
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
+      - name: Restore tests-zkevm fixture archive
+        if: env.CORPUS_MODE == 'tests-zkevm'
+        uses: actions/cache/restore@v6
+        with:
+          path: .eest/cache
+          key: eest-zkevm-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
+      - name: Fetch pinned tests-zkevm fixtures
+        if: env.CORPUS_MODE == 'tests-zkevm'
+        working-directory: eest
+        run: scripts/fetch-eest-zkevm-fixtures.sh
+
       - name: Record corpus identity
         run: |
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            version="$(awk -F= '$1 == "zkevm_version" { print $2; exit }' eest.lock)"
+            archive_sha="$(awk -F= '$1 == "zkevm_sha256" { print $2; exit }' eest.lock)"
+            fixture_root="$(awk -F= '$1 == "zkevm_dest" { print $2; exit }' eest.lock)"
+            test -n "${version}"
+            test -n "${archive_sha}"
+            test -d "${fixture_root}"
+
+            blockchain_root="${fixture_root}/fixtures/blockchain_tests"
+            index="${fixture_root}/fixtures/.meta/index.json"
+            test -d "${blockchain_root}"
+            test -f "${index}"
+            fixture_files="$(find "${blockchain_root}" -type f -name '*.json' | wc -l)"
+            indexed_files="$(jq '[.test_cases[] | select(.format == "blockchain_test") | .json_path] | unique | length' "${index}")"
+            indexed_tests="$(jq '[.test_cases[] | select(.format == "blockchain_test")] | length' "${index}")"
+            fixture_count="$({
+              find "${blockchain_root}" -type f -name '*.json' -print0 \
+                | xargs -0 -n 64 jq -r \
+                  '[.. | objects | .statelessInputBytes? | select(type == "string" and length > 2)] | length'
+            } | awk '{ total += $1 } END { print total + 0 }')"
+            test "${fixture_files}" -gt 0
+            test "${fixture_files}" -eq "${indexed_files}"
+            test "${indexed_tests}" -gt 0
+            test "${fixture_count}" -gt 0
+
+            jq -n \
+              --arg id "${version}" \
+              --arg digest "${archive_sha}" \
+              --arg source_commit "${SOURCE_COMMIT}" \
+              --argjson fixture_files "${fixture_files}" \
+              --argjson indexed_tests "${indexed_tests}" \
+              --argjson fixture_count "${fixture_count}" \
+              '{
+                schema_version: 1,
+                mode: "tests-zkevm",
+                id: $id,
+                corpus_digest: $digest,
+                source_commit: $source_commit,
+                fixture_files: $fixture_files,
+                indexed_tests: $indexed_tests,
+                fixture_count: $fixture_count
+              }' > "${RESOLVED_MANIFEST}"
+            echo "EEST_ZKEVM_ROOT=${GITHUB_WORKSPACE}/${blockchain_root}" >> "${GITHUB_ENV}"
+          fi
           {
             echo "CORPUS_ID=$(jq -r .id "${RESOLVED_MANIFEST}")"
             echo "FIXTURE_COUNT=$(jq -r .fixture_count "${RESOLVED_MANIFEST}")"
           } >> "${GITHUB_ENV}"
+
+      - name: Resolve stored release metrics
+        if: env.CORPUS_MODE == 'tests-zkevm'
+        id: release-metrics
+        run: |
+          summary="${RUNNER_TEMP}/release-baseline-summary.json"
+          available=false
+          source_ref=none
+          if jq -e \
+            --arg corpus "${CORPUS_ID}" \
+            --arg backend "${BACKEND}" \
+            '.metrics[$corpus][$backend] | type == "object"' \
+            "${BASELINE_MANIFEST}" >/dev/null; then
+            jq \
+              --arg corpus "${CORPUS_ID}" \
+              --arg backend "${BACKEND}" \
+              '.metrics[$corpus][$backend]' \
+              "${BASELINE_MANIFEST}" > "${summary}"
+            current_digest="$(jq -r .corpus_digest "${RESOLVED_MANIFEST}")"
+            metric="$([[ "${BACKEND}" == zisk ]] && echo steps || echo cycles)"
+            if jq -e \
+              --arg backend "${BACKEND}" \
+              --arg metric "${metric}" \
+              --arg corpus "${CORPUS_ID}" \
+              --arg digest "${current_digest}" \
+              --argjson fixture_count "${FIXTURE_COUNT}" \
+              '.schema_version == 1
+                and .backend == $backend
+                and .metric == $metric
+                and .corpus == $corpus
+                and .corpus_digest == $digest
+                and .fixture_count == $fixture_count
+                and .crashes == 0
+                and .upstream_matches == $fixture_count
+                and (.total | type == "number")
+                and .total >= 0
+                and (.source_ref | type == "string")
+                and (.source_ref | length > 0)' \
+              "${summary}" >/dev/null; then
+              available=true
+              source_ref="$(jq -r .source_ref "${summary}")"
+            else
+              echo "::warning::Ignoring incompatible stored release metrics"
+            fi
+          fi
+          {
+            echo "available=${available}"
+            echo "source_ref=${source_ref}"
+            echo "path=${summary}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Restore ZisK build cache
         if: matrix.backend == 'zisk'
@@ -294,11 +418,15 @@ jobs:
       - name: Run candidate corpus
         run: |
           fixture_roots=()
-          while IFS= read -r -d '' root; do
-            fixture_roots+=("${root}")
-          done < <(find "${CORPUS_ROOT}" -type d -name blockchain_tests -print0 | sort -z)
-          expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
-          test "${#fixture_roots[@]}" -eq "${expected_batches}"
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            fixture_roots+=("${EEST_ZKEVM_ROOT}")
+          else
+            while IFS= read -r -d '' root; do
+              fixture_roots+=("${root}")
+            done < <(find "${CORPUS_ROOT}" -type d -name blockchain_tests -print0 | sort -z)
+            expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
+            test "${#fixture_roots[@]}" -eq "${expected_batches}"
+          fi
           args=(
             --engine "${BACKEND}"
             --report-only
@@ -312,6 +440,7 @@ jobs:
           zig build zkevm-ere-bench --summary all -- "${args[@]}" "${fixture_roots[@]}"
 
       - name: Resolve release baseline
+        if: env.CORPUS_MODE != 'tests-zkevm'
         id: baseline
         run: |
           url="$(jq -r --arg backend "${BACKEND}" '.artifacts[$backend].elf_url // empty' "${BASELINE_MANIFEST}")"
@@ -359,33 +488,57 @@ jobs:
             --backend "${BACKEND}"
             --current "${RESULTS_ROOT}"
             --output guest-cycle-report.md
-            --current-ref "${GITHUB_SHA}"
-            --baseline-ref "${{ steps.baseline.outputs.release }}"
+            --summary-output guest-cycle-summary.json
+            --current-ref "${SOURCE_COMMIT}"
             --fixtures "${CORPUS_ID}"
             --corpus-manifest "${RESOLVED_MANIFEST}"
             --zisk "${ZISK_VERSION} (${ZISK_COMMIT})"
             --zisk-rust "${ZISK_RUST_TOOLCHAIN}"
             --sp1 "${SP1_VERSION}"
           )
+          actual_count="$(find "${RESULTS_ROOT}" -type f -name '*.json' | wc -l)"
+          baseline_ref="${{ steps.baseline.outputs.release }}"
           if [[ "${{ steps.baseline.outputs.available }}" == true ]]; then
             args+=(--baseline "${BASELINE_ROOT}")
           fi
+          if [[ "${{ steps.release-metrics.outputs.available }}" == true ]]; then
+            baseline_ref="${{ steps.release-metrics.outputs.source_ref }}"
+            args+=(--baseline-summary "${{ steps.release-metrics.outputs.path }}")
+          fi
+          args+=(--baseline-ref "${baseline_ref:-none}")
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            args+=(--summary-only)
+          fi
           python3 eest/scripts/report-guest-cycles.py "${args[@]}"
+          test "${actual_count}" -eq "${FIXTURE_COUNT}"
 
       - name: Publish job summary
         if: always() && hashFiles('guest-cycle-report.md') != ''
         run: cat guest-cycle-report.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload benchmark evidence
-        if: always()
+        if: always() && env.CORPUS_MODE != 'tests-zkevm'
         uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.backend }}-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             guest-cycle-report.md
+            guest-cycle-summary.json
             resolved-manifest.json
             guest-results
             release-baseline-results
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload release gate evidence
+        if: always() && env.CORPUS_MODE == 'tests-zkevm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-${{ matrix.backend }}-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            guest-cycle-report.md
+            guest-cycle-summary.json
+            resolved-manifest.json
           if-no-files-found: warn
           retention-days: 14
 

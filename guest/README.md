@@ -233,6 +233,21 @@ The R2 corpus is downloaded directly rather than stored in the repository's
 successful `main` and scheduled runs may seed backend build caches for later
 restores.
 
+Before publishing a guest release, manually dispatch the same workflow with
+`corpus=tests-zkevm` and `release_ref` set to the candidate commit on `main`.
+That mode verifies the full SHA-256-pinned `tests-zkevm@v0.6.2`
+`blockchain_tests` corpus in ZisK, requires every expected fixture row and exact
+upstream output, and reports aggregate steps without a regression threshold.
+The resolved evidence records the fixture archive digest, indexed test count,
+executable row count, and exact source commit; the workflow does not publish a
+release. Detailed per-block release deltas remain on the pinned 100-block devnet
+lane. The full gate executes only the candidate and compares its aggregate steps
+with stored release metrics. The first successful full run uploads
+`guest-cycle-summary.json`. After accepting that release, copy its object into
+`guest-release-baseline.json.metrics["tests-zkevm@v0.6.2"].zisk` in an explicit
+manifest PR. Later gates validate its corpus digest and fixture count, then
+compare aggregate steps without re-executing the old ELF.
+
 ## Real proof gate
 
 A successful `ziskemu` run proves that the guest completed with the expected
