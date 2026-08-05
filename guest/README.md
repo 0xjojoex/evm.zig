@@ -1,58 +1,21 @@
-# zkVM guest checks
+# zkVM guests
+
+The stateless validator compiles to an RV64 ELF for ZisK and SP1. Both
+backends share the `zkvm_accelerators.h` ABI and the same shape: the vendor
+static library owns `_start`, Zig exports `main`, and no Rust guest wrapper is
+involved.
+
+## Building
 
 `guest-zisk` builds the selected payload as a ZisK RV64 ELF. A real
 `libziskos_staticlib.a` provider is required:
 
 ```sh
-zig build guest-zisk -Dguest-payload=basic -Doptimize=ReleaseFast \
+zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 ```
 
-Every payload allocates from a fixed buffer whose capacity is chosen at artifact
-build time with `-Dguest-heap-bytes=<bytes>`, defaulting to 32 MiB. This applies
-to both guest backends and to the native payload tests. The `stateless-ere`
-payload uses the unmetered allocator by default; add `-Dguest-heap-metrics=true`
-to meter peak heap usage and export the `evmz_guest_heap_capacity_bytes` and
-`evmz_guest_heap_peak_used_bytes` diagnostic symbols. Heap metering is
-independent of profile tags and changes the guest execution-step count.
-
-The `stateless-ere` payload decodes `schema_id || payload` input, where the
-two-byte id packs `fork_index || revision`. `-Dstateless-schema=0x1501`
-(repeatable) picks which ids the build's router accepts; unset enables every
-schema evmz implements. Pin it explicitly for a shipped guest: each enabled fork
-compiles its own specialized `Validator` into the ELF, and an id the router
-cannot resolve is a compile error rather than a runtime rejection.
-
-ZisK separately defaults to a 48 MiB total RAM envelope, set with
-`-Dguest-zisk-ram-bytes=<bytes>`. The envelope holds the guest's data and bss,
-then the payload heap, then a 1 MiB stack, and the remainder is ZisKOS heap —
-which the linker script asserts is at least 8 MiB. A payload heap therefore has
-to stay roughly 9 MiB under the envelope, so the 48 MiB default admits just
-under 39 MiB of heap; anything above that needs a larger envelope. Both bounds
-are enforced by the linker script, which unlike the build script knows the
-guest's actual data and bss sizes.
-
-The ERE RAM top can be matched while retaining Evmz's `0xA0030000` RAM origin
-with `-Dguest-zisk-ram-bytes=536674304`; this is a diagnostic envelope, not
-required for wire or execution correctness.
-
-These defaults close the pinned `tests-zkevm@v0.6.2` capacity case. They are a
-conformance baseline, not a production-mainnet memory claim. Size a deployment
-artifact from metered replay of its real witness/block workload and retain an
-explicit failure when that artifact's fixed capacity is exceeded.
-
-The stateless validator builds one authenticated state/storage catalog during
-witness ingest, executes through BAL-bound dense state, and commits dirty paths
-through a block-local occurrence engine. `TrackedValidator` remains the
-explicit indexed-proof oracle for differential diagnostics.
-
-## SP1 execute-only backend
-
-SP1 v6.3.1 is the second guest backend. It uses the same
-`zkvm_accelerators.h` ABI and vendor-static-library shape as ZisK: SP1 owns
-`_start`, Zig exports `main`, and no Rust guest wrapper is involved.
-
-Download the released SDK and verify its pinned archive:
+For SP1 (v6.3.1), download the released SDK and verify its pinned archive:
 
 ```sh
 curl -fL \
@@ -66,7 +29,7 @@ tar -xzf /tmp/zkevm-sdk-v6.3.1.tar.gz -C /tmp
 Build or execute a payload with the released `libzkevm.a`:
 
 ```sh
-zig build guest-sp1 -Dguest-payload=basic -Doptimize=ReleaseFast \
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dsp1-staticlib=/tmp/zkevm-sdk-v6.3.1/libzkevm.a
 
 zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
@@ -75,29 +38,33 @@ zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dguest-output=/path/to/public-values.bin
 ```
 
-The host driver is locked to `sp1-core-executor` 6.3.1 and built on demand.
-It sends the entire private input as one raw SP1 hint chunk, requires exit code
-zero, writes unpadded public values, and reports deterministic instruction
-cycles. These are execute-only measurements, not proof cycles or proving time.
+The SP1 host driver is locked to `sp1-core-executor` 6.3.1 and built on
+demand. It reports deterministic execute-only instruction cycles — not proof
+cycles or proving time.
 
-SP1's executor accepts RV64IM but not atomic instructions. Because the guest is
-single-threaded, `guest/runtime/sp1/atomics.zig` supplies the six 64-bit atomic
-libcalls emitted by Zig as ordinary operations. Its exports are strong and
-override compiler-rt's weak ones, which matters because compiler-rt implements
-them with `@atomicLoad`/`@cmpxchg` and would recurse into the same libcalls on a
-target without the A extension. The rest of compiler-rt stays bundled; the guest
-needs `memcpy`, `memset`, and `memmove` from it.
+## Input schema
 
-The linker script keeps the payload heap as bare symbols rather than an output
-section. SP1's ELF loader walks each `PT_LOAD` by `p_memsz` and materializes a
-zero word per address past `p_filesz`, so an emitted 16 MiB heap section would
-add ~2M entries to the initial memory image on every run.
+The `stateless-ere` payload decodes `schema_id || payload` input, where the
+two-byte id packs `fork_index || revision`. `-Dstateless-schema=0x1501`
+(repeatable) picks which ids the build's router accepts; unset enables every
+schema evmz implements. Pin it explicitly for a shipped guest: each enabled
+fork compiles its own specialized `Validator` into the ELF, and an id the
+router cannot resolve is a compile error rather than a runtime rejection.
 
-`zkevm-ere-bench --engine sp1` emits the same ERE-shaped rows as the native
-and ZisK engines. Pass `--sp1-host`, `--sp1-elf`, and raw fixture paths. SP1
-public output is already raw, unlike ZisK's 256-byte public region. The SP1
-execution-cycles workflow archives those rows and publishes current-versus-main
-cycle and public-output tables in the Actions job summary.
+## Memory
+
+Every payload allocates from a fixed-capacity heap chosen at build time with
+`-Dguest-heap-bytes=<bytes>`, defaulting to 480 MiB. Add
+`-Dguest-heap-metrics=true` to meter peak heap usage; metering changes the
+guest execution-step count. ZisK additionally takes a total RAM envelope with
+`-Dguest-zisk-ram-bytes=<bytes>`, defaulting to end at ZisK's declared RAM
+top. The linker scripts enforce both bounds, and capacity is free: heap and
+envelope size change neither the ELF nor the step count.
+
+These defaults are a conformance envelope, not a production-mainnet memory
+claim. Size a deployment artifact from metered replay of its real
+witness/block workload, and retain an explicit failure when that fixed
+capacity is exceeded.
 
 ## Host semantic gate
 
@@ -108,152 +75,47 @@ guest:
 zig build test-evmz-zkvm --summary all
 ```
 
-This test command alone links a host-native implementation of every symbol in
-`zkvm_accelerators.h`. Its direct ABI vectors cover hashes, signatures,
-RIPEMD-160 padding, modexp, BN254, BLAKE2f, KZG, BLS12-381, status codes, and
-compact point shapes. The rest of the root suite then exercises the normal
-zkVM adapters against those semantics.
+This links a host-native implementation of every symbol in
+`zkvm_accelerators.h` and exercises the zkVM adapters against those
+semantics. The provider is a correctness test double, not a guest-performance
+model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 
-The provider is a correctness test double, not a guest-performance model. It
-is not imported by the public module or any guest payload; `guest-zisk` still
-requires the real `libziskos_staticlib.a`.
-
-## Source-tree A/B gate
-
-`guest-zisk-ab` builds the same self-contained payload from baseline and
-candidate source trees with the same Zig executable, provider, optimization
-mode, and emulator. It then:
-
-1. verifies byte-identical public output;
-2. requires a nonzero deterministic ZisK step count; and
-3. fails if the candidate uses more steps than the baseline.
-
-```sh
-zig build guest-zisk-ab -- \
-  --baseline-tree /path/to/baseline-worktree \
-  --candidate-tree . \
-  --ziskemu /path/to/ziskemu \
-  --ziskos-staticlib /path/to/libziskos_staticlib.a
-```
-
-The default canary is `basic`. Override it with one
-or more `--payload` arguments. `--report-only` prints regressions without
-failing while exploring a spike. `--global-cache-dir` and
-`--system-package-dir` let both trees share an offline Zig package cache.
-
-The reported number is a ZisK execution-step count, not static RV64
-instructions, proof-generation cycles, or prover wall time. Treat it as the
-guest-side complement to the host RSS and VM-loop benchmarks in
-[`bench/`](../bench/README.md). A representation optimization should normally
-improve or preserve both surfaces; an explicit product tradeoff should not be
-hidden behind a host-only improvement.
-
-## Published cross-guest scoreboard
-
-The complete guest field behind the two-row summary in the root README.
-Execute-only totals over the pinned 75-block Amsterdam `tests-zkevm` v0.6.2
-manifest (12 JSON files, 52 test objects). Lower is better. evmz uses its
-committed release configuration; peers use their published optimized defaults,
-including fat LTO and one codegen unit for the Reth and Ethrex SP1 builds. No
-peer artifact was rebuilt with evmz-specific flags.
-
-SP1 cycles:
-
-| Guest    | Correct |   Total cycles |  vs leader |
-| -------- | ------: | -------------: | ---------: |
-| **evmz** |   75/75 | **94,915,078** | **leader** |
-| Reth     |   75/75 |    134,914,894 |    +42.14% |
-| Ethrex   |   75/75 |    292,260,053 |   +207.92% |
-
-ZisK steps:
-
-| Guest    | Correct |    Total steps |  vs leader |
-| -------- | ------: | -------------: | ---------: |
-| **Reth** |   75/75 | **54,672,821** | **leader** |
-| evmz     |   75/75 |     56,995,060 |     +4.25% |
-| Zesu     |   75/75 |     76,314,637 |    +39.58% |
-| Ethrex   |   75/75 |    100,659,842 |    +84.11% |
-
-Cycles and steps are backend-specific instruction metrics and must not be
-compared across zkVMs. They are not proof cycles or proving time. These measure
-the complete stateless guest workload, not the EVM interpreter in isolation.
-
-### Snapshot
-
-- evmz `ee78731dc8b195a0e30460d1c5c09f40121979f6`, Zig `0.16.0`, `ReleaseFast`,
-  backend-specific RV64 target features with linker relaxation, frame pointers
-  omitted, fully relaxed external SP1 and ZisK provider archives, stripped ELF,
-  `.medium` code model.
-- Workload: Eth Act `zkevm-benchmark-workload`
-  `35fa24ebf007edd4c9d65bdc41b25cb5fd726a80`; ERE
-  `58ca85beaee2fa8acd31dbf33b90bb765aac9010`.
-- Reth and Ethrex guests: `ere-guests`
-  `a52609d4553405ab46d2dbda60dffd59b47e2082`. Zilkworm: official
-  `zilkworm-stateless` v0.2.5, commit `bd2638c`.
-- Host: Linux 6.8.0-110-generic, x86_64, 4-vCPU AMD EPYC Genoa, 7.6 GiB RAM.
-- Fixture manifest SHA-256
-  `fdd5f0e59e0343df0a569fcb04e1aa49ea4e7537b455236686573584da263e8b`.
-- Each of the eight backend/guest combinations ran twice. Pass 2 changed no
-  cycle or step count, correctness result, or public output.
-
-The integration patch that drives the guests is preserved at
-[`0xjojoex/zkevm-benchmark-workload@a7e2203a`](https://github.com/0xjojoex/zkevm-benchmark-workload/tree/a7e2203a2316d9a44254a8ebfe3f1d51c1baa744).
-
-## Devnet guest benchmark
+## Guest benchmark CI
 
 The `Guest benchmark` workflow is the single execute-only guest performance
-surface. ZisK is currently the only enabled backend; the SP1 job definition is
-retained but omitted from the matrix until its provider issue is resolved.
-Pull requests and pushes to `main` use the immutable 100-block
-`glamsterdam-devnet-7` snapshot in
-[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json).
-The ten SHA-256-pinned R2 batches cover blocks 115170 through 115269. A nightly
-ZisK run resolves the latest ten complete schema-v2 R2 batches and uploads that
-resolved manifest with the metrics, so discovery remains reproducible after
-the catalog moves.
-
-Correctness is the gate: every archive must match its catalog length and
-SHA-256, every fixture must execute, and every public output must match the
-fixture. Cycle changes never fail the workflow. When
+surface; ZisK is currently the only enabled backend. Pull requests and pushes
+to `main` replay the immutable 100-block `glamsterdam-devnet-7` snapshot in
+[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json),
+and a nightly run resolves the latest ten complete R2 batches. Correctness is
+the gate — every archive digest, execution, and public output must match —
+while cycle changes never fail the workflow. When
 [`../eest/fixtures/guest-release-baseline.json`](../eest/fixtures/guest-release-baseline.json)
-names immutable release ELFs, the same runner executes those exact ELFs on the
-same pinned corpus and reports aggregate and per-block deltas annotated with
-gas used and stateless-input size. Before
-the first guest release, the report labels the missing baseline and shows
-absolute cycles.
+names immutable release ELFs, the runner also reports aggregate and per-block
+deltas against them. ZisK steps and SP1 cycles stay separate metrics, and
+emulator execution duration is never treated as proving time.
 
-The workflow keeps backend measurements distinct. ZisK steps and SP1 cycles are
-not converted into one metric, and emulator execution duration is not treated
-as proving time. ZisK and SP1 retain their own pinned SDK/compiler setup while
-sharing corpus resolution, execution completeness, release-baseline semantics,
-reporting, and evidence retention.
+`zig build zkevm -- --executor zisk|sp1` runs the same ERE-shaped
+measurements locally; pass `--zisk-host`/`--zisk-elf` or
+`--sp1-host`/`--sp1-elf` and fixture paths.
 
-The R2 corpus is downloaded directly rather than stored in the repository's
-10 GiB Actions cache. Pull requests never save Zig or Rust build caches. Only
-successful `main` and scheduled runs may seed backend build caches for later
-restores.
+### Release gate
 
 Before publishing a guest release, manually dispatch the same workflow with
 `corpus=tests-zkevm` and `release_ref` set to the candidate commit on `main`.
 That mode verifies the full SHA-256-pinned `tests-zkevm@v0.6.2`
-`blockchain_tests` corpus in ZisK, requires every expected fixture row and exact
-upstream output, and reports aggregate steps without a regression threshold.
-The resolved evidence records the fixture archive digest, indexed test count,
-executable row count, and exact source commit; the workflow does not publish a
-release. Detailed per-block release deltas remain on the pinned 100-block devnet
-lane. The full gate executes only the candidate and compares its aggregate steps
-with stored release metrics. The first successful full run uploads
-`guest-cycle-summary.json`. After accepting that release, copy its object into
-`guest-release-baseline.json.metrics["tests-zkevm@v0.6.2"].zisk` in an explicit
-manifest PR. Later gates validate its corpus digest and fixture count, then
-compare aggregate steps without re-executing the old ELF.
+`blockchain_tests` corpus in ZisK, requires exact upstream output for every
+fixture row, and uploads `guest-cycle-summary.json` with the candidate ELF
+SHA-256. After accepting the release, copy its object into
+`guest-release-baseline.json.metrics["tests-zkevm@v0.6.2"].zisk` in an
+explicit manifest PR; later gates validate the corpus digest and compare
+aggregate steps without re-executing the old ELF.
 
 ## Real proof gate
 
 A successful `ziskemu` run proves that the guest completed with the expected
-public output; it does not prove that the execution trace satisfies the prover
-constraints. Preflight an external-input guest and its framed input before
-starting a long proof:
+public output; it does not prove that the execution trace satisfies the
+prover constraints. Preflight an external-input guest and its framed input
+before starting a long proof:
 
 ```sh
 cargo-zisk-dev verify-constraints \
@@ -275,22 +137,14 @@ cargo-zisk prove \
 cargo-zisk verify --proof /path/to/proof.bin
 ```
 
-Build the persistent benchmark host with the same pinned ZisK revision:
+The persistent ZisK benchmark host builds with the same pinned revision:
 
 ```sh
 cargo build --release --manifest-path guest/runtime/zisk/host/Cargo.toml
 ```
 
-Pass the resulting binary with `--zisk-host`. One host process owns one
-transpiled `ZiskRom` for the entire runner invocation; each fixture still gets
-a fresh emulator and guest memory. `execution_duration` is measured inside the
-host around input framing, emulator construction, execution, and public-output
-collection. It excludes host startup, ELF reading, and ELF-to-ROM conversion.
-Keep emulator execution steps, prover wall time, and standalone verification
-time as separate measurements.
-
 The `stateless-ere` guest publishes the raw SSZ `StatelessValidationResult`,
-matching `ere-guests` and `zkevm-benchmark-workload`. ZisK pads that result to
-its 256-byte public-output region; the bytes after the SSZ result must be zero.
-Any guest ELF or proof produced with a different public-output representation
+matching `ere-guests` and `zkevm-benchmark-workload`. ZisK pads that result
+to its 256-byte public-output region, and the bytes after the SSZ result must
+be zero; a guest ELF or proof with a different public-output representation
 is not compatible with this contract.

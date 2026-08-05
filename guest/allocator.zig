@@ -14,11 +14,15 @@ const NativeHeap = if (guest_options.backend != .native) struct {
 } else struct {
     var backing: ?[]align(16) u8 = null;
 
+    /// Mapped rather than allocated. A safe-build `alignedAlloc` memsets the
+    /// whole capacity to `undefined`, which materialises every page of a heap
+    /// sized for a guest envelope; the payload only ever touches what it hands
+    /// out. Subranges still get normal allocator initialisation.
     fn buffer() []u8 {
         if (backing) |existing| return existing;
-        const allocated = std.heap.page_allocator.alignedAlloc(u8, .@"16", guest_options.heap_bytes) catch {
-            @panic("failed to allocate native guest heap");
-        };
+        const mapped = std.heap.PageAllocator.map(guest_options.heap_bytes, .@"16") orelse
+            @panic("failed to map native guest heap");
+        const allocated: []align(16) u8 = @alignCast(mapped[0..guest_options.heap_bytes]);
         backing = allocated;
         return allocated;
     }

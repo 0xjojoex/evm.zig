@@ -15,8 +15,8 @@ zig build eest-tx
 Every runner is a subcommand of one `evmz-eest` binary (`src/main.zig`
 dispatching into `src/cmd/`), and each `zig build` step above is an alias for
 one of them — `zig build eest` runs `evmz-eest state`. Run `evmz-eest --help`
-for the command list. Two runners stay separate executables: `ssz-conformance`
-builds without evmz, and `zkevm-ere-bench` builds at `-Dbench-optimize`.
+for the command list. One runner stays a separate executable: `ssz-conformance`
+builds without evmz.
 
 The default state-test corpus comes from `eest.lock`, currently
 `tests-glamsterdam-devnet@v7.2.0` from `ethereum/execution-specs` for Amsterdam
@@ -114,9 +114,36 @@ zig build zkevm-mutations
 
 The ERE adapter uses the same raw SSZ output as the fixture and upstream guest
 programs. `zkevm-input` extracts raw input or ZisK-framed stdin together with
-the expected public output; `zkevm-ere` runs the native adapter, and
-`zkevm-ere-bench` emits ERE-compatible metrics. ZisK framing pads the raw
-result to 256 bytes without hashing it.
+the expected public output, and `zkevm-ere` runs the native adapter on one
+input. ZisK framing pads the raw result to 256 bytes without hashing it.
+
+`zkevm --executor zisk|sp1` runs each block's `statelessInputBytes` on a zkVM
+guest instead of natively. The executor strips guest framing before comparison,
+so every executor is judged against the same `statelessOutputBytes` and one set
+of fixture semantics — `expectException`, malformed-input handling, the report
+categories — covers all three. Add `--output-folder` to also emit one
+ERE `BenchmarkRun` row per block for `scripts/report-guest-cycles.py`.
+
+A guest writes into a fixed-width public region and an encoded
+`StatelessValidationResult` is variable-size, so the meaningful length cannot be
+recovered from the region alone; the executor takes it from the fixture's own
+expected output and requires the remainder of the region to be zero. A guest
+that fails before producing a result writes an `EVMZERR1` marker instead, which
+is reported as a crash rather than as a wrong output.
+
+Guest runs share one session across every root, so a guest host child converts
+the ELF to a ROM once per worker rather than once per corpus batch. Each worker owns one host child process, and
+that child converts the guest ELF to a ZisK ROM once at startup — roughly 0.4s,
+against ~10ms of execution for a typical fixture — so `--jobs N` pays that setup
+N times and then amortises it across every fixture the worker handles.
+
+`fixtures/guest-known-failures.json` lists fixtures expected to fail on a pinned
+backend, with the upstream cause. `report-guest-cycles.py --known-failures`
+excuses them, and fails if any of them passes or disappears from the corpus — so
+a backend upgrade that fixes one forces the entry to be removed rather than
+letting the list rot. `--report-only` withholds the fixture-failure exit code so
+those rows reach the comparison; configuration, I/O and host-startup failures
+still fail immediately, as does an empty run.
 
 `--report` selects a serial run and writes deterministic JSON with one record
 per runnable block. Records include revision, fixture family, validation status,

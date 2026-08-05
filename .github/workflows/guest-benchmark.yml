@@ -38,11 +38,6 @@ on:
         required: true
         default: main
         type: string
-      zisk_max_steps:
-        description: Maximum ZisK steps per block
-        required: true
-        default: "70000000000"
-        type: string
 
 permissions:
   contents: read
@@ -78,7 +73,6 @@ jobs:
       ZISK_RUST_TOOLCHAIN: zisk-1.0.0
       SP1_VERSION: v6.3.1
       SP1_SDK_SHA256: ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8
-      MAX_STEPS: ${{ inputs.zisk_max_steps || '70000000000' }}
 
     steps:
       - name: Checkout
@@ -93,8 +87,10 @@ jobs:
       - name: Require release source on main
         if: inputs.corpus == 'tests-zkevm'
         run: |
-          git show-ref --verify --quiet refs/remotes/origin/main
-          git merge-base --is-ancestor "${SOURCE_COMMIT}" refs/remotes/origin/main
+          # `release_ref` is normally a commit, which checkout fetches as a bare
+          # object without any remote-tracking branch. Fetch main explicitly.
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 
       - name: Resolve runner paths
         run: |
@@ -196,10 +192,12 @@ jobs:
             fixture_files="$(find "${blockchain_root}" -type f -name '*.json' | wc -l)"
             indexed_files="$(jq '[.test_cases[] | select(.format == "blockchain_test") | .json_path] | unique | length' "${index}")"
             indexed_tests="$(jq '[.test_cases[] | select(.format == "blockchain_test")] | length' "${index}")"
+            # Every block carrying the key is executed, including an empty
+            # witness, so the expected row count must not filter on length.
             fixture_count="$({
               find "${blockchain_root}" -type f -name '*.json' -print0 \
                 | xargs -0 -n 64 jq -r \
-                  '[.. | objects | .statelessInputBytes? | select(type == "string" and length > 2)] | length'
+                  '[.. | objects | .statelessInputBytes? | select(type == "string")] | length'
             } | awk '{ total += $1 } END { print total + 0 }')"
             test "${fixture_files}" -gt 0
             test "${fixture_files}" -eq "${indexed_files}"
@@ -249,11 +247,16 @@ jobs:
               "${BASELINE_MANIFEST}" > "${summary}"
             current_digest="$(jq -r .corpus_digest "${RESOLVED_MANIFEST}")"
             metric="$([[ "${BACKEND}" == zisk ]] && echo steps || echo cycles)"
+            # When the manifest names a release ELF, the stored metrics must
+            # have come from that exact ELF.
+            artifact_sha="$(jq -r --arg backend "${BACKEND}" \
+              '.artifacts[$backend].elf_sha256 // "" | sub("^0x"; "")' "${BASELINE_MANIFEST}")"
             if jq -e \
               --arg backend "${BACKEND}" \
               --arg metric "${metric}" \
               --arg corpus "${CORPUS_ID}" \
               --arg digest "${current_digest}" \
+              --arg artifact_sha "${artifact_sha}" \
               --argjson fixture_count "${FIXTURE_COUNT}" \
               '.schema_version == 1
                 and .backend == $backend
@@ -266,7 +269,10 @@ jobs:
                 and (.total | type == "number")
                 and .total >= 0
                 and (.source_ref | type == "string")
-                and (.source_ref | length > 0)' \
+                and (.source_ref | length > 0)
+                and (.elf_sha256 | type == "string")
+                and (.elf_sha256 | test("^[0-9a-f]{64}$"))
+                and ($artifact_sha == "" or .elf_sha256 == $artifact_sha)' \
               "${summary}" >/dev/null; then
               available=true
               source_ref="$(jq -r .source_ref "${summary}")"
@@ -428,16 +434,17 @@ jobs:
             test "${#fixture_roots[@]}" -eq "${expected_batches}"
           fi
           args=(
-            --engine "${BACKEND}"
+            --executor "${BACKEND}"
+            --jobs "$(( $(nproc) > 16 ? 16 : $(nproc) ))"
             --report-only
             --output-folder "${RESULTS_ROOT}"
           )
           if [[ "${BACKEND}" == zisk ]]; then
-            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${CANDIDATE_ELF}" --zisk-max-steps "${MAX_STEPS}")
+            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${CANDIDATE_ELF}")
           else
             args+=(--sp1-host "${GUEST_HOST}" --sp1-elf "${CANDIDATE_ELF}" --sp1-work-dir "${RUNNER_TEMP}/sp1-candidate")
           fi
-          zig build zkevm-ere-bench --summary all -- "${args[@]}" "${fixture_roots[@]}"
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" "${fixture_roots[@]}"
 
       - name: Resolve release baseline
         if: env.CORPUS_MODE != 'tests-zkevm'
@@ -469,16 +476,17 @@ jobs:
           expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
           test "${#fixture_roots[@]}" -eq "${expected_batches}"
           args=(
-            --engine "${BACKEND}"
+            --executor "${BACKEND}"
+            --jobs "$(( $(nproc) > 16 ? 16 : $(nproc) ))"
             --report-only
             --output-folder "${BASELINE_ROOT}"
           )
           if [[ "${BACKEND}" == zisk ]]; then
-            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${RUNNER_TEMP}/release-baseline.elf" --zisk-max-steps "${MAX_STEPS}")
+            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${RUNNER_TEMP}/release-baseline.elf")
           else
             args+=(--sp1-host "${GUEST_HOST}" --sp1-elf "${RUNNER_TEMP}/release-baseline.elf" --sp1-work-dir "${RUNNER_TEMP}/sp1-baseline")
           fi
-          zig build zkevm-ere-bench --summary all -- "${args[@]}" "${fixture_roots[@]}"
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" "${fixture_roots[@]}"
 
       - name: Compare correctness and cycles
         id: comparison
@@ -487,11 +495,13 @@ jobs:
           args=(
             --backend "${BACKEND}"
             --current "${RESULTS_ROOT}"
+            --elf "${CANDIDATE_ELF}"
             --output guest-cycle-report.md
             --summary-output guest-cycle-summary.json
             --current-ref "${SOURCE_COMMIT}"
             --fixtures "${CORPUS_ID}"
             --corpus-manifest "${RESOLVED_MANIFEST}"
+            --known-failures eest/fixtures/guest-known-failures.json
             --zisk "${ZISK_VERSION} (${ZISK_COMMIT})"
             --zisk-rust "${ZISK_RUST_TOOLCHAIN}"
             --sp1 "${SP1_VERSION}"

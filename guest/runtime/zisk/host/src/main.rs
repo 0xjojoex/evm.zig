@@ -18,7 +18,6 @@ const RESPONSE_HEADER_BYTES: usize = 32;
 #[derive(Default)]
 struct Options {
     elf: Option<PathBuf>,
-    max_steps: Option<u64>,
 }
 
 struct Success {
@@ -30,7 +29,6 @@ struct Success {
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_args()?;
     let elf_path = options.elf.ok_or("missing --elf PATH")?;
-    let max_steps = options.max_steps.ok_or("missing --max-steps N")?;
     let elf = fs::read(elf_path)?;
     let rom = Riscv2zisk::new(&elf)
         .run()
@@ -44,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     writer.flush()?;
 
     while let Some(input) = read_request(&mut reader)? {
-        match execute(&rom, input, max_steps) {
+        match execute(&rom, input) {
             Ok(success) => write_response(
                 &mut writer,
                 0,
@@ -59,13 +57,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn execute(rom: &ZiskRom, input: Vec<u8>, max_steps: u64) -> Result<Success, String> {
+fn execute(rom: &ZiskRom, input: Vec<u8>) -> Result<Success, String> {
     let start = Instant::now();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let options = EmuOptions {
-            max_steps,
-            ..EmuOptions::default()
-        };
+        let options = EmuOptions::default();
         let mut emu = Emu::new(rom);
         emu.ctx = emu.create_emu_context(frame_input(&input), &options);
         emu.run_fast(&options);
@@ -152,15 +147,6 @@ fn parse_args() -> Result<Options, Box<dyn Error>> {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--elf") => options.elf = Some(args.next().ok_or("--elf requires PATH")?.into()),
-            Some("--max-steps") => {
-                options.max_steps = Some(
-                    args.next()
-                        .ok_or("--max-steps requires N")?
-                        .to_str()
-                        .ok_or("--max-steps must be UTF-8")?
-                        .parse()?,
-                )
-            }
             _ => return Err(format!("unknown argument: {}", arg.to_string_lossy()).into()),
         }
     }
@@ -202,7 +188,7 @@ mod tests {
 
     #[test]
     fn emulator_panics_become_request_errors() {
-        let reason = match execute(&ZiskRom::default(), Vec::new(), 1) {
+        let reason = match execute(&ZiskRom::default(), Vec::new()) {
             Ok(_) => panic!("empty ROM unexpectedly executed"),
             Err(reason) => reason,
         };

@@ -17,7 +17,7 @@ pub const FileMatch = union(enum) {
 pub fn runWorkers(
     io: std.Io,
     allocator: std.mem.Allocator,
-    path: []const u8,
+    paths: []const []const u8,
     workers: anytype,
     file_match: FileMatch,
     comptime workerFn: anytype,
@@ -28,7 +28,7 @@ pub fn runWorkers(
         .io = io,
         .allocator = allocator,
         .queue = &queue,
-        .path = path,
+        .paths = paths,
         .file_match = file_match,
     };
     var producer_group: std.Io.Group = .init;
@@ -61,16 +61,19 @@ const Producer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     queue: *std.Io.Queue([]u8),
-    path: []const u8,
+    paths: []const []const u8,
     file_match: FileMatch,
     err: ?anyerror = null,
 
     fn run(self: *Producer) std.Io.Cancelable!void {
         defer self.queue.close(self.io);
-        enqueuePath(self.io, self.allocator, self.queue, self.path, self.file_match) catch |err| {
-            if (err == error.Canceled) return error.Canceled;
-            self.err = err;
-        };
+        for (self.paths) |path| {
+            enqueuePath(self.io, self.allocator, self.queue, path, self.file_match) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                self.err = err;
+                return;
+            };
+        }
     }
 };
 

@@ -10,11 +10,6 @@ const Secp256k1Backend = enum { std, libsecp256k1 };
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const bench_optimize = b.option(
-        std.builtin.OptimizeMode,
-        "bench-optimize",
-        "Optimization mode for EEST benchmark-style runners",
-    ) orelse .ReleaseFast;
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
     const native_secp256k1 = b.option(Secp256k1Backend, "native-secp256k1", "Native secp256k1 backend") orelse .std;
@@ -31,15 +26,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).module("snappyz");
-
-    const bench_evmz_dep = b.dependency("evmz", .{
-        .target = target,
-        .optimize = bench_optimize,
-        .profile = profile,
-        .@"native-keccak" = native_keccak,
-        .@"native-secp256k1" = native_secp256k1,
-    });
-    const bench_evmz_mod = bench_evmz_dep.module("evmz");
 
     {
         const eest_tests = b.addTest(.{
@@ -66,17 +52,6 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(ssz_conformance_exe);
         addStep(b, ssz_conformance_exe, "ssz-conformance", "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures", &.{});
-    }
-
-    {
-        // The ERE benchmark runner is its own executable so it can build at
-        // `bench_optimize` against a matching evmz; everything else shares one.
-        const ere_bench_exe = b.addExecutable(.{
-            .name = "evmz-zkevm-ere-bench",
-            .root_module = eestModule(b, "src/ere_bench_main.zig", target, bench_optimize, bench_evmz_mod),
-        });
-        b.installArtifact(ere_bench_exe);
-        addStep(b, ere_bench_exe, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", &.{});
     }
 
     {

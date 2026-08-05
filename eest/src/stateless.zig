@@ -2,6 +2,8 @@ const std = @import("std");
 const evmz = @import("evmz");
 const fixture_common = @import("fixture.zig");
 const stateless_report = @import("stateless_report.zig");
+const stateless_executor = @import("stateless_executor.zig");
+const stateless_metrics = @import("stateless_metrics.zig");
 
 const JsonValue = fixture_common.JsonValue;
 const asArray = fixture_common.asArray;
@@ -10,6 +12,7 @@ const jsonString = fixture_common.jsonString;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
 
 pub const Report = stateless_report.Report;
+pub const Target = stateless_executor.Target;
 
 pub const Options = struct {
     test_filter: ?[]const u8 = null,
@@ -19,6 +22,26 @@ pub const Options = struct {
     classify_failures: bool = false,
     oracle_differential: bool = false,
     report: ?*Report = null,
+    executor: stateless_executor.Options = .{},
+    /// When set, one ERE `BenchmarkRun` row per executed block lands here.
+    output_folder: ?[]const u8 = null,
+    /// Corpus roots, so rows report a source path relative to the one that
+    /// contains them.
+    source_roots: []const []const u8 = &.{},
+};
+
+/// One executor per worker. A guest host is a child process behind a single
+/// pipe pair, so it cannot be shared.
+pub const Context = struct {
+    executor: stateless_executor.Executor,
+
+    pub fn init(io: std.Io, options: Options) !Context {
+        return .{ .executor = try stateless_executor.Executor.init(io, options.executor) };
+    }
+
+    pub fn deinit(self: *Context) void {
+        self.executor.deinit();
+    }
 };
 
 pub const FailReason = enum(u8) {
@@ -29,6 +52,7 @@ pub const FailReason = enum(u8) {
     unexpected_success,
     unexpected_failure,
     oracle_mismatch,
+    executor_crash,
 };
 
 pub const Summary = struct {
@@ -56,38 +80,57 @@ pub const Summary = struct {
     }
 };
 
-pub fn runFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
+pub fn runFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    options: Options,
+    context: *Context,
+) !Summary {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512 * 1024 * 1024));
     defer allocator.free(bytes);
-    var summary = try runSlice(allocator, bytes, options, path);
+    var summary = try runSlice(io, allocator, bytes, options, path, context);
     summary.files = 1;
     return summary;
 }
 
-pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Options, path: []const u8) !Summary {
+pub fn runSlice(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: Options,
+    path: []const u8,
+    context: *Context,
+) !Summary {
     var parsed = try std.json.parseFromSlice(JsonValue, allocator, bytes, .{ .parse_numbers = false });
     defer parsed.deinit();
 
     var root = asObject(parsed.value) orelse return error.ExpectedObject;
     var summary = Summary{};
+    var names = stateless_metrics.Names.init(allocator);
+    defer names.deinit();
+
     var it = root.iterator();
     while (it.next()) |entry| {
         const test_name = entry.key_ptr.*;
         if (options.test_filter) |needle| {
             if (std.mem.indexOf(u8, test_name, needle) == null) continue;
         }
-        try runFixture(allocator, path, test_name, entry.value_ptr.*, options, &summary);
+        try runFixture(io, allocator, path, test_name, entry.value_ptr.*, options, context, &names, &summary);
         if (options.limit > 0 and summary.fixtures >= options.limit) break;
     }
     return summary;
 }
 
 fn runFixture(
+    io: std.Io,
     allocator: std.mem.Allocator,
     path: []const u8,
     test_name: []const u8,
     fixture: JsonValue,
     options: Options,
+    context: *Context,
+    names: *stateless_metrics.Names,
     summary: *Summary,
 ) !void {
     var reporter = Reporter{ .options = options, .source = path, .test_name = test_name };
@@ -97,6 +140,10 @@ fn runFixture(
         return;
     };
     reporter.revision = if (object.get("network")) |value| jsonString(value) orelse "unknown" else "unknown";
+    const chain_id = chain: {
+        const config = asObject(object.get("config") orelse break :chain 0) orelse break :chain 0;
+        break :chain (try parseOptionalU64(config.get("chainid"))) orelse 0;
+    };
     const blocks = asArray(object.get("blocks") orelse {
         try reporter.malformed("missing_blocks", null);
         summary.countFail(.malformed_fixture);
@@ -128,7 +175,33 @@ fn runFixture(
         summary.fixtures += 1;
 
         const expected_success = block.get("expectException") == null;
-        const result = evmz.stateless.wire.validateStatelessBytes(allocator, input_bytes) catch |err| {
+
+        // Parsed before execution: a guest writes into a fixed-width public
+        // region, and only the fixture knows how much of it is meaningful.
+        const expected_output: ?[]u8 = if (block.get("statelessOutputBytes")) |expected_value|
+            parseBytesFromValue(allocator, expected_value) catch {
+                try reporter.add(.{
+                    .category = .fixture_spec_version_skew,
+                    .validation_status = "malformed_stateless_output_bytes",
+                    .difference = .fixture_shape,
+                    .expected_success = expected_success,
+                });
+                summary.countFail(.malformed_fixture);
+                continue;
+            }
+        else
+            null;
+        defer if (expected_output) |bytes| allocator.free(bytes);
+
+        const name = try names.take(test_name, block_index);
+        defer allocator.free(name);
+
+        var outcome = context.executor.execute(
+            allocator,
+            input_bytes,
+            if (expected_output) |bytes| bytes.len else 0,
+            name,
+        ) catch |err| {
             if (options.verbose) std.debug.print("  validation error: {s}\n", .{@errorName(err)});
             if (options.classify_failures) printValidationClassification(path, test_name, block_index, expected_success, err);
             try reporter.add(.{
@@ -140,97 +213,99 @@ fn runFixture(
             summary.countFail(.validation_error);
             continue;
         };
-        defer allocator.free(result);
+        defer outcome.deinit(allocator);
 
-        // Expected-invalid fixtures often contain several independent faults.
-        // Their internal rejection priority is not part of the public wire
-        // contract, so use focused mutations to compare typed failure status.
-        if (options.oracle_differential and expected_success) {
-            switch (try compareOracle(allocator, input_bytes)) {
-                .skipped => {},
-                .matched => summary.oracle_compared += 1,
-                .mismatch => |mismatch| {
-                    summary.oracle_compared += 1;
-                    printOracleMismatch(path, test_name, block_index, mismatch);
+        const output_matched = classify: {
+            const result = switch (outcome) {
+                .crashed => |crashed| {
                     try reporter.add(.{
                         .category = .implementation_mismatch,
-                        .validation_status = "dense_tracked_mismatch",
-                        .difference = .oracle_result,
+                        .validation_status = crashed.reason,
+                        .difference = .execution_error,
                         .expected_success = expected_success,
                     });
-                    summary.countFail(.oracle_mismatch);
-                    continue;
+                    summary.countFail(.executor_crash);
+                    break :classify false;
                 },
-            }
-        }
+                .completed => |completed| completed.output,
+            };
 
-        if (block.get("statelessOutputBytes")) |expected_value| {
-            const expected_output = parseBytesFromValue(allocator, expected_value) catch {
+            // Expected-invalid fixtures often contain several independent faults.
+            // Their internal rejection priority is not part of the public wire
+            // contract, so use focused mutations to compare typed failure status.
+            // The oracle is an in-process comparison, so it only says anything
+            // about the native target.
+            if (options.oracle_differential and expected_success and options.executor.target == .native) {
+                switch (try compareOracle(allocator, input_bytes)) {
+                    .skipped => {},
+                    .matched => summary.oracle_compared += 1,
+                    .mismatch => |mismatch| {
+                        summary.oracle_compared += 1;
+                        printOracleMismatch(path, test_name, block_index, mismatch);
+                        try reporter.add(.{
+                            .category = .implementation_mismatch,
+                            .validation_status = "dense_tracked_mismatch",
+                            .difference = .oracle_result,
+                            .expected_success = expected_success,
+                        });
+                        summary.countFail(.oracle_mismatch);
+                        break :classify false;
+                    },
+                }
+            }
+
+            if (expected_output) |expected| {
+                if (!std.mem.eql(u8, result, expected)) {
+                    if (options.verbose) printMismatch(allocator, input_bytes, result, expected, options.trace_mismatch);
+                    if (options.classify_failures) printOutputClassification(allocator, path, test_name, block_index, input_bytes, result, expected);
+                    try reportOutputMismatch(allocator, reporter, expected_success, input_bytes, result, expected);
+                    summary.countFail(.output_mismatch);
+                    break :classify false;
+                }
+                const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch null;
                 try reporter.add(.{
-                    .category = .fixture_spec_version_skew,
-                    .validation_status = "malformed_stateless_output_bytes",
-                    .difference = .fixture_shape,
+                    .category = .pass,
+                    .validation_status = if (actual) |value| validationStatus(allocator, input_bytes, value.successful_validation) else "valid",
+                    .difference = .none,
+                    .expected_success = expected_success,
+                    .actual_success = if (actual) |value| value.successful_validation else null,
+                });
+                summary.passed += 1;
+                break :classify true;
+            }
+
+            const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch {
+                try reporter.add(.{
+                    .category = .adapter_wire_mismatch,
+                    .validation_status = "actual_decode_error",
+                    .difference = .result_encoding,
                     .expected_success = expected_success,
                 });
-                summary.countFail(.malformed_fixture);
-                continue;
+                summary.countFail(.missing_stateless_output);
+                break :classify false;
             };
-            defer allocator.free(expected_output);
-            if (!std.mem.eql(u8, result, expected_output)) {
-                if (options.verbose) printMismatch(allocator, input_bytes, result, expected_output, options.trace_mismatch);
-                if (options.classify_failures) printOutputClassification(allocator, path, test_name, block_index, input_bytes, result, expected_output);
-                try reportOutputMismatch(
-                    allocator,
-                    reporter,
-                    expected_success,
-                    input_bytes,
-                    result,
-                    expected_output,
-                );
-                summary.countFail(.output_mismatch);
-                continue;
+            if (actual.successful_validation and !expected_success) {
+                try reporter.add(.{
+                    .category = .implementation_mismatch,
+                    .validation_status = "valid",
+                    .difference = .successful_validation,
+                    .expected_success = expected_success,
+                    .actual_success = true,
+                });
+                summary.countFail(.unexpected_success);
+                break :classify false;
             }
-            const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch null;
-            try reporter.add(.{
-                .category = .pass,
-                .validation_status = if (actual) |value| validationStatus(allocator, input_bytes, value.successful_validation) else "valid",
-                .difference = .none,
-                .expected_success = expected_success,
-                .actual_success = if (actual) |value| value.successful_validation else null,
-            });
-            summary.passed += 1;
-            continue;
-        }
-
-        const actual = evmz.stateless.wire.StatelessValidationResult.decode(allocator, result) catch {
-            try reporter.add(.{
-                .category = .adapter_wire_mismatch,
-                .validation_status = "actual_decode_error",
-                .difference = .result_encoding,
-                .expected_success = expected_success,
-            });
-            summary.countFail(.missing_stateless_output);
-            continue;
-        };
-        if (actual.successful_validation and !expected_success) {
-            try reporter.add(.{
-                .category = .implementation_mismatch,
-                .validation_status = "valid",
-                .difference = .successful_validation,
-                .expected_success = expected_success,
-                .actual_success = true,
-            });
-            summary.countFail(.unexpected_success);
-        } else if (!actual.successful_validation and expected_success) {
-            try reporter.add(.{
-                .category = .implementation_mismatch,
-                .validation_status = validationStatus(allocator, input_bytes, false),
-                .difference = .successful_validation,
-                .expected_success = expected_success,
-                .actual_success = false,
-            });
-            summary.countFail(.unexpected_failure);
-        } else {
+            if (!actual.successful_validation and expected_success) {
+                try reporter.add(.{
+                    .category = .implementation_mismatch,
+                    .validation_status = validationStatus(allocator, input_bytes, false),
+                    .difference = .successful_validation,
+                    .expected_success = expected_success,
+                    .actual_success = false,
+                });
+                summary.countFail(.unexpected_failure);
+                break :classify false;
+            }
             try reporter.add(.{
                 .category = .pass,
                 .validation_status = validationStatus(allocator, input_bytes, actual.successful_validation),
@@ -239,8 +314,42 @@ fn runFixture(
                 .actual_success = actual.successful_validation,
             });
             summary.passed += 1;
+            break :classify true;
+        };
+
+        if (options.output_folder) |folder| {
+            const source_path = try stateless_metrics.relativeSourcePath(allocator, path, options.source_roots);
+            defer allocator.free(source_path);
+            try stateless_metrics.write(io, allocator, folder, options.executor.target, name, .{
+                .original_test_name = test_name,
+                .source_path = source_path,
+                .block_index = block_index,
+                .network = reporter.revision,
+                .chain_id = chain_id,
+                .block_number = try blockNumber(block),
+                .block_used_gas = try blockUsedGas(block),
+            }, outcome, output_matched);
         }
     }
+}
+
+fn blockNumber(block: std.json.ObjectMap) !?u64 {
+    const header = if (block.get("blockHeader")) |value| asObject(value) else null;
+    const value = if (header) |object| object.get("number") orelse block.get("blocknumber") else block.get("blocknumber");
+    return parseOptionalU64(value);
+}
+
+fn blockUsedGas(block: std.json.ObjectMap) !?u64 {
+    const header = asObject(block.get("blockHeader") orelse return null) orelse return null;
+    return parseOptionalU64(header.get("gasUsed"));
+}
+
+fn parseOptionalU64(value: ?JsonValue) !?u64 {
+    const found = value orelse return null;
+    const text = jsonString(found) orelse return null;
+    const trimmed = if (std.mem.startsWith(u8, text, "0x")) text[2..] else text;
+    const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else 10;
+    return std.fmt.parseInt(u64, trimmed, base) catch null;
 }
 
 const OracleMismatch = struct {
@@ -440,9 +549,17 @@ test "stateless zkevm runner compares canonical SSZ bytes" {
     , .{ input_hex, output_hex });
     defer std.testing.allocator.free(fixture);
 
-    const summary = try runSlice(std.testing.allocator, fixture, .{
-        .oracle_differential = true,
-    }, "smoke.json");
+    const options = Options{ .oracle_differential = true };
+    var context = try Context.init(std.testing.io, options);
+    defer context.deinit();
+    const summary = try runSlice(
+        std.testing.io,
+        std.testing.allocator,
+        fixture,
+        options,
+        "smoke.json",
+        &context,
+    );
     try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
