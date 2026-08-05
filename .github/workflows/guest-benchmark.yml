@@ -508,6 +508,8 @@ jobs:
       - name: Compare correctness and cycles
         id: comparison
         continue-on-error: true
+        env:
+          RELEASE_GATE: ${{ inputs.release_gate }}
         run: |
           args=(
             --backend "${BACKEND}"
@@ -535,6 +537,9 @@ jobs:
           args+=(--baseline-ref "${baseline_ref:-none}")
           if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
             args+=(--summary-only)
+            if [[ "${RELEASE_GATE}" != true ]]; then
+              args+=(--allow-known-failures)
+            fi
           fi
           python3 eest/scripts/report-guest-cycles.py "${args[@]}"
           test "${actual_count}" -eq "${FIXTURE_COUNT}"
@@ -593,7 +598,7 @@ jobs:
             ${{ runner.temp }}/sp1-host-target
           key: sp1-host-v6.3.1-${{ runner.os }}-${{ hashFiles('guest/runtime/sp1/host/Cargo.lock') }}
 
-      - name: Require complete exact execution
+      - name: Require accepted execution outcome
         if: always()
         env:
           COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}

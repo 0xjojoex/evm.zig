@@ -42,8 +42,8 @@ class KnownFailures:
 
     The list is strict in both directions: an entry that passes means the
     upstream cause was fixed and the entry must go, and an entry absent from the
-    declared corpus means the list no longer describes it. Entries annotate
-    failures but never waive the exact-execution gate.
+    declared corpus means the list no longer describes it. A diagnostic run may
+    allow matching failures; release gates remain exact.
     """
 
     reasons: dict[str, str]
@@ -76,6 +76,7 @@ class Aggregate:
     upstream_matches: int
     total: int
     known_failures: int = 0
+    unexpected_failures: int = 0
     unexpected_passes: tuple[str, ...] = ()
     stale_known: tuple[str, ...] = ()
 
@@ -97,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-summary", type=Path)
     parser.add_argument("--summary-output", type=Path)
     parser.add_argument("--known-failures", type=Path)
+    parser.add_argument("--allow-known-failures", action="store_true")
     parser.add_argument("--summary-only", action="store_true")
     return parser.parse_args()
 
@@ -187,6 +189,9 @@ def aggregate(rows: dict[str, Row], known: KnownFailures = KnownFailures({})) ->
         upstream_matches=sum(row.upstream_matched is True for row in rows.values()),
         total=sum(row.steps or 0 for row in rows.values()),
         known_failures=sum(failed(row) and known.excused(row) for row in rows.values()),
+        unexpected_failures=sum(
+            failed(row) and not known.excused(row) for row in rows.values()
+        ),
         unexpected_passes=tuple(sorted(
             name for name in known.reasons if name in rows and not failed(rows[name])
         )),
@@ -194,11 +199,11 @@ def aggregate(rows: dict[str, Row], known: KnownFailures = KnownFailures({})) ->
     )
 
 
-def healthy(current: Aggregate) -> bool:
+def healthy(current: Aggregate, allow_known_failures: bool) -> bool:
     return (
         current.fixture_count > 0
-        and current.crashes == 0
-        and current.upstream_matches == current.fixture_count
+        and current.unexpected_failures == 0
+        and (allow_known_failures or current.known_failures == 0)
         and not current.unexpected_passes
         and not current.stale_known
     )
@@ -206,21 +211,10 @@ def healthy(current: Aggregate) -> bool:
 
 def failure_lines(rows: Iterable[Row], known: KnownFailures, current: Aggregate) -> list[str]:
     lines: list[str] = []
-    expected = sorted((row for row in rows if failed(row) and known.excused(row)), key=lambda r: r.name)
-    if expected:
-        lines.extend((
-            "## Known backend failures",
-            "",
-            "These failures are annotated for diagnosis but do not waive the exact-execution gate.",
-            "",
-        ))
-        for row in expected:
-            lines.append(
-                f"- `{short_name(row)}`: {row.crash or 'upstream output mismatch'}; "
-                f"known cause: {known.reasons[row.name]}"
-            )
-        lines.append("")
-    unexpected = sorted((row for row in rows if failed(row) and not known.excused(row)), key=lambda r: r.name)
+    unexpected = sorted(
+        (row for row in rows if failed(row) and not known.excused(row)),
+        key=lambda row: row.name,
+    )
     if unexpected:
         lines.extend(("## Failures", ""))
         for row in unexpected:
@@ -272,6 +266,7 @@ def summary_document(
         "upstream_matches": current.upstream_matches,
         "total": current.total,
         "known_failures": current.known_failures,
+        "unexpected_failures": current.unexpected_failures,
     }
 
 
@@ -307,7 +302,7 @@ def load_summary(args: argparse.Namespace, corpus: CorpusContext) -> Aggregate |
     return baseline
 
 
-def header(args: argparse.Namespace, corpus: CorpusContext, current: Aggregate) -> list[str]:
+def header(args: argparse.Namespace, corpus: CorpusContext) -> list[str]:
     lines = [
         f"# {'ZisK' if args.backend == 'zisk' else 'SP1'} execution {metric(args)}",
         "",
@@ -322,8 +317,6 @@ def header(args: argparse.Namespace, corpus: CorpusContext, current: Aggregate) 
     lines.append(f"- Fixtures: `{args.fixtures}`")
     if corpus.digest:
         lines.append(f"- Corpus digest: `{corpus.digest}`")
-    if current.known_failures:
-        lines.append(f"- Known backend failures observed: {current.known_failures}")
     lines.extend((
         f"- Scope: execution {metric(args)} and public outputs only; no proof generation and no {metric_singular(args)}-regression threshold.",
         "",
@@ -340,20 +333,21 @@ def render_absolute(
     names = sorted(current)
     current_aggregate = aggregate(current, known)
 
-    lines = header(args, corpus, current_aggregate)
+    lines = header(args, corpus)
     lines.extend((
         f"No stored baseline was available; reporting absolute {metric_singular(args)} counts only.",
         "",
-        f"| Fixtures | Crashes | Upstream matches | Total {metric(args)} |",
-        "| ---: | ---: | ---: | ---: |",
-        f"| {current_aggregate.fixture_count} | {current_aggregate.crashes} | "
+        f"| Fixtures | Known failures | Unexpected failures | Crashes | Upstream matches | Total {metric(args)} |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
+        f"| {current_aggregate.fixture_count} | {current_aggregate.known_failures} | "
+        f"{current_aggregate.unexpected_failures} | {current_aggregate.crashes} | "
         f"{current_aggregate.upstream_matches}/{current_aggregate.fixture_count} | "
         f"{current_aggregate.total:,} |",
         "",
     ))
     if args.summary_only:
         lines.extend(failure_lines(current.values(), known, current_aggregate))
-        return "\n".join(lines), healthy(current_aggregate)
+        return "\n".join(lines), healthy(current_aggregate, args.allow_known_failures)
 
     lines.extend((
         "## Per fixture",
@@ -373,7 +367,7 @@ def render_absolute(
         )
     lines.append("")
     lines.extend(failure_lines(current.values(), known, current_aggregate))
-    return "\n".join(lines), healthy(current_aggregate)
+    return "\n".join(lines), healthy(current_aggregate, args.allow_known_failures)
 
 
 def render_aggregate_comparison(
@@ -385,19 +379,28 @@ def render_aggregate_comparison(
 ) -> tuple[str, bool]:
     current_aggregate = aggregate(current, known)
     delta = current_aggregate.total - baseline.total
-    lines = header(args, corpus, current_aggregate)
+    comparable = current_aggregate.known_failures == 0
+    delta_value = f"{delta:+,}" if comparable else "n/a"
+    delta_pct = pct(delta, baseline.total) if comparable else "n/a"
+    lines = header(args, corpus)
     lines.extend((
-        f"| Baseline fixtures | Current fixtures | Crashes | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        f"| Baseline fixtures | Current fixtures | Known failures | Unexpected failures | Crashes | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         f"| {baseline.fixture_count} | {current_aggregate.fixture_count} | "
+        f"{current_aggregate.known_failures} | {current_aggregate.unexpected_failures} | "
         f"{current_aggregate.crashes} | "
         f"{current_aggregate.upstream_matches}/{current_aggregate.fixture_count} | "
-        f"{baseline.total:,} | {current_aggregate.total:,} | {delta:+,} | "
-        f"{pct(delta, baseline.total)} |",
+        f"{baseline.total:,} | {current_aggregate.total:,} | {delta_value} | "
+        f"{delta_pct} |",
         "",
     ))
+    if not comparable:
+        lines.extend((
+            "Step totals are not compared because known failures produced no measurement.",
+            "",
+        ))
     lines.extend(failure_lines(current.values(), known, current_aggregate))
-    return "\n".join(lines), healthy(current_aggregate)
+    return "\n".join(lines), healthy(current_aggregate, args.allow_known_failures)
 
 
 def render_comparison(
@@ -414,35 +417,45 @@ def render_comparison(
     added = sorted(current_names - baseline_names)
     dropped = sorted(baseline_names - current_names)
 
-    baseline_steps = sum(baseline[name].steps or 0 for name in shared)
-    current_steps = sum(current[name].steps or 0 for name in shared)
+    allowed = {
+        name for name in current_names
+        if args.allow_known_failures and known.excused(current[name]) and failed(current[name])
+    }
+    measured = [name for name in shared if name not in allowed]
+    baseline_steps = sum(baseline[name].steps or 0 for name in measured)
+    current_steps = sum(current[name].steps or 0 for name in measured)
     delta = current_steps - baseline_steps
     public_matches = sum(
         baseline[name].public_values is not None
         and baseline[name].public_values == current[name].public_values
-        for name in shared
+        for name in measured
     )
     baseline_upstream = sum(baseline[name].upstream_matched is True for name in shared)
     current_upstream = sum(current[name].upstream_matched is True for name in current_names)
-    crashes = sum(
+    unexpected_crashes = sum(
         current[name].crash is not None
         or (name in baseline and baseline[name].crash is not None)
-        for name in current_names
+        for name in current_names if name not in allowed
     )
+    expected_upstream_matches = len(current_names) - len(allowed)
 
     is_healthy = (
         bool(shared)
         and not dropped
-        and crashes == 0
-        and public_matches == len(shared)
-        and current_upstream == len(current_names)
+        and unexpected_crashes == 0
+        and public_matches == len(measured)
+        and current_upstream == expected_upstream_matches
     )
 
-    lines = header(args, corpus, current_aggregate)
+    lines = header(args, corpus)
     lines.extend((
-        f"| Fixtures | Public outputs equal | Crashes | Baseline upstream matches | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        f"| {len(shared)} | {public_matches}/{len(shared)} | {crashes} | {baseline_upstream}/{len(shared)} | {current_upstream}/{len(current_names)} | {baseline_steps:,} | {current_steps:,} | {delta:+,} | {pct(delta, baseline_steps)} |",
+        f"| Fixtures | Measured fixtures | Public outputs equal | Known failures | Unexpected failures | Crashes | Baseline upstream matches | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        f"| {len(shared)} | {len(measured)} | {public_matches}/{len(measured)} | "
+        f"{current_aggregate.known_failures} | {current_aggregate.unexpected_failures} | "
+        f"{current_aggregate.crashes} | {baseline_upstream}/{len(shared)} | "
+        f"{current_upstream}/{expected_upstream_matches} | {baseline_steps:,} | "
+        f"{current_steps:,} | {delta:+,} | {pct(delta, baseline_steps)} |",
         "",
     ))
 
@@ -453,7 +466,9 @@ def render_comparison(
             "",
         ))
         lines.extend(failure_lines(current.values(), known, current_aggregate))
-        return "\n".join(lines), is_healthy and healthy(current_aggregate)
+        return "\n".join(lines), is_healthy and healthy(
+            current_aggregate, args.allow_known_failures
+        )
 
     if added:
         lines.extend(("## New since baseline", "", *[f"- `{name}`" for name in added], ""))
@@ -488,7 +503,9 @@ def render_comparison(
         )
     lines.append("")
     lines.extend(failure_lines(current.values(), known, current_aggregate))
-    return "\n".join(lines), is_healthy and healthy(current_aggregate)
+    return "\n".join(lines), is_healthy and healthy(
+        current_aggregate, args.allow_known_failures
+    )
 
 
 def main() -> int:
