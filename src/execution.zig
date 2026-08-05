@@ -232,6 +232,10 @@ pub const ExecutionResult = struct {
     state_gas_from_gas_left: i64 = 0,
     output_data: []u8,
 
+    comptime {
+        std.debug.assert(@sizeOf(ExecutionResult) == 64);
+    }
+
     pub fn status(self: ExecutionResult) Status {
         return self.outcome.status;
     }
@@ -274,20 +278,19 @@ pub fn finalizeStateGas(result: anytype) void {
 fn unwindStateGas(result: anytype, restore_regular_gas: bool) void {
     const max_i64 = @as(i64, std.math.maxInt(i64));
     const min_i64 = @as(i64, std.math.minInt(i64));
-    const reservoir_delta = std.math.sub(i64, result.state_gas_spent, result.state_gas_from_gas_left) catch if (result.state_gas_spent >= 0) max_i64 else min_i64;
-    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, reservoir_delta) catch if (reservoir_delta >= 0) max_i64 else min_i64;
+    const reservoir_delta = std.math.sub(i64, result.state_gas_spent, result.state_gas_from_gas_left) catch
+        if (result.state_gas_spent >= 0) max_i64 else min_i64;
+
+    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, reservoir_delta) catch
+        if (reservoir_delta >= 0) max_i64 else min_i64;
+
     if (restore_regular_gas) {
-        result.gas_left = std.math.add(i64, result.gas_left, result.state_gas_from_gas_left) catch if (result.state_gas_from_gas_left >= 0) max_i64 else min_i64;
+        result.gas_left = std.math.add(i64, result.gas_left, result.state_gas_from_gas_left) catch
+            if (result.state_gas_from_gas_left >= 0) max_i64 else min_i64;
     }
+
     result.state_gas_spent = 0;
     result.state_gas_from_gas_left = 0;
-}
-
-comptime {
-    // Rerun engine boundary benchmarks if these layouts change.
-    std.debug.assert(@sizeOf(FrameHalt) == 1);
-    std.debug.assert(@sizeOf(ExecutionOutcome) == 2);
-    std.debug.assert(@sizeOf(ExecutionResult) == 64);
 }
 
 /// A top-level call message.

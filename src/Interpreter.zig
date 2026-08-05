@@ -201,7 +201,6 @@ pub fn Interpreter(comptime spec: Spec) type {
                 try tail_dispatch.Dispatch(spec, .{ .traced = true }).executeTraced(
                     frame_capture,
                     self.call_frame,
-                    self.call_frame.readBytes(),
                 );
             }
 
@@ -217,7 +216,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.isRunning()) {
-                try TailDispatch.execute(frame, frame.readBytes());
+                try TailDispatch.execute(frame);
             }
 
             if (frame.isRunning()) {
@@ -552,10 +551,6 @@ pub const CallFrame = struct {
         const mask_bits = @bitSizeOf(usize);
         return self.jumpdest_masks[target / mask_bits] &
             (@as(usize, 1) << @intCast(target % mask_bits)) != 0;
-    }
-
-    pub fn readBytes(self: *const CallFrame) []const u8 {
-        return self.code.ptr[0 .. self.code.len + Bytecode.zero_padding_len];
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {

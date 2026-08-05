@@ -342,9 +342,9 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return Instructions.tailFastPathBuiltin(opcode);
         }
 
-        pub fn execute(frame: *CallFrame, read_bytes: []const u8) anyerror!void {
+        pub fn execute(frame: *CallFrame) anyerror!void {
             comptime std.debug.assert(!traced);
-            return executeAt(frame, read_bytes.ptr);
+            return executeAt(frame, frame.code.ptr);
         }
 
         fn executeAt(frame: *CallFrame, code_base: [*]const u8) anyerror!void {
@@ -370,7 +370,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             }
         }
 
-        pub fn executeTraced(capture: *trace.TraceCapture, frame: *CallFrame, read_bytes: []const u8) anyerror!void {
+        pub fn executeTraced(capture: *trace.TraceCapture, frame: *CallFrame) anyerror!void {
             if (comptime !traced) @compileError("executeTraced requires tail_dispatch.bindTrace");
 
             // A resumed CALL/CREATE completes its parent step before its next
@@ -391,7 +391,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 return;
             }
 
-            const code_base = read_bytes.ptr;
+            const code_base = frame.code.ptr;
             const stack_base = frame.stack.base;
             var ctx = Context{
                 .frame = frame,
@@ -807,7 +807,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
                     const immediate_len: usize = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
-                    // read_bytes carries Bytecode.zero_padding_len (33) trailing zero
+                    // `code_base` carries Bytecode.zero_padding_len (33) trailing zero
                     // bytes, so a full-width big-endian load is always in bounds and
                     // preserves truncated-push zero-fill semantics.
                     const Int = std.meta.Int(.unsigned, immediate_len * 8);
