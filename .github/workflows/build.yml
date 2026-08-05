@@ -36,7 +36,6 @@ jobs:
           zig build
           test-evmz-native
           test-packages
-          test-tools
           guest-payload-test
           guest-payload-abi-check
           fmt-check

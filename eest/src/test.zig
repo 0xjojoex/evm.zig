@@ -5,7 +5,8 @@ test {
     _ = @import("tx.zig");
     _ = @import("stateless.zig");
     _ = @import("stateless_mutation.zig");
-    _ = @import("stateless_ere_bench.zig");
+    _ = @import("stateless_executor.zig");
+    _ = @import("stateless_metrics.zig");
     _ = @import("block_stf.zig");
     _ = @import("stateless_block_stf.zig");
 }

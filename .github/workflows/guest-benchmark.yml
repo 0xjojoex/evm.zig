@@ -1,5 +1,6 @@
-# One guest-execution surface for pinned PR/release evidence and rolling devnet
-# discovery. Correctness is required; cycle deltas are review evidence only.
+# One guest-execution surface for PR conformance, pinned performance evidence,
+# and rolling devnet discovery. Correctness is required; cycle deltas are
+# review evidence only.
 name: Guest benchmark
 
 on:
@@ -32,24 +33,25 @@ on:
         options:
           - pinned
           - rolling
-      zisk_max_steps:
-        description: Maximum ZisK steps per block
+          - tests-zkevm
+      release_gate:
+        description: Require the selected tests-zkevm workflow revision to be on main
         required: true
-        default: "70000000000"
-        type: string
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.ref }}-${{ github.event_name }}
+  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
-    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }} devnet
+    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.corpus == 'tests-zkevm' && 360 || 120 }}
     strategy:
       fail-fast: false
       # SP1 stays out of the matrix until its provider issue is resolved. Keep
@@ -59,7 +61,7 @@ jobs:
           - backend: zisk
     env:
       BACKEND: ${{ matrix.backend }}
-      CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
+      CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
       CATALOG_URL: https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7
       PINNED_MANIFEST: eest/fixtures/devnet-glamsterdam-7-pinned.json
       BASELINE_MANIFEST: eest/fixtures/guest-release-baseline.json
@@ -72,48 +74,79 @@ jobs:
       ZISK_RUST_TOOLCHAIN: zisk-1.0.0
       SP1_VERSION: v6.3.1
       SP1_SDK_SHA256: ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8
-      MAX_STEPS: ${{ inputs.zisk_max_steps || '70000000000' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ inputs.release_gate && 0 || 1 }}
+
+      - name: Record source commit
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          test "${source_commit}" = "${GITHUB_SHA}"
+          echo "SOURCE_COMMIT=${source_commit}" >> "${GITHUB_ENV}"
+
+      - name: Require full corpus for release gate
+        if: inputs.release_gate
+        run: test "${CORPUS_MODE}" = tests-zkevm
+
+      - name: Require release source on main
+        if: inputs.corpus == 'tests-zkevm' && inputs.release_gate
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 
       - name: Resolve runner paths
         run: |
           {
             echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
             echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
+            echo "ZISK_ARTIFACTS=${RUNNER_TEMP}/zisk-artifacts"
             echo "SP1_SDK_ROOT=${RUNNER_TEMP}/sp1-sdk"
             echo "SP1_HOST_TARGET=${RUNNER_TEMP}/sp1-host-target"
           } >> "${GITHUB_ENV}"
 
+      - name: Restore pinned ZisK artifacts
+        if: matrix.backend == 'zisk'
+        id: zisk-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/zisk-artifacts
+          key: >-
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
+
       - name: Install common system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y binutils-riscv64-unknown-elf jq zstd
+          sudo apt-get install -y --no-install-recommends \
+            binutils-riscv64-unknown-elf \
+            jq \
+            zstd
 
-      - name: Install ZisK system dependencies
+      - name: Install ZisK runtime dependencies
         if: matrix.backend == 'zisk'
         run: |
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
+            libgmp10 \
+            libomp5-18 \
+            libopenmpi3t64 \
+            libsodium23
+
+      - name: Install ZisK build dependencies
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
             clang \
-            gcc-riscv64-unknown-elf \
             libclang-dev \
             libgmp-dev \
-            libgrpc++-dev \
             libomp-dev \
             libopenmpi-dev \
-            libpqxx-dev \
-            libsecp256k1-dev \
             libsodium-dev \
             nasm \
             nlohmann-json3-dev \
-            openmpi-bin \
-            openmpi-common \
             pkg-config \
-            protobuf-compiler \
-            uuid-dev \
             xz-utils
 
       - name: Install Zig
@@ -149,27 +182,128 @@ jobs:
             --output-root "${CORPUS_ROOT}" \
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
+      - name: Fetch pinned tests-zkevm fixtures
+        if: env.CORPUS_MODE == 'tests-zkevm'
+        working-directory: eest
+        env:
+          EEST_CACHE: ${{ runner.temp }}/eest-download
+        run: |
+          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
+          scripts/fetch-eest-zkevm-fixtures.sh
+
       - name: Record corpus identity
         run: |
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            version="$(awk -F= '$1 == "zkevm_version" { print $2; exit }' eest.lock)"
+            archive_sha="$(awk -F= '$1 == "zkevm_sha256" { print $2; exit }' eest.lock)"
+            fixture_root="$(awk -F= '$1 == "zkevm_dest" { print $2; exit }' eest.lock)"
+            test -n "${version}"
+            test -n "${archive_sha}"
+            test -d "${fixture_root}"
+
+            blockchain_root="${fixture_root}/fixtures/blockchain_tests"
+            index="${fixture_root}/fixtures/.meta/index.json"
+            test -d "${blockchain_root}"
+            test -f "${index}"
+            fixture_files="$(find "${blockchain_root}" -type f -name '*.json' | wc -l)"
+            indexed_files="$(jq '[.test_cases[] | select(.format == "blockchain_test") | .json_path] | unique | length' "${index}")"
+            indexed_tests="$(jq '[.test_cases[] | select(.format == "blockchain_test")] | length' "${index}")"
+            # Every block carrying the key is executed, including an empty
+            # witness, so the expected row count must not filter on length.
+            fixture_count="$({
+              find "${blockchain_root}" -type f -name '*.json' -print0 \
+                | xargs -0 -n 64 jq -r \
+                  '[.. | objects | .statelessInputBytes? | select(type == "string")] | length'
+            } | awk '{ total += $1 } END { print total + 0 }')"
+            test "${fixture_files}" -gt 0
+            test "${fixture_files}" -eq "${indexed_files}"
+            test "${indexed_tests}" -gt 0
+            test "${fixture_count}" -gt 0
+
+            jq -n \
+              --arg id "${version}" \
+              --arg digest "${archive_sha}" \
+              --arg source_commit "${SOURCE_COMMIT}" \
+              --argjson fixture_files "${fixture_files}" \
+              --argjson indexed_tests "${indexed_tests}" \
+              --argjson fixture_count "${fixture_count}" \
+              '{
+                schema_version: 1,
+                mode: "tests-zkevm",
+                id: $id,
+                corpus_digest: $digest,
+                source_commit: $source_commit,
+                fixture_files: $fixture_files,
+                indexed_tests: $indexed_tests,
+                fixture_count: $fixture_count
+              }' > "${RESOLVED_MANIFEST}"
+            echo "EEST_ZKEVM_ROOT=${GITHUB_WORKSPACE}/${blockchain_root}" >> "${GITHUB_ENV}"
+          fi
           {
             echo "CORPUS_ID=$(jq -r .id "${RESOLVED_MANIFEST}")"
             echo "FIXTURE_COUNT=$(jq -r .fixture_count "${RESOLVED_MANIFEST}")"
           } >> "${GITHUB_ENV}"
 
-      - name: Restore ZisK build cache
-        if: matrix.backend == 'zisk'
-        id: zisk-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            guest/runtime/zisk/host/target
-            ${{ runner.temp }}/zisk-source/target
-          key: zisk-v1-alpha-rust-1.0-rv64ima-${{ runner.os }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.lock') }}
+      - name: Resolve stored release metrics
+        if: env.CORPUS_MODE == 'tests-zkevm'
+        id: release-metrics
+        run: |
+          summary="${RUNNER_TEMP}/release-baseline-summary.json"
+          available=false
+          source_ref=none
+          if jq -e \
+            --arg corpus "${CORPUS_ID}" \
+            --arg backend "${BACKEND}" \
+            '.metrics[$corpus][$backend] | type == "object"' \
+            "${BASELINE_MANIFEST}" >/dev/null; then
+            jq \
+              --arg corpus "${CORPUS_ID}" \
+              --arg backend "${BACKEND}" \
+              '.metrics[$corpus][$backend]' \
+              "${BASELINE_MANIFEST}" > "${summary}"
+            current_digest="$(jq -r .corpus_digest "${RESOLVED_MANIFEST}")"
+            metric="$([[ "${BACKEND}" == zisk ]] && echo steps || echo cycles)"
+            # When the manifest names a release ELF, the stored metrics must
+            # have come from that exact ELF.
+            artifact_sha="$(jq -r --arg backend "${BACKEND}" \
+              '.artifacts[$backend].elf_sha256 // "" | sub("^0x"; "")' "${BASELINE_MANIFEST}")"
+            if jq -e \
+              --arg backend "${BACKEND}" \
+              --arg metric "${metric}" \
+              --arg corpus "${CORPUS_ID}" \
+              --arg digest "${current_digest}" \
+              --arg artifact_sha "${artifact_sha}" \
+              --argjson fixture_count "${FIXTURE_COUNT}" \
+              '.schema_version == 1
+                and .backend == $backend
+                and .metric == $metric
+                and .corpus == $corpus
+                and .corpus_digest == $digest
+                and .fixture_count == $fixture_count
+                and .crashes == 0
+                and .upstream_matches == $fixture_count
+                and (.total | type == "number")
+                and .total >= 0
+                and (.source_ref | type == "string")
+                and (.source_ref | length > 0)
+                and (.elf_sha256 | type == "string")
+                and (.elf_sha256 | test("^[0-9a-f]{64}$"))
+                and ($artifact_sha == "" or .elf_sha256 == $artifact_sha)' \
+              "${summary}" >/dev/null; then
+              available=true
+              source_ref="$(jq -r .source_ref "${summary}")"
+            else
+              echo "::warning::Ignoring incompatible stored release metrics"
+            fi
+          fi
+          {
+            echo "available=${available}"
+            echo "source_ref=${source_ref}"
+            echo "path=${summary}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Install pinned ZisK toolchain
-        if: matrix.backend == 'zisk'
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL \
             "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_COMMIT}/ziskup/ziskup" \
@@ -200,7 +334,7 @@ jobs:
           echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
 
       - name: Prepare pinned ZisK source
-        if: matrix.backend == 'zisk'
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         run: |
           git init "${ZISK_SOURCE}"
           git -C "${ZISK_SOURCE}" remote add origin https://github.com/0xPolygonHermez/zisk.git
@@ -209,8 +343,7 @@ jobs:
           test "$(git -C "${ZISK_SOURCE}" rev-parse HEAD)" = "${ZISK_COMMIT}"
 
       - name: Build pinned ZisK artifacts
-        if: matrix.backend == 'zisk'
-        id: zisk
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/zisk-source
         run: |
           "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
@@ -218,9 +351,24 @@ jobs:
             --manifest-path "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/Cargo.toml"
           provider="$(find target/elf -type f -name libziskos_staticlib.a -print -quit)"
           test -n "${provider}"
+          install -D -m 0755 \
+            "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host" \
+            "${ZISK_ARTIFACTS}/evmz-zisk-host"
+          install -D -m 0644 \
+            "${provider}" \
+            "${ZISK_ARTIFACTS}/libziskos_staticlib.a"
+
+      - name: Resolve pinned ZisK artifacts
+        if: matrix.backend == 'zisk'
+        id: zisk
+        run: |
+          host="${ZISK_ARTIFACTS}/evmz-zisk-host"
+          provider="${ZISK_ARTIFACTS}/libziskos_staticlib.a"
+          test -x "${host}"
+          test -s "${provider}"
           {
-            echo "host=${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host"
-            echo "provider=${ZISK_SOURCE}/${provider}"
+            echo "host=${host}"
+            echo "provider=${provider}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Build candidate ZisK guest
@@ -294,24 +442,30 @@ jobs:
       - name: Run candidate corpus
         run: |
           fixture_roots=()
-          while IFS= read -r -d '' root; do
-            fixture_roots+=("${root}")
-          done < <(find "${CORPUS_ROOT}" -type d -name blockchain_tests -print0 | sort -z)
-          expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
-          test "${#fixture_roots[@]}" -eq "${expected_batches}"
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            fixture_roots+=("${EEST_ZKEVM_ROOT}")
+          else
+            while IFS= read -r -d '' root; do
+              fixture_roots+=("${root}")
+            done < <(find "${CORPUS_ROOT}" -type d -name blockchain_tests -print0 | sort -z)
+            expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
+            test "${#fixture_roots[@]}" -eq "${expected_batches}"
+          fi
           args=(
-            --engine "${BACKEND}"
+            --executor "${BACKEND}"
+            --jobs "$(( $(nproc) > 16 ? 16 : $(nproc) ))"
             --report-only
             --output-folder "${RESULTS_ROOT}"
           )
           if [[ "${BACKEND}" == zisk ]]; then
-            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${CANDIDATE_ELF}" --zisk-max-steps "${MAX_STEPS}")
+            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${CANDIDATE_ELF}")
           else
             args+=(--sp1-host "${GUEST_HOST}" --sp1-elf "${CANDIDATE_ELF}" --sp1-work-dir "${RUNNER_TEMP}/sp1-candidate")
           fi
-          zig build zkevm-ere-bench --summary all -- "${args[@]}" "${fixture_roots[@]}"
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" "${fixture_roots[@]}"
 
       - name: Resolve release baseline
+        if: env.CORPUS_MODE != 'tests-zkevm'
         id: baseline
         run: |
           url="$(jq -r --arg backend "${BACKEND}" '.artifacts[$backend].elf_url // empty' "${BASELINE_MANIFEST}")"
@@ -340,68 +494,97 @@ jobs:
           expected_batches="$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
           test "${#fixture_roots[@]}" -eq "${expected_batches}"
           args=(
-            --engine "${BACKEND}"
+            --executor "${BACKEND}"
+            --jobs "$(( $(nproc) > 16 ? 16 : $(nproc) ))"
             --report-only
             --output-folder "${BASELINE_ROOT}"
           )
           if [[ "${BACKEND}" == zisk ]]; then
-            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${RUNNER_TEMP}/release-baseline.elf" --zisk-max-steps "${MAX_STEPS}")
+            args+=(--zisk-host "${GUEST_HOST}" --zisk-elf "${RUNNER_TEMP}/release-baseline.elf")
           else
             args+=(--sp1-host "${GUEST_HOST}" --sp1-elf "${RUNNER_TEMP}/release-baseline.elf" --sp1-work-dir "${RUNNER_TEMP}/sp1-baseline")
           fi
-          zig build zkevm-ere-bench --summary all -- "${args[@]}" "${fixture_roots[@]}"
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" "${fixture_roots[@]}"
 
       - name: Compare correctness and cycles
         id: comparison
         continue-on-error: true
+        env:
+          RELEASE_GATE: ${{ inputs.release_gate }}
         run: |
           args=(
             --backend "${BACKEND}"
             --current "${RESULTS_ROOT}"
+            --elf "${CANDIDATE_ELF}"
             --output guest-cycle-report.md
-            --current-ref "${GITHUB_SHA}"
-            --baseline-ref "${{ steps.baseline.outputs.release }}"
+            --summary-output guest-cycle-summary.json
+            --current-ref "${SOURCE_COMMIT}"
             --fixtures "${CORPUS_ID}"
             --corpus-manifest "${RESOLVED_MANIFEST}"
+            --known-failures eest/fixtures/guest-known-failures.json
             --zisk "${ZISK_VERSION} (${ZISK_COMMIT})"
             --zisk-rust "${ZISK_RUST_TOOLCHAIN}"
             --sp1 "${SP1_VERSION}"
           )
+          actual_count="$(find "${RESULTS_ROOT}" -type f -name '*.json' | wc -l)"
+          baseline_ref="${{ steps.baseline.outputs.release }}"
           if [[ "${{ steps.baseline.outputs.available }}" == true ]]; then
             args+=(--baseline "${BASELINE_ROOT}")
           fi
+          if [[ "${{ steps.release-metrics.outputs.available }}" == true ]]; then
+            baseline_ref="${{ steps.release-metrics.outputs.source_ref }}"
+            args+=(--baseline-summary "${{ steps.release-metrics.outputs.path }}")
+          fi
+          args+=(--baseline-ref "${baseline_ref:-none}")
+          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            args+=(--summary-only)
+            if [[ "${RELEASE_GATE}" != true ]]; then
+              args+=(--allow-known-failures)
+            fi
+          fi
           python3 eest/scripts/report-guest-cycles.py "${args[@]}"
+          test "${actual_count}" -eq "${FIXTURE_COUNT}"
 
       - name: Publish job summary
         if: always() && hashFiles('guest-cycle-report.md') != ''
         run: cat guest-cycle-report.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload benchmark evidence
-        if: always()
+        if: always() && env.CORPUS_MODE != 'tests-zkevm'
         uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.backend }}-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             guest-cycle-report.md
+            guest-cycle-summary.json
             resolved-manifest.json
             guest-results
             release-baseline-results
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Save ZisK build cache from main
+      - name: Upload release gate evidence
+        if: always() && env.CORPUS_MODE == 'tests-zkevm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-${{ matrix.backend }}-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            guest-cycle-report.md
+            guest-cycle-summary.json
+            resolved-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Save pinned ZisK artifacts from main
         if: >-
           matrix.backend == 'zisk'
           && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
           && steps.zisk-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            guest/runtime/zisk/host/target
-            ${{ runner.temp }}/zisk-source/target
-          key: zisk-v1-alpha-rust-1.0-rv64ima-${{ runner.os }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.lock') }}
+          path: ${{ runner.temp }}/zisk-artifacts
+          key: >-
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
 
       - name: Save SP1 build cache from main
         if: >-
@@ -416,7 +599,7 @@ jobs:
             ${{ runner.temp }}/sp1-host-target
           key: sp1-host-v6.3.1-${{ runner.os }}-${{ hashFiles('guest/runtime/sp1/host/Cargo.lock') }}
 
-      - name: Require complete exact execution
+      - name: Require accepted execution outcome
         if: always()
         env:
           COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}

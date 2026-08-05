@@ -156,7 +156,7 @@ fn runPathConcurrent(
     try fixture_pool.runWorkers(
         io,
         allocator,
-        path,
+        &.{path},
         workers,
         .{ .basename = "serialized.ssz_snappy" },
         Worker.run,

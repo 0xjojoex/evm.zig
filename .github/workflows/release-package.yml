@@ -58,17 +58,14 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Restore consensus fixture archives
-        if: inputs.package == 'ssz'
-        uses: actions/cache@v6
-        with:
-          path: .eest/cache
-          key: release-consensus-${{ runner.os }}-${{ hashFiles('eest.lock') }}
-
       - name: Fetch consensus SSZ fixtures
         if: inputs.package == 'ssz'
         working-directory: eest
-        run: scripts/fetch-consensus-ssz-fixtures.sh
+        env:
+          CONSENSUS_CACHE: ${{ runner.temp }}/eest-download
+        run: |
+          trap 'rm -rf -- "${CONSENSUS_CACHE}"' EXIT
+          scripts/fetch-consensus-ssz-fixtures.sh
 
       - name: Run consensus SSZ corpus
         if: inputs.package == 'ssz'

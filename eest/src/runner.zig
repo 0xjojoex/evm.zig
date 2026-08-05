@@ -17,33 +17,82 @@ pub fn parseJobs(value: []const u8, max: usize) !usize {
 /// `module` must expose `Options`, a default-constructible `Summary` with
 /// `add`, and `runFile(io, allocator, path, options) !Summary`. A `limit`
 /// field on `Options` stops the walk once `Summary.fixtures` reaches it.
+///
+/// A module may also declare `Context` with `init(io, options)` and `deinit`,
+/// in which case `runFile` takes a trailing `*Context`. Every worker owns one,
+/// so a context may hold state that cannot be shared across threads - a guest
+/// host child process caching its ROM, for instance.
 pub fn Runner(comptime module: type) type {
     return struct {
         const Options = module.Options;
         const Summary = module.Summary;
         const has_limit = @hasField(Options, "limit");
+        const has_context = @hasDecl(module, "Context");
+        const Context = if (has_context) module.Context else void;
 
-        pub fn run(
+        fn initContext(io: std.Io, options: Options) !Context {
+            return if (has_context) try module.Context.init(io, options) else {};
+        }
+
+        fn deinitContext(context: *Context) void {
+            if (has_context) context.deinit();
+        }
+
+        fn runFile(
             io: std.Io,
             allocator: std.mem.Allocator,
             path: []const u8,
             options: Options,
+            context: *Context,
+        ) !Summary {
+            return if (has_context)
+                module.runFile(io, allocator, path, options, context)
+            else
+                module.runFile(io, allocator, path, options);
+        }
+
+        /// Every root shares one set of contexts. A guest context owns a host
+        /// child that converts the ELF to a ROM at startup, so recreating them
+        /// per root would pay that cost once per corpus batch.
+        pub fn run(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            roots: []const []const u8,
+            options: Options,
             jobs: usize,
         ) !Summary {
             return if (jobs == 1)
-                sequential(io, allocator, path, options)
+                sequential(io, allocator, roots, options)
             else
-                concurrent(io, allocator, path, options, jobs);
+                concurrent(io, allocator, roots, options, jobs);
         }
 
         pub fn sequential(
             io: std.Io,
             allocator: std.mem.Allocator,
-            path: []const u8,
+            roots: []const []const u8,
             options: Options,
         ) !Summary {
+            var context = try initContext(io, options);
+            defer deinitContext(&context);
+
+            var total = Summary{};
+            for (roots) |root| {
+                total.add(try walk(io, allocator, root, options, &context));
+                if (has_limit and options.limit > 0 and total.fixtures >= options.limit) break;
+            }
+            return total;
+        }
+
+        fn walk(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            options: Options,
+            context: *Context,
+        ) !Summary {
             var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-                error.NotDir => return module.runFile(io, allocator, path, options),
+                error.NotDir => return runFile(io, allocator, path, options, context),
                 else => return err,
             };
             defer dir.close(io);
@@ -54,9 +103,9 @@ pub fn Runner(comptime module: type) type {
                 const child = try std.fs.path.join(allocator, &.{ path, entry.name });
                 defer allocator.free(child);
                 switch (entry.kind) {
-                    .directory => total.add(try sequential(io, allocator, child, options)),
+                    .directory => total.add(try walk(io, allocator, child, options, context)),
                     .file => if (std.mem.endsWith(u8, entry.name, ".json")) {
-                        total.add(try module.runFile(io, allocator, child, options));
+                        total.add(try runFile(io, allocator, child, options, context));
                     },
                     else => {},
                 }
@@ -68,27 +117,25 @@ pub fn Runner(comptime module: type) type {
         fn concurrent(
             io: std.Io,
             allocator: std.mem.Allocator,
-            path: []const u8,
+            roots: []const []const u8,
             options: Options,
             jobs: usize,
         ) !Summary {
-            var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-                error.NotDir => return module.runFile(io, allocator, path, options),
-                else => return err,
-            };
-            dir.close(io);
-
             const workers = try allocator.alloc(Worker, jobs);
+            var started: usize = 0;
             defer {
-                for (workers) |*worker| worker.deinit();
+                for (workers[0..started]) |*worker| worker.deinit();
                 allocator.free(workers);
             }
-            for (workers) |*worker| worker.* = .{
-                .allocator = allocator,
-                .arena = .init(allocator),
-                .options = options,
-            };
-            try fixture_pool.runWorkers(io, allocator, path, workers, .{ .suffix = ".json" }, Worker.run);
+            while (started < jobs) : (started += 1) {
+                workers[started] = .{
+                    .allocator = allocator,
+                    .arena = .init(allocator),
+                    .options = options,
+                    .context = try initContext(io, options),
+                };
+            }
+            try fixture_pool.runWorkers(io, allocator, roots, workers, .{ .suffix = ".json" }, Worker.run);
 
             var total = Summary{};
             var file_errors: std.ArrayList(FileError) = .empty;
@@ -128,11 +175,15 @@ pub fn Runner(comptime module: type) type {
             /// needs a fresh chunk.
             arena: std.heap.ArenaAllocator,
             options: Options,
+            /// Private per-worker executor state. Never shared: a guest host is
+            /// one child process behind one pipe pair.
+            context: Context,
             summary: Summary = .{},
             file_errors: std.ArrayList(FileError) = .empty,
             allocation_error: ?anyerror = null,
 
             fn deinit(self: *Worker) void {
+                deinitContext(&self.context);
                 for (self.file_errors.items) |file_error| self.allocator.free(file_error.path);
                 self.file_errors.deinit(self.allocator);
                 self.arena.deinit();
@@ -146,7 +197,7 @@ pub fn Runner(comptime module: type) type {
                     };
                     // `Summary` is plain counters, so nothing survives the reset.
                     defer _ = self.arena.reset(.retain_capacity);
-                    const summary = module.runFile(io, self.arena.allocator(), path, self.options) catch |err| {
+                    const summary = runFile(io, self.arena.allocator(), path, self.options, &self.context) catch |err| {
                         self.file_errors.append(self.allocator, .{ .path = path, .err = err }) catch |alloc_err| {
                             if (self.allocation_error == null) self.allocation_error = alloc_err;
                             self.allocator.free(path);

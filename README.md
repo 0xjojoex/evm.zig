@@ -1,32 +1,16 @@
 # evmz
 
-**A fast, composable Ethereum execution engine in Zig — from native execution to
-the same block state transition function inside SP1 and ZisK.**
-
-In evmz, one exact Ethereum specification is a compile-time value. Its dispatch
-table, gas schedule, precompiles, transaction rules, and block hooks are
-resolved into one concrete VM, without runtime fork selection inside the
-generated engine.
-
-## Highlights
-
-- **Composable** — patch protocol parameters, replace instruction or precompile
-  tables, or bind custom transaction and block programs.
-- **Fast natively** — ahead of the revm interpreter in every row of both VM-loop
-  snapshots. Against evmone's baseline, the workload-shaped wins range from
-  1.7–2.9× on Snailtracer, 1.1–2.0× on ERC20 mint, and 1.4–4.4× on the SSTORE
-  loop.
-- **Stateless and guest-ready** — run the same witness-backed block validator
-  natively or as an RV64 guest on SP1 and ZisK. On the pinned 75-block [Eth Act
-  workload](https://github.com/eth-act/zkevm-benchmark-workload), evmz leads SP1
-  at 94.9M cycles — 29.7% under Reth's guest — and sits second on ZisK within
-  4.3%.
-- **Tested** — `67,066/67,066` EEST vectors pass for Glamsterdam devnet-7.
+A fast, composable EVM execution engine in Zig. One exact Ethereum specification —
+dispatch table, gas schedule, precompiles, transaction rules, and block hooks —
+is a compile-time value, resolved into one concrete VM with no runtime fork
+selection. The same block state transition function runs natively and as an
+RV64 guest on SP1 and ZisK.
 
 ## Status
 
 evmz is pre-release. The version is `0.0.0`, the public API may change between
-commits, and the project has not been audited.
+commits, and the project has not been audited. `67,066/67,066` EEST vectors
+pass for Glamsterdam devnet-7.
 
 Implemented:
 
@@ -157,34 +141,35 @@ The same validator is compiled natively and as an RV64 ELF under `guest/`.
 SP1 and ZisK share one accelerator ABI while retaining backend-specific
 runtimes and host drivers.
 
-See [`guest/README.md`](guest/README.md) for backend setup, semantic and
-source-tree gates, input/output contracts, and proof-readiness checks.
+Run the full test suite through the zkVM adapters on the host, with no RV64
+toolchain or vendor library required:
+
+```sh
+zig build test-evmz-zkvm
+```
+
+Building a guest ELF requires the backend's static provider library:
+
+```sh
+zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+    -Dziskos-staticlib=/path/to/libziskos_staticlib.a
+
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+    -Dsp1-staticlib=/path/to/libzkevm.a
+```
+
+The matching `guest-zisk-run` and `guest-sp1-run` steps execute the built ELF
+on the backend emulator; pass `-Dguest-input=<file>` for the stateless input
+and `-Dguest-output=<file>` to capture public output. ZisK runs use `ziskemu`
+from `PATH` unless `-Dziskemu` points elsewhere; the SP1 run step builds its
+host driver with Cargo on demand.
+
+See [`guest/README.md`](guest/README.md) for provider setup, heap and RAM
+sizing, schema pinning, and proof-readiness checks.
 
 ## Performance
 
-### Stateless guest execution
-
-Execute-only totals over the pinned 75-block Amsterdam
-[`tests-zkevm` workload](https://github.com/eth-act/zkevm-benchmark-workload).
-All shown guests matched the expected public output for `75/75` fixtures.
-
-| Backend metric | evmz | Reth | evmz vs Reth |
-| --- | ---: | ---: | ---: |
-| SP1 cycles | **94,915,078** | 134,914,894 | **−29.65%** |
-| ZisK steps | 56,995,060 | **54,672,821** | +4.25% |
-
-Cycles and steps are backend-specific instruction metrics and must not be
-compared across zkVMs. They are not proof cycles or proving time.
-
-Snapshot: evmz `ee78731d`; Reth `ere-guests@a52609d`. The pinned
-[benchmark integration](https://github.com/0xjojoex/zkevm-benchmark-workload/tree/a7e2203a2316d9a44254a8ebfe3f1d51c1baa744)
-contains the workload and runner. The complete guest field, win/loss profile, and
-correctness gates are in
-[`guest/README.md`](guest/README.md#published-cross-guest-scoreboard).
-
-### Native interpreter
-
-Representative Apple M1 Max results from the fixed-Osaka `ReleaseFast`
+Representative Apple M1 Max VM-loop results from the fixed-Osaka `ReleaseFast`
 snapshot; lower is better:
 
 | Fixture | evmz | evmone-base | revm-int |
@@ -217,10 +202,6 @@ Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
 messages, and IO buffers live in preallocated slots (optionally hard-bounded for
 embedded/zkVM targets), and the state journal is cheap enough that the full
 executor benches within noise of the raw interpreter.
-
-The same property pays off twice. Natively it removes per-instruction fork
-checks; in a zkVM guest it removes the code and memory a runtime-configurable
-VM would carry into the proof.
 
 </details>
 

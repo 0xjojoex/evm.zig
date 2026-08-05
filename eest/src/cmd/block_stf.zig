@@ -54,7 +54,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
 
     var total = block_stf.Summary{};
     for (paths.items) |path| {
-        const summary = try Fixtures.run(init.io, allocator, path, options, jobs);
+        const summary = try Fixtures.run(init.io, allocator, &.{path}, options, jobs);
         total.add(summary);
         printSummary(path, summary);
     }

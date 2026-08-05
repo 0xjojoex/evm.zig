@@ -21,6 +21,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     var report = stateless.Report.init(allocator);
     defer report.deinit();
     var report_path: ?[]const u8 = null;
+    var report_only = false;
 
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
@@ -43,12 +44,37 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             options.trace_mismatch = true;
         } else if (std.mem.eql(u8, arg, "--classify-failures")) {
             options.classify_failures = true;
+        } else if (std.mem.eql(u8, arg, "--report-only")) {
+            report_only = true;
         } else if (std.mem.eql(u8, arg, "--oracle-differential")) {
             options.oracle_differential = true;
         } else if (std.mem.eql(u8, arg, "--report")) {
             const value = args.next() orelse return error.MissingReportPath;
             report_path = try arena.dupe(u8, value);
             options.report = &report;
+        } else if (std.mem.eql(u8, arg, "--executor")) {
+            const value = args.next() orelse return error.MissingExecutor;
+            options.executor.target = stateless.Target.parse(value) orelse return error.InvalidExecutor;
+        } else if (std.mem.eql(u8, arg, "--output-folder")) {
+            const value = args.next() orelse return error.MissingOutputFolder;
+            options.output_folder = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--zisk-host")) {
+            const value = args.next() orelse return error.MissingZiskHostPath;
+            options.executor.zisk_host_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--zisk-elf")) {
+            const value = args.next() orelse return error.MissingZiskElfPath;
+            options.executor.zisk_elf_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-host")) {
+            const value = args.next() orelse return error.MissingSp1HostPath;
+            options.executor.sp1_host_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-elf")) {
+            const value = args.next() orelse return error.MissingSp1ElfPath;
+            options.executor.sp1_elf_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--sp1-work-dir")) {
+            const value = args.next() orelse return error.MissingSp1WorkDir;
+            options.executor.sp1_work_dir = try arena.dupe(u8, value);
+        } else if (isOption(arg)) {
+            return error.UnknownOption;
         } else {
             try paths.append(allocator, try arena.dupe(u8, arg));
         }
@@ -63,15 +89,21 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
     }
 
-    var total = stateless.Summary{};
-    for (paths.items) |path| {
-        const summary = try Fixtures.run(init.io, allocator, path, options, jobs);
-        total.add(summary);
-        printSummary(path, summary);
-    }
-    if (paths.items.len > 1) printSummary("total", total);
+    // One session over every root: a guest context owns a host child, and
+    // rebuilding it per root would repeat the ELF-to-ROM conversion per batch.
+    options.source_roots = paths.items;
+    const total = try Fixtures.run(init.io, allocator, paths.items, options, jobs);
+    printSummary(if (paths.items.len == 1) paths.items[0] else "total", total);
     if (report_path) |path| try report.write(init.io, path);
-    if (total.failed > 0) std.process.exit(1);
+    // `--report-only` withholds the exit code for accumulated fixture failures
+    // so a downstream comparison still gets its rows. Configuration, I/O and
+    // host-startup problems surface as errors above and still fail hard, and an
+    // empty run is always a failure.
+    if ((!report_only and total.failed > 0) or total.fixtures == 0) std.process.exit(1);
+}
+
+fn isOption(arg: []const u8) bool {
+    return std.mem.startsWith(u8, arg, "-");
 }
 
 fn requiresSequential(options: stateless.Options) bool {
@@ -92,7 +124,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [path ...]
+        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
@@ -103,6 +135,13 @@ fn printUsage() void {
         \\Use --oracle-differential to require dense/tracked consensus-result parity
         \\for blocks without expectException. Typed mutations own rejection-status parity.
         \\Use --report to write one deterministic JSON record per runnable block.
+        \\Use --report-only to withhold the fixture-failure exit code so a
+        \\downstream comparison still receives its rows; an empty run still fails.
+        \\Use --executor to run each block on a zkVM guest instead of natively.
+        \\Guest framing is stripped before comparison, so every executor is judged
+        \\against the same statelessOutputBytes. Each worker owns one guest host
+        \\child, which converts the ELF to a ZisK ROM once at startup.
+        \\Use --output-folder to also write one ERE BenchmarkRun row per block.
         \\
     , .{ default_jobs, max_jobs });
 }
@@ -116,4 +155,11 @@ test "limited and diagnostic zkEVM runs stay sequential" {
     var report = stateless.Report.init(std.testing.allocator);
     defer report.deinit();
     try std.testing.expect(requiresSequential(.{ .report = &report }));
+}
+
+test "unknown options are not fixture paths" {
+    try std.testing.expect(isOption("--executorr"));
+    try std.testing.expect(isOption("-unknown"));
+    try std.testing.expect(!isOption("./-fixture.json"));
+    try std.testing.expect(!isOption("fixtures/blockchain_tests"));
 }

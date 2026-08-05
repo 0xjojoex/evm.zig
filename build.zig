@@ -45,7 +45,6 @@ const TestSteps = struct {
     native: *std.Build.Step,
     zkvm: *std.Build.Step,
     packages: *std.Build.Step,
-    tools: *std.Build.Step,
     selected: *std.Build.Step,
 };
 
@@ -274,7 +273,6 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(tests.native);
     ci_step.dependOn(tests.zkvm);
     ci_step.dependOn(tests.packages);
-    ci_step.dependOn(tests.tools);
     ci_step.dependOn(tidy_step);
     ci_step.dependOn(fmt_step);
 
@@ -365,7 +363,6 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", "zkevm-input", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "zkevm-ere-bench", "Emit ERE BenchmarkRun rows for zkEVM stateless fixtures", "zkevm-ere-bench", null, bench_optimize_name, evmz_build, null);
         addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, evmz_build, null);
@@ -395,16 +392,22 @@ pub fn build(b: *std.Build) void {
         addEvmcDelegate(b, "evmc-example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
     }
 
+    // Capacity is free in guest execution steps: the linker reserves the heap
+    // after `_bss_end` as bare address space, nothing zeroes it, and the bump
+    // allocator only writes what it hands out. Default to filling ZisK's RAM,
+    // matching what ERE guests get, rather than to a number sized for one
+    // corpus. Shrink it deliberately once a real workload's peak is known.
     const guest_heap_bytes = b.option(
         u64,
         "guest-heap-bytes",
         "Fixed guest payload heap capacity in bytes",
-    ) orelse 32 * 1024 * 1024;
+    ) orelse 480 * 1024 * 1024;
+    // 0xA0030000 + 536674304 = 0xC0000000, ZisK's RAM top.
     const guest_zisk_ram_bytes = b.option(
         u64,
         "guest-zisk-ram-bytes",
         "ZisK guest RAM envelope in bytes",
-    ) orelse 48 * 1024 * 1024;
+    ) orelse 536674304;
 
     const guest_payload_steps = addGuestPayloadTests(b, target, optimize, native_evmz_mod, guest_heap_bytes);
     ci_step.dependOn(guest_payload_steps.tests);
@@ -426,7 +429,6 @@ pub fn build(b: *std.Build) void {
     const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse true;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
     const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
-    addGuestZiskAb(b, optimize);
     addGuest(
         b,
         .zisk,
@@ -683,26 +685,14 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     packages_step.dependOn(&b.addRunArtifact(rlp_tests).step);
     packages_step.dependOn(&b.addRunArtifact(mpt_tests).step);
 
-    const zisk_ab_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("guest/zisk_ab.zig"),
-            .target = b.graph.host,
-            .optimize = config.optimize,
-        }),
-    });
-    const tools_step = b.step("test-tools", "Run host-side build and guest tooling tests");
-    tools_step.dependOn(&b.addRunArtifact(zisk_ab_tests).step);
-
     const selected_step = b.step("test", "Run unit tests for the selected profile");
     selected_step.dependOn(if (config.selected_profile == .native) native_step else zkvm_step);
     selected_step.dependOn(packages_step);
-    selected_step.dependOn(tools_step);
 
     return .{
         .native = native_step,
         .zkvm = zkvm_step,
         .packages = packages_step,
-        .tools = tools_step,
         .selected = selected_step,
     };
 }
@@ -1095,22 +1085,6 @@ fn addGuestRunner(
             run_step.dependOn(&run.step);
         },
     }
-}
-
-fn addGuestZiskAb(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
-    const runner = b.addExecutable(.{
-        .name = "evmz-guest-zisk-ab",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("guest/zisk_ab.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-    const run = b.addRunArtifact(runner);
-    run.addArgs(&.{ "--zig", b.graph.zig_exe });
-    if (b.args) |args| run.addArgs(args);
-    const step = b.step("guest-zisk-ab", "Compare verified ZisK guest steps across two source trees");
-    step.dependOn(&run.step);
 }
 
 /// Whole-tree hygiene check. It reads the working tree rather than a declared

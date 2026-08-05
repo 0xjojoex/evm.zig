@@ -37,7 +37,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
 
     var total = tx.Summary{};
     for (paths.items) |path| {
-        const summary = try Fixtures.sequential(init.io, allocator, path, options);
+        const summary = try Fixtures.sequential(init.io, allocator, &.{path}, options);
         total.add(summary);
         printSummary(path, summary);
     }
