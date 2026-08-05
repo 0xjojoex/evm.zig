@@ -171,6 +171,27 @@ pub const Catalog = struct {
         return self.reference(entry, branch.links[child_index], branch.reference_offsets[child_index]);
     }
 
+    pub fn branchReferenceEncodedLen(
+        self: Catalog,
+        id: NodeId,
+        child_index: usize,
+    ) errors.LookupError!usize {
+        if (child_index >= 16) return error.InvalidNodeReference;
+        const entry = self.node(id) orelse return error.InvalidNodeReference;
+        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
+            return error.InvalidNodeReference;
+        }
+        const link = self.branches.items[entry.payload].links[child_index];
+        return switch (link) {
+            .empty => 1,
+            .@"opaque" => 33,
+            _ => if (link.node()) |child_id| child: {
+                const child_node = self.node(child_id) orelse return error.InvalidNodeReference;
+                break :child if (child_node.encoded.len < 32) child_node.encoded.len else 33;
+            } else error.InvalidNodeReference,
+        };
+    }
+
     fn reference(
         self: Catalog,
         parent: *const Node,
@@ -363,8 +384,8 @@ pub const Builder = struct {
         while (self.work.pop()) |id| {
             const index = @intFromEnum(id);
             if (self.states.items[index] == decoded) continue;
-            const decoded_node = try node_codec.decode(self.nodes.items[index].encoded, false);
-            const compact = try self.compactNode(self.nodes.items[index].encoded, decoded_node);
+            var decoded_node = try node_codec.decodeForCatalog(self.nodes.items[index].encoded);
+            const compact = try self.compactNode(self.nodes.items[index].encoded, &decoded_node);
             self.nodes.items[index] = compact;
             self.states.items[index] = decoded;
         }
@@ -373,13 +394,22 @@ pub const Builder = struct {
     fn linkChildren(
         self: *Builder,
         encoded: []const u8,
-        references: [16]node_codec.Reference,
+        references: *const [16]node_codec.CatalogReference,
     ) BuildError!u32 {
         if (self.branches.items.len >= self.limits.branches) return error.ResourceLimitExceeded;
         var branch: Branch = undefined;
-        for (references, 0..) |reference, index| {
-            branch.links[index] = try self.linkReference(reference);
-            branch.reference_offsets[index] = try referenceOffset(encoded, reference);
+        for (references, 0..) |compact_reference, index| {
+            const reference = compact_reference.reference(encoded);
+            switch (reference) {
+                .empty => {
+                    branch.links[index] = .empty;
+                    branch.reference_offsets[index] = 0;
+                },
+                else => {
+                    branch.links[index] = try self.linkReference(reference);
+                    branch.reference_offsets[index] = @intCast(compact_reference.offset);
+                },
+            }
         }
         if (self.branches.items.len > std.math.maxInt(u32)) return error.ResourceLimitExceeded;
         const index: u32 = @intCast(self.branches.items.len);
@@ -432,7 +462,7 @@ pub const Builder = struct {
         return id;
     }
 
-    fn compactNode(self: *Builder, encoded: []const u8, decoded_node: node_codec.Node) BuildError!Node {
+    fn compactNode(self: *Builder, encoded: []const u8, decoded_node: *node_codec.CatalogNode) BuildError!Node {
         if (encoded.len > std.math.maxInt(u16)) return error.ResourceLimitExceeded;
         var compact: Node = .{
             .encoded = encoded,
@@ -445,7 +475,7 @@ pub const Builder = struct {
             .path_nibble_offset = 0,
             .kind = undefined,
         };
-        switch (decoded_node) {
+        switch (decoded_node.*) {
             .leaf => |leaf| {
                 try setPath(&compact, leaf.path);
                 try setValue(&compact, leaf.value);
@@ -457,8 +487,8 @@ pub const Builder = struct {
                 compact.value_offset = try referenceOffset(encoded, extension.child);
                 compact.kind = .extension;
             },
-            .branch => |branch| {
-                compact.payload = try self.linkChildren(encoded, branch.children);
+            .branch => |*branch| {
+                compact.payload = try self.linkChildren(encoded, &branch.children);
                 if (branch.value) |value| try setValue(&compact, value);
                 compact.kind = .branch;
             },

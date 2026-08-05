@@ -390,6 +390,13 @@ test "catalog keeps missing hashed siblings opaque" {
     defer catalog.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), catalog.nodeCount());
+    try std.testing.expectEqual(@as(usize, 33), try catalog.branchReferenceEncodedLen(root_ref.node.id, 0));
+    try std.testing.expectEqual(@as(usize, 3), try catalog.branchReferenceEncodedLen(root_ref.node.id, 1));
+    try std.testing.expectEqual(@as(usize, 1), try catalog.branchReferenceEncodedLen(root_ref.node.id, 2));
+    try std.testing.expectError(
+        error.InvalidNodeReference,
+        catalog.branchReferenceEncodedLen(root_ref.node.id, 16),
+    );
     try std.testing.expectError(error.MissingNode, catalog.lookup(root_ref, &[_]u8{0x00}));
     const embedded = try catalog.lookup(root_ref, &[_]u8{0x10});
     switch (embedded) {

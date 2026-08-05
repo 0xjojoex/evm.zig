@@ -19,8 +19,7 @@ pub const ShardFold = struct {
     };
 
     allocator: Allocator,
-    accounts: std.ArrayList(FoldAccount) = .empty,
-    account_indices: std.AutoHashMap(bal.Address, usize),
+    accounts: std.array_hash_map.Auto(bal.Address, FoldAccount) = .empty,
     lifecycle: Lifecycle = .building,
 
     pub const Error = Allocator.Error || error{
@@ -33,16 +32,12 @@ pub const ShardFold = struct {
     };
 
     pub fn init(allocator: Allocator) ShardFold {
-        return .{
-            .allocator = allocator,
-            .account_indices = .init(allocator),
-        };
+        return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *ShardFold) void {
-        for (self.accounts.items) |*account| account.deinit(self.allocator);
+        for (self.accounts.values()) |*account| account.deinit(self.allocator);
         self.accounts.deinit(self.allocator);
-        self.account_indices.deinit();
         self.* = undefined;
     }
 
@@ -102,16 +97,20 @@ pub const ShardFold = struct {
     }
 
     fn finishFallible(self: *ShardFold) Error!bal.Decoded {
-        std.mem.sort(FoldAccount, self.accounts.items, {}, foldAccountLessThan);
+        const account_order = try self.allocator.alloc(usize, self.accounts.count());
+        defer self.allocator.free(account_order);
+        for (account_order, 0..) |*index, value| index.* = value;
+        std.sort.pdq(usize, account_order, self.accounts.keys(), accountIndexLessThan);
 
         var accounts: std.ArrayList(bal.AccountChanges) = .empty;
         errdefer {
             for (accounts.items) |*account| deinitAccount(self.allocator, account);
             accounts.deinit(self.allocator);
         }
-        try accounts.ensureTotalCapacity(self.allocator, self.accounts.items.len);
-        for (self.accounts.items) |*account| {
-            var owned = try account.toOwnedAccount(self.allocator);
+        try accounts.ensureTotalCapacity(self.allocator, self.accounts.count());
+        for (account_order) |account_index| {
+            const account = &self.accounts.values()[account_index];
+            var owned = try account.toOwnedAccount(self.allocator, self.accounts.keys()[account_index]);
             errdefer deinitAccount(self.allocator, &owned);
             accounts.appendAssumeCapacity(owned);
         }
@@ -119,12 +118,9 @@ pub const ShardFold = struct {
     }
 
     fn accountFor(self: *ShardFold, target: bal.Address) Error!*FoldAccount {
-        if (self.account_indices.get(target)) |index| return &self.accounts.items[index];
-        const index = self.accounts.items.len;
-        try self.accounts.append(self.allocator, .{ .address = target });
-        errdefer _ = self.accounts.pop();
-        try self.account_indices.put(target, index);
-        return &self.accounts.items[index];
+        const result = try self.accounts.getOrPut(self.allocator, target);
+        if (!result.found_existing) result.value_ptr.* = .{};
+        return result.value_ptr;
     }
 };
 
@@ -153,7 +149,6 @@ const FoldStorageChange = struct {
 };
 
 const FoldAccount = struct {
-    address: bal.Address,
     storage_changes: std.ArrayList(FoldStorageChange) = .empty,
     storage_reads: std.ArrayList(u256) = .empty,
     balance_changes: std.ArrayList(bal.BalanceChange) = .empty,
@@ -230,8 +225,12 @@ const FoldAccount = struct {
         };
     }
 
-    fn toOwnedAccount(self: *FoldAccount, allocator: Allocator) ShardFold.Error!bal.AccountChanges {
-        var result = bal.AccountChanges{ .address = self.address };
+    fn toOwnedAccount(
+        self: *FoldAccount,
+        allocator: Allocator,
+        target: bal.Address,
+    ) ShardFold.Error!bal.AccountChanges {
+        var result = bal.AccountChanges{ .address = target };
         errdefer deinitAccount(allocator, &result);
 
         result.storage_changes = try self.toOwnedStorageChanges(allocator);
@@ -252,7 +251,16 @@ const FoldAccount = struct {
     }
 
     fn toOwnedStorageChanges(self: *FoldAccount, allocator: Allocator) ShardFold.Error![]const bal.SlotChanges {
-        std.mem.sort(FoldStorageChange, self.storage_changes.items, {}, storageChangeLessThan);
+        const storage_order = try allocator.alloc(usize, self.storage_changes.items.len);
+        defer allocator.free(storage_order);
+        for (storage_order, 0..) |*entry, index| entry.* = index;
+        std.sort.pdq(
+            usize,
+            storage_order,
+            self.storage_changes.items,
+            storageChangeIndexLessThan,
+        );
+
         var slots: std.ArrayList(bal.SlotChanges) = .empty;
         errdefer {
             for (slots.items) |slot| allocator.free(@constCast(slot.changes));
@@ -260,12 +268,14 @@ const FoldAccount = struct {
         }
 
         var index: usize = 0;
-        while (index < self.storage_changes.items.len) {
-            const slot = self.storage_changes.items[index].slot;
+        while (index < storage_order.len) {
+            const slot = self.storage_changes.items[storage_order[index]].slot;
             var changes: std.ArrayList(bal.StorageChange) = .empty;
             errdefer changes.deinit(allocator);
-            while (index < self.storage_changes.items.len and self.storage_changes.items[index].slot == slot) {
-                const change = self.storage_changes.items[index];
+            while (index < storage_order.len and
+                self.storage_changes.items[storage_order[index]].slot == slot)
+            {
+                const change = self.storage_changes.items[storage_order[index]];
                 if (changes.getLastOrNull()) |previous| {
                     if (previous.block_access_index == change.block_access_index)
                         return error.DuplicateStorageChangeIndex;
@@ -326,11 +336,17 @@ fn rejectDuplicateCodeIndices(changes: []const bal.CodeChange) ShardFold.Error!v
     }
 }
 
-fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
+fn accountIndexLessThan(addresses: []const bal.Address, lhs: usize, rhs: usize) bool {
+    return std.mem.order(u8, &addresses[lhs], &addresses[rhs]) == .lt;
 }
 
-fn storageChangeLessThan(_: void, lhs: FoldStorageChange, rhs: FoldStorageChange) bool {
+fn storageChangeIndexLessThan(
+    changes: []const FoldStorageChange,
+    lhs_index: usize,
+    rhs_index: usize,
+) bool {
+    const lhs = changes[lhs_index];
+    const rhs = changes[rhs_index];
     if (lhs.slot != rhs.slot) return lhs.slot < rhs.slot;
     return lhs.block_access_index < rhs.block_access_index;
 }
@@ -404,4 +420,55 @@ test "observation append projects reads writes and code at one index" {
         account.nonce_changes[0],
     );
     try std.testing.expectEqualSlices(u8, &code, account.code_changes[0].new_code);
+}
+
+test "large account fold canonicalizes through indirect order" {
+    const allocator = std.testing.allocator;
+    var fold = ShardFold.init(allocator);
+    defer fold.deinit();
+
+    for (0..32) |index| {
+        var target: bal.Address = @splat(0);
+        target[target.len - 1] = @intCast(32 - index);
+        try fold.appendObservation(.{
+            .address = target,
+            .balance = .{ .original = 0, .current = 1 },
+        }, @intCast(index + 1));
+    }
+
+    var result = try fold.finish();
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 32), result.accounts.len);
+    for (result.accounts, 1..) |account, expected| {
+        try std.testing.expectEqual(@as(u8, @intCast(expected)), account.address[account.address.len - 1]);
+    }
+}
+
+test "large storage fold canonicalizes through indirect order" {
+    const allocator = std.testing.allocator;
+    var fold = ShardFold.init(allocator);
+    defer fold.deinit();
+
+    const target: bal.Address = @splat(1);
+    for (0..32) |index| {
+        const slot: u256 = @intCast(32 - index);
+        var storage = [_]observation.StorageObservation{.{
+            .slot = slot,
+            .original = 0,
+            .current = 1,
+        }};
+        try fold.appendObservation(.{ .address = target, .storage = &storage }, @intCast(64 - index));
+        storage[0].current = 2;
+        try fold.appendObservation(.{ .address = target, .storage = &storage }, @intCast(index + 1));
+    }
+
+    var result = try fold.finish();
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.accounts.len);
+    try std.testing.expectEqual(@as(usize, 32), result.accounts[0].storage_changes.len);
+    for (result.accounts[0].storage_changes, 1..) |slot, expected| {
+        try std.testing.expectEqual(@as(u256, @intCast(expected)), slot.slot);
+        try std.testing.expectEqual(@as(usize, 2), slot.changes.len);
+        try std.testing.expect(slot.changes[0].block_access_index < slot.changes[1].block_access_index);
+    }
 }
