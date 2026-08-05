@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) void {
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
     const native_secp256k1 = b.option(Secp256k1Backend, "native-secp256k1", "Native secp256k1 backend") orelse .std;
-
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,

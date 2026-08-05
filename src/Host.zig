@@ -55,18 +55,23 @@ pub const Message = struct {
     kind: CallKind,
     gas: i64,
     gas_reservoir: i64 = 0,
-    recipient: Address = addr(0),
-    sender: Address,
+    recipient: Address align(8) = addr(0),
+    sender: Address align(8),
     input_data: []const u8,
     value: u256,
     is_static: bool = false,
-    real_sender: Address = addr(0),
-    code_address: Address = addr(0),
+    real_sender: Address align(8) = addr(0),
+    code_address: Address align(8) = addr(0),
 
     /// Terminal validation already resolved by the opcode handler. The
     /// interpreter still emits the semantic action so call capture observes
     /// the attempt, but no host implementation may execute it.
     precheck_failure: ?TerminalCause = null,
+
+    comptime {
+        std.debug.assert(@sizeOf(Message) == 176);
+        std.debug.assert(@alignOf(Message) == 16);
+    }
 };
 
 pub const CallResult = struct {
@@ -86,6 +91,11 @@ pub const CallResult = struct {
 
     pub fn terminalCause(self: CallResult) TerminalCause {
         return self.outcome.cause;
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(CallResult) == 64);
+        std.debug.assert(@alignOf(CallResult) == 8);
     }
 };
 
@@ -107,6 +117,11 @@ pub const CreateResult = struct {
 
     pub fn terminalCause(self: CreateResult) TerminalCause {
         return self.outcome.cause;
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(CreateResult) == 88);
+        std.debug.assert(@alignOf(CreateResult) == 8);
     }
 };
 
@@ -230,13 +245,6 @@ pub fn precheckResult(msg: Message) ?Result {
     };
 }
 
-comptime {
-    // Rerun benches if follows size changes
-    std.debug.assert(@sizeOf(Message) == 160);
-    std.debug.assert(@sizeOf(CallResult) == 64);
-    std.debug.assert(@sizeOf(CreateResult) == 88);
-}
-
 pub const CallKind = enum(u8) {
     call = 0,
     delegatecall = 1,
@@ -244,7 +252,6 @@ pub const CallKind = enum(u8) {
     create = 3,
     create2 = 4,
     staticcall = 5,
-    // eofcreate = 6,
 
     pub fn fromOpcode(opcode: Opcode) CallKind {
         switch (opcode) {
@@ -254,7 +261,6 @@ pub const CallKind = enum(u8) {
             Opcode.CALLCODE => return CallKind.callcode,
             Opcode.CREATE => return CallKind.create,
             Opcode.CREATE2 => return CallKind.create2,
-            // Opcode.EOFCREATE => return CallKind.eofcreate,
             else => {
                 unreachable;
             },

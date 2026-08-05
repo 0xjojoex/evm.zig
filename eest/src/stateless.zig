@@ -17,6 +17,7 @@ pub const Options = struct {
     verbose: bool = false,
     trace_mismatch: bool = false,
     classify_failures: bool = false,
+    oracle_differential: bool = false,
     report: ?*Report = null,
 };
 
@@ -27,6 +28,7 @@ pub const FailReason = enum(u8) {
     output_mismatch,
     unexpected_success,
     unexpected_failure,
+    oracle_mismatch,
 };
 
 pub const Summary = struct {
@@ -35,6 +37,7 @@ pub const Summary = struct {
     passed: usize = 0,
     failed: usize = 0,
     skipped: usize = 0,
+    oracle_compared: usize = 0,
     fail_reasons: [std.meta.fields(FailReason).len]usize = [_]usize{0} ** std.meta.fields(FailReason).len,
 
     pub fn add(self: *Summary, other: Summary) void {
@@ -43,6 +46,7 @@ pub const Summary = struct {
         self.passed += other.passed;
         self.failed += other.failed;
         self.skipped += other.skipped;
+        self.oracle_compared += other.oracle_compared;
         for (&self.fail_reasons, other.fail_reasons) |*target, value| target.* += value;
     }
 
@@ -138,6 +142,28 @@ fn runFixture(
         };
         defer allocator.free(result);
 
+        // Expected-invalid fixtures often contain several independent faults.
+        // Their internal rejection priority is not part of the public wire
+        // contract, so use focused mutations to compare typed failure status.
+        if (options.oracle_differential and expected_success) {
+            switch (try compareOracle(allocator, input_bytes)) {
+                .skipped => {},
+                .matched => summary.oracle_compared += 1,
+                .mismatch => |mismatch| {
+                    summary.oracle_compared += 1;
+                    printOracleMismatch(path, test_name, block_index, mismatch);
+                    try reporter.add(.{
+                        .category = .implementation_mismatch,
+                        .validation_status = "dense_tracked_mismatch",
+                        .difference = .oracle_result,
+                        .expected_success = expected_success,
+                    });
+                    summary.countFail(.oracle_mismatch);
+                    continue;
+                },
+            }
+        }
+
         if (block.get("statelessOutputBytes")) |expected_value| {
             const expected_output = parseBytesFromValue(allocator, expected_value) catch {
                 try reporter.add(.{
@@ -215,6 +241,95 @@ fn runFixture(
             summary.passed += 1;
         }
     }
+}
+
+const OracleMismatch = struct {
+    dense: evmz.eth.block_stf.Result,
+    tracked: evmz.eth.block_stf.Result,
+};
+
+const OracleComparison = union(enum) {
+    skipped,
+    matched,
+    mismatch: OracleMismatch,
+};
+
+fn compareOracle(allocator: std.mem.Allocator, input_bytes: []const u8) !OracleComparison {
+    const dense = try evmz.stateless.wire.validateStatelessResultBytes(allocator, input_bytes);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const input = evmz.stateless.wire.StatelessInput.decodeSchemaPrefixed(scratch, input_bytes) catch
+        return .skipped;
+    const normalized = evmz.stateless.wire.v1.normalize(scratch, input) catch return .skipped;
+    const tracked = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validate(
+        scratch,
+        normalized,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.BlockTransitionFailed => return error.BlockTransitionFailed,
+        else => evmz.eth.block_stf.Result{ .status = .invalid_witness },
+    };
+    if (oracleResultsEqual(dense, tracked)) return .matched;
+    return .{ .mismatch = .{ .dense = dense, .tracked = tracked } };
+}
+
+fn oracleResultsEqual(dense: evmz.eth.block_stf.Result, tracked: evmz.eth.block_stf.Result) bool {
+    var dense_consensus = dense;
+    var tracked_consensus = tracked;
+    // Admission can reject before a transaction starts while the sparse oracle
+    // discovers the same invalid witness during that transaction. `tx_index`
+    // is diagnostic provenance; every consensus-derived result field must match.
+    dense_consensus.tx_index = null;
+    tracked_consensus.tx_index = null;
+    return std.meta.eql(dense_consensus, tracked_consensus);
+}
+
+fn printOracleMismatch(
+    path: []const u8,
+    test_name: []const u8,
+    block_index: usize,
+    mismatch: OracleMismatch,
+) void {
+    std.debug.print(
+        "oracle mismatch path={s} test={s} block={} dense={s} tracked={s}\n",
+        .{
+            path,
+            test_name,
+            block_index,
+            @tagName(mismatch.dense.status),
+            @tagName(mismatch.tracked.status),
+        },
+    );
+    std.debug.print(
+        "  dense tx={?} gas={}/{}/{} state={x} transactions={x} receipts={x} withdrawals={x} bal={x}\n",
+        .{
+            mismatch.dense.tx_index,
+            mismatch.dense.gas_used,
+            mismatch.dense.block_gas_used,
+            mismatch.dense.block_state_gas_used,
+            mismatch.dense.state_root,
+            mismatch.dense.transactions_root,
+            mismatch.dense.receipts_root,
+            mismatch.dense.withdrawals_root,
+            mismatch.dense.block_access_list_hash,
+        },
+    );
+    std.debug.print(
+        "  tracked tx={?} gas={}/{}/{} state={x} transactions={x} receipts={x} withdrawals={x} bal={x}\n",
+        .{
+            mismatch.tracked.tx_index,
+            mismatch.tracked.gas_used,
+            mismatch.tracked.block_gas_used,
+            mismatch.tracked.block_state_gas_used,
+            mismatch.tracked.state_root,
+            mismatch.tracked.transactions_root,
+            mismatch.tracked.receipts_root,
+            mismatch.tracked.withdrawals_root,
+            mismatch.tracked.block_access_list_hash,
+        },
+    );
 }
 
 /// Per-block report context. Source, test, block, and revision are fixed for a
@@ -325,10 +440,22 @@ test "stateless zkevm runner compares canonical SSZ bytes" {
     , .{ input_hex, output_hex });
     defer std.testing.allocator.free(fixture);
 
-    const summary = try runSlice(std.testing.allocator, fixture, .{}, "smoke.json");
+    const summary = try runSlice(std.testing.allocator, fixture, .{
+        .oracle_differential = true,
+    }, "smoke.json");
     try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.oracle_compared);
+}
+
+test "oracle parity excludes only diagnostic transaction provenance" {
+    const dense = evmz.eth.block_stf.Result{ .status = .invalid_witness };
+    var tracked = dense;
+    tracked.tx_index = 0;
+    try std.testing.expect(oracleResultsEqual(dense, tracked));
+    tracked.gas_used = 1;
+    try std.testing.expect(!oracleResultsEqual(dense, tracked));
 }
 
 fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -475,7 +602,7 @@ fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
         std.debug.print("    trace normalize failed: {s}\n", .{@errorName(err)});
         return;
     };
-    _ = evmz.stateless.Exact(.amsterdam).validateWithCaptureOptions(scratch, normalized, .{
+    _ = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validateWithCaptureOptions(scratch, normalized, .{
         .observations = printer.observationTarget(),
         .steps = .{
             .tape = &tape,

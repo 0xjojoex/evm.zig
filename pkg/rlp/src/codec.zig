@@ -161,8 +161,34 @@ pub fn decode(comptime T: type, bytes: []const u8) DecodeError!T {
 
 /// Decode one nonallocating value through an explicit codec.
 pub fn decodeAs(comptime Codec: type, bytes: []const u8) DecodeError!Codec.Value {
-    var budget = decoding.Budget.unlimited();
-    return decodeWithBudgetAs(Codec, bytes, &budget);
+    var value: Codec.Value = undefined;
+    try decodeIntoAs(Codec, bytes, &value);
+    return value;
+}
+
+/// Decode one nonallocating host value directly into caller-owned storage.
+/// The destination is undefined when decoding fails.
+pub fn decodeInto(comptime T: type, bytes: []const u8, value: *T) DecodeError!void {
+    return decodeIntoAs(hostCodec(T), bytes, value);
+}
+
+/// Decode one explicitly coded value directly into caller-owned storage.
+/// The destination is undefined when decoding fails.
+pub fn decodeIntoAs(
+    comptime Codec: type,
+    bytes: []const u8,
+    value: *Codec.Value,
+) DecodeError!void {
+    comptime {
+        assertCodec(Codec);
+        if (Codec.requires_allocator) {
+            @compileError("allocating RLP codec requires decodeAlloc");
+        }
+    }
+
+    var cursor = raw.Cursor.init(bytes);
+    try decodeIntoValue(Codec, &cursor, value);
+    try cursor.expectDone();
 }
 
 pub fn decodeWithBudget(
@@ -252,7 +278,7 @@ const Bytes = struct {
         try encoder.bytes(value);
     }
 
-    pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Value {
+    pub fn decodeFrom(decoder: anytype) DecodeError!Value {
         return decoder.nextBytes();
     }
 };
@@ -300,7 +326,7 @@ const EmptyBytes = struct {
         try encoder.bytes("");
     }
 
-    pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!void {
+    pub fn decodeFrom(decoder: anytype) DecodeError!void {
         if ((try decoder.nextBytes()).len != 0) return error.UnexpectedLength;
     }
 };
@@ -318,9 +344,14 @@ pub fn FixedBytes(comptime len: usize) type {
             try encoder.bytes(&value);
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Value {
-            const value = try decoder.nextBytesExact(len);
-            return value[0..len].*;
+        pub fn decodeFrom(decoder: anytype) DecodeError!Value {
+            var value: Value = undefined;
+            try @This().decodeInto(decoder, &value);
+            return value;
+        }
+
+        pub inline fn decodeInto(decoder: anytype, value: *Value) DecodeError!void {
+            @memcpy(value, try decoder.nextBytesExact(len));
         }
     };
 }
@@ -349,7 +380,7 @@ pub fn OptionalFixedBytes(comptime len: usize) type {
             }
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Value {
+        pub fn decodeFrom(decoder: anytype) DecodeError!Value {
             const bytes = try decoder.nextBytes();
             if (bytes.len == 0) return null;
             if (bytes.len != len) return error.UnexpectedLength;
@@ -375,7 +406,7 @@ fn Uint(comptime T: type) type {
             try encoder.uint(T, value);
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!T {
+        pub fn decodeFrom(decoder: anytype) DecodeError!T {
             return decoder.nextInt(T);
         }
     };
@@ -394,7 +425,7 @@ const Bool = struct {
         try encoder.uint(u1, @intFromBool(value));
     }
 
-    pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!bool {
+    pub fn decodeFrom(decoder: anytype) DecodeError!bool {
         return (try decoder.nextInt(u1)) == 1;
     }
 };
@@ -512,16 +543,20 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
             try encodeStructFields(T, overrides, encoder, value);
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!T {
-            var fields = try decoder.nextList();
+        pub fn decodeFrom(decoder: anytype) DecodeError!T {
             var value: T = undefined;
+            try @This().decodeInto(decoder, &value);
+            return value;
+        }
+
+        pub fn decodeInto(decoder: anytype, value: *T) DecodeError!void {
+            var fields = try decoder.nextList();
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 const FieldCodec = fieldCodec(overrides, field.name, field.type);
                 if (FieldCodec.requires_allocator) unreachable;
-                @field(value, field.name) = try FieldCodec.decodeFrom(&fields);
+                try decodeIntoValue(FieldCodec, &fields, &@field(value.*, field.name));
             }
             try fields.expectDone();
-            return value;
         }
 
         pub fn decodeAllocFrom(
@@ -561,6 +596,7 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
         pub const fieldsEncodedLen = Common.fieldsEncodedLen;
         pub const encodeFieldsTo = Common.encodeFieldsTo;
         pub const decodeFrom = Common.decodeFrom;
+        pub const decodeInto = Common.decodeInto;
     };
 }
 
@@ -581,14 +617,18 @@ pub fn ArrayOf(comptime ElementCodec: type, comptime len: usize) type {
             try encodeSequencePayload(ElementCodec, encoder, values);
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Value {
-            var fields = try decoder.nextList();
+        pub fn decodeFrom(decoder: anytype) DecodeError!Value {
             var values: Value = undefined;
+            try @This().decodeInto(decoder, &values);
+            return values;
+        }
+
+        pub fn decodeInto(decoder: anytype, values: *Value) DecodeError!void {
+            var fields = try decoder.nextList();
             inline for (0..len) |index| {
-                values[index] = try ElementCodec.decodeFrom(&fields);
+                try decodeIntoValue(ElementCodec, &fields, &values[index]);
             }
             try fields.expectDone();
-            return values;
         }
 
         pub fn decodeAllocFrom(
@@ -624,6 +664,7 @@ pub fn ArrayOf(comptime ElementCodec: type, comptime len: usize) type {
         pub const encodedLen = Common.encodedLen;
         pub const encodeTo = Common.encodeTo;
         pub const decodeFrom = Common.decodeFrom;
+        pub const decodeInto = Common.decodeInto;
     };
 }
 
@@ -660,7 +701,7 @@ pub fn Mapped(comptime Host: type, comptime WireCodec: type, comptime Mapping: t
             try WireCodec.encodeTo(encoder, Mapping.toWire(value));
         }
 
-        pub fn decodeFrom(decoder: *decoding.Decoder) DecodeError!Host {
+        pub fn decodeFrom(decoder: anytype) DecodeError!Host {
             return Mapping.fromWire(try WireCodec.decodeFrom(decoder));
         }
 
@@ -1036,6 +1077,14 @@ fn decodeValue(
         Codec.decodeAllocFrom(allocator, decoder)
     else
         Codec.decodeFrom(decoder);
+}
+
+inline fn decodeIntoValue(comptime Codec: type, decoder: anytype, value: *Codec.Value) !void {
+    if (@hasDecl(Codec, "decodeInto")) {
+        try Codec.decodeInto(decoder, value);
+    } else {
+        value.* = try Codec.decodeFrom(decoder);
+    }
 }
 
 fn deinitValue(comptime Codec: type, allocator: Allocator, value: *Codec.Value) void {

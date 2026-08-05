@@ -18,9 +18,8 @@ pub const Options = struct {
     limit: usize = 0,
     output_folder: []const u8 = "zkevm-metrics",
     engine: Engine = .native,
-    ziskemu_path: ?[]const u8 = null,
+    zisk_host_path: ?[]const u8 = null,
     zisk_elf_path: ?[]const u8 = null,
-    zisk_work_dir: []const u8 = "zig-out/zkevm-ere-bench",
     zisk_max_steps: []const u8 = "1000000",
     sp1_host_path: ?[]const u8 = null,
     sp1_elf_path: ?[]const u8 = null,
@@ -74,67 +73,114 @@ pub const SelectionLimit = struct {
     }
 };
 
-pub fn runRoot(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options, limit: *SelectionLimit) !Summary {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.NotDir, error.FileNotFound => {
-            const input_root = std.fs.path.dirname(path) orelse ".";
-            return runFile(io, allocator, path, input_root, options, limit);
-        },
-        else => return err,
-    };
-    defer dir.close(io);
-
-    return runDir(io, allocator, path, path, options, limit);
-}
-
-fn runDir(
+pub const Runner = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    path: []const u8,
-    input_root: []const u8,
     options: Options,
-    limit: *SelectionLimit,
-) !Summary {
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
+    zisk_host: ?ZiskHost,
 
-    var summary = Summary{};
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (limit.exhausted()) break;
-
-        const child = try std.fs.path.join(allocator, &.{ path, entry.name });
-        defer allocator.free(child);
-
-        switch (entry.kind) {
-            .directory => summary.add(try runDir(io, allocator, child, input_root, options, limit)),
-            .file => {
-                if (std.mem.endsWith(u8, entry.name, ".json")) {
-                    summary.add(try runFile(io, allocator, child, input_root, options, limit));
-                }
-            },
-            else => {},
-        }
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, options: Options) !Runner {
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .options = options,
+            .zisk_host = if (options.engine == .zisk) try ZiskHost.init(io, options) else null,
+        };
     }
 
-    return summary;
-}
+    pub fn deinit(self: *Runner) void {
+        if (self.zisk_host) |*host| host.deinit(self.io);
+    }
 
-pub fn runFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    input_root: []const u8,
-    options: Options,
-    limit: *SelectionLimit,
-) !Summary {
-    const bytes = try readBenchmarkInputFile(io, allocator, path);
-    defer allocator.free(bytes);
+    pub fn runRoot(self: *Runner, path: []const u8, limit: *SelectionLimit) !Summary {
+        var dir = std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch |err| switch (err) {
+            error.NotDir, error.FileNotFound => {
+                const input_root = std.fs.path.dirname(path) orelse ".";
+                return self.runFile(path, input_root, limit);
+            },
+            else => return err,
+        };
+        defer dir.close(self.io);
 
-    var summary = try runSlice(io, allocator, path, input_root, bytes, options, limit);
-    summary.files = 1;
-    return summary;
-}
+        return self.runDir(path, path, limit);
+    }
+
+    fn runDir(self: *Runner, path: []const u8, input_root: []const u8, limit: *SelectionLimit) !Summary {
+        var dir = try std.Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true });
+        defer dir.close(self.io);
+
+        var summary = Summary{};
+        var it = dir.iterate();
+        while (try it.next(self.io)) |entry| {
+            if (limit.exhausted()) break;
+
+            const child = try std.fs.path.join(self.allocator, &.{ path, entry.name });
+            defer self.allocator.free(child);
+
+            switch (entry.kind) {
+                .directory => summary.add(try self.runDir(child, input_root, limit)),
+                .file => {
+                    if (std.mem.endsWith(u8, entry.name, ".json")) {
+                        summary.add(try self.runFile(child, input_root, limit));
+                    }
+                },
+                else => {},
+            }
+        }
+
+        return summary;
+    }
+
+    fn runFile(self: *Runner, path: []const u8, input_root: []const u8, limit: *SelectionLimit) !Summary {
+        const bytes = try readBenchmarkInputFile(self.io, self.allocator, path);
+        defer self.allocator.free(bytes);
+
+        var summary = try self.runSlice(path, input_root, bytes, limit);
+        summary.files = 1;
+        return summary;
+    }
+
+    fn runSlice(
+        self: *Runner,
+        path: []const u8,
+        input_root: []const u8,
+        bytes: []const u8,
+        limit: *SelectionLimit,
+    ) !Summary {
+        var fixtures = try loadEestBenchmarkFixtures(self.allocator, path, input_root, bytes, self.options);
+        defer {
+            for (fixtures.items) |*fixture| fixture.deinit(self.allocator);
+            fixtures.deinit(self.allocator);
+        }
+
+        var summary = Summary{};
+        for (fixtures.items) |*fixture| {
+            if (!limit.take()) break;
+            summary.fixtures += 1;
+
+            var execution = executeFixture(self, fixture) catch |err| blk: {
+                const reason = try std.fmt.allocPrint(self.allocator, "evmz bridge failed: {s}", .{@errorName(err)});
+                break :blk ExecutionMetrics{ .crashed = .{ .reason = reason } };
+            };
+            defer execution.deinit(self.allocator);
+
+            const output_path = try metricOutputPath(self.allocator, self.options.output_folder, self.options.engine, fixture.name);
+            defer self.allocator.free(output_path);
+            try writeBenchmarkRun(self.io, self.allocator, output_path, fixture, execution);
+
+            switch (execution) {
+                .success => |success| {
+                    summary.benchmarked += 1;
+                    if (!success.output_matched) summary.failed += 1;
+                },
+                .crashed => summary.failed += 1,
+            }
+        }
+
+        if (fixtures.items.len == 0) summary.skipped += 1;
+        return summary;
+    }
+};
 
 fn readBenchmarkInputFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return readBenchmarkInputPath(io, allocator, path) catch |err| switch (err) {
@@ -167,49 +213,6 @@ fn readBenchmarkInputPath(io: std.Io, allocator: std.mem.Allocator, path: []cons
     }
 
     return bytes.toOwnedSlice(allocator);
-}
-
-pub fn runSlice(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    input_root: []const u8,
-    bytes: []const u8,
-    options: Options,
-    limit: *SelectionLimit,
-) !Summary {
-    var fixtures = try loadEestBenchmarkFixtures(allocator, path, input_root, bytes, options);
-    defer {
-        for (fixtures.items) |*fixture| fixture.deinit(allocator);
-        fixtures.deinit(allocator);
-    }
-
-    var summary = Summary{};
-    for (fixtures.items) |*fixture| {
-        if (!limit.take()) break;
-        summary.fixtures += 1;
-
-        var execution = executeFixture(io, allocator, fixture, options) catch |err| blk: {
-            const reason = try std.fmt.allocPrint(allocator, "evmz bridge failed: {s}", .{@errorName(err)});
-            break :blk ExecutionMetrics{ .crashed = .{ .reason = reason } };
-        };
-        defer execution.deinit(allocator);
-
-        const output_path = try metricOutputPath(allocator, options.output_folder, options.engine, fixture.name);
-        defer allocator.free(output_path);
-        try writeBenchmarkRun(io, allocator, output_path, fixture, execution);
-
-        switch (execution) {
-            .success => |success| {
-                summary.benchmarked += 1;
-                if (!success.output_matched) summary.failed += 1;
-            },
-            .crashed => summary.failed += 1,
-        }
-    }
-
-    if (fixtures.items.len == 0) summary.skipped += 1;
-    return summary;
 }
 
 const Fixture = struct {
@@ -389,19 +392,113 @@ const HeapMetrics = struct {
     measurement: []const u8,
 };
 
-fn executeFixture(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture, options: Options) !ExecutionMetrics {
-    return switch (options.engine) {
-        .native => try executeNative(io, allocator, fixture),
-        .zisk => try executeZisk(io, allocator, fixture, options),
-        .sp1 => try executeSp1(io, allocator, fixture, options),
+const ZiskHost = struct {
+    child: std.process.Child,
+
+    const ready = "EVZKH001";
+    const response_header_bytes = 32;
+    const max_response_payload_bytes = 4 * 1024 * 1024;
+
+    fn init(io: std.Io, options: Options) !ZiskHost {
+        const host_path = options.zisk_host_path orelse return error.MissingZiskHostPath;
+        const elf_path = options.zisk_elf_path orelse return error.MissingZiskElfPath;
+        const argv = [_][]const u8{
+            host_path,
+            "--elf",
+            elf_path,
+            "--max-steps",
+            options.zisk_max_steps,
+        };
+        var child = try std.process.spawn(io, .{
+            .argv = &argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .inherit,
+        });
+        errdefer child.kill(io);
+
+        var handshake: [ready.len]u8 = undefined;
+        try readPipeAll(child.stdout.?, io, &handshake);
+        if (!std.mem.eql(u8, &handshake, ready)) return error.InvalidZiskHostHandshake;
+        return .{ .child = child };
+    }
+
+    fn deinit(self: *ZiskHost, io: std.Io) void {
+        if (self.child.id == null) return;
+        if (self.child.stdin) |stdin| {
+            stdin.close(io);
+            self.child.stdin = null;
+        }
+        _ = self.child.wait(io) catch {
+            self.child.kill(io);
+            return;
+        };
+    }
+
+    fn execute(self: *ZiskHost, io: std.Io, allocator: std.mem.Allocator, input: []const u8) !ZiskHostResponse {
+        var length_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length_bytes, @intCast(input.len), .little);
+        try writePipeAll(self.child.stdin.?, io, &length_bytes);
+        try writePipeAll(self.child.stdin.?, io, input);
+
+        var header: [response_header_bytes]u8 = undefined;
+        try readPipeAll(self.child.stdout.?, io, &header);
+        const status = header[0];
+        if (status > 1) return error.InvalidZiskHostStatus;
+        const steps = std.mem.readInt(u64, header[8..16], .little);
+        const duration_nanos = std.mem.readInt(u64, header[16..24], .little);
+        const payload_len = std.mem.readInt(u64, header[24..32], .little);
+        if (payload_len > max_response_payload_bytes) return error.ZiskHostResponseTooLarge;
+
+        const payload = try allocator.alloc(u8, @intCast(payload_len));
+        errdefer allocator.free(payload);
+        try readPipeAll(self.child.stdout.?, io, payload);
+        return .{
+            .status = status,
+            .steps = steps,
+            .duration_nanos = duration_nanos,
+            .payload = payload,
+        };
+    }
+};
+
+const ZiskHostResponse = struct {
+    status: u8,
+    steps: u64,
+    duration_nanos: u64,
+    payload: []u8,
+
+    fn deinit(self: *ZiskHostResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload);
+    }
+};
+
+fn readPipeAll(file: std.Io.File, io: std.Io, bytes: []u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const read = try file.readStreaming(io, &.{bytes[offset..]});
+        if (read == 0) return error.UnexpectedEndOfStream;
+        offset += read;
+    }
+}
+
+fn writePipeAll(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
+    try file.writeStreamingAll(io, bytes);
+}
+
+fn executeFixture(runner: *Runner, fixture: *const Fixture) !ExecutionMetrics {
+    return switch (runner.options.engine) {
+        .native => try executeNative(runner.io, runner.allocator, fixture),
+        .zisk => try executeZisk(runner, fixture),
+        .sp1 => try executeSp1(runner.io, runner.allocator, fixture, runner.options),
     };
 }
 
 fn executeSp1(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture, options: Options) !ExecutionMetrics {
     const host_path = options.sp1_host_path orelse return error.MissingSp1HostPath;
     const elf_path = options.sp1_elf_path orelse return error.MissingSp1ElfPath;
-    var mirror = try validateWithMeteredFixedHeap(allocator, fixture.stateless_input_bytes, "native-fixed-mirror");
-    defer mirror.deinit(allocator);
+    var mirror = optionalNativeMirror(allocator, fixture.stateless_input_bytes);
+    defer if (mirror) |*run| run.deinit(allocator);
 
     const run_id = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ fixture.name, monotonicNanos(io) });
     defer allocator.free(run_id);
@@ -454,7 +551,7 @@ fn executeSp1(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture,
         .public_values = try .init(allocator, actual),
         .total_num_cycles = cycles,
         .execution_duration = durationJson(elapsed_ns),
-        .heap = mirror.heap,
+        .heap = if (mirror) |run| run.heap else null,
     } };
 }
 
@@ -473,70 +570,27 @@ fn executeNative(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixtu
     } };
 }
 
-fn executeZisk(io: std.Io, allocator: std.mem.Allocator, fixture: *const Fixture, options: Options) !ExecutionMetrics {
-    const ziskemu_path = options.ziskemu_path orelse return error.MissingZiskemuPath;
-    const zisk_elf_path = options.zisk_elf_path orelse return error.MissingZiskElfPath;
-    var mirror = try validateWithMeteredFixedHeap(allocator, fixture.stateless_input_bytes, "native-fixed-mirror");
-    defer mirror.deinit(allocator);
+fn executeZisk(runner: *Runner, fixture: *const Fixture) !ExecutionMetrics {
+    const allocator = runner.allocator;
+    var mirror = optionalNativeMirror(allocator, fixture.stateless_input_bytes);
+    defer if (mirror) |*run| run.deinit(allocator);
 
-    const run_id = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ fixture.name, monotonicNanos(io) });
-    defer allocator.free(run_id);
-    const work_dir = try std.fs.path.join(allocator, &.{ options.zisk_work_dir, run_id });
-    defer allocator.free(work_dir);
-    try std.Io.Dir.cwd().createDirPath(io, work_dir);
-
-    const input_path = try std.fs.path.join(allocator, &.{ work_dir, "stdin.bin" });
-    defer allocator.free(input_path);
-    const output_path = try std.fs.path.join(allocator, &.{ work_dir, "public.bin" });
-    defer allocator.free(output_path);
-
-    const framed_input = try ere_io.inputBytes(allocator, fixture.stateless_input_bytes, .zisk);
-    defer allocator.free(framed_input);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = input_path, .data = framed_input });
-
-    const argv = [_][]const u8{
-        ziskemu_path,
-        "-e",
-        zisk_elf_path,
-        "-i",
-        input_path,
-        "-o",
-        output_path,
-        "-n",
-        options.zisk_max_steps,
-        "-m",
-        "--steps",
-        "-c",
-    };
-
-    const start = monotonicNanos(io);
-    const result = try std.process.run(allocator, io, .{
-        .argv = &argv,
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(4 * 1024 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    const elapsed_ns = monotonicNanos(io) - start;
-
-    const steps = parseZiskSteps(result.stdout) orelse parseZiskSteps(result.stderr) orelse 0;
-    if (!childTermOk(result.term) or ziskRunErrored(result.stdout) or ziskRunErrored(result.stderr)) {
-        const reason = try std.fmt.allocPrint(allocator, "ziskemu exited with {f}: {s}{s}", .{ fmtTerm(result.term), result.stdout, result.stderr });
-        return .{ .crashed = .{ .reason = reason } };
+    var response = try runner.zisk_host.?.execute(runner.io, allocator, fixture.stateless_input_bytes);
+    defer response.deinit(allocator);
+    if (response.status != 0) {
+        return .{ .crashed = .{ .reason = try allocator.dupe(u8, response.payload) } };
     }
 
-    const actual = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(1024));
-    defer allocator.free(actual);
     const expected = try ere_io.outputBytes(allocator, fixture.stateless_output_bytes, .zisk);
     defer allocator.free(expected);
-    const public_len = @min(actual.len, fixture.stateless_output_bytes.len);
+    const public_len = @min(response.payload.len, fixture.stateless_output_bytes.len);
 
     return .{ .success = .{
-        .output_matched = std.mem.eql(u8, actual, expected),
-        .public_values = try .init(allocator, actual[0..public_len]),
-        .total_num_cycles = steps,
-        .execution_duration = durationJson(elapsed_ns),
-        .heap = mirror.heap,
+        .output_matched = std.mem.eql(u8, response.payload, expected),
+        .public_values = try .init(allocator, response.payload[0..public_len]),
+        .total_num_cycles = response.steps,
+        .execution_duration = durationJson(response.duration_nanos),
+        .heap = if (mirror) |run| run.heap else null,
     } };
 }
 
@@ -564,6 +618,19 @@ fn validateWithMeteredFixedHeap(allocator: std.mem.Allocator, input: []const u8,
             .measurement = measurement,
         },
     };
+}
+
+fn optionalNativeMirror(allocator: std.mem.Allocator, input: []const u8) ?MeteredRun {
+    return validateWithMeteredFixedHeap(allocator, input, "native-fixed-mirror") catch null;
+}
+
+test "native mirror failure omits telemetry" {
+    const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
+    defer std.testing.allocator.free(input);
+
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    try std.testing.expectEqual(null, optionalNativeMirror(fixed.allocator(), input));
 }
 
 const BenchmarkRun = struct {
@@ -713,10 +780,6 @@ fn truncateFixtureName(allocator: std.mem.Allocator, base: []const u8, suffix: [
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ base[0..end], suffix });
 }
 
-fn parseZiskSteps(bytes: []const u8) ?u64 {
-    return parseCounter(bytes, "steps=");
-}
-
 fn parseSp1Cycles(bytes: []const u8) ?u64 {
     return parseCounter(bytes, "cycles=");
 }
@@ -728,15 +791,6 @@ fn parseCounter(bytes: []const u8, needle: []const u8) ?u64 {
     while (cursor < bytes.len and std.ascii.isDigit(bytes[cursor])) cursor += 1;
     if (cursor == digits_start) return null;
     return std.fmt.parseInt(u64, bytes[digits_start..cursor], 10) catch null;
-}
-
-fn ziskRunErrored(bytes: []const u8) bool {
-    return std.mem.indexOf(u8, bytes, "finished with error") != null;
-}
-
-test "ZisK error marker overrides a zero process exit" {
-    try std.testing.expect(ziskRunErrored("Emu::run() finished with error at step=42"));
-    try std.testing.expect(!ziskRunErrored("Emu::run() finished at step=42"));
 }
 
 test "parses SP1 executor cycles" {
@@ -807,12 +861,12 @@ fn rfc3339TimestampAlloc(allocator: std.mem.Allocator, timestamp_nanos: u128) ![
 
 pub fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk|sp1] [--output-folder PATH] [--limit N] [--test NAME] [--report-only] [--ziskemu PATH] [--zisk-elf PATH] [--zisk-max-steps N] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
+        \\usage: zig build zkevm-ere-bench -- [--engine native|zisk|sp1] [--output-folder PATH] [--limit N] [--test NAME] [--report-only] [--zisk-host PATH] [--zisk-elf PATH] [--zisk-max-steps N] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
         \\
         \\Consumes direct EEST zkEVM fixtures with non-empty statelessInputBytes
         \\and emits ERE BenchmarkRun-compatible execution JSON rows. Native
-        \\runs execute evmz directly. ZisK runs frame the raw fixture bytes at
-        \\the backend boundary and compare the 256-byte padded public output.
+        \\runs execute evmz directly. One persistent ZisK host caches the ELF's
+        \\ROM, frames each fixture, and compares the 256-byte padded public output.
         \\SP1 runs use one raw hint chunk and compare raw public output.
         \\
     , .{});
@@ -923,8 +977,10 @@ test "native run writes BenchmarkRun execution success row" {
     const output_folder = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/metrics", .{tmp.sub_path});
     defer std.testing.allocator.free(output_folder);
 
+    var runner = try Runner.init(std.testing.io, std.testing.allocator, .{ .output_folder = output_folder });
+    defer runner.deinit();
     var limit = SelectionLimit{};
-    const summary = try runSlice(std.testing.io, std.testing.allocator, "smoke.json", ".", fixture, .{ .output_folder = output_folder }, &limit);
+    const summary = try runner.runSlice("smoke.json", ".", fixture, &limit);
     try std.testing.expectEqual(@as(usize, 1), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 1), summary.benchmarked);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
@@ -966,8 +1022,10 @@ test "native run writes BenchmarkRun row to absolute output folder" {
     const output_folder = try std.fs.path.resolve(std.testing.allocator, &.{relative_output_folder});
     defer std.testing.allocator.free(output_folder);
 
+    var runner = try Runner.init(std.testing.io, std.testing.allocator, .{ .output_folder = output_folder });
+    defer runner.deinit();
     var limit = SelectionLimit{};
-    const summary = try runSlice(std.testing.io, std.testing.allocator, "smoke.json", ".", fixture, .{ .output_folder = output_folder }, &limit);
+    const summary = try runner.runSlice("smoke.json", ".", fixture, &limit);
     try std.testing.expectEqual(@as(usize, 1), summary.benchmarked);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
 

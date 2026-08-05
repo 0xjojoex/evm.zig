@@ -16,6 +16,13 @@ to meter peak heap usage and export the `evmz_guest_heap_capacity_bytes` and
 `evmz_guest_heap_peak_used_bytes` diagnostic symbols. Heap metering is
 independent of profile tags and changes the guest execution-step count.
 
+The `stateless-ere` payload decodes `schema_id || payload` input, where the
+two-byte id packs `fork_index || revision`. `-Dstateless-schema=0x1501`
+(repeatable) picks which ids the build's router accepts; unset enables every
+schema evmz implements. Pin it explicitly for a shipped guest: each enabled fork
+compiles its own specialized `Validator` into the ELF, and an id the router
+cannot resolve is a compile error rather than a runtime rejection.
+
 ZisK separately defaults to a 48 MiB total RAM envelope, set with
 `-Dguest-zisk-ram-bytes=<bytes>`. The envelope holds the guest's data and bss,
 then the payload heap, then a 1 MiB stack, and the remainder is ZisKOS heap —
@@ -33,6 +40,11 @@ These defaults close the pinned `tests-zkevm@v0.6.2` capacity case. They are a
 conformance baseline, not a production-mainnet memory claim. Size a deployment
 artifact from metered replay of its real witness/block workload and retain an
 explicit failure when that artifact's fixed capacity is exceeded.
+
+The stateless validator builds one authenticated state/storage catalog during
+witness ingest, executes through BAL-bound dense state, and commits dirty paths
+through a block-local occurrence engine. `TrackedValidator` remains the
+explicit indexed-proof oracle for differential diagnostics.
 
 ## SP1 execute-only backend
 
@@ -83,7 +95,9 @@ add ~2M entries to the initial memory image on every run.
 
 `zkevm-ere-bench --engine sp1` emits the same ERE-shaped rows as the native
 and ZisK engines. Pass `--sp1-host`, `--sp1-elf`, and raw fixture paths. SP1
-public output is already raw, unlike ZisK's 256-byte public region.
+public output is already raw, unlike ZisK's 256-byte public region. The SP1
+execution-cycles workflow archives those rows and publishes current-versus-main
+cycle and public-output tables in the Actions job summary.
 
 ## Host semantic gate
 
@@ -251,9 +265,19 @@ cargo-zisk prove \
 cargo-zisk verify --proof /path/to/proof.bin
 ```
 
-`zkevm-ere-bench --engine zisk` writes the required framed input as
-`stdin.bin` below its `--zisk-work-dir`. Keep emulator execution steps, prover
-wall time, and standalone verification time as separate measurements.
+Build the persistent benchmark host with the same pinned ZisK revision:
+
+```sh
+cargo build --release --manifest-path guest/runtime/zisk/host/Cargo.toml
+```
+
+Pass the resulting binary with `--zisk-host`. One host process owns one
+transpiled `ZiskRom` for the entire runner invocation; each fixture still gets
+a fresh emulator and guest memory. `execution_duration` is measured inside the
+host around input framing, emulator construction, execution, and public-output
+collection. It excludes host startup, ELF reading, and ELF-to-ROM conversion.
+Keep emulator execution steps, prover wall time, and standalone verification
+time as separate measurements.
 
 The `stateless-ere` guest publishes the raw SSZ `StatelessValidationResult`,
 matching `ere-guests` and `zkevm-benchmark-workload`. ZisK pads that result to

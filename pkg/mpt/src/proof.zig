@@ -113,7 +113,7 @@ const IndexData = struct {
     }
 };
 
-const IndexedNode = struct {
+pub const IndexedNode = struct {
     encoded: []const u8,
     position: usize,
 };
@@ -164,6 +164,10 @@ pub fn nodeCount(index: *const NodeIndex) usize {
 pub fn find(index: *const NodeIndex, digest: hash.Root) ?[]const u8 {
     const indexed = dataFromIndex(index).find(digest) orelse return null;
     return indexed.encoded;
+}
+
+pub fn findIndexed(index: *const NodeIndex, digest: hash.Root) ?IndexedNode {
+    return dataFromIndex(index).find(digest);
 }
 
 fn indexFromData(data: *const IndexData) *const NodeIndex {

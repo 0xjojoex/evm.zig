@@ -43,6 +43,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             options.trace_mismatch = true;
         } else if (std.mem.eql(u8, arg, "--classify-failures")) {
             options.classify_failures = true;
+        } else if (std.mem.eql(u8, arg, "--oracle-differential")) {
+            options.oracle_differential = true;
         } else if (std.mem.eql(u8, arg, "--report")) {
             const value = args.next() orelse return error.MissingReportPath;
             report_path = try arena.dupe(u8, value);
@@ -79,8 +81,8 @@ fn requiresSequential(options: stateless.Options) bool {
 
 fn printSummary(path: []const u8, summary: stateless.Summary) void {
     std.debug.print(
-        "{s}: files={} fixtures={} passed={} failed={} skipped={}\n",
-        .{ path, summary.files, summary.fixtures, summary.passed, summary.failed, summary.skipped },
+        "{s}: files={} fixtures={} passed={} failed={} skipped={} oracle_compared={}\n",
+        .{ path, summary.files, summary.fixtures, summary.passed, summary.failed, summary.skipped, summary.oracle_compared },
     );
     inline for (std.meta.fields(stateless.FailReason), 0..) |field, i| {
         const count = summary.fail_reasons[i];
@@ -90,7 +92,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--report PATH] [path ...]
+        \\usage: zig build zkevm -- [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
@@ -98,6 +100,8 @@ fn printUsage() void {
         \\output options require --jobs 1.
         \\Use --trace-mismatch with --verbose to print selected gas/state trace events.
         \\Use --classify-failures to print one tab-separated record per failure.
+        \\Use --oracle-differential to require dense/tracked consensus-result parity
+        \\for blocks without expectException. Typed mutations own rejection-status parity.
         \\Use --report to write one deterministic JSON record per runnable block.
         \\
     , .{ default_jobs, max_jobs });

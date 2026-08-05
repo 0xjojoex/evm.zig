@@ -14,7 +14,7 @@ const ParsedFixture = struct {
 
     fn deinit(self: *ParsedFixture, allocator: Allocator) void {
         for (self.block_access_list) |*account| deinitAccount(allocator, account);
-        if (self.block_access_list.len > 0) allocator.free(self.block_access_list);
+        allocator.free(self.block_access_list);
         self.* = .{};
     }
 };
@@ -167,9 +167,7 @@ fn parseStorageChanges(allocator: Allocator, value: ?JsonValue) ![]bal.SlotChang
     const array = if (value) |array_value| try expectArray(array_value) else return &.{};
     var out = std.ArrayList(bal.SlotChanges).empty;
     errdefer {
-        for (out.items) |*slot| {
-            if (slot.changes.len > 0) allocator.free(slot.changes);
-        }
+        for (out.items) |*slot| allocator.free(slot.changes);
         out.deinit(allocator);
     }
 
@@ -177,7 +175,7 @@ fn parseStorageChanges(allocator: Allocator, value: ?JsonValue) ![]bal.SlotChang
         var object = try expectObject(slot_value);
         try rejectUnknownKeys(&object, &.{ "slot", "key", "changes", "slot_changes", "slotChanges" });
         const changes = try parseStorageChangeList(allocator, fieldAny(&object, &.{ "slot_changes", "slotChanges", "changes" }) orelse return error.MalformedFixture);
-        errdefer if (changes.len > 0) allocator.free(changes);
+        errdefer allocator.free(changes);
         try out.append(allocator, .{
             .slot = try parseU256(fieldAny(&object, &.{ "slot", "key" }) orelse return error.MalformedFixture),
             .changes = changes,
@@ -268,9 +266,7 @@ fn parseCodeChanges(allocator: Allocator, value: ?JsonValue) ![]bal.CodeChange {
     const array = if (value) |array_value| try expectArray(array_value) else return &.{};
     var out = std.ArrayList(bal.CodeChange).empty;
     errdefer {
-        for (out.items) |change| {
-            if (change.new_code.len > 0) allocator.free(change.new_code);
-        }
+        for (out.items) |change| allocator.free(change.new_code);
         out.deinit(allocator);
     }
     for (array.items) |change_value| {
@@ -284,7 +280,7 @@ fn parseCodeChanges(allocator: Allocator, value: ?JsonValue) ![]bal.CodeChange {
             "newCode",
         });
         const code = try parseBytes(allocator, fieldAny(&object, &.{ "new_code", "newCode" }) orelse return error.MalformedFixture);
-        errdefer if (code.len > 0) allocator.free(code);
+        errdefer allocator.free(code);
         try out.append(allocator, .{
             .block_access_index = try parseChangeIndex(&object),
             .new_code = code,
@@ -464,15 +460,11 @@ fn strip0x(string: []const u8) []const u8 {
 }
 
 fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void {
-    for (account.storage_changes) |slot| {
-        if (slot.changes.len > 0) allocator.free(slot.changes);
-    }
-    if (account.storage_changes.len > 0) allocator.free(account.storage_changes);
-    if (account.storage_reads.len > 0) allocator.free(account.storage_reads);
-    if (account.balance_changes.len > 0) allocator.free(account.balance_changes);
-    if (account.nonce_changes.len > 0) allocator.free(account.nonce_changes);
-    for (account.code_changes) |change| {
-        if (change.new_code.len > 0) allocator.free(change.new_code);
-    }
-    if (account.code_changes.len > 0) allocator.free(account.code_changes);
+    for (account.storage_changes) |slot| allocator.free(slot.changes);
+    allocator.free(account.storage_changes);
+    allocator.free(account.storage_reads);
+    allocator.free(account.balance_changes);
+    allocator.free(account.nonce_changes);
+    for (account.code_changes) |change| allocator.free(change.new_code);
+    allocator.free(account.code_changes);
 }

@@ -25,15 +25,15 @@
 
 const std = @import("std");
 
-const address = @import("../address.zig");
-const bal = @import("../eth/bal/model.zig");
-const ClaimView = @import("../eth/bal/ClaimView.zig");
-const crypto = @import("../crypto.zig");
-const Account = @import("./Account.zig");
-const Reader = @import("./Reader.zig");
+const address = @import("../../address.zig");
+const bal = @import("./model.zig");
+const ClaimView = @import("./ClaimView.zig");
+const crypto = @import("../../crypto.zig");
+const Account = @import("../../state/Account.zig");
+const Reader = @import("../../state/Reader.zig");
 
 const Address = address.Address;
-const BalClaimReader = @This();
+const ClaimReader = @This();
 
 pub const Error = error{
     BlockAccessListAccountNotCovered,
@@ -51,7 +51,7 @@ claim: *const ClaimView,
 block_access_index: bal.BlockAccessIndex,
 strategy_failure: ?StrategyFailure = null,
 
-pub fn init(base: Reader, claim: *const ClaimView, block_access_index: bal.BlockAccessIndex) BalClaimReader {
+pub fn init(base: Reader, claim: *const ClaimView, block_access_index: bal.BlockAccessIndex) ClaimReader {
     return .{
         .base = base,
         .claim = claim,
@@ -59,7 +59,7 @@ pub fn init(base: Reader, claim: *const ClaimView, block_access_index: bal.Block
     };
 }
 
-pub fn reader(self: *BalClaimReader) Reader {
+pub fn reader(self: *ClaimReader) Reader {
     return .{ .ptr = self, .vtable = &vtable };
 }
 
@@ -71,7 +71,7 @@ const vtable = Reader.VTable{
     .accountHasStorage = accountHasStorage,
 };
 
-fn context(ptr: *anyopaque) *BalClaimReader {
+fn context(ptr: *anyopaque) *ClaimReader {
     return @ptrCast(@alignCast(ptr));
 }
 
@@ -83,12 +83,12 @@ fn loadAccount(ptr: *anyopaque, target: Address) !?Account {
     return loadPositionedAccount(context(ptr), target);
 }
 
-fn loadPositionedAccount(self: *BalClaimReader, target: Address) !?Account {
+fn loadPositionedAccount(self: *ClaimReader, target: Address) !?Account {
     const account_cursor = self.claim.account(target) orelse return self.fail(.account_not_covered);
     return self.loadPositionedAccountFor(target, account_cursor);
 }
 
-fn loadPositionedAccountFor(self: *BalClaimReader, target: Address, account_cursor: ClaimView.AccountCursor) !?Account {
+fn loadPositionedAccountFor(self: *ClaimReader, target: Address, account_cursor: ClaimView.AccountCursor) !?Account {
     const balance = account_cursor.balanceAt(self.block_access_index);
     const nonce = account_cursor.nonceAt(self.block_access_index);
     const code = account_cursor.codeAt(self.block_access_index);
@@ -145,7 +145,7 @@ fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
     return self.base.accountHasStorage(target);
 }
 
-fn fail(self: *BalClaimReader, failure: StrategyFailure) Error {
+fn fail(self: *ClaimReader, failure: StrategyFailure) Error {
     self.strategy_failure = failure;
     return switch (failure) {
         .account_not_covered => error.BlockAccessListAccountNotCovered,
@@ -223,7 +223,7 @@ const TestBase = struct {
     }
 };
 
-test "BalClaimReader resolves positioned account code and storage" {
+test "ClaimReader resolves positioned account code and storage" {
     const target = address.addr(1);
     const old_code = [_]u8{0x00};
     const new_code = [_]u8{ 0x60, 0x00 };
@@ -256,7 +256,7 @@ test "BalClaimReader resolves positioned account code and storage" {
         .storage = &base_storage,
     };
 
-    var before = BalClaimReader.init(base.reader(), &view, 0);
+    var before = ClaimReader.init(base.reader(), &view, 0);
     const before_reader = before.reader();
     const before_account = (try before_reader.loadAccount(target)).?;
     try std.testing.expectEqual(@as(u64, 1), before_account.nonce);
@@ -265,14 +265,14 @@ test "BalClaimReader resolves positioned account code and storage" {
     try std.testing.expectEqual(@as(u256, 9), try before_reader.getStorage(target, 3));
     try std.testing.expectEqualSlices(u8, &old_code, try before_reader.loadCode(before_account.code_hash));
 
-    var after_balance = BalClaimReader.init(base.reader(), &view, 1);
+    var after_balance = ClaimReader.init(base.reader(), &view, 1);
     const after_balance_reader = after_balance.reader();
     const middle_account = (try after_balance_reader.loadAccount(target)).?;
     try std.testing.expectEqual(@as(u64, 1), middle_account.nonce);
     try std.testing.expectEqual(@as(u256, 20), middle_account.balance);
     try std.testing.expectEqual(@as(u256, 7), try after_balance_reader.getStorage(target, 2));
 
-    var after_all = BalClaimReader.init(base.reader(), &view, 2);
+    var after_all = ClaimReader.init(base.reader(), &view, 2);
     const after_reader = after_all.reader();
     const after_account = (try after_reader.loadAccount(target)).?;
     try std.testing.expectEqual(@as(u64, 3), after_account.nonce);
@@ -280,7 +280,7 @@ test "BalClaimReader resolves positioned account code and storage" {
     try std.testing.expectEqualSlices(u8, &new_code, try after_reader.loadCode(after_account.code_hash));
 }
 
-test "BalClaimReader fails closed outside claim coverage" {
+test "ClaimReader fails closed outside claim coverage" {
     const target = address.addr(1);
     const reads = [_]u256{3};
     const claim = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &reads }};
@@ -288,7 +288,7 @@ test "BalClaimReader fails closed outside claim coverage" {
 
     var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
     defer view.deinit(std.testing.allocator);
-    var positioned = BalClaimReader.init(Reader.empty(), &view, 0);
+    var positioned = ClaimReader.init(Reader.empty(), &view, 0);
     const state_reader = positioned.reader();
 
     try std.testing.expectError(
@@ -306,7 +306,7 @@ test "BalClaimReader fails closed outside claim coverage" {
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 3));
 }
 
-test "BalClaimReader keeps an untouched base leaf and verifies delegated code" {
+test "ClaimReader keeps an untouched base leaf and verifies delegated code" {
     const target = address.addr(1);
     const reads = [_]u256{3};
     const future_balance = [_]bal.BalanceChange{.{ .block_access_index = 2, .post_balance = 1 }};
@@ -328,7 +328,7 @@ test "BalClaimReader keeps an untouched base leaf and verifies delegated code" {
         .code = &corrupt_code,
         .code_key = expected_hash,
     };
-    var positioned = BalClaimReader.init(base.reader(), &view, 0);
+    var positioned = ClaimReader.init(base.reader(), &view, 0);
     const state_reader = positioned.reader();
 
     try std.testing.expect(try state_reader.accountExists(target));
@@ -337,13 +337,13 @@ test "BalClaimReader keeps an untouched base leaf and verifies delegated code" {
 
     // No claim field applies before index 2, so the base leaf stays visible
     // instead of becoming an unresolvable lifecycle question.
-    var later = BalClaimReader.init(base.reader(), &view, 1);
+    var later = ClaimReader.init(base.reader(), &view, 1);
     try std.testing.expectEqual(@as(u256, 5), (try later.reader().loadAccount(target)).?.balance);
     try std.testing.expect(try later.reader().accountExists(target));
     try std.testing.expectEqual(@as(u256, 0), try later.reader().getStorage(target, 3));
 }
 
-test "BalClaimReader resolves an emptied account to absent" {
+test "ClaimReader resolves an emptied account to absent" {
     const target = address.addr(1);
     const balance_changes = [_]bal.BalanceChange{.{ .block_access_index = 1, .post_balance = 0 }};
     const nonce_changes = [_]bal.NonceChange{.{ .block_access_index = 1, .new_nonce = 0 }};
@@ -363,15 +363,15 @@ test "BalClaimReader resolves an emptied account to absent" {
         .account = .{ .nonce = 3, .balance = 10 },
     };
 
-    var before = BalClaimReader.init(base.reader(), &view, 0);
+    var before = ClaimReader.init(base.reader(), &view, 0);
     try std.testing.expect(try before.reader().accountExists(target));
 
-    var after = BalClaimReader.init(base.reader(), &view, 1);
+    var after = ClaimReader.init(base.reader(), &view, 1);
     try std.testing.expect(!(try after.reader().accountExists(target)));
     try std.testing.expectEqual(@as(?Account, null), try after.reader().loadAccount(target));
 }
 
-test "BalClaimReader answers whole-storage presence from parent state" {
+test "ClaimReader answers whole-storage presence from parent state" {
     const target = address.addr(1);
     const clear_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 0 }};
     const clear_only_slots = [_]bal.SlotChanges{.{ .slot = 1, .changes = &clear_changes }};
@@ -390,24 +390,24 @@ test "BalClaimReader answers whole-storage presence from parent state" {
         .account = .{ .balance = 1 },
         .storage = &base_storage,
     };
-    var positioned = BalClaimReader.init(storage_only.reader(), &view, 1);
+    var positioned = ClaimReader.init(storage_only.reader(), &view, 1);
     try std.testing.expect(try positioned.reader().accountHasStorage(target));
     // Alive through balance, so `createCollision` still reaches the storage
     // predicate without an aliveness exception.
     try std.testing.expect(try positioned.reader().accountExists(target));
 
     var empty_base = TestBase{ .target = target };
-    var absent = BalClaimReader.init(empty_base.reader(), &view, 1);
+    var absent = ClaimReader.init(empty_base.reader(), &view, 1);
     try std.testing.expect(!(try absent.reader().accountHasStorage(target)));
 
-    var uncovered = BalClaimReader.init(storage_only.reader(), &view, 1);
+    var uncovered = ClaimReader.init(storage_only.reader(), &view, 1);
     try std.testing.expectError(
         error.BlockAccessListAccountNotCovered,
         uncovered.reader().accountHasStorage(address.addr(2)),
     );
 }
 
-test "BalClaimReader resolves an untouched empty leaf to absent" {
+test "ClaimReader resolves an untouched empty leaf to absent" {
     const target = address.addr(1);
     const reads = [_]u256{3};
     const claim = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &reads }};
@@ -421,10 +421,10 @@ test "BalClaimReader resolves an untouched empty leaf to absent" {
     // account. The two must agree, because `account_exists` drives new-account
     // gas and a disagreement would surface as a lane mismatch on gas alone.
     var empty_leaf = TestBase{ .target = target, .account = .{} };
-    var over_empty = BalClaimReader.init(empty_leaf.reader(), &view, 1);
+    var over_empty = ClaimReader.init(empty_leaf.reader(), &view, 1);
     try std.testing.expect(!(try over_empty.reader().accountExists(target)));
 
     var absent = TestBase{ .target = target };
-    var over_absent = BalClaimReader.init(absent.reader(), &view, 1);
+    var over_absent = ClaimReader.init(absent.reader(), &view, 1);
     try std.testing.expect(!(try over_absent.reader().accountExists(target)));
 }

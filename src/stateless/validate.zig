@@ -3,7 +3,7 @@
 const std = @import("std");
 
 const Revision = @import("../eth/revision.zig").Revision;
-const eth_spec = @import("../eth/spec.zig");
+const Spec = @import("../spec.zig").Spec;
 const system_prepared_code = @import("../eth/system_prepared_code.zig");
 const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
@@ -14,6 +14,7 @@ const rlp = @import("rlp");
 const state = @import("../state.zig");
 const stateless_tx = @import("./tx.zig");
 const transaction = @import("../transaction.zig");
+const Backend = @import("../backend.zig").Backend;
 
 pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || stateless_tx.Error || error{
     MissingParentHeader,
@@ -31,17 +32,35 @@ pub const Options = struct {
     bal_differential: ?*block_stf.BalDifferentialReport = null,
 };
 
-/// Exact stateless validator for one Ethereum revision.
-///
-/// Callers supporting multiple revisions dispatch to these types themselves;
-/// this library never compiles or loops over a runtime fork set.
-pub fn Exact(comptime revision: Revision) type {
-    return Bind(block_stf.Exact(revision));
+/// Compile the production stateless validator from one complete specification.
+/// The current normalized-input/header adapter is Amsterdam-specific; revision
+/// naming remains internal to that Ethereum adapter and never enters the VM.
+pub fn Validator(comptime spec: Spec) type {
+    return ValidatorWithOptions(spec, .{});
 }
 
-/// Bind the validator to an already-compiled exact block STF. Fork identity
-/// and compile options are read from the type, never threaded as parameters.
-pub fn Bind(comptime ExactBlockStf: type) type {
+pub fn ValidatorWithOptions(
+    comptime spec: Spec,
+    comptime options: Vm.CompileOptions,
+) type {
+    requireAmsterdamSpec(spec);
+    const ExactVm = Vm.BalStatelessVmWithOptions(spec, options);
+    return ValidatorType(block_stf.Bind(.amsterdam, ExactVm));
+}
+
+/// Explicit tracked-state oracle for capture and differential diagnostics.
+pub fn TrackedValidator(comptime spec: Spec) type {
+    requireAmsterdamSpec(spec);
+    return ValidatorType(block_stf.Bind(.amsterdam, Vm.Vm(spec)));
+}
+
+fn requireAmsterdamSpec(comptime spec: Spec) void {
+    if (!spec.block.block_access_list) {
+        @compileError("the current stateless validator requires an Amsterdam BAL-enabled spec");
+    }
+}
+
+fn ValidatorType(comptime ExactBlockStf: type) type {
     return struct {
         pub const fork = ExactBlockStf.fork;
         pub const compile_options = ExactBlockStf.compile_options;
@@ -90,12 +109,20 @@ pub fn Bind(comptime ExactBlockStf: type) type {
             allocator: std.mem.Allocator,
             input: input_mod.Input,
         ) Error!block_stf.Result {
+            return validateOneShotWithOptions(allocator, input, .{});
+        }
+
+        pub fn validateOneShotWithOptions(
+            allocator: std.mem.Allocator,
+            input: input_mod.Input,
+            validation_options: Options,
+        ) Error!block_stf.Result {
             return validateWithScratchExact(
                 ExactBlockStf,
                 allocator,
                 input,
                 null,
-                .{},
+                validation_options,
             );
         }
     };
@@ -151,7 +178,12 @@ fn validateExact(
             .gas_limit = block.gas_limit,
             .prev_randao = block.prev_randao,
             .base_fee = block.base_fee_per_gas,
-            .blob_base_fee = try currentBlobBaseFeeExact(revision, input.blob_params, block),
+            .blob_base_fee = try currentBlobBaseFeeExact(
+                revision,
+                ExactBlockStf.specification,
+                input.blob_params,
+                block,
+            ),
             .blob_params = input.blob_params,
         },
         .block_hash_source = header_chain.source(),
@@ -161,7 +193,7 @@ fn validateExact(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = try state.Backend.fromWitness(
+        .state_backend = try ExactBlockStf.Vm.BlockState.witnessBackend(
             allocator,
             parent_header.state_root,
             input.witness.state,
@@ -255,12 +287,13 @@ fn blockShapeValid(revision: Revision, block: input_mod.Block) bool {
 
 fn currentBlobBaseFeeExact(
     comptime revision: Revision,
+    comptime spec: Spec,
     blob_params: ?transaction.BlobParams,
     block: input_mod.Block,
 ) Error!u256 {
     if (!revision.isImpl(.cancun)) return 0;
     const excess_blob_gas = block.excess_blob_gas orelse return error.InvalidHeaderWitness;
-    const spec_schedule = eth_spec.specAt(revision).transaction.blob_schedule orelse return 0;
+    const spec_schedule = spec.transaction.blob_schedule orelse return 0;
     const schedule = if (blob_params) |params| spec_schedule.withParams(params) else spec_schedule;
     return schedule.blobBaseFeeForSchedule(excess_blob_gas) orelse error.InvalidHeaderWitness;
 }
@@ -425,6 +458,21 @@ test "normalized stateless block shape uses actual fields" {
     var amsterdam = cancun;
     amsterdam.block_access_list = &.{};
     try std.testing.expect(blockShapeValid(.amsterdam, amsterdam));
+}
+
+test "stateless validator is specialized by the complete spec" {
+    const custom = @import("../eth/spec.zig").amsterdam.extend(.{
+        .call = .{ .base_gas = @import("../eth/spec.zig").amsterdam.call.base_gas + 1 },
+    });
+    const ExactValidator = Validator(custom);
+    const Oracle = TrackedValidator(custom);
+
+    comptime {
+        std.debug.assert(ExactValidator.BlockStf.specification.call.base_gas == custom.call.base_gas);
+        std.debug.assert(ExactValidator.BlockStf.Vm.specification.call.base_gas == custom.call.base_gas);
+        std.debug.assert(ExactValidator.BlockStf.Vm.BlockState.State == @import("BlockState.zig"));
+        std.debug.assert(Oracle.BlockStf.Vm.BlockState.State == state.TrackedState);
+    }
 }
 
 test "stateless block errors preserve witness and body taxonomy" {

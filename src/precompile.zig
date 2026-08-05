@@ -189,9 +189,15 @@ fn validateConfig(comptime config: Config) void {
 }
 
 pub fn contractFromAddress(target: Address) ?Contract {
-    const contract_id = std.mem.readInt(u160, &target, .big);
-    if (contract_id > std.math.maxInt(u16)) return null;
-    return switch (@as(u16, @intCast(contract_id))) {
+    // Precompile addresses are 18 zero bytes followed by a 16-bit selector.
+    // Reject non-precompile targets with native u64 zero tests instead of
+    // materializing a u160, which RV64 assembles as a multiword byteswap on
+    // every CALL-family target.
+    if (std.mem.readInt(u64, target[0..8], .little) != 0) return null;
+    if (std.mem.readInt(u64, target[8..16], .little) != 0) return null;
+    if (std.mem.readInt(u16, target[16..18], .little) != 0) return null;
+    const contract_id = std.mem.readInt(u16, target[18..20], .big);
+    return switch (contract_id) {
         0x01 => .ecrecover,
         0x02 => .sha256,
         0x03 => .ripemd160,
@@ -212,6 +218,49 @@ pub fn contractFromAddress(target: Address) ?Contract {
         0x100 => .p256verify,
         else => null,
     };
+}
+
+test "contractFromAddress round-trips every contract and rejects poisoned high bytes" {
+    // Round-trip: every catalog contract resolves from its canonical address.
+    inline for (@typeInfo(Contract).@"enum".fields) |field| {
+        const contract: Contract = @enumFromInt(field.value);
+        try std.testing.expectEqual(@as(?Contract, contract), contractFromAddress(contract.toAddress()));
+    }
+
+    // Exhaustive 16-bit selector sweep against a linear-scan oracle, then the
+    // same selector with each of the 18 high bytes poisoned must reject.
+    var selector: u32 = 0;
+    while (selector <= std.math.maxInt(u16)) : (selector += 1) {
+        var target: Address = @splat(0);
+        std.mem.writeInt(u16, target[18..20], @intCast(selector), .big);
+        var expected: ?Contract = null;
+        inline for (@typeInfo(Contract).@"enum".fields) |field| {
+            const contract: Contract = @enumFromInt(field.value);
+            const canonical = contract.toAddress();
+            if (std.mem.eql(u8, &target, &canonical)) expected = contract;
+        }
+        try std.testing.expectEqual(expected, contractFromAddress(target));
+        for (0..18) |index| {
+            var poisoned = target;
+            poisoned[index] = 0x01;
+            try std.testing.expectEqual(@as(?Contract, null), contractFromAddress(poisoned));
+        }
+    }
+
+    // Randomized addresses against the same oracle.
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    for (0..100_000) |_| {
+        var target: Address = undefined;
+        random.bytes(&target);
+        var expected: ?Contract = null;
+        inline for (@typeInfo(Contract).@"enum".fields) |field| {
+            const contract: Contract = @enumFromInt(field.value);
+            const canonical = contract.toAddress();
+            if (std.mem.eql(u8, &target, &canonical)) expected = contract;
+        }
+        try std.testing.expectEqual(expected, contractFromAddress(target));
+    }
 }
 
 fn emptyResult(status: Status) Result {
@@ -242,7 +291,7 @@ fn outputOwned(call: Call) bool {
 }
 
 fn freeOutput(call: Call, output: []u8) void {
-    if (outputOwned(call) and output.len != 0) call.allocator.free(output);
+    if (outputOwned(call)) call.allocator.free(output);
 }
 
 fn successOutput(call: Call, output: []u8, gas_left: i64) Result {

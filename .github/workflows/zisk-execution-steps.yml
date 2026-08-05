@@ -152,21 +152,23 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
+            guest/runtime/zisk/host/target
             ${{ runner.temp }}/zisk-source/target
-          key: zisk-v1-alpha-rust-1.0-rv64ima-upstream-${{ runner.os }}
+          key: zisk-v1-alpha-rust-1.0-rv64ima-upstream-${{ runner.os }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.lock') }}
 
       - name: Build pinned ZisK artifacts
         id: zisk
         working-directory: ${{ runner.temp }}/zisk-source
         run: |
-          cargo build --locked --release -p ziskemu
           PATH="${HOME}/.cargo/bin:${PATH}" \
             ZISK_HOME="${ZISK_HOME}" \
             "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
+          cargo build --locked --release \
+            --manifest-path "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/Cargo.toml"
           provider="$(find target/elf -type f -name libziskos_staticlib.a -print -quit)"
           test -n "${provider}"
           {
-            echo "ziskemu=${ZISK_SOURCE}/target/release/ziskemu"
+            echo "host=${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host"
             echo "provider=${ZISK_SOURCE}/${provider}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -190,7 +192,7 @@ jobs:
 
       - name: Run fixture suite
         env:
-          ZISKEMU: ${{ steps.zisk.outputs.ziskemu }}
+          ZISK_HOST: ${{ steps.zisk.outputs.host }}
         run: |
           fixtures=()
           while IFS= read -r fixture || [[ -n "${fixture}" ]]; do
@@ -203,9 +205,8 @@ jobs:
             --engine zisk \
             --report-only \
             --output-folder "${RESULTS_ROOT}" \
-            --ziskemu "${ZISKEMU}" \
+            --zisk-host "${ZISK_HOST}" \
             --zisk-elf "${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf" \
-            --zisk-work-dir "${RUNNER_TEMP}/zisk-runs" \
             --zisk-max-steps "${MAX_STEPS}" \
             "${fixtures[@]}"
 

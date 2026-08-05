@@ -74,5 +74,9 @@ SECTIONS
   /DISCARD/ : {
     *(.comment)
     *(.note.GNU-stack)
+    /* Keep .symtab for -Dguest-zisk-strip=false profiling without applying
+       signed R_RISCV_SET32 relocations to ROM addresses in DWARF sections. */
+    *(.debug .debug_*)
+    *(.zdebug .zdebug_*)
   }
 }

@@ -18,7 +18,6 @@ pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
 pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
 pub const resources = @import("./execution/resources.zig");
 
-// TODO: more status code
 pub const Status = enum(u8) {
     success,
     revert,

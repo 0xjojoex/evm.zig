@@ -15,6 +15,18 @@ backend: ?Backend,
 scratch_allocator: std.mem.Allocator,
 transient_entries: std.AutoHashMap([32]u8, Bytecode.View),
 owned_entries: std.ArrayList(Bytecode),
+/// Two remembered hash→view resolutions with round-robin eviction. Nested
+/// calls resolve the same one or two code hashes on every frame; remembering
+/// them skips the hash-map probe. Entries die with this execution, so a view
+/// can never outlive the scratch storage it points into. Keys are
+/// pre-assembled hash words: `[32]u8` is align-1 and this target has no
+/// unaligned loads, but a by-value `[32]u8` parameter sits on
+/// compiler-aligned stack storage, so the byte-wise compare already lowers
+/// to word compares here — a pre-assembled word key measured slower.
+memo_hashes: [2][32]u8 = undefined,
+memo_views: [2]Bytecode.View = undefined,
+memo_valid: [2]bool = .{ false, false },
+memo_victim: u1 = 0,
 
 /// Backend startup failure disables only the optimization for this execution.
 pub fn init(scratch_allocator: std.mem.Allocator, maybe_backend: ?Backend) Execution {
@@ -48,13 +60,35 @@ pub fn deinit(self: *Execution) void {
 /// Backend failures and admission refusal fall back to transient preparation;
 /// `CodeHashMismatch` remains a correctness error. Every successful resolution
 /// returns the one representation accepted by the interpreter.
-pub fn resolve(
+pub inline fn resolve(
     self: *Execution,
     code_hash: [32]u8,
     raw_code: []const u8,
     policy: ResolvePolicy,
 ) !Bytecode.View {
     if (raw_code.len == 0) return .empty;
+    inline for (0..2) |entry| {
+        if (self.memo_valid[entry] and
+            std.mem.eql(u8, &self.memo_hashes[entry], &code_hash))
+        {
+            return self.memo_views[entry];
+        }
+    }
+    const bytecode = try self.resolveUncached(code_hash, raw_code, policy);
+    const victim = self.memo_victim;
+    self.memo_hashes[victim] = code_hash;
+    self.memo_views[victim] = bytecode;
+    self.memo_valid[victim] = true;
+    self.memo_victim +%= 1;
+    return bytecode;
+}
+
+fn resolveUncached(
+    self: *Execution,
+    code_hash: [32]u8,
+    raw_code: []const u8,
+    policy: ResolvePolicy,
+) !Bytecode.View {
     if (self.transient_entries.get(code_hash)) |bytecode| return bytecode;
 
     if (self.backend) |backend| {
@@ -89,6 +123,8 @@ pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
         return error.PreparedCodeCapacityExceeded;
     return self.owned_entries.items[self.owned_entries.items.len - 1].view();
 }
+
+const crypto = @import("../crypto.zig");
 
 test "backend failure falls back to one transient artifact" {
     const FailingBackend = struct {
@@ -130,7 +166,7 @@ test "backend failure falls back to one transient artifact" {
     defer execution.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
-    const code_hash = @import("../crypto.zig").keccak256(&raw_code);
+    const code_hash = crypto.keccak256(&raw_code);
     const first = try execution.resolve(code_hash, &raw_code, .{});
     const second = try execution.resolve(code_hash, &raw_code, .{});
     try std.testing.expectEqual(first.bytes.ptr, second.bytes.ptr);
@@ -147,4 +183,31 @@ test "bounded preparation reports capacity exhaustion without raw fallback" {
         error.PreparedCodeCapacityExceeded,
         execution.prepareTransient(&raw_code),
     );
+}
+
+test "resolve memo returns stable views across alternation and eviction" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var execution = Execution.init(arena.allocator(), null);
+    defer execution.deinit();
+
+    const codes = [_][]const u8{
+        &.{ 0x60, 0x01, 0x00 },
+        &.{ 0x60, 0x02, 0x00 },
+        &.{ 0x60, 0x03, 0x00 },
+    };
+    var hashes: [3][32]u8 = undefined;
+    var first: [3]Bytecode.View = undefined;
+    for (codes, 0..) |code, index| {
+        std.crypto.hash.sha3.Keccak256.hash(code, &hashes[index], .{});
+        first[index] = try execution.resolve(hashes[index], code, .{});
+    }
+    // Alternation plus eviction revisits: every hit must return the same
+    // prepared artifact bytes the first resolution produced.
+    const sequence = [_]usize{ 0, 1, 0, 1, 2, 0, 1, 2, 2, 0 };
+    for (sequence) |index| {
+        const view = try execution.resolve(hashes[index], codes[index], .{});
+        try std.testing.expectEqual(first[index].bytes.ptr, view.bytes.ptr);
+        try std.testing.expectEqualSlices(u8, first[index].bytes, view.bytes);
+    }
 }

@@ -10,11 +10,8 @@ const rlp = @import("rlp");
 const mpt = @import("mpt");
 const uint256 = @import("../uint256.zig");
 const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
-const TrackedState = @import("../state/TrackedState.zig");
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
-const ChangesView = TrackedState.ChangesView;
-
 const Allocator = std.mem.Allocator;
 
 /// Evmz execution backend for the MPT's fixed structural Keccak-256 rule.
@@ -51,6 +48,26 @@ fn accountTrie(allocator: Allocator) AccountTrie {
 
 fn storageTrie(allocator: Allocator) StorageTrie {
     return StorageTrie.init(structuralTrie(allocator), .{});
+}
+
+/// Internal hashed-key seam for the dense commit module. Keeping the
+/// structural trie context here avoids instantiating a second Keccak-backed
+/// MPT implementation merely because commit lives in its own source file.
+pub inline fn updateStatelessCatalogHashed(
+    workspace: *mpt.StatelessWorkspace,
+    allocator: Allocator,
+    root_hash: [32]u8,
+    catalog: *const WitnessCatalog,
+    root_ref: mpt.catalog.RootRef,
+    updates: []const mpt.StatelessUpdate,
+) UpdateError![32]u8 {
+    return structuralTrie(allocator).updateStatelessCatalog(
+        workspace,
+        root_hash,
+        &catalog.topology,
+        root_ref,
+        updates,
+    );
 }
 
 pub const Error = Allocator.Error || mpt.Error;
@@ -90,6 +107,205 @@ pub const Update = mpt.Update;
 
 pub const IndexedNodes = mpt.IndexedNodes;
 pub const ProofCache = mpt.LookupCache;
+
+const StorageCatalogRoot = struct {
+    hash: [32]u8,
+    root: mpt.catalog.RootRef,
+};
+
+const CatalogAccount = struct {
+    node: mpt.catalog.NodeId,
+    decoded: Account,
+};
+
+/// Block-lifetime authenticated topology for state reads. The sorted witness
+/// index remains separately owned by the backend until sparse commit is moved
+/// onto catalog paths.
+pub const WitnessCatalog = struct {
+    allocator: Allocator,
+    topology: mpt.Catalog,
+    state_root: mpt.catalog.RootRef,
+    storage_roots: std.ArrayList(StorageCatalogRoot),
+    accounts: std.ArrayList(CatalogAccount),
+
+    pub fn deinit(self: *WitnessCatalog) void {
+        self.topology.deinit();
+        self.storage_roots.deinit(self.allocator);
+        self.accounts.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn account(self: WitnessCatalog, key: []const u8) mpt.LookupError!?[]const u8 {
+        return catalogValue(try self.topology.lookup(self.state_root, key));
+    }
+
+    pub fn decodedAccount(self: WitnessCatalog, key: []const u8) ProofLookupError!?Account {
+        const bound = switch (try self.topology.lookupBound(self.state_root, key)) {
+            .present => |present| present,
+            .absent => return null,
+        };
+        const target = @intFromEnum(bound.node);
+        var low: usize = 0;
+        var high = self.accounts.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const current = @intFromEnum(self.accounts.items[mid].node);
+            if (current < target) {
+                low = mid + 1;
+            } else if (current > target) {
+                high = mid;
+            } else {
+                return self.accounts.items[mid].decoded;
+            }
+        }
+        return error.InvalidNode;
+    }
+
+    pub fn storage(
+        self: WitnessCatalog,
+        storage_root: [32]u8,
+        key: []const u8,
+    ) mpt.LookupError!?[]const u8 {
+        if (std.mem.eql(u8, &storage_root, &empty_root_hash)) return null;
+        const root_ref = self.findStorageRoot(storage_root) orelse return error.MissingNode;
+        return catalogValue(try self.topology.lookup(root_ref, key));
+    }
+
+    pub fn nodeCount(self: WitnessCatalog) usize {
+        return self.topology.nodeCount();
+    }
+
+    pub fn branchCount(self: WitnessCatalog) usize {
+        return self.topology.branchCount();
+    }
+
+    pub fn stateCatalogRoot(self: WitnessCatalog) mpt.catalog.RootRef {
+        return self.state_root;
+    }
+
+    pub fn storageCatalogRoot(
+        self: WitnessCatalog,
+        digest: [32]u8,
+    ) mpt.LookupError!mpt.catalog.RootRef {
+        if (std.mem.eql(u8, &digest, &empty_root_hash)) return .empty;
+        return self.findStorageRoot(digest) orelse error.MissingNode;
+    }
+
+    fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.catalog.RootRef {
+        var low: usize = 0;
+        var high = self.storage_roots.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            switch (std.mem.order(u8, &self.storage_roots.items[mid].hash, &digest)) {
+                .lt => low = mid + 1,
+                .gt => high = mid,
+                .eq => return self.storage_roots.items[mid].root,
+            }
+        }
+        return null;
+    }
+};
+
+/// Authenticate the state root, then bind every witness-present storage root
+/// exposed by authenticated account leaves into the same immutable catalog.
+/// Missing storage roots remain lazy witness failures when execution accesses
+/// them, matching proof-reader behavior for partial witnesses.
+pub fn buildWitnessCatalog(
+    allocator: Allocator,
+    state_root: [32]u8,
+    indexed: *const IndexedNodes,
+) (Allocator.Error || ProofLookupError)!WitnessCatalog {
+    var builder = try structuralTrie(allocator).catalogBuilder(indexed.index());
+    defer builder.deinit();
+
+    const catalog_state_root = try builder.authenticateRoot(state_root);
+    const state_node_count = builder.nodeCount();
+    var storage_roots: std.ArrayList(StorageCatalogRoot) = .empty;
+    errdefer storage_roots.deinit(allocator);
+    var accounts: std.ArrayList(CatalogAccount) = .empty;
+    errdefer accounts.deinit(allocator);
+    var first_storage_root_account: ?u32 = null;
+    var storage_root_accounts: std.ArrayList(u32) = .empty;
+    defer storage_root_accounts.deinit(allocator);
+
+    for (0..state_node_count) |raw_id| {
+        const id: mpt.catalog.NodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
+        const node = builder.node(id) orelse return error.InvalidNodeReference;
+        if (node.kind != .leaf) continue;
+        const encoded = node.value() orelse return error.InvalidNode;
+        const entry = try accounts.addOne(allocator);
+        entry.node = id;
+        try decodeAccountValueInto(encoded, &entry.decoded);
+        if (std.mem.eql(u8, &entry.decoded.storage_root, &empty_root_hash)) continue;
+        const account_index: u32 = @intCast(accounts.items.len - 1);
+        if (first_storage_root_account == null) {
+            first_storage_root_account = account_index;
+        } else if (storage_root_accounts.items.len == 0) {
+            try storage_root_accounts.ensureUnusedCapacity(allocator, 2);
+            storage_root_accounts.appendAssumeCapacity(first_storage_root_account.?);
+            storage_root_accounts.appendAssumeCapacity(account_index);
+        } else {
+            try storage_root_accounts.append(allocator, account_index);
+        }
+    }
+
+    var single_storage_root_account: [1]u32 = undefined;
+    const candidates = if (storage_root_accounts.items.len != 0)
+        storage_root_accounts.items
+    else if (first_storage_root_account) |account_index| blk: {
+        single_storage_root_account[0] = account_index;
+        break :blk single_storage_root_account[0..];
+    } else single_storage_root_account[0..0];
+    const unique_len = sortDeduplicateStorageRootAccounts(candidates, accounts.items);
+    for (candidates[0..unique_len]) |account_index| {
+        const storage_root = accounts.items[account_index].decoded.storage_root;
+        const root_ref = builder.authenticateRoot(storage_root) catch |err| switch (err) {
+            error.MissingNode => continue,
+            else => return err,
+        };
+        try storage_roots.append(allocator, .{ .hash = storage_root, .root = root_ref });
+    }
+
+    return .{
+        .allocator = allocator,
+        .topology = try builder.finishAssumeCollisionResistant(),
+        .state_root = catalog_state_root,
+        .storage_roots = storage_roots,
+        .accounts = accounts,
+    };
+}
+
+fn catalogValue(result: mpt.Lookup) ?[]const u8 {
+    return switch (result) {
+        .present => |value| value,
+        .absent => null,
+    };
+}
+
+fn sortDeduplicateStorageRootAccounts(
+    account_indices: []u32,
+    accounts: []const CatalogAccount,
+) usize {
+    if (account_indices.len < 2) return account_indices.len;
+    std.mem.sort(u32, account_indices, accounts, storageRootAccountLessThan);
+    var unique_len: usize = 1;
+    for (account_indices[1..]) |account_index| {
+        const previous = accounts[account_indices[unique_len - 1]].decoded.storage_root;
+        const current = accounts[account_index].decoded.storage_root;
+        if (std.mem.eql(u8, &previous, &current)) continue;
+        account_indices[unique_len] = account_index;
+        unique_len += 1;
+    }
+    return unique_len;
+}
+
+fn storageRootAccountLessThan(accounts: []const CatalogAccount, lhs: u32, rhs: u32) bool {
+    return std.mem.order(
+        u8,
+        &accounts[lhs].decoded.storage_root,
+        &accounts[rhs].decoded.storage_root,
+    ) == .lt;
+}
 
 pub const Proof = struct {
     root_hash: [32]u8,
@@ -186,7 +402,7 @@ fn storageRootAfterChangesIndexed(
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
-    changes: ChangesView,
+    changes: anytype,
     target: address.Address,
 ) UpdateError![32]u8 {
     const scratch = allocator;
@@ -213,11 +429,49 @@ fn storageRootAfterChangesIndexed(
     return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
 }
 
+fn storageRootAfterChangesCatalog(
+    workspace: *mpt.StatelessWorkspace,
+    allocator: Allocator,
+    root_hash: [32]u8,
+    catalog: *const WitnessCatalog,
+    changes: anytype,
+    target: address.Address,
+) UpdateError![32]u8 {
+    var updates: std.ArrayList(StorageTrie.Update) = .empty;
+    defer updates.deinit(allocator);
+
+    var index: u32 = 0;
+    while (index < changes.storage_writes.len()) : (index += 1) {
+        const write = changes.storage_writes.at(index);
+        if (!std.mem.eql(u8, &write.address, &target)) continue;
+        const value: ?[]const u8 = if (write.value == 0)
+            null
+        else
+            try storageValue(allocator, write.value);
+        try updates.append(allocator, .{ .key = write.key, .value = value });
+    }
+
+    const wiped = changesWipeStorage(changes, target);
+    const base_root = if (wiped) empty_root_hash else root_hash;
+    if (updates.items.len == 0) return base_root;
+    const root_ref: mpt.catalog.RootRef = if (wiped)
+        .empty
+    else
+        try catalog.storageCatalogRoot(root_hash);
+    return storageTrie(allocator).updateStatelessCatalog(
+        workspace,
+        base_root,
+        &catalog.topology,
+        root_ref,
+        updates.items,
+    );
+}
+
 pub fn stateRootAfterChanges(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
-    changes: ChangesView,
+    changes: anytype,
 ) UpdateError![32]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -232,7 +486,7 @@ pub fn stateRootAfterChangesIndexed(
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
     authenticated_accounts: ?*const AccountFacts,
-    changes: ChangesView,
+    changes: anytype,
 ) UpdateError![32]u8 {
     const scratch = allocator;
 
@@ -311,6 +565,88 @@ pub fn stateRootAfterChangesIndexed(
     return accounts.update(root_hash, indexed.index(), updates.items);
 }
 
+pub fn stateRootAfterChangesCatalog(
+    allocator: Allocator,
+    root_hash: [32]u8,
+    catalog: *const WitnessCatalog,
+    authenticated_accounts: *const AccountFacts,
+    changes: anytype,
+) UpdateError![32]u8 {
+    var workspace = mpt.StatelessWorkspace.init(allocator);
+    defer workspace.deinit();
+
+    var addresses: std.ArrayList(address.Address) = .empty;
+    defer addresses.deinit(allocator);
+
+    var account_index: u32 = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        if (change.account != null) try appendUniqueAddress(allocator, &addresses, change.address);
+    }
+    var storage_index: u32 = 0;
+    while (storage_index < changes.storage_writes.len()) : (storage_index += 1) {
+        const write = changes.storage_writes.at(storage_index);
+        if (!changesDeleteAccount(changes, write.address)) {
+            try appendUniqueAddress(allocator, &addresses, write.address);
+        }
+    }
+    var wipe_index: u32 = 0;
+    while (wipe_index < changes.storage_wipes.len()) : (wipe_index += 1) {
+        const target = changes.storage_wipes.at(wipe_index);
+        if (!changesDeleteAccount(changes, target)) {
+            try appendUniqueAddress(allocator, &addresses, target);
+        }
+    }
+
+    var updates: std.ArrayList(AccountTrie.Update) = .empty;
+    defer updates.deinit(allocator);
+
+    for (addresses.items) |target| {
+        const previous = if (authenticated_accounts.get(target)) |account|
+            account orelse Account{}
+        else
+            try loadCatalogAccountOrEmpty(catalog, target);
+        const account_change = changesAccount(changes, target);
+        const storage_root = try storageRootAfterChangesCatalog(
+            &workspace,
+            allocator,
+            previous.storage_root,
+            catalog,
+            changes,
+            target,
+        );
+        var next_account = previous;
+        if (account_change) |change| {
+            const account = change.account orelse unreachable;
+            next_account.nonce = account.nonce;
+            next_account.balance = account.balance;
+            next_account.code_hash = account.code_hash;
+        }
+        next_account.storage_root = storage_root;
+
+        const value: ?[]const u8 = if (next_account.hasNoState())
+            null
+        else
+            try accountValueFrom(allocator, next_account);
+        try updates.append(allocator, .{ .key = target, .value = value });
+    }
+
+    account_index = 0;
+    while (account_index < changes.accounts.len()) : (account_index += 1) {
+        const change = changes.accounts.at(account_index);
+        if (change.account != null) continue;
+        try updates.append(allocator, .{ .key = change.address, .value = null });
+    }
+
+    return accountTrie(allocator).updateStatelessCatalog(
+        &workspace,
+        root_hash,
+        &catalog.topology,
+        catalog.stateCatalogRoot(),
+        updates.items,
+    );
+}
+
 pub fn hashedAddressKey(target: address.Address) [32]u8 {
     return AddressKeyContext.trieKey(.{}, target);
 }
@@ -349,6 +685,47 @@ pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
     return rlp.decode(Account, encoded);
 }
 
+pub fn decodeAccountValueInto(encoded: []const u8, account: *Account) ProofLookupError!void {
+    try rlp.decodeInto(Account, encoded, account);
+}
+
+test "decodeAccountValue matches the fixed account schema" {
+    var prng = std.Random.DefaultPrng.init(0xacc7);
+    const random = prng.random();
+    const scalars = [_]u256{ 0, 1, 0x7f, 0x80, 0xff, 0x100, std.math.maxInt(u64), 1 << 255, std.math.maxInt(u256) };
+    for (0..256) |_| {
+        var account = Account{
+            .nonce = @truncate(scalars[random.uintLessThan(usize, scalars.len)]),
+            .balance = scalars[random.uintLessThan(usize, scalars.len)],
+        };
+        random.bytes(&account.storage_root);
+        random.bytes(&account.code_hash);
+        const encoded = try encodeFixedRlp(Account, std.testing.allocator, account);
+        defer std.testing.allocator.free(encoded);
+        const decoded = try decodeAccountValue(encoded);
+        try std.testing.expectEqual(account, decoded);
+        var decoded_into: Account = undefined;
+        try decodeAccountValueInto(encoded, &decoded_into);
+        try std.testing.expectEqual(account, decoded_into);
+        // Truncation must be rejected by typed decode.
+        try std.testing.expectError(
+            error.InputTooShort,
+            decodeAccountValue(encoded[0 .. encoded.len - 1]),
+        );
+        try std.testing.expectError(
+            error.InputTooShort,
+            decodeAccountValueInto(encoded[0 .. encoded.len - 1], &decoded_into),
+        );
+    }
+}
+
+pub fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
+    var cursor = rlp.Cursor.init(encoded);
+    const value = try cursor.nextInt(u256);
+    try cursor.expectDone();
+    return value;
+}
+
 pub fn withdrawalValue(allocator: Allocator, withdrawal: Withdrawal) Allocator.Error![]u8 {
     return encodeFixedRlp(Withdrawal, allocator, withdrawal);
 }
@@ -372,7 +749,14 @@ fn loadAccountOrEmpty(
     };
 }
 
-fn changesAccount(changes: ChangesView, target: address.Address) ?TrackedState.AccountChange {
+fn loadCatalogAccountOrEmpty(
+    catalog: *const WitnessCatalog,
+    target: address.Address,
+) UpdateError!Account {
+    return try catalog.decodedAccount(&hashedAddressKey(target)) orelse .{};
+}
+
+fn changesAccount(changes: anytype, target: address.Address) ?@TypeOf(changes.accounts.at(0)) {
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
@@ -381,12 +765,12 @@ fn changesAccount(changes: ChangesView, target: address.Address) ?TrackedState.A
     return null;
 }
 
-fn changesDeleteAccount(changes: ChangesView, target: address.Address) bool {
+fn changesDeleteAccount(changes: anytype, target: address.Address) bool {
     const change = changesAccount(changes, target) orelse return false;
     return change.account == null;
 }
 
-fn changesWipeStorage(changes: ChangesView, target: address.Address) bool {
+fn changesWipeStorage(changes: anytype, target: address.Address) bool {
     var index: u32 = 0;
     while (index < changes.storage_wipes.len()) : (index += 1) {
         const wiped = changes.storage_wipes.at(index);
@@ -804,6 +1188,105 @@ test "MPT proof lookup rejects malformed compact paths" {
     try std.testing.expectError(error.InvalidCompactPath, proof(root_hash, indexed).get(""));
 }
 
+test "witness catalog links state and witness-present storage roots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const slot_key = hashedStorageKey(3);
+    const slot_value = try storageValue(scratch, 42);
+    const storage_pairs = [_]Pair{.{ .key = &slot_key, .value = slot_value }};
+    const storage_node = try encodedRootForTest(scratch, &storage_pairs);
+    const storage_root = crypto.keccak256(storage_node);
+
+    const target = address.addr(0x2000);
+    const account_key = hashedAddressKey(target);
+    const account_value = try accountValueFrom(scratch, .{ .storage_root = storage_root });
+    const state_pairs = [_]Pair{.{ .key = &account_key, .value = account_value }};
+    const state_node = try encodedRootForTest(scratch, &state_pairs);
+    const state_root = crypto.keccak256(state_node);
+
+    const nodes = [_][]const u8{ state_node, storage_node };
+    var indexed = try indexNodes(scratch, &nodes);
+    defer indexed.deinit();
+    var catalog = try buildWitnessCatalog(scratch, state_root, indexed);
+    defer catalog.deinit();
+
+    try std.testing.expect((try catalog.account(&account_key)) != null);
+    const account = (try catalog.decodedAccount(&account_key)).?;
+    try std.testing.expectEqualSlices(u8, &storage_root, &account.storage_root);
+    try std.testing.expectEqualSlices(u8, slot_value, (try catalog.storage(storage_root, &slot_key)).?);
+    const absent_key = hashedStorageKey(4);
+    try std.testing.expect(try catalog.storage(storage_root, &absent_key) == null);
+    try std.testing.expectEqual(@as(usize, 2), catalog.nodeCount());
+
+    const state_only_nodes = [_][]const u8{state_node};
+    var state_only_indexed = try indexNodes(scratch, &state_only_nodes);
+    defer state_only_indexed.deinit();
+    var state_only = try buildWitnessCatalog(scratch, state_root, state_only_indexed);
+    defer state_only.deinit();
+    try std.testing.expect((try state_only.account(&account_key)) != null);
+    try std.testing.expectError(error.MissingNode, state_only.storage(storage_root, &slot_key));
+}
+
+test "witness catalog storage-root accounts sort and deduplicate in place" {
+    const first = [_]u8{0x11} ** 32;
+    const second = [_]u8{0x22} ** 32;
+    const third = [_]u8{0x33} ** 32;
+    const accounts = [_]CatalogAccount{
+        .{ .node = @enumFromInt(0), .decoded = .{ .storage_root = first } },
+        .{ .node = @enumFromInt(1), .decoded = .{ .storage_root = second } },
+        .{ .node = @enumFromInt(2), .decoded = .{ .storage_root = third } },
+    };
+    var account_indices = [_]u32{ 2, 0, 1, 0, 2 };
+
+    const len = sortDeduplicateStorageRootAccounts(&account_indices, &accounts);
+    try std.testing.expectEqual(@as(usize, 3), len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, account_indices[0..len]);
+}
+
+test "witness catalog cleans every allocation failure position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const slot_key = hashedStorageKey(3);
+    const slot_value = try storageValue(scratch, 42);
+    const storage_node = try encodedRootForTest(
+        scratch,
+        &.{.{ .key = &slot_key, .value = slot_value }},
+    );
+    const storage_root = crypto.keccak256(storage_node);
+    const account_key = hashedAddressKey(address.addr(0x2000));
+    const account_value = try accountValueFrom(scratch, .{ .storage_root = storage_root });
+    const state_node = try encodedRootForTest(
+        scratch,
+        &.{.{ .key = &account_key, .value = account_value }},
+    );
+    const state_root = crypto.keccak256(state_node);
+    const nodes = [_][]const u8{ state_node, storage_node };
+
+    const Harness = struct {
+        fn run(
+            allocator: Allocator,
+            root_hash: [32]u8,
+            encoded_nodes: []const []const u8,
+        ) !void {
+            var indexed = try indexNodes(allocator, encoded_nodes);
+            defer indexed.deinit();
+            var catalog = try buildWitnessCatalog(allocator, root_hash, indexed);
+            defer catalog.deinit();
+            try std.testing.expectEqual(@as(usize, 1), catalog.accounts.items.len);
+            try std.testing.expectEqual(@as(usize, 1), catalog.storage_roots.items.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Harness.run,
+        .{ state_root, &nodes },
+    );
+}
+
 test "MPT update root inserts into empty trie" {
     const allocator = std.testing.allocator;
     const update = [_]Update{.{ .key = "dog", .value = "puppy" }};
@@ -989,6 +1472,7 @@ test "MPT batch inserts before deletes to avoid unnecessary sibling witness" {
 }
 
 test "MPT state root consumes tracked changes" {
+    const TrackedState = @import("../state/TrackedState.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1042,6 +1526,7 @@ test "MPT state root consumes tracked changes" {
 }
 
 test "MPT state root reuses authenticated present account" {
+    const TrackedState = @import("../state/TrackedState.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1091,7 +1576,17 @@ test "MPT state root reuses authenticated present account" {
         null,
         changes,
     );
+    var catalog = try buildWitnessCatalog(scratch, root_hash, indexed);
+    defer catalog.deinit();
+    const catalog_root = try stateRootAfterChangesCatalog(
+        scratch,
+        root_hash,
+        &catalog,
+        &facts,
+        changes,
+    );
     try std.testing.expectEqualSlices(u8, &fallback, &cached);
+    try std.testing.expectEqualSlices(u8, &fallback, &catalog_root);
 }
 
 test "authenticated account facts preserve cached absence" {

@@ -2,7 +2,7 @@
 //!
 //! A lane owns nothing the coordinator owns. It takes an immutable block
 //! context plus a transaction the authoritative fold already executed, runs it
-//! over `BalClaimReader(base, claim, tx_index)`, and hands back BAL evidence.
+//! over `ClaimReader(base, claim, tx_index)`, and hands back BAL evidence.
 //!
 //! The lane compares its own result and logs against the canonical ones while
 //! its executor is still alive, so a disagreement never travels. What comes
@@ -18,7 +18,7 @@ const observation = @import("../observation.zig");
 const ClaimView = @import("../ClaimView.zig");
 const tracked_state_projector = @import("../tracked_state_projector.zig");
 const prepared_code = @import("../../../prepared_code.zig");
-const BalClaimReader = @import("../../../state/BalClaimReader.zig");
+const ClaimReader = @import("../ClaimReader.zig");
 const Reader = @import("../../../state/Reader.zig");
 const state = @import("../../../state.zig");
 const vm = @import("../../../vm.zig");
@@ -107,7 +107,7 @@ pub fn Lane(comptime Engine: type) type {
             err: anyerror,
             /// Retained beside the generic executor error because executor
             /// boundaries normalize type-erased reader failures.
-            strategy_failure: ?BalClaimReader.StrategyFailure,
+            strategy_failure: ?ClaimReader.StrategyFailure,
         };
 
         pub const Outcome = union(enum) {
@@ -143,9 +143,14 @@ pub fn Lane(comptime Engine: type) type {
             pub fn init(
                 self: *CapturedExecution,
                 allocator: std.mem.Allocator,
-                options: Engine.Executor.Init,
+                reader: Reader,
+                options: Engine.Executor.Services,
             ) !void {
-                self.executor = Engine.Executor.init(allocator, options);
+                self.executor = Engine.Executor.initOwned(
+                    allocator,
+                    Engine.BlockState.initState(allocator, reader),
+                    options,
+                );
             }
 
             pub fn deinit(self: *CapturedExecution) void {
@@ -187,7 +192,7 @@ pub fn Lane(comptime Engine: type) type {
                     .err = error.BlockAccessIndexOverflow,
                     .strategy_failure = null,
                 } };
-            var claim_reader = BalClaimReader.init(base_reader, context.claim, block_access_index);
+            var claim_reader = ClaimReader.init(base_reader, context.claim, block_access_index);
             return runFallible(context, allocator, &claim_reader, included) catch |err|
                 .{ .failed = .{
                     .err = err,
@@ -198,12 +203,11 @@ pub fn Lane(comptime Engine: type) type {
         fn runFallible(
             context: Context,
             allocator: std.mem.Allocator,
-            claim_reader: *BalClaimReader,
+            claim_reader: *ClaimReader,
             included: Included,
         ) !Outcome {
             var execution: CapturedExecution = undefined;
-            try execution.init(allocator, .{
-                .state_reader = claim_reader.reader(),
+            try execution.init(allocator, claim_reader.reader(), .{
                 .prepared_code_backend = context.prepared_code_backend,
                 .block_hash_source = context.block_hash_source,
             });

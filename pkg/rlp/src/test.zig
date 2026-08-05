@@ -181,6 +181,15 @@ test "top-level API infers scalar and struct codecs" {
         &.{ 0xc3, 0x82, 0x12, 0x34 },
         try rlp.encode(PlainField, &struct_out, .{ .amount = 0x1234 }),
     );
+
+    const encoded = struct_out[0..4];
+    const decoded = try rlp.decode(PlainField, encoded);
+    var decoded_into: PlainField = undefined;
+    try rlp.decodeInto(PlainField, encoded, &decoded_into);
+    try std.testing.expectEqual(decoded, decoded_into);
+    var budget = rlp.Budget.init(.{ .max_depth = 1, .max_items = 2 });
+    try std.testing.expectEqual(decoded, try rlp.decodeWithBudget(PlainField, encoded, &budget));
+    try std.testing.expectEqual(@as(usize, 2), budget.visited_items);
 }
 
 test "host types cover tuple structs, void, pointers, and owned mutable bytes" {

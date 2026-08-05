@@ -25,8 +25,8 @@ pub const OwnedPlan = struct {
     resources: execution_resources.Plan,
 
     pub fn deinit(self: *OwnedPlan, allocator: Allocator) void {
-        if (self.resources.state.accounts.len != 0) allocator.free(self.resources.state.accounts);
-        if (self.resources.state.storage_slots.len != 0) allocator.free(self.resources.state.storage_slots);
+        allocator.free(self.resources.state.accounts);
+        allocator.free(self.resources.state.storage_slots);
         self.* = undefined;
     }
 };
@@ -39,14 +39,12 @@ pub fn planAllocAssumeValidated(
 ) Allocator.Error!OwnedPlan {
     const counts = bal.count(block_access_list);
 
-    var accounts: []Address = &.{};
-    if (counts.accounts != 0) accounts = try allocator.alloc(Address, counts.accounts);
-    errdefer if (accounts.len != 0) allocator.free(accounts);
+    const accounts = try allocator.alloc(Address, counts.accounts);
+    errdefer allocator.free(accounts);
 
     const storage_count = counts.storage_read_keys + counts.storage_write_keys;
-    var storage_slots: []execution_resources.StorageSlot = &.{};
-    if (storage_count != 0) storage_slots = try allocator.alloc(execution_resources.StorageSlot, storage_count);
-    errdefer if (storage_slots.len != 0) allocator.free(storage_slots);
+    const storage_slots = try allocator.alloc(execution_resources.StorageSlot, storage_count);
+    errdefer allocator.free(storage_slots);
 
     var account_index: usize = 0;
     var storage_index: usize = 0;

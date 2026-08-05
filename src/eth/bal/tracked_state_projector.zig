@@ -24,7 +24,7 @@ const linear_index_limit = 8;
 /// observation mapping - notably the rule that a storage wipe suppresses the
 /// implied nonce and code finalization writes - exists exactly once.
 pub fn materialize(
-    view: State.ObservationsView,
+    view: anytype,
     allocator: Allocator,
 ) !observation.LaneTransition {
     var fold = ObservationFold.init(allocator);
@@ -69,7 +69,7 @@ pub const BlockBuilder = struct {
 
     pub fn append(
         self: *BlockBuilder,
-        view: State.ObservationsView,
+        view: anytype,
         block_access_index: bal.BlockAccessIndex,
     ) !void {
         const active = try self.activeFold(block_access_index);
@@ -153,7 +153,7 @@ const ObservationFold = struct {
         }
     }
 
-    fn appendView(self: *ObservationFold, view: State.ObservationsView) !void {
+    fn appendView(self: *ObservationFold, view: anytype) !void {
         var account_index: u32 = 0;
         while (account_index < view.accounts.len()) : (account_index += 1) {
             const fact = view.accounts.at(account_index);
@@ -279,8 +279,8 @@ const FoldAccount = struct {
     fn appendAccountFact(
         self: *FoldAccount,
         allocator: Allocator,
-        view: State.ObservationsView,
-        fact: State.AccountObservationFact,
+        view: anytype,
+        fact: anytype,
     ) !void {
         if (fact.effect.balance_written or
             (!fact.effect.storage_wiped and
@@ -377,7 +377,8 @@ const FoldAccount = struct {
     }
 };
 
-fn accountOrZero(value: ?State.AccountValue) Account {
+fn accountOrZero(value: anytype) Account {
+    if (@TypeOf(value) == ?Account) return value orelse .{};
     return switch (value orelse .absent) {
         .loaded => |account| account,
         .absent => .{},

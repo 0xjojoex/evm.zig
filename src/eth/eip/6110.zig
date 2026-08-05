@@ -20,6 +20,10 @@ const signature_offset = 384;
 const index_offset = 512;
 
 pub fn appendRequestDataFromLogs(allocator: std.mem.Allocator, out: *std.ArrayList(u8), logs: state.TrackedState.LogView) !void {
+    return appendRequestDataFromLogView(allocator, out, logs);
+}
+
+pub fn appendRequestDataFromLogView(allocator: std.mem.Allocator, out: *std.ArrayList(u8), logs: anytype) !void {
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);
         if (!std.mem.eql(u8, &event_log.address, &deposit_contract_address)) continue;

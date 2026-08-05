@@ -3,6 +3,7 @@ const std = @import("std");
 const address = @import("../../address.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const smoke = @import("./v1_smoke.zig");
+const schema = @import("./schema.zig");
 const ssz = @import("ssz");
 const transaction_signing = @import("../../transaction/signing.zig");
 const wire = @import("./v1.zig");
@@ -20,7 +21,6 @@ test "stateless wire v1 smoke validates and returns SSZ output" {
     const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
     try std.testing.expect(result.successful_validation);
     try std.testing.expectEqual(@as(u64, 1), result.chain_config.chain_id);
-    try std.testing.expectEqual(@as(u16, 0x1501), wire.schema_id);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -149,8 +149,26 @@ test "stateless wire v1 exposes successful decode ownership cleanup" {
 test "stateless wire v1 rejects unknown schema ids" {
     var input_bytes = try smoke.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input_bytes);
+
+    // Known fork, unimplemented payload revision.
     input_bytes[1] = 0x02;
     try std.testing.expectError(error.UnsupportedSchemaId, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes));
+
+    // Known fork this build does not decode, then a fork index that does not exist.
+    input_bytes[0] = @intFromEnum(wire.ProtocolFork.osaka);
+    input_bytes[1] = wire.schema_revision;
+    try std.testing.expectError(error.UnsupportedFork, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes));
+    input_bytes[0] = 0xff;
+    try std.testing.expectError(error.UnsupportedFork, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes));
+
+    try std.testing.expectError(error.MissingSchemaId, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes[0..1]));
+}
+
+test "stateless wire v1 schema id packs fork index and revision" {
+    try std.testing.expectEqual(@as(u16, 0x1501), wire.schema_id);
+    try std.testing.expectEqual(wire.ProtocolFork.amsterdam, wire.schema_fork);
+    try std.testing.expectEqual(wire.schema_id, schema.id(wire.schema_fork, wire.schema_revision));
+    try std.testing.expectEqual(@as(u16, 0x0e01), schema.id(.paris, 0x01));
 }
 
 test "stateless wire v1 enforces witness resource bounds before execution" {

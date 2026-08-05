@@ -8,7 +8,7 @@ const ExecutionContext = evmz.execution.ExecutionContext;
 const Interpreter = evmz.interpreter;
 
 const IgnorePending = struct {
-    pub fn observe(_: IgnorePending, _: evmz.state.TrackedState.PendingView) !void {}
+    pub fn observe(_: IgnorePending, _: anytype) !void {}
 };
 
 pub const BeforeBlockContext = block_program.BeforeBlockContext;

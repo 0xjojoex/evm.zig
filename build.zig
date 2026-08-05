@@ -102,8 +102,25 @@ pub fn build(b: *std.Build) void {
         const install_license = b.addInstallFile(dep.path("COPYING"), "share/licenses/evmz/libsecp256k1.txt");
         b.getInstallStep().dependOn(&install_license.step);
     }
-    const native_build_options = buildOptions(b, .native, native_keccak, native_secp256k1);
-    const zkvm_build_options = buildOptions(b, .zkvm, .std, .std);
+    const stateless_schemas = b.option(
+        []const []const u8,
+        "stateless-schema",
+        "Stateless wire schema id compiled into the router, e.g. 0x1501 (repeatable; default all known)",
+    ) orelse &.{};
+    const native_build_options = buildOptions(
+        b,
+        .native,
+        native_keccak,
+        native_secp256k1,
+        stateless_schemas,
+    );
+    const zkvm_build_options = buildOptions(
+        b,
+        .zkvm,
+        .std,
+        .std,
+        stateless_schemas,
+    );
     const build_options = if (is_native_profile) native_build_options else zkvm_build_options;
     const stateless_profile_none_mod = b.createModule(.{
         .root_source_file = b.path("guest/profile_none.zig"),
@@ -424,6 +441,7 @@ pub fn build(b: *std.Build) void {
         guest_heap_metrics,
         guest_heap_bytes,
         guest_zisk_ram_bytes,
+        zkvm_build_options,
     );
     addGuest(
         b,
@@ -439,6 +457,7 @@ pub fn build(b: *std.Build) void {
         guest_heap_metrics,
         guest_heap_bytes,
         null,
+        zkvm_build_options,
     );
 
     // examples
@@ -503,11 +522,13 @@ fn buildOptions(
     profile: Profile,
     native_keccak: KeccakBackend,
     native_secp256k1: Secp256k1Backend,
+    stateless_schemas: []const []const u8,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(Profile, "profile", profile);
     options.addOption(KeccakBackend, "native_keccak", native_keccak);
     options.addOption(Secp256k1Backend, "native_secp256k1", native_secp256k1);
+    options.addOption([]const []const u8, "stateless_schemas", stateless_schemas);
     return options;
 }
 
@@ -606,7 +627,7 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .optimize = config.optimize,
         .link_libcpp = true,
     });
-    provider_mod.addOptions("build_options", buildOptions(b, .native, .std, .std));
+    provider_mod.addOptions("build_options", config.native_build_options);
     addPrecompileNative(b, provider_mod, config.native_precompiles);
     const provider = b.addObject(.{
         .name = "zkvm-test-accelerators",
@@ -891,6 +912,7 @@ fn addGuest(
     heap_metrics: bool,
     heap_bytes: u64,
     ram_bytes: ?u64,
+    build_options: *std.Build.Step.Options,
 ) void {
     const config = backend.config();
     // A zero heap_bytes collapses _evmz_heap_bottom onto _evmz_heap_top, which the
@@ -922,7 +944,6 @@ fn addGuest(
         .omit_frame_pointer = omit_frame_pointer,
         .strip = strip,
     };
-    const build_options = buildOptions(b, .zkvm, .std, .std);
     const guest_options = guestOptions(b, backend, heap_metrics, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();

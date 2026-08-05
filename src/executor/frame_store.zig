@@ -9,20 +9,20 @@ const Memory = @import("../Memory.zig");
 const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");
 const evmz = @import("../evm.zig");
-const ScopeCheckpoint = @import("../state/TrackedState.zig").Checkpoint;
+const Checkpoint = @import("../state/checkpoint.zig").Checkpoint;
 const CallToken = @import("../trace/call_arena.zig").Token;
 
 const FrameStore = @This();
 
 pub const CreateControl = struct {
-    checkpoint_state: ScopeCheckpoint,
+    checkpoint_state: Checkpoint,
     address: evmz.Address,
     kind: Host.CallKind,
 };
 
 pub const Kind = union(enum) {
     root_call,
-    call: ScopeCheckpoint,
+    call: Checkpoint,
     create: CreateControl,
 };
 

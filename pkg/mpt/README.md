@@ -100,6 +100,29 @@ records through its retained allocator; the encoded node bytes remain borrowed.
 be assembled into an index accepted by lookup or update. It serves any number
 of allocation-free lookups and updates. Extra irrelevant nodes do not fail a proof.
 
+**Authenticated catalog.** `catalogBuilder(index)` is an optional ingestion
+layer over the sealed index. `authenticateRoot` decodes the witness-present
+topology reachable from a trusted root into stable `u32` handles; `finish`
+rejects resolved cycles and noncanonical extension topology, then seals an
+immutable catalog whose lookup path performs no hashing, digest search,
+allocation, or RLP decoding. Embedded children are always linked; a hashed child
+absent from the sparse witness stays opaque and produces `MissingNode` only when
+a lookup selects it. Several state or storage roots may share one builder, and
+content-addressed nodes retain one handle. `updateSortedCatalog` materializes
+selected nodes directly by handle while preserving untouched authenticated child
+references; `updateSortedCatalogWithWorkspace` reuses one
+`CatalogUpdateWorkspace` across independent roots, and
+`updateSortedCatalogBatch` partitions sorted updates at shared branch prefixes,
+falling back to the sequential updater on divergent terminal paths.
+
+**Fixed-key stateless commit.** `stateless.zig` is a separate state/storage
+commit engine for exactly 32-byte hashed keys, independent of `proof.zig` and
+`sparse.zig`. The immutable catalog remains the clean authenticated topology;
+commit creates mutable occurrences only along selected paths, retains untouched
+children as authenticated references, and encodes dirty ancestors bottom-up —
+a commit overlay, not a second execution-time copy. Ethereum state and storage
+calls reuse one resettable `StatelessWorkspace` during block commit.
+
 **Lookup outcomes.** `lookup` returns a `Lookup` union:
 
 - `.present` — the authenticated value bytes (borrowed from the bag; they cannot
@@ -148,6 +171,21 @@ nothing per lookup; a full root is `O(entries + key topology + max_node_rlp_byte
 a sparse update is `O(touched_nodes + max_node_rlp_bytes)`. The implementation
 never retains every encoded internal node, so a one-shot zkVM Keccak provider
 stays on the fast path without incremental hashing.
+
+The optional catalog is `O(reachable_hashed_nodes + embedded_occurrences)` and is
+deliberately not constructed by ordinary proof/update users: one compact
+descriptor per linked node plus one child row per branch, on top of the witness
+index records ingest already retains. Its descriptors encode node-relative spans
+as `u16`, so catalog ingestion rejects an encoded node larger than 65,535 bytes
+with `ResourceLimitExceeded` — a catalog-only representation bound that leaves
+the generic proof and sparse-update APIs unchanged.
+
+`catalogBuilderWithLimits` additionally bounds indexed node count, linked nodes
+(including embedded occurrences), and branch rows; exceeding a bound returns
+`ResourceLimitExceeded`, and applications can retain the ordinary proof reader
+as a correctness-preserving fallback. All of this happens after the witness index
+exists, so surrounding wire admission must separately bound raw witness
+count/bytes. The package chooses no policy numbers for either layer.
 
 ## Keccak execution context
 

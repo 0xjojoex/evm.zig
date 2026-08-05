@@ -2,9 +2,14 @@
 //! Defines the SSZ-encoded `StatelessInput`/`StatelessValidationResult` types
 //! (per tests-zkevm v0.6.2) and the schema-prefixed validate entry points.
 //! The two-byte schema id gates decoding; unknown ids are rejected.
+//!
+//! This module implements exactly one `fork || revision` pair, so its id is
+//! derived from that pair rather than written out. See `schema.zig` for the
+//! framing and `../wire.zig` for the router that selects between schemas.
 
 const std = @import("std");
 const ssz = @import("ssz");
+const schema = @import("./schema.zig");
 const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
 const address = @import("../../address.zig");
@@ -13,19 +18,28 @@ const EthWithdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const eth_spec = @import("../../eth/spec.zig");
-const vm = @import("../../vm.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
 const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const revision: Revision = .amsterdam;
-const AmsterdamValidator = stateless_validate.Exact(revision);
-/// The guest engine: identical consensus spec, no step-capture dispatch.
-const SlimVm = vm.VmWithOptions(eth_spec.specAt(revision), .{ .step_capture = false });
-const AmsterdamOneShotValidator = stateless_validate.Bind(block_stf.Bind(revision, SlimVm));
+const specification = eth_spec.specAt(revision);
+const AmsterdamValidator = stateless_validate.Validator(specification);
+const AmsterdamCaptureValidator = stateless_validate.TrackedValidator(specification);
+const AmsterdamOneShotValidator = stateless_validate.ValidatorWithOptions(
+    specification,
+    .{ .step_capture = false },
+);
 
-pub const schema_id: u16 = 0x1501;
-pub const schema_id_size = 2;
+pub const ProtocolFork = schema.ProtocolFork;
+
+/// Fork this schema decodes; the high byte of the only id it accepts.
+pub const schema_fork: ProtocolFork = .amsterdam;
+/// Payload encoding under `schema_fork`: `1` is SSZ `StatelessInput`.
+pub const schema_revision: u8 = 0x01;
+pub const schema_id: u16 = schema.id(schema_fork, schema_revision);
+pub const schema_id_size = schema.id_size;
+
 const max_extra_data_bytes = 32;
 const max_withdrawals_per_payload = 16;
 const max_transactions_per_payload = 1 << 20;
@@ -62,59 +76,6 @@ pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Err
     InvalidPayloadForFork,
     InvalidPublicKey,
     ExtraDataTooLong,
-};
-
-pub const ValidationOptions = struct {};
-
-pub const ProtocolFork = enum(u64) {
-    frontier = 0x01,
-    homestead = 0x02,
-    dao_fork = 0x03,
-    tangerine_whistle = 0x04,
-    spurious_dragon = 0x05,
-    byzantium = 0x06,
-    petersburg = 0x07,
-    istanbul = 0x08,
-    muir_glacier = 0x09,
-    berlin = 0x0a,
-    london = 0x0b,
-    arrow_glacier = 0x0c,
-    gray_glacier = 0x0d,
-    paris = 0x0e,
-    shanghai = 0x0f,
-    cancun = 0x10,
-    prague = 0x11,
-    osaka = 0x12,
-    bpo1 = 0x13,
-    bpo2 = 0x14,
-    amsterdam = 0x15,
-
-    pub fn fromInt(value: u64) Error!ProtocolFork {
-        return switch (value) {
-            0x01 => .frontier,
-            0x02 => .homestead,
-            0x03 => .dao_fork,
-            0x04 => .tangerine_whistle,
-            0x05 => .spurious_dragon,
-            0x06 => .byzantium,
-            0x07 => .petersburg,
-            0x08 => .istanbul,
-            0x09 => .muir_glacier,
-            0x0a => .berlin,
-            0x0b => .london,
-            0x0c => .arrow_glacier,
-            0x0d => .gray_glacier,
-            0x0e => .paris,
-            0x0f => .shanghai,
-            0x10 => .cancun,
-            0x11 => .prague,
-            0x12 => .osaka,
-            0x13 => .bpo1,
-            0x14 => .bpo2,
-            0x15 => .amsterdam,
-            else => error.UnsupportedFork,
-        };
-    }
 };
 
 pub const ForkActivation = struct {
@@ -709,17 +670,11 @@ pub const StatelessInput = struct {
     }
 
     pub fn decodeSchemaPrefixed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
-        if (bytes.len < schema_id_size) return error.MissingSchemaId;
-        const actual_schema_id = std.mem.readInt(u16, bytes[0..schema_id_size], .big);
-        if (actual_schema_id != schema_id) return error.UnsupportedSchemaId;
-        return decode(allocator, bytes[schema_id_size..]);
+        return decode(allocator, try schema.body(bytes, schema_id));
     }
 
     fn decodeSchemaPrefixedBorrowed(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
-        if (bytes.len < schema_id_size) return error.MissingSchemaId;
-        const actual_schema_id = std.mem.readInt(u16, bytes[0..schema_id_size], .big);
-        if (actual_schema_id != schema_id) return error.UnsupportedSchemaId;
-        return decodeBorrowed(allocator, bytes[schema_id_size..]);
+        return decodeBorrowed(allocator, try schema.body(bytes, schema_id));
     }
 
     pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) Error!StatelessInput {
@@ -1158,19 +1113,15 @@ fn failureResult(chain_config: ChainConfig, request_root: [32]u8) StatelessValid
 }
 
 pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
-    return validateStatelessBytesWithOptions(allocator, bytes, .{});
-}
-
-pub fn validateStatelessBytesWithOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ValidationOptions) Error![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    return validateStatelessBytesUsingScratch(false, arena.allocator(), allocator, bytes, options);
+    return validateStatelessBytesUsingScratch(false, arena.allocator(), allocator, bytes);
 }
 
 /// Validates one invocation whose scratch and result allocations share a
 /// caller-owned lifetime. Reusable callers must use `validateStatelessBytes`.
 pub fn validateStatelessBytesOneShot(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
-    return validateStatelessBytesUsingScratch(true, allocator, allocator, bytes, .{});
+    return validateStatelessBytesUsingScratch(true, allocator, allocator, bytes);
 }
 
 fn validateStatelessBytesUsingScratch(
@@ -1178,16 +1129,15 @@ fn validateStatelessBytesUsingScratch(
     scratch: std.mem.Allocator,
     result_allocator: std.mem.Allocator,
     bytes: []const u8,
-    options: ValidationOptions,
 ) Error![]u8 {
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
     };
     const result = if (comptime reuse_scratch)
-        try validateStatelessWithOptionsImpl(AmsterdamOneShotValidator, true, scratch, input, options)
+        try validateStatelessUsing(AmsterdamOneShotValidator, true, scratch, input)
     else
-        try validateStatelessWithOptionsImpl(AmsterdamValidator, false, scratch, input, options);
+        try validateStatelessUsing(AmsterdamValidator, false, scratch, input);
     return result.encode(result_allocator);
 }
 
@@ -1196,26 +1146,13 @@ pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const
 }
 
 pub fn validateStatelessResultBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Result {
-    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, null, .{});
-}
-
-pub fn validateStatelessResultBytesWithOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ValidationOptions) Error!block_stf.Result {
-    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, null, options);
+    return validateStatelessResultBytesWithCapture(allocator, bytes, null);
 }
 
 pub fn validateStatelessResultBytesWithCapture(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     capture: ?block_stf.ExecutionCapture,
-) Error!block_stf.Result {
-    return validateStatelessResultBytesWithCaptureAndOptions(allocator, bytes, capture, .{});
-}
-
-pub fn validateStatelessResultBytesWithCaptureAndOptions(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    capture: ?block_stf.ExecutionCapture,
-    options: ValidationOptions,
 ) Error!block_stf.Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -1224,12 +1161,15 @@ pub fn validateStatelessResultBytesWithCaptureAndOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    _ = options;
     const normalized = normalize(scratch, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    return AmsterdamValidator.validateWithCapture(scratch, normalized, capture) catch |err| switch (err) {
+    const result = if (capture == null)
+        AmsterdamValidator.validate(scratch, normalized)
+    else
+        AmsterdamCaptureValidator.validateWithCapture(scratch, normalized, capture);
+    return result catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
         else => .{ .status = .invalid_witness },
@@ -1237,25 +1177,19 @@ pub fn validateStatelessResultBytesWithCaptureAndOptions(
 }
 
 pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Error!StatelessValidationResult {
-    return validateStatelessWithOptions(allocator, input, .{});
+    return validateStatelessUsing(AmsterdamValidator, false, allocator, input);
 }
 
-pub fn validateStatelessWithOptions(allocator: std.mem.Allocator, input: StatelessInput, options: ValidationOptions) Error!StatelessValidationResult {
-    return validateStatelessWithOptionsImpl(AmsterdamValidator, false, allocator, input, options);
-}
-
-fn validateStatelessWithOptionsImpl(
+fn validateStatelessUsing(
     comptime Validator: type,
     comptime reuse_scratch: bool,
     allocator: std.mem.Allocator,
     input: StatelessInput,
-    options: ValidationOptions,
 ) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, [_]u8{0} ** 32),
     };
-    _ = options;
     const normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, request_root),

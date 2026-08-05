@@ -67,18 +67,15 @@ code_by_hash: []*const CodeChange = &.{},
 
 /// Construct over a claim already accepted by `bal.validate`.
 pub fn initAssumeValidated(allocator: Allocator, block_access_list: bal.BlockAccessList) InitError!ClaimView {
-    var accounts: []AccountView = &.{};
-    if (block_access_list.len != 0) accounts = try allocator.alloc(AccountView, block_access_list.len);
-    errdefer if (accounts.len != 0) allocator.free(accounts);
+    const accounts = try allocator.alloc(AccountView, block_access_list.len);
+    errdefer allocator.free(accounts);
 
     var code_change_count: usize = 0;
     for (block_access_list) |account_claim| code_change_count += account_claim.code_changes.len;
-    var code_changes: []CodeChange = &.{};
-    if (code_change_count != 0) code_changes = try allocator.alloc(CodeChange, code_change_count);
-    errdefer if (code_changes.len != 0) allocator.free(code_changes);
-    var code_by_hash: []*const CodeChange = &.{};
-    if (code_change_count != 0) code_by_hash = try allocator.alloc(*const CodeChange, code_change_count);
-    errdefer if (code_by_hash.len != 0) allocator.free(code_by_hash);
+    const code_changes = try allocator.alloc(CodeChange, code_change_count);
+    errdefer allocator.free(code_changes);
+    const code_by_hash = try allocator.alloc(*const CodeChange, code_change_count);
+    errdefer allocator.free(code_by_hash);
 
     var code_index: usize = 0;
     for (block_access_list, 0..) |*account_claim, account_index| {
@@ -107,9 +104,9 @@ pub fn initAssumeValidated(allocator: Allocator, block_access_list: bal.BlockAcc
 }
 
 pub fn deinit(self: *ClaimView, allocator: Allocator) void {
-    if (self.accounts.len != 0) allocator.free(self.accounts);
-    if (self.code_changes.len != 0) allocator.free(self.code_changes);
-    if (self.code_by_hash.len != 0) allocator.free(self.code_by_hash);
+    allocator.free(self.accounts);
+    allocator.free(self.code_changes);
+    allocator.free(self.code_by_hash);
     self.* = .{};
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise report-only ZisK BenchmarkRun rows against an optional stored baseline."""
+"""Summarise report-only zkVM BenchmarkRun rows against an optional stored baseline."""
 
 from __future__ import annotations
 
@@ -27,8 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--current-ref", required=True)
     parser.add_argument("--baseline-ref", default="none")
+    parser.add_argument("--backend", choices=("zisk", "sp1"), default="zisk")
     parser.add_argument("--zisk", default="v1.0.0-alpha (4b9f758fabc4955cac20af837019ccc31b803a46)")
     parser.add_argument("--zisk-rust", default="zisk-1.0.0")
+    parser.add_argument("--sp1", default="v6.3.1")
     parser.add_argument("--fixtures", default="tests-zkevm@v0.6.2")
     return parser.parse_args()
 
@@ -80,18 +82,31 @@ def short_name(row: Row) -> str:
     return f"{row.source}: {row.name}"
 
 
+def metric(args: argparse.Namespace) -> str:
+    return "steps" if args.backend == "zisk" else "cycles"
+
+
+def metric_singular(args: argparse.Namespace) -> str:
+    return "step" if args.backend == "zisk" else "cycle"
+
+
 def header(args: argparse.Namespace) -> list[str]:
-    return [
-        "# ZisK execution steps",
+    lines = [
+        f"# {'ZisK' if args.backend == 'zisk' else 'SP1'} execution {metric(args)}",
         "",
         f"- Current: `{args.current_ref}`",
         f"- Baseline: `{args.baseline_ref}`",
-        f"- ZisK: `{args.zisk}`",
-        f"- ZisK Rust toolchain: `{args.zisk_rust}`",
-        f"- Fixtures: `{args.fixtures}`",
-        "- Scope: execution steps and public outputs only; no proof generation and no step-regression threshold.",
-        "",
     ]
+    if args.backend == "zisk":
+        lines.extend((f"- ZisK: `{args.zisk}`", f"- ZisK Rust toolchain: `{args.zisk_rust}`"))
+    else:
+        lines.append(f"- SP1: `{args.sp1}`")
+    lines.extend((
+        f"- Fixtures: `{args.fixtures}`",
+        f"- Scope: execution {metric(args)} and public outputs only; no proof generation and no {metric_singular(args)}-regression threshold.",
+        "",
+    ))
+    return lines
 
 
 def render_absolute(args: argparse.Namespace, current: dict[str, Row]) -> tuple[str, bool]:
@@ -102,15 +117,15 @@ def render_absolute(args: argparse.Namespace, current: dict[str, Row]) -> tuple[
 
     lines = header(args)
     lines.extend((
-        "No stored baseline was available; reporting absolute step counts only.",
+        f"No stored baseline was available; reporting absolute {metric_singular(args)} counts only.",
         "",
-        "| Fixtures | Crashes | Upstream matches | Total steps |",
+        f"| Fixtures | Crashes | Upstream matches | Total {metric(args)} |",
         "| ---: | ---: | ---: | ---: |",
         f"| {len(names)} | {crashes} | {upstream}/{len(names)} | {total:,} |",
         "",
         "## Per fixture",
         "",
-        "| Fixture | Steps | Upstream |",
+        f"| Fixture | {metric(args).title()} | Upstream |",
         "| --- | ---: | :---: |",
     ))
     for name in names:
@@ -118,7 +133,7 @@ def render_absolute(args: argparse.Namespace, current: dict[str, Row]) -> tuple[
         steps = "crash" if row.steps is None else f"{row.steps:,}"
         lines.append(f"| `{short_name(row)}` | {steps} | {mark(row.upstream_matched is True)} |")
     lines.append("")
-    return "\n".join(lines), bool(names) and crashes == 0
+    return "\n".join(lines), bool(names) and crashes == 0 and upstream == len(names)
 
 
 def render_comparison(
@@ -141,16 +156,26 @@ def render_comparison(
         for name in shared
     )
     baseline_upstream = sum(baseline[name].upstream_matched is True for name in shared)
-    current_upstream = sum(current[name].upstream_matched is True for name in shared)
-    crashes = sum(baseline[name].crash is not None or current[name].crash is not None for name in shared)
+    current_upstream = sum(current[name].upstream_matched is True for name in current_names)
+    crashes = sum(
+        current[name].crash is not None
+        or (name in baseline and baseline[name].crash is not None)
+        for name in current_names
+    )
 
-    healthy = bool(shared) and not dropped and crashes == 0 and public_matches == len(shared)
+    healthy = (
+        bool(shared)
+        and not dropped
+        and crashes == 0
+        and public_matches == len(shared)
+        and current_upstream == len(current_names)
+    )
 
     lines = header(args)
     lines.extend((
-        "| Fixtures | Public outputs equal | Crashes | Baseline upstream matches | Current upstream matches | Baseline steps | Current steps | Delta | Delta % |",
+        f"| Fixtures | Public outputs equal | Crashes | Baseline upstream matches | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        f"| {len(shared)} | {public_matches}/{len(shared)} | {crashes} | {baseline_upstream}/{len(shared)} | {current_upstream}/{len(shared)} | {baseline_steps:,} | {current_steps:,} | {delta:+,} | {pct(delta, baseline_steps)} |",
+        f"| {len(shared)} | {public_matches}/{len(shared)} | {crashes} | {baseline_upstream}/{len(shared)} | {current_upstream}/{len(current_names)} | {baseline_steps:,} | {current_steps:,} | {delta:+,} | {pct(delta, baseline_steps)} |",
         "",
     ))
 
