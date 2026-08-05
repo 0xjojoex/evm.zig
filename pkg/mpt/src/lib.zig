@@ -47,12 +47,14 @@ pub const empty_node_index = proof.emptyIndex(&empty_index_storage);
 const IndexedNodesData = struct {
     allocator: ?std.mem.Allocator,
     storage: []proof.NodeRecord,
+    table: []u32,
     index_storage: proof.IndexStorage,
 };
 
 const empty_indexed_nodes: IndexedNodesData = .{
     .allocator = null,
     .storage = &.{},
+    .table = &.{},
     .index_storage = .{},
 };
 
@@ -62,6 +64,7 @@ pub const IndexedNodes = opaque {
     pub fn deinit(self: *IndexedNodes) void {
         const data = indexedNodesData(self);
         if (data.allocator) |allocator| {
+            allocator.free(data.table);
             allocator.free(data.storage);
             allocator.destroy(data);
         }
@@ -80,7 +83,9 @@ pub const IndexedNodes = opaque {
     pub fn allocationBytes(self: *const IndexedNodes) usize {
         const data = indexedNodesData(self);
         if (data.allocator == null) return 0;
-        return @sizeOf(IndexedNodesData) + data.storage.len * @sizeOf(proof.NodeRecord);
+        return @sizeOf(IndexedNodesData) +
+            data.storage.len * @sizeOf(proof.NodeRecord) +
+            data.table.len * @sizeOf(u32);
     }
 };
 
@@ -179,14 +184,17 @@ pub fn Trie(comptime KeccakContext: type) type {
 
             const storage = try self.allocator.alloc(proof.NodeRecord, encoded_nodes.len);
             errdefer self.allocator.free(storage);
+            const table = try self.allocator.alloc(u32, proof.tableCapacity(encoded_nodes.len));
+            errdefer self.allocator.free(table);
             const data = try self.allocator.create(IndexedNodesData);
             errdefer self.allocator.destroy(data);
             data.* = .{
                 .allocator = self.allocator,
                 .storage = storage,
+                .table = table,
                 .index_storage = .{},
             };
-            _ = proof.indexNodes(self.keccak_context, &data.index_storage, storage, encoded_nodes) catch |err| switch (err) {
+            _ = proof.indexNodes(self.keccak_context, &data.index_storage, storage, table, encoded_nodes) catch |err| switch (err) {
                 error.WorkspaceTooSmall => unreachable,
                 error.ConflictingNode => return error.ConflictingNode,
             };

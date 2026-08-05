@@ -1,5 +1,6 @@
 //! Decoding of RLP-encoded trie nodes into leaf/extension/branch structures.
 
+const std = @import("std");
 const rlp = @import("rlp");
 
 const Error = @import("error.zig").CodecError;
@@ -41,11 +42,120 @@ pub const Node = union(enum) {
     };
 };
 
+/// Compact validated reference used while building the catalog. Offsets borrow
+/// from the enclosing encoded node without retaining wide slice unions.
+pub const CatalogReference = struct {
+    // The record already occupies eight bytes. Give that stride its natural
+    // RV64 alignment so catalog decode/link can move it as one word.
+    offset: u32 align(8),
+    len: u8,
+    kind: Kind,
+
+    pub const Kind = enum(u8) {
+        empty,
+        embedded,
+        hashed,
+    };
+
+    pub fn reference(self: CatalogReference, encoded: []const u8) Reference {
+        return switch (self.kind) {
+            .empty => .empty,
+            .embedded => .{ .embedded = encoded[self.offset..][0..self.len] },
+            .hashed => .{ .hashed = @ptrCast(encoded[self.offset..][0..32].ptr) },
+        };
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(CatalogReference) == 8);
+        std.debug.assert(@alignOf(CatalogReference) == 8);
+    }
+};
+
+pub const CatalogBranch = struct {
+    children: [16]CatalogReference,
+    value: ?[]const u8,
+
+    comptime {
+        std.debug.assert(@sizeOf(CatalogBranch) == 144);
+        std.debug.assert(@alignOf(CatalogBranch) == 8);
+    }
+};
+
+/// Catalog-oriented decode result. Branch children retain only compact spans
+/// after validation instead of the wider general-purpose reference union.
+pub const CatalogNode = union(enum) {
+    leaf: Node.Leaf,
+    extension: Node.Extension,
+    branch: CatalogBranch,
+};
+
 /// Decode one RLP-encoded node. When `require_branch` is set the node must be a
 /// branch, rejecting non-canonical structure reached through an extension. The
 /// result borrows from `encoded`.
 pub fn decode(encoded: []const u8, require_branch: bool) Error!Node {
     return decodeWithBranchMode(encoded, require_branch, .full);
+}
+
+/// Decode short nodes normally while compacting branch references in one pass
+/// for catalog construction.
+pub fn decodeForCatalog(encoded: []const u8) Error!CatalogNode {
+    const item = try rlp.parseExact(encoded);
+    var fields = item.listCursor() catch return error.InvalidNode;
+    if (fields.isDone()) return error.InvalidNode;
+    const first = try fields.next();
+    if (fields.isDone()) return error.InvalidNode;
+    const second = try fields.next();
+    if (fields.isDone()) {
+        return switch (try decodeShort(first, second)) {
+            .leaf => |leaf| .{ .leaf = leaf },
+            .extension => |extension| .{ .extension = extension },
+            .branch => unreachable,
+        };
+    }
+    var branch: CatalogBranch = undefined;
+    branch.children[0] = try decodeCatalogReference(encoded, first);
+    branch.children[1] = try decodeCatalogReference(encoded, second);
+    var occupied: usize = 0;
+    if (branch.children[0].kind != .empty) occupied += 1;
+    if (branch.children[1].kind != .empty) occupied += 1;
+    for (2..16) |index| {
+        if (fields.isDone()) return error.InvalidNode;
+        branch.children[index] = try decodeCatalogReference(encoded, try fields.next());
+        if (branch.children[index].kind != .empty) occupied += 1;
+    }
+    if (fields.isDone()) return error.InvalidNode;
+    const value = (try fields.next()).asBytes() catch return error.InvalidNode;
+    if (!fields.isDone()) return error.InvalidNode;
+    branch.value = if (value.len == 0) null else value;
+    if (branch.value != null) occupied += 1;
+    if (occupied < 2) return error.NonCanonicalNode;
+    return .{ .branch = branch };
+}
+
+fn decodeCatalogReference(encoded: []const u8, item: rlp.Item) Error!CatalogReference {
+    const reference = try decodeReference(item);
+    return switch (reference) {
+        .empty => .{ .offset = 0, .len = 0, .kind = .empty },
+        .embedded => |child| .{
+            .offset = try catalogOffset(encoded, child),
+            .len = @intCast(child.len),
+            .kind = .embedded,
+        },
+        .hashed => |digest| .{
+            .offset = try catalogOffset(encoded, digest),
+            .len = 32,
+            .kind = .hashed,
+        },
+    };
+}
+
+fn catalogOffset(encoded: []const u8, span: []const u8) Error!u32 {
+    const base = @intFromPtr(encoded.ptr);
+    const start = @intFromPtr(span.ptr);
+    if (start < base) return error.InvalidNode;
+    const offset = start - base;
+    if (offset > encoded.len or span.len > encoded.len - offset) return error.InvalidNode;
+    return std.math.cast(u32, offset) orelse error.InvalidNode;
 }
 
 /// Decode one node for a single proof path. Branch validation still examines

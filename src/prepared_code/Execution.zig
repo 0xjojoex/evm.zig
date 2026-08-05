@@ -18,11 +18,10 @@ owned_entries: std.ArrayList(Bytecode),
 /// Two remembered hash→view resolutions with round-robin eviction. Nested
 /// calls resolve the same one or two code hashes on every frame; remembering
 /// them skips the hash-map probe. Entries die with this execution, so a view
-/// can never outlive the scratch storage it points into. Keys are
-/// pre-assembled hash words: `[32]u8` is align-1 and this target has no
-/// unaligned loads, but a by-value `[32]u8` parameter sits on
-/// compiler-aligned stack storage, so the byte-wise compare already lowers
-/// to word compares here — a pre-assembled word key measured slower.
+/// can never outlive the scratch storage it points into. Keys stay `[32]u8`:
+/// a by-value parameter sits on compiler-aligned stack storage, so the
+/// byte-wise compare already lowers to word compares and a pre-assembled word
+/// key measured slower.
 memo_hashes: [2][32]u8 = undefined,
 memo_views: [2]Bytecode.View = undefined,
 memo_valid: [2]bool = .{ false, false },

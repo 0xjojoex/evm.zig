@@ -1,11 +1,10 @@
 //! Compile-time construction of immutable execution-ready bytecode views.
 //!
-//! This module is internal to protocol-constant artifacts. Runtime bytecode
-//! preparation keeps the faster scalar scanner.
+//! This module is internal to protocol-constant artifacts. It runs the same
+//! scan as runtime preparation, at comptime.
 
 const std = @import("std");
 const Bytecode = @import("Bytecode.zig");
-const Opcode = @import("../opcode.zig").Opcode;
 const scanner = @import("scanner.zig");
 const t = @import("../t.zig");
 
@@ -25,7 +24,7 @@ pub fn View(comptime source: []const u8) type {
             .masks = [_]usize{0} ** mask_count,
             .needs_action_loop = false,
         };
-        result.needs_action_loop = analyzeLinear(source, &result.masks);
+        result.needs_action_loop = scanner.markJumpDests(&result.masks, source);
         break :analysis result;
     };
 
@@ -38,26 +37,6 @@ pub fn View(comptime source: []const u8) type {
             .needs_action_loop = analysis.needs_action_loop,
         };
     };
-}
-
-fn analyzeLinear(bytes: []const u8, masks: []usize) bool {
-    @memset(masks, 0);
-    var needs_action_loop = false;
-    var pc: usize = 0;
-    while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
-        if (opcode == .JUMPDEST) {
-            const shift: std.math.Log2Int(usize) = @truncate(pc);
-            masks[pc / @bitSizeOf(usize)] |= @as(usize, 1) << shift;
-        }
-        needs_action_loop = needs_action_loop or
-            scanner.isActionBoundaryOpcode(bytes[pc]);
-
-        var next = pc + 1;
-        if (opcode.isPushN()) next += opcode.toByte() - Opcode.PUSH0.toByte();
-        pc = @min(bytes.len, next);
-    }
-    return needs_action_loop;
 }
 
 test "static view matches runtime preparation" {
@@ -93,41 +72,5 @@ test "static view matches runtime preparation" {
         u8,
         &([_]u8{0} ** Bytecode.zero_padding_len),
         Prepared.read_bytes[raw.len..],
-    );
-}
-
-test "linear static analysis agrees with runtime scanner" {
-    var masks: [2]usize = undefined;
-
-    for (0..256) |byte| {
-        const raw = [_]u8{@intCast(byte)};
-        try expectLinearMatchesRuntime(&raw, &masks);
-    }
-
-    var prng = std.Random.DefaultPrng.init(0x5354_4154_4943);
-    const random = prng.random();
-    var raw: [128]u8 = undefined;
-    for (0..512) |iteration| {
-        random.bytes(&raw);
-        const len = iteration % (raw.len + 1);
-        try expectLinearMatchesRuntime(raw[0..len], &masks);
-    }
-}
-
-fn expectLinearMatchesRuntime(bytes: []const u8, masks: []usize) !void {
-    const needs_action_loop = analyzeLinear(bytes, masks);
-    var runtime = try Bytecode.init(std.testing.allocator, bytes);
-    defer runtime.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(runtime.needs_action_loop, needs_action_loop);
-    const mask_count = std.math.divCeil(
-        usize,
-        bytes.len,
-        @bitSizeOf(usize),
-    ) catch unreachable;
-    try std.testing.expectEqualSlices(
-        usize,
-        runtime.jumpdests.bits.masks[0..mask_count],
-        masks[0..mask_count],
     );
 }

@@ -52,16 +52,13 @@ const Reference = union(enum) {
         len: u8,
         bytes: [31]u8,
     };
-};
 
-const Source = struct {
-    node: catalog.NodeId,
-    reference: Reference,
-};
-
-const Deferred = union(enum) {
-    sealed: hash.Root,
-    linked: Source,
+    comptime {
+        // This value is stored in every mutable occurrence. Padding it to
+        // eight-byte alignment costs more than aligned digest loads save.
+        std.debug.assert(@sizeOf(Reference) == 33);
+        std.debug.assert(@alignOf(Reference) == 1);
+    }
 };
 
 const Parent = union(enum) {
@@ -99,16 +96,37 @@ const Occurrence = struct {
     };
 
     const Branch = struct {
+        source: ?catalog.NodeId,
         children: [16]Child,
         value: ?[]const u8,
+
+        pub const empty = Branch{
+            .source = null,
+            .children = [_]Child{.empty} ** 16,
+            .value = null,
+        };
     };
 
     const Child = union(enum) {
         empty,
-        deferred: Deferred,
-        occurrence: OccurrenceId,
+        catalog,
+        // The union already occupies eight bytes. Align its only payload so
+        // branch child arrays can use natural RV64 word loads without growing.
+        occurrence: OccurrenceId align(8),
+
+        comptime {
+            std.debug.assert(@sizeOf(Child) == 8);
+            std.debug.assert(@alignOf(Child) == 8);
+        }
     };
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Occurrence.Kind) == 160);
+    std.debug.assert(@alignOf(Occurrence.Kind) == 8);
+    std.debug.assert(@sizeOf(Occurrence) == 208);
+    std.debug.assert(@alignOf(Occurrence) == 8);
+}
 
 const DeleteFrame = union(enum) {
     extension: OccurrenceId,
@@ -286,10 +304,11 @@ fn materialize(context: anytype, id: OccurrenceId) AllocUpdateError!void {
         .branch => {
             const links = context.catalog.branchChildren(source_id) orelse
                 return error.InvalidNodeReference;
-            var branch = emptyBranch();
+            var branch = Occurrence.Branch.empty;
+            branch.source = source_id;
             for (links, 0..) |link, child_index| {
-                const reference = try context.catalog.branchReference(source_id, child_index);
-                branch.children[child_index] = try deferredChild(link, reference);
+                if (link == .empty) continue;
+                branch.children[child_index] = .catalog;
             }
             branch.value = entry.value();
             context.occurrence(id).kind = .{ .branch = branch };
@@ -303,33 +322,23 @@ fn appendDeferred(
     reference: node_codec.Reference,
     parent: Parent,
 ) AllocUpdateError!OccurrenceId {
-    return switch (try deferred(link, reference)) {
-        .sealed => |digest| context.newOccurrence(.{ .sealed = digest }, parent, .{ .hashed = digest }, false),
-        .linked => |source| context.newOccurrence(.{ .source = source.node }, parent, source.reference, false),
-    };
-}
-
-fn deferredChild(
-    link: catalog.Link,
-    reference: node_codec.Reference,
-) UpdateError!Occurrence.Child {
-    return switch (link) {
-        .empty => .empty,
-        else => .{ .deferred = try deferred(link, reference) },
-    };
-}
-
-fn deferred(link: catalog.Link, reference: node_codec.Reference) UpdateError!Deferred {
     return switch (link) {
         .empty => error.InvalidNodeReference,
         .@"opaque" => switch (reference) {
-            .hashed => |digest| .{ .sealed = digest.* },
+            .hashed => |digest| context.newOccurrence(
+                .{ .sealed = digest.* },
+                parent,
+                .{ .hashed = digest.* },
+                false,
+            ),
             else => error.InvalidNodeReference,
         },
-        else => if (link.node()) |id|
-            .{ .linked = .{ .node = id, .reference = try referenceFromCodec(reference) } }
-        else
-            error.InvalidNodeReference,
+        else => if (link.node()) |id| context.newOccurrence(
+            .{ .source = id },
+            parent,
+            try referenceFromCodec(reference),
+            false,
+        ) else error.InvalidNodeReference,
     };
 }
 
@@ -338,28 +347,24 @@ fn childOccurrence(
     parent: OccurrenceId,
     child_index: usize,
 ) AllocUpdateError!?OccurrenceId {
-    const child = switch (context.occurrence(parent).kind) {
-        .branch => |branch| branch.children[child_index],
+    const branch = switch (context.occurrence(parent).kind) {
+        .branch => |*value| value,
         else => unreachable,
     };
-    return switch (child) {
+    return switch (branch.children[child_index]) {
         .empty => null,
         .occurrence => |id| id,
-        .deferred => |value| occurrence: {
-            const id = switch (value) {
-                .sealed => |digest| try context.newOccurrence(
-                    .{ .sealed = digest },
-                    .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
-                    .{ .hashed = digest },
-                    false,
-                ),
-                .linked => |source| try context.newOccurrence(
-                    .{ .source = source.node },
-                    .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
-                    source.reference,
-                    false,
-                ),
-            };
+        .catalog => occurrence: {
+            const source = branch.source orelse return error.InvalidNodeReference;
+            const links = context.catalog.branchChildren(source) orelse
+                return error.InvalidNodeReference;
+            const reference = try context.catalog.branchReference(source, child_index);
+            const id = try appendDeferred(
+                context,
+                links[child_index],
+                reference,
+                .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
+            );
             context.occurrence(parent).kind.branch.children[child_index] = .{ .occurrence = id };
             break :occurrence id;
         },
@@ -461,11 +466,11 @@ fn insertIntoLeaf(
     }
 
     if (common == 0) {
-        context.occurrence(node).kind = .{ .branch = emptyBranch() };
+        context.occurrence(node).kind = .{ .branch = .empty };
         try populateSplitBranch(context, node, leaf.path, leaf.value, key, value);
     } else {
         const branch = try context.newOccurrence(
-            .{ .branch = emptyBranch() },
+            .{ .branch = .empty },
             .{ .extension = node },
             .unset,
             true,
@@ -530,12 +535,12 @@ fn splitExtension(
     common: usize,
 ) AllocUpdateError!void {
     const branch_id = if (common == 0) node else try context.newOccurrence(
-        .{ .branch = emptyBranch() },
+        .{ .branch = .empty },
         .{ .extension = node },
         .unset,
         true,
     );
-    if (common == 0) context.occurrence(node).kind = .{ .branch = emptyBranch() };
+    if (common == 0) context.occurrence(node).kind = .{ .branch = .empty };
 
     const old_remaining = extension.path[common..];
     const old_child = if (old_remaining.len == 1) extension.child else child: {
@@ -664,13 +669,13 @@ fn compressExtension(context: anytype, node: OccurrenceId) AllocUpdateError!void
 
 fn compressBranch(context: anytype, node: OccurrenceId) AllocUpdateError!void {
     const branch = switch (context.occurrence(node).kind) {
-        .branch => |value| value,
+        .branch => |*value| value,
         else => unreachable,
     };
     var child_count: usize = 0;
     var only_child_index: usize = 0;
-    for (branch.children, 0..) |child, index| {
-        if (child == .empty) continue;
+    for (&branch.children, 0..) |*child, index| {
+        if (child.* == .empty) continue;
         child_count += 1;
         only_child_index = index;
     }
@@ -760,7 +765,7 @@ fn encodeRoot(context: anytype, root: OccurrenceId) AllocUpdateError!hash.Root {
                 }
                 continue;
             },
-            .branch => |branch| {
+            .branch => |*branch| {
                 try frames.append(context.allocator, .{
                     .node = frame.node,
                     .expanded = true,
@@ -777,7 +782,7 @@ fn encodeRoot(context: anytype, root: OccurrenceId) AllocUpdateError!hash.Root {
                                 .is_root = false,
                             });
                         },
-                        .empty, .deferred => {},
+                        .empty, .catalog => {},
                     }
                 }
                 continue;
@@ -786,7 +791,7 @@ fn encodeRoot(context: anytype, root: OccurrenceId) AllocUpdateError!hash.Root {
 
         const encoded = switch (node.kind) {
             .extension => |extension| encoded: {
-                const reference = context.occurrence(extension.child).reference;
+                const reference = &context.occurrence(extension.child).reference;
                 const lengths = try extensionBufferLengths(extension.path, reference);
                 const buffers = try context.buffers(lengths.compact, lengths.node);
                 break :encoded try encodeExtension(
@@ -796,10 +801,10 @@ fn encodeRoot(context: anytype, root: OccurrenceId) AllocUpdateError!hash.Root {
                     reference,
                 );
             },
-            .branch => |branch| encoded: {
-                const node_len = try branchBufferLength(context, branch);
-                const buffers = try context.buffers(0, node_len);
-                break :encoded try encodeBranch(context, buffers.node, branch);
+            .branch => |*branch| encoded: {
+                const lengths = try branchBufferLengths(context, branch);
+                const buffers = try context.buffers(0, lengths.node);
+                break :encoded try encodeBranch(context, buffers.node, branch, lengths.payload);
             },
             else => unreachable,
         };
@@ -843,7 +848,7 @@ fn leafBufferLengths(path: []const u8, value: []const u8) UpdateError!BufferLeng
     return .{ .compact = compact, .node = try listEncodedLen(payload) };
 }
 
-fn extensionBufferLengths(path: []const u8, child_reference: Reference) UpdateError!BufferLengths {
+fn extensionBufferLengths(path: []const u8, child_reference: *const Reference) UpdateError!BufferLengths {
     const compact = try compactOutputLen(path);
     const payload = try addEncodedLengths(&.{
         try bytesEncodedLenUpperBound(compact),
@@ -852,28 +857,26 @@ fn extensionBufferLengths(path: []const u8, child_reference: Reference) UpdateEr
     return .{ .compact = compact, .node = try listEncodedLen(payload) };
 }
 
-fn branchBufferLength(context: anytype, branch: Occurrence.Branch) UpdateError!usize {
+const BranchBufferLengths = struct {
+    payload: usize,
+    node: usize,
+};
+
+fn branchBufferLengths(context: anytype, branch: *const Occurrence.Branch) UpdateError!BranchBufferLengths {
     var payload = try bytesEncodedLen(branch.value orelse "");
-    for (branch.children) |child| {
-        const child_len = switch (child) {
+    for (&branch.children, 0..) |*child, index| {
+        const child_len = switch (child.*) {
             .empty => 1,
-            else => try referenceEncodedLen(try childReference(context, child)),
+            .catalog => try context.catalog.branchReferenceEncodedLen(
+                branch.source orelse return error.InvalidNodeReference,
+                index,
+            ),
+            .occurrence => |id| try referenceEncodedLen(&context.occurrence(id).reference),
         };
         payload = std.math.add(usize, payload, child_len) catch
             return error.ResourceLimitExceeded;
     }
-    return listEncodedLen(payload);
-}
-
-fn childReference(context: anytype, child: Occurrence.Child) UpdateError!Reference {
-    return switch (child) {
-        .empty => .empty,
-        .deferred => |value| switch (value) {
-            .sealed => |digest| .{ .hashed = digest },
-            .linked => |source| source.reference,
-        },
-        .occurrence => |id| context.occurrence(id).reference,
-    };
+    return .{ .payload = payload, .node = try listEncodedLen(payload) };
 }
 
 fn encodeLeaf(
@@ -897,9 +900,9 @@ fn encodeExtension(
     node_buffer: []u8,
     compact_buffer: []u8,
     path: []const u8,
-    child_reference: Reference,
+    child_reference: *const Reference,
 ) UpdateError![]const u8 {
-    if (child_reference == .unset or child_reference == .empty) return error.InvalidNode;
+    if (child_reference.* == .unset or child_reference.* == .empty) return error.InvalidNode;
     const compact = try encodeCompact(compact_buffer, path, false);
     const payload_len = try addEncodedLengths(&.{
         try bytesEncodedLen(compact),
@@ -914,21 +917,20 @@ fn encodeExtension(
 fn encodeBranch(
     context: anytype,
     node_buffer: []u8,
-    branch: Occurrence.Branch,
+    branch: *const Occurrence.Branch,
+    payload_len: usize,
 ) UpdateError![]const u8 {
-    var payload_len = try bytesEncodedLen(branch.value orelse "");
-    for (branch.children) |child| {
-        const child_len = switch (child) {
-            .empty => 1,
-            else => try referenceEncodedLen(try childReference(context, child)),
-        };
-        payload_len = std.math.add(usize, payload_len, child_len) catch
-            return error.ResourceLimitExceeded;
-    }
     var writer = try listWriter(node_buffer, payload_len);
-    for (branch.children) |child| switch (child) {
+    for (&branch.children, 0..) |*child, index| switch (child.*) {
         .empty => try writeBytes(&writer, ""),
-        else => try writeReference(&writer, try childReference(context, child)),
+        .catalog => try writeCodecReference(
+            &writer,
+            try context.catalog.branchReference(
+                branch.source orelse return error.InvalidNodeReference,
+                index,
+            ),
+        ),
+        .occurrence => |id| try writeReference(&writer, &context.occurrence(id).reference),
     };
     try writeBytes(&writer, branch.value orelse "");
     return node_buffer[0 .. listPrefixLen(payload_len) + writer.written().len];
@@ -974,12 +976,26 @@ fn writeBytes(writer: *rlp.Writer, value: []const u8) UpdateError!void {
     };
 }
 
-fn writeReference(writer: *rlp.Writer, reference: Reference) UpdateError!void {
-    switch (reference) {
+fn writeReference(writer: *rlp.Writer, reference: *const Reference) UpdateError!void {
+    switch (reference.*) {
         .unset, .empty => return error.InvalidNode,
-        .hashed => |digest| try writeBytes(writer, &digest),
-        .embedded => |embedded| {
+        .hashed => |*digest| try writeBytes(writer, digest),
+        .embedded => |*embedded| {
             const item = try rlp.parseExact(embedded.bytes[0..embedded.len]);
+            writer.raw(item) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.ResourceLimitExceeded,
+                error.OutOfMemory => unreachable,
+            };
+        },
+    }
+}
+
+fn writeCodecReference(writer: *rlp.Writer, reference: node_codec.Reference) UpdateError!void {
+    switch (reference) {
+        .empty => return error.InvalidNode,
+        .hashed => |digest| try writeBytes(writer, digest),
+        .embedded => |encoded| {
+            const item = try rlp.parseExact(encoded);
             writer.raw(item) catch |err| switch (err) {
                 error.NoSpaceLeft => return error.ResourceLimitExceeded,
                 error.OutOfMemory => unreachable,
@@ -1004,11 +1020,11 @@ fn referenceFromCodec(reference: node_codec.Reference) UpdateError!Reference {
     };
 }
 
-fn referenceEncodedLen(reference: Reference) UpdateError!usize {
-    return switch (reference) {
+fn referenceEncodedLen(reference: *const Reference) UpdateError!usize {
+    return switch (reference.*) {
         .unset, .empty => error.InvalidNode,
         .hashed => 33,
-        .embedded => |embedded| embedded.len,
+        .embedded => |*embedded| embedded.len,
     };
 }
 
@@ -1064,13 +1080,6 @@ fn keyNibbles(context: anytype, key: hash.Root) AllocUpdateError![]u8 {
     const out = try context.alloc(u8, 64);
     for (out, 0..) |*value, index| value.* = nibble.keyNibbleAt(&key, index);
     return out;
-}
-
-fn emptyBranch() Occurrence.Branch {
-    return .{
-        .children = [_]Occurrence.Child{.empty} ** 16,
-        .value = null,
-    };
 }
 
 fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {

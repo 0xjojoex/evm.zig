@@ -4,4 +4,5 @@ comptime {
     _ = @import("src/test.zig");
     _ = @import("src/keyed_test.zig");
     _ = @import("src/fixed_key_test.zig");
+    _ = @import("src/proof_test.zig");
 }

@@ -2145,7 +2145,31 @@ fn logsBloomView(logs: anytype) [256]u8 {
 }
 
 fn mergeLogsBloom(target: *[256]u8, source: [256]u8) void {
-    for (target, source) |*target_byte, source_byte| target_byte.* |= source_byte;
+    const target_words = std.mem.bytesAsSlice(u64, target[0..]);
+    const source_words = std.mem.bytesAsSlice(u64, source[0..]);
+    for (target_words, source_words) |*target_word, source_word| target_word.* |= source_word;
+}
+
+test "word-wise logs bloom merge matches byte-wise oracle" {
+    var seed: u64 = 0x9e3779b97f4a7c15;
+    for (0..256) |_| {
+        var target: [256]u8 = undefined;
+        var source: [256]u8 = undefined;
+        var expected: [256]u8 = undefined;
+        for (&target, &source, &expected) |*target_byte, *source_byte, *expected_byte| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            target_byte.* = @truncate(seed);
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            source_byte.* = @truncate(seed);
+            expected_byte.* = target_byte.* | source_byte.*;
+        }
+        mergeLogsBloom(&target, source);
+        try std.testing.expectEqualSlices(u8, &expected, &target);
+    }
 }
 
 fn addBloomEntry(bloom: *[256]u8, entry: []const u8) void {

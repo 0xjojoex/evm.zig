@@ -420,11 +420,9 @@ transaction_scope_reverted: bool = false,
 /// translation — CALL-family targets, dynamic-address opcodes, storage
 /// owners, and system calls — passes through `resolveAccount`/
 /// `resolveStorage`, so these entries cover the complete translation domain.
-/// Memo keys are pre-assembled address words: `[20]u8` is align-1, and this
-/// target has no unaligned loads, so a byte-wise address compare assembles
-/// both sides from `lbu` ladders on every hit. Word keys pay that assembly
-/// once at insert and once per resolution for the probe, then compare in
-/// registers.
+/// Memo keys are pre-assembled address words: the probe is assembled once per
+/// resolution and then compares in registers, instead of paying an align-1
+/// byte ladder on every hit.
 translation_account_keys: [2][3]u64 = undefined,
 translation_account_ids: [2]AccountId = undefined,
 translation_account_valid: [2]bool = .{ false, false },

@@ -143,11 +143,7 @@ pub fn copy(self: *Memory, dest: usize, src: usize, size: usize) void {
 
     const dest_bytes = self.bytes.items[dest..][0..size];
     const src_bytes = self.bytes.items[src..][0..size];
-    if (dest < src) {
-        std.mem.copyForwards(u8, dest_bytes, src_bytes);
-    } else {
-        std.mem.copyBackwards(u8, dest_bytes, src_bytes);
-    }
+    @memmove(dest_bytes, src_bytes);
 }
 
 pub fn planExpansion(self: *const Memory, offset: usize, byte_size: usize) ?Expansion {
@@ -325,6 +321,34 @@ test "padded memory byte writes only zero missing source bytes" {
 
     memory.writePaddedBytes(8, 4, &.{ 0x11, 0x22 });
     try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x00, 0x00 }, memory.readBytes(8, 4));
+}
+
+test "memory copy matches a per-byte oracle across overlap shapes" {
+    var prng = std.Random.DefaultPrng.init(0x6d636f70);
+    const random = prng.random();
+
+    var storage: Storage = .empty;
+    var memory = Memory.init(&storage, std.testing.allocator);
+    defer memory.deinit();
+    try memory.expandToFit(0, 256);
+
+    for (0..2_000) |_| {
+        random.bytes(memory.writeSlice(0, 256));
+        var expected: [256]u8 = undefined;
+        @memcpy(&expected, memory.readBytes(0, 256));
+
+        const size = random.uintLessThan(usize, 65);
+        const dest = random.uintLessThan(usize, 256 - size + 1);
+        const src = random.uintLessThan(usize, 256 - size + 1);
+
+        // MCOPY semantics: as if through an intermediate buffer.
+        var scratch: [64]u8 = undefined;
+        @memcpy(scratch[0..size], expected[src..][0..size]);
+        @memcpy(expected[dest..][0..size], scratch[0..size]);
+
+        memory.copy(dest, src, size);
+        try std.testing.expectEqualSlices(u8, &expected, memory.readBytes(0, 256));
+    }
 }
 
 test "memory copy is overlap safe" {

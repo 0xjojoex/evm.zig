@@ -27,8 +27,9 @@ pub const Range = struct {
 };
 
 pub const AccountClaim = struct {
-    // Aligned so address/key compares use word loads; `[N]u8` is otherwise
-    // align-1 and this target assembles byte ladders for every compare.
+    // Aligned for record stride and whole-record copies: without it this
+    // claim is 60 bytes at align 4, so every index is a 60-multiply. It does
+    // not change the `accountId` compare.
     address: address.Address align(8),
     trie_key: Hash align(8),
     storage: Range,
@@ -60,6 +61,9 @@ pub const ClaimPlan = struct {
     storage: []StorageClaim = &.{},
     account_trie_order: []AccountId = &.{},
     storage_trie_order: []StorageId = &.{},
+    /// Open-addressed AccountId + 1; zero marks an empty slot. The table is
+    /// built at no more than 50% load and every hit verifies the full address.
+    account_positions: []u32 = &.{},
 
     /// Construct from a BAL already accepted by `bal.validate`.
     pub fn initAssumeValidated(
@@ -89,6 +93,13 @@ pub const ClaimPlan = struct {
 
         const storage_trie_order = try allocator.alloc(StorageId, storage.len);
         errdefer allocator.free(storage_trie_order);
+
+        const account_positions = try allocator.alloc(
+            u32,
+            try accountTableCapacity(accounts.len),
+        );
+        errdefer allocator.free(account_positions);
+        @memset(account_positions, 0);
 
         var storage_index: usize = 0;
         for (block_access_list, 0..) |account, account_index| {
@@ -131,6 +142,7 @@ pub const ClaimPlan = struct {
                 },
             };
             account_trie_order[account_index] = id;
+            insertAccountPosition(account_positions, accounts, id);
         }
         std.debug.assert(storage_index == storage.len);
 
@@ -147,6 +159,7 @@ pub const ClaimPlan = struct {
             .storage = storage,
             .account_trie_order = account_trie_order,
             .storage_trie_order = storage_trie_order,
+            .account_positions = account_positions,
         };
     }
 
@@ -155,6 +168,7 @@ pub const ClaimPlan = struct {
         allocator.free(self.storage);
         allocator.free(self.account_trie_order);
         allocator.free(self.storage_trie_order);
+        allocator.free(self.account_positions);
         self.* = .{};
     }
 
@@ -170,17 +184,16 @@ pub const ClaimPlan = struct {
 
     /// Resolve one full address in canonical raw BAL order.
     pub fn accountId(self: ClaimPlan, target: address.Address) ?AccountId {
-        var low: usize = 0;
-        var high = self.accounts.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            switch (std.mem.order(u8, &self.accounts[mid].address, &target)) {
-                .lt => low = mid + 1,
-                .gt => high = mid,
-                .eq => return @enumFromInt(@as(u32, @intCast(mid))),
-            }
+        if (self.account_positions.len == 0) return null;
+        const mask: u64 = self.account_positions.len - 1;
+        var slot: usize = @intCast(addressHash(target) & mask);
+        while (true) {
+            const entry = self.account_positions[slot];
+            if (entry == 0) return null;
+            const id: AccountId = @enumFromInt(entry - 1);
+            if (std.mem.eql(u8, &self.accounts[@intFromEnum(id)].address, &target)) return id;
+            slot = @intCast((slot + 1) & mask);
         }
-        return null;
     }
 
     /// Resolve one full raw slot inside its account's canonical BAL range.
@@ -206,9 +219,42 @@ pub const ClaimPlan = struct {
         return self.accounts.len * @sizeOf(AccountClaim) +
             self.storage.len * @sizeOf(StorageClaim) +
             self.account_trie_order.len * @sizeOf(AccountId) +
-            self.storage_trie_order.len * @sizeOf(StorageId);
+            self.storage_trie_order.len * @sizeOf(StorageId) +
+            self.account_positions.len * @sizeOf(u32);
     }
 };
+
+fn accountTableCapacity(account_count: usize) InitError!usize {
+    if (account_count == 0) return 0;
+    const doubled = std.math.mul(usize, account_count, 2) catch
+        return error.ResourceLimitExceeded;
+    return std.math.ceilPowerOfTwo(usize, doubled) catch
+        return error.ResourceLimitExceeded;
+}
+
+fn insertAccountPosition(
+    positions: []u32,
+    accounts: []const AccountClaim,
+    id: AccountId,
+) void {
+    const mask: u64 = positions.len - 1;
+    var slot: usize = @intCast(addressHash(accounts[@intFromEnum(id)].address) & mask);
+    while (positions[slot] != 0) slot = @intCast((slot + 1) & mask);
+    positions[slot] = @intFromEnum(id) + 1;
+}
+
+fn addressHash(value: address.Address) u64 {
+    const first = std.mem.readInt(u64, value[0..8], .little);
+    const second = std.mem.readInt(u64, value[8..16], .little);
+    const tail = std.mem.readInt(u32, value[16..20], .little);
+    var mixed = first ^ std.math.rotl(u64, second, 23) ^
+        @as(u64, tail) *% 0x9e3779b97f4a7c15;
+    mixed ^= mixed >> 30;
+    mixed *%= 0xbf58476d1ce4e5b9;
+    mixed ^= mixed >> 27;
+    mixed *%= 0x94d049bb133111eb;
+    return mixed ^ (mixed >> 31);
+}
 
 fn accountTrieLessThan(accounts: []const AccountClaim, lhs: AccountId, rhs: AccountId) bool {
     return std.mem.order(
@@ -302,6 +348,42 @@ test "claim plan cleans every allocation failure position" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
+}
+
+test "account position table resolves collisions and terminates on a colliding miss" {
+    var first: [4]?address.Address = .{null} ** 4;
+    var second: [4]?address.Address = .{null} ** 4;
+    var collision: [3]address.Address = undefined;
+    var found = false;
+    for (1..100) |value| {
+        const candidate = address.addr(@as(u64, @intCast(value)));
+        const slot: usize = @intCast(addressHash(candidate) & 3);
+        if (first[slot] == null) {
+            first[slot] = candidate;
+        } else if (second[slot] == null) {
+            second[slot] = candidate;
+        } else {
+            collision = .{ first[slot].?, second[slot].?, candidate };
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+
+    if (std.mem.order(u8, &collision[0], &collision[1]) == .gt) {
+        std.mem.swap(address.Address, &collision[0], &collision[1]);
+    }
+    const claims = [_]bal.AccountChanges{
+        .{ .address = collision[0] },
+        .{ .address = collision[1] },
+    };
+    try bal.validate(&claims, .{});
+
+    var plan = try ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(0)), plan.accountId(collision[0]));
+    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(1)), plan.accountId(collision[1]));
+    try std.testing.expectEqual(@as(?AccountId, null), plan.accountId(collision[2]));
 }
 
 fn expectAccountTrieOrder(plan: ClaimPlan) !void {

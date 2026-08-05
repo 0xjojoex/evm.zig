@@ -79,8 +79,25 @@ pub const LookupCache = struct {
     }
 };
 
+/// Node digest as native-endian words. A `[32]u8` digest in a heap record is
+/// align-1 and would compare through byte ladders on targets without
+/// unaligned loads; word keys compare in registers and keep the record
+/// word-aligned. Word 0 also serves as the position-table hash.
+const NodeKey = [4]u64;
+
+fn nodeKey(digest: hash.Root) NodeKey {
+    return @bitCast(digest);
+}
+
+fn keyEquals(lhs: NodeKey, rhs: NodeKey) bool {
+    inline for (lhs, rhs) |left, right| {
+        if (left != right) return false;
+    }
+    return true;
+}
+
 pub const NodeRecord = struct {
-    hash: hash.Root,
+    key: NodeKey,
     encoded: []const u8,
 };
 
@@ -93,23 +110,35 @@ pub const IndexStorage = struct {
 /// assembled into a value accepted by lookup or update operations.
 pub const NodeIndex = opaque {};
 
+/// Table capacity for `node_count` records: a power of two with at most 50%
+/// load, so probe chains stay short and the mask is one AND.
+pub fn tableCapacity(node_count: usize) usize {
+    if (node_count == 0) return 0;
+    return std.math.ceilPowerOfTwo(usize, node_count * 2) catch unreachable;
+}
+
 const IndexData = struct {
     records: []const NodeRecord = &.{},
+    /// Open-addressing position table: record position + 1, 0 = empty slot.
+    /// Slots are addressed by digest word 0 — keccak output is uniform, so no
+    /// second hash is needed. Length is a power of two (`tableCapacity`).
+    table: []const u32 = &.{},
 
-    /// The node whose hash equals `digest`, or null. Records must be sorted
-    /// ascending by hash (as produced by `indexNodes`).
+    /// The node whose hash equals `digest`, or null.
     pub fn find(self: IndexData, digest: hash.Root) ?IndexedNode {
-        var low: usize = 0;
-        var high = self.records.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            switch (std.mem.order(u8, &self.records[mid].hash, &digest)) {
-                .lt => low = mid + 1,
-                .gt => high = mid,
-                .eq => return .{ .encoded = self.records[mid].encoded, .position = mid },
+        if (self.table.len == 0) return null;
+        const key = nodeKey(digest);
+        const mask: u64 = self.table.len - 1;
+        var slot: usize = @intCast(key[0] & mask);
+        while (true) {
+            const entry = self.table[slot];
+            if (entry == 0) return null;
+            const record = &self.records[entry - 1];
+            if (keyEquals(record.key, key)) {
+                return .{ .encoded = record.encoded, .position = entry - 1 };
             }
+            slot = @intCast((slot + 1) & mask);
         }
-        return null;
     }
 };
 
@@ -118,37 +147,50 @@ pub const IndexedNode = struct {
     position: usize,
 };
 
-/// Hash each node in `encoded_nodes` and build a sorted, deduplicated sealed
-/// index in `storage`. Errors with `ConflictingNode` when two nodes share a hash
-/// but differ in bytes.
+/// Hash each node in `encoded_nodes` and build a deduplicated sealed index in
+/// `storage` with a hashed position `table` (sized by `tableCapacity`).
+/// Records keep first-occurrence order, so positions are dense and stable.
+/// Errors with `ConflictingNode` when two nodes share a hash but differ in
+/// bytes.
 pub fn indexNodes(
     keccak_context: anytype,
     index_storage: *IndexStorage,
     storage: []NodeRecord,
+    table: []u32,
     encoded_nodes: []const []const u8,
 ) InternalIndexError!*const NodeIndex {
     if (storage.len < encoded_nodes.len) return error.WorkspaceTooSmall;
+    const capacity = tableCapacity(encoded_nodes.len);
+    if (table.len < capacity) return error.WorkspaceTooSmall;
+    // Position entries are u32; a witness cannot hold 4G nodes.
+    std.debug.assert(encoded_nodes.len < std.math.maxInt(u32));
 
-    for (encoded_nodes, 0..) |encoded, index| {
-        storage[index] = .{ .hash = keccak_context.keccak256(encoded), .encoded = encoded };
-    }
-
-    const records = storage[0..encoded_nodes.len];
-    std.sort.heap(NodeRecord, records, {}, recordLessThan);
-
+    const active_table = table[0..capacity];
+    @memset(active_table, 0);
+    const mask: u64 = capacity -% 1;
     var unique_len: usize = 0;
-    for (records) |record| {
-        if (unique_len > 0 and std.mem.eql(u8, &records[unique_len - 1].hash, &record.hash)) {
-            if (!std.mem.eql(u8, records[unique_len - 1].encoded, record.encoded)) {
-                return error.ConflictingNode;
+    for (encoded_nodes) |encoded| {
+        const key = nodeKey(keccak_context.keccak256(encoded));
+        var slot: usize = @intCast(key[0] & mask);
+        while (true) {
+            const entry = active_table[slot];
+            if (entry == 0) {
+                storage[unique_len] = .{ .key = key, .encoded = encoded };
+                active_table[slot] = @intCast(unique_len + 1);
+                unique_len += 1;
+                break;
             }
-            continue;
+            const record = &storage[entry - 1];
+            if (keyEquals(record.key, key)) {
+                if (!std.mem.eql(u8, record.encoded, encoded)) return error.ConflictingNode;
+                break;
+            }
+            slot = @intCast((slot + 1) & mask);
         }
-        records[unique_len] = record;
-        unique_len += 1;
     }
     index_storage.sealed = .{
-        .records = records[0..unique_len],
+        .records = storage[0..unique_len],
+        .table = active_table,
     };
     return indexFromData(&index_storage.sealed);
 }
@@ -296,10 +338,6 @@ fn resolveReference(index: *const NodeIndex, reference: node.Reference) LookupEr
             return .{ .encoded = indexed.encoded, .position = indexed.position };
         },
     };
-}
-
-fn recordLessThan(_: void, lhs: NodeRecord, rhs: NodeRecord) bool {
-    return std.mem.order(u8, &lhs.hash, &rhs.hash) == .lt;
 }
 
 test "decoded-node cache indexes many witness positions" {

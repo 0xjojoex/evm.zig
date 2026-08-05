@@ -50,6 +50,8 @@ pub const StorageStoreResult = struct {
     access_status: AccessStatus,
 };
 
+/// Address fields are `align(8)` for their by-value field copies on the call
+/// path. The layout this pins is asserted in `Interpreter.zig`.
 pub const Message = struct {
     depth: u16,
     kind: CallKind,

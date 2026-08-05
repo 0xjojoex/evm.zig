@@ -139,6 +139,11 @@ pub const CodeStore = struct {
         allocator: Allocator,
         bytes: []const u8,
     ) CacheError!CacheResult {
+        if (bytes.len == 0) return .{
+            .view = .{ .code_hash = crypto.keccak256_empty, .bytes = &.{} },
+            .ref = .empty,
+            .newly_introduced = null,
+        };
         const hash = crypto.keccak256(bytes);
         const existing_ref = self.bind(hash);
         if (self.view(existing_ref)) |existing| {
@@ -368,6 +373,13 @@ test "code store authenticates borrowed codes and owns introduced code" {
     try std.testing.expectEqualSlices(u8, &parent_code, store.view(parent_ref).?.bytes);
     try std.testing.expect(store.bind([_]u8{0x99} ** 32) == .missing);
     try std.testing.expect(store.bind(crypto.keccak256_empty) == .empty);
+
+    const empty = try store.cacheIntroduced(std.testing.allocator, &.{});
+    try std.testing.expectEqual(CodeRef.empty, empty.ref);
+    try std.testing.expectEqualSlices(u8, &crypto.keccak256_empty, &empty.view.code_hash);
+    try std.testing.expectEqual(@as(usize, 0), empty.view.bytes.len);
+    try std.testing.expectEqual(@as(?IntroducedCodeId, null), empty.newly_introduced);
+    try std.testing.expectEqual(@as(usize, 0), store.introducedLen());
 
     const introduced = [_]u8{0x5f};
     const cached = try store.cacheIntroduced(std.testing.allocator, &introduced);
