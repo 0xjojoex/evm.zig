@@ -1,5 +1,6 @@
-# One guest-execution surface for pinned PR/release evidence and rolling devnet
-# discovery. Correctness is required; cycle deltas are review evidence only.
+# One guest-execution surface for PR conformance, pinned performance evidence,
+# and rolling devnet discovery. Correctness is required; cycle deltas are
+# review evidence only.
 name: Guest benchmark
 
 on:
@@ -43,12 +44,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
+  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
-    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
+    name: ${{ matrix.backend }} ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.corpus == 'tests-zkevm' && 360 || 120 }}
     strategy:
@@ -60,7 +61,7 @@ jobs:
           - backend: zisk
     env:
       BACKEND: ${{ matrix.backend }}
-      CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
+      CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
       CATALOG_URL: https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7
       PINNED_MANIFEST: eest/fixtures/devnet-glamsterdam-7-pinned.json
       BASELINE_MANIFEST: eest/fixtures/guest-release-baseline.json
