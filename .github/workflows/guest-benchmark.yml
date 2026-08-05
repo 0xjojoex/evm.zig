@@ -101,37 +101,51 @@ jobs:
           {
             echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
             echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
+            echo "ZISK_ARTIFACTS=${RUNNER_TEMP}/zisk-artifacts"
             echo "SP1_SDK_ROOT=${RUNNER_TEMP}/sp1-sdk"
             echo "SP1_HOST_TARGET=${RUNNER_TEMP}/sp1-host-target"
           } >> "${GITHUB_ENV}"
 
+      - name: Restore pinned ZisK artifacts
+        if: matrix.backend == 'zisk'
+        id: zisk-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/zisk-artifacts
+          key: >-
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
+
       - name: Install common system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y binutils-riscv64-unknown-elf jq zstd
+          sudo apt-get install -y --no-install-recommends \
+            binutils-riscv64-unknown-elf \
+            jq \
+            zstd
 
-      - name: Install ZisK system dependencies
+      - name: Install ZisK runtime dependencies
         if: matrix.backend == 'zisk'
         run: |
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
+            libgmp10 \
+            libomp5-18 \
+            libopenmpi3t64 \
+            libsodium23
+
+      - name: Install ZisK build dependencies
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
             clang \
-            gcc-riscv64-unknown-elf \
             libclang-dev \
             libgmp-dev \
-            libgrpc++-dev \
             libomp-dev \
             libopenmpi-dev \
-            libpqxx-dev \
-            libsecp256k1-dev \
             libsodium-dev \
             nasm \
             nlohmann-json3-dev \
-            openmpi-bin \
-            openmpi-common \
             pkg-config \
-            protobuf-compiler \
-            uuid-dev \
             xz-utils
 
       - name: Install Zig
@@ -167,17 +181,14 @@ jobs:
             --output-root "${CORPUS_ROOT}" \
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
-      - name: Restore tests-zkevm fixture archive
-        if: env.CORPUS_MODE == 'tests-zkevm'
-        uses: actions/cache/restore@v6
-        with:
-          path: .eest/cache
-          key: eest-zkevm-${{ runner.os }}-${{ hashFiles('eest.lock') }}
-
       - name: Fetch pinned tests-zkevm fixtures
         if: env.CORPUS_MODE == 'tests-zkevm'
         working-directory: eest
-        run: scripts/fetch-eest-zkevm-fixtures.sh
+        env:
+          EEST_CACHE: ${{ runner.temp }}/eest-download
+        run: |
+          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
+          scripts/fetch-eest-zkevm-fixtures.sh
 
       - name: Record corpus identity
         run: |
@@ -290,20 +301,8 @@ jobs:
             echo "path=${summary}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Restore ZisK build cache
-        if: matrix.backend == 'zisk'
-        id: zisk-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            guest/runtime/zisk/host/target
-            ${{ runner.temp }}/zisk-source/target
-          key: zisk-v1-alpha-rust-1.0-rv64ima-${{ runner.os }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.lock') }}
-
       - name: Install pinned ZisK toolchain
-        if: matrix.backend == 'zisk'
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL \
             "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_COMMIT}/ziskup/ziskup" \
@@ -334,7 +333,7 @@ jobs:
           echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
 
       - name: Prepare pinned ZisK source
-        if: matrix.backend == 'zisk'
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         run: |
           git init "${ZISK_SOURCE}"
           git -C "${ZISK_SOURCE}" remote add origin https://github.com/0xPolygonHermez/zisk.git
@@ -343,8 +342,7 @@ jobs:
           test "$(git -C "${ZISK_SOURCE}" rev-parse HEAD)" = "${ZISK_COMMIT}"
 
       - name: Build pinned ZisK artifacts
-        if: matrix.backend == 'zisk'
-        id: zisk
+        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/zisk-source
         run: |
           "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
@@ -352,9 +350,24 @@ jobs:
             --manifest-path "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/Cargo.toml"
           provider="$(find target/elf -type f -name libziskos_staticlib.a -print -quit)"
           test -n "${provider}"
+          install -D -m 0755 \
+            "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host" \
+            "${ZISK_ARTIFACTS}/evmz-zisk-host"
+          install -D -m 0644 \
+            "${provider}" \
+            "${ZISK_ARTIFACTS}/libziskos_staticlib.a"
+
+      - name: Resolve pinned ZisK artifacts
+        if: matrix.backend == 'zisk'
+        id: zisk
+        run: |
+          host="${ZISK_ARTIFACTS}/evmz-zisk-host"
+          provider="${ZISK_ARTIFACTS}/libziskos_staticlib.a"
+          test -x "${host}"
+          test -s "${provider}"
           {
-            echo "host=${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host"
-            echo "provider=${ZISK_SOURCE}/${provider}"
+            echo "host=${host}"
+            echo "provider=${provider}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Build candidate ZisK guest
@@ -556,19 +569,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Save ZisK build cache from main
+      - name: Save pinned ZisK artifacts from main
         if: >-
           matrix.backend == 'zisk'
           && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
           && steps.zisk-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            guest/runtime/zisk/host/target
-            ${{ runner.temp }}/zisk-source/target
-          key: zisk-v1-alpha-rust-1.0-rv64ima-${{ runner.os }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.lock') }}
+          path: ${{ runner.temp }}/zisk-artifacts
+          key: >-
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
 
       - name: Save SP1 build cache from main
         if: >-
