@@ -98,18 +98,6 @@ emulator execution duration is never treated as proving time.
 measurements locally; pass `--zisk-host`/`--zisk-elf` or
 `--sp1-host`/`--sp1-elf` and fixture paths.
 
-### Release gate
-
-Before publishing a guest release, manually dispatch the same workflow with
-`corpus=tests-zkevm` and `release_ref` set to the candidate commit on `main`.
-That mode verifies the full SHA-256-pinned `tests-zkevm@v0.6.2`
-`blockchain_tests` corpus in ZisK, requires exact upstream output for every
-fixture row, and uploads `guest-cycle-summary.json` with the candidate ELF
-SHA-256. After accepting the release, copy its object into
-`guest-release-baseline.json.metrics["tests-zkevm@v0.6.2"].zisk` in an
-explicit manifest PR; later gates validate the corpus digest and compare
-aggregate steps without re-executing the old ELF.
-
 ## Real proof gate
 
 A successful `ziskemu` run proves that the guest completed with the expected

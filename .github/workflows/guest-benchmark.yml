@@ -33,17 +33,17 @@ on:
           - pinned
           - rolling
           - tests-zkevm
-      release_ref:
-        description: Commit on main for the tests-zkevm release gate; ignored for devnet modes
+      release_gate:
+        description: Require the selected tests-zkevm workflow revision to be on main
         required: true
-        default: main
-        type: string
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.ref }}-${{ github.event_name }}
+  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event_name == 'schedule' && 'rolling' || inputs.corpus || 'pinned' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -78,17 +78,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.corpus == 'tests-zkevm' && inputs.release_ref || github.sha }}
-          fetch-depth: ${{ inputs.corpus == 'tests-zkevm' && 0 || 1 }}
+          fetch-depth: ${{ inputs.release_gate && 0 || 1 }}
 
       - name: Record source commit
-        run: echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          test "${source_commit}" = "${GITHUB_SHA}"
+          echo "SOURCE_COMMIT=${source_commit}" >> "${GITHUB_ENV}"
+
+      - name: Require full corpus for release gate
+        if: inputs.release_gate
+        run: test "${CORPUS_MODE}" = tests-zkevm
 
       - name: Require release source on main
-        if: inputs.corpus == 'tests-zkevm'
+        if: inputs.corpus == 'tests-zkevm' && inputs.release_gate
         run: |
-          # `release_ref` is normally a commit, which checkout fetches as a bare
-          # object without any remote-tracking branch. Fetch main explicitly.
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 

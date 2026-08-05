@@ -38,23 +38,28 @@ class CorpusContext:
 
 @dataclass(frozen=True)
 class KnownFailures:
-    """Fixtures expected to fail on this backend, and why.
+    """Corpus-scoped fixtures expected to fail on this backend, and why.
 
     The list is strict in both directions: an entry that passes means the
     upstream cause was fixed and the entry must go, and an entry absent from the
-    corpus means the list no longer describes the fixtures being run. Either one
-    fails the gate, so a backend upgrade cannot quietly leave the list stale.
+    declared corpus means the list no longer describes it. Entries annotate
+    failures but never waive the exact-execution gate.
     """
 
     reasons: dict[str, str]
 
     @staticmethod
-    def load(path: Path | None, backend: str) -> KnownFailures:
+    def load(path: Path | None, corpus: str, backend: str) -> KnownFailures:
         if path is None:
             return KnownFailures({})
         document = json.loads(path.read_text())
         if document.get("schema_version") != 1:
             raise ValueError("known-failure manifest schema_version mismatch")
+        declared_corpus = document.get("corpus")
+        if not isinstance(declared_corpus, str) or not declared_corpus:
+            raise ValueError("known-failure manifest corpus is missing or malformed")
+        if declared_corpus != corpus:
+            return KnownFailures({})
         entries = document.get(backend, {})
         if not isinstance(entries, dict):
             raise ValueError(f"known-failure entries for {backend} are not an object")
@@ -190,10 +195,10 @@ def aggregate(rows: dict[str, Row], known: KnownFailures = KnownFailures({})) ->
 
 
 def healthy(current: Aggregate) -> bool:
-    unexcused = current.fixture_count - current.upstream_matches - current.known_failures
     return (
         current.fixture_count > 0
-        and unexcused <= 0
+        and current.crashes == 0
+        and current.upstream_matches == current.fixture_count
         and not current.unexpected_passes
         and not current.stale_known
     )
@@ -201,6 +206,20 @@ def healthy(current: Aggregate) -> bool:
 
 def failure_lines(rows: Iterable[Row], known: KnownFailures, current: Aggregate) -> list[str]:
     lines: list[str] = []
+    expected = sorted((row for row in rows if failed(row) and known.excused(row)), key=lambda r: r.name)
+    if expected:
+        lines.extend((
+            "## Known backend failures",
+            "",
+            "These failures are annotated for diagnosis but do not waive the exact-execution gate.",
+            "",
+        ))
+        for row in expected:
+            lines.append(
+                f"- `{short_name(row)}`: {row.crash or 'upstream output mismatch'}; "
+                f"known cause: {known.reasons[row.name]}"
+            )
+        lines.append("")
     unexpected = sorted((row for row in rows if failed(row) and not known.excused(row)), key=lambda r: r.name)
     if unexpected:
         lines.extend(("## Failures", ""))
@@ -304,7 +323,7 @@ def header(args: argparse.Namespace, corpus: CorpusContext, current: Aggregate) 
     if corpus.digest:
         lines.append(f"- Corpus digest: `{corpus.digest}`")
     if current.known_failures:
-        lines.append(f"- Known backend failures excused: {current.known_failures}")
+        lines.append(f"- Known backend failures observed: {current.known_failures}")
     lines.extend((
         f"- Scope: execution {metric(args)} and public outputs only; no proof generation and no {metric_singular(args)}-regression threshold.",
         "",
@@ -353,6 +372,7 @@ def render_absolute(
             f"{mark(row.upstream_matched is True)} |"
         )
     lines.append("")
+    lines.extend(failure_lines(current.values(), known, current_aggregate))
     return "\n".join(lines), healthy(current_aggregate)
 
 
@@ -387,6 +407,7 @@ def render_comparison(
     corpus: CorpusContext,
     known: KnownFailures,
 ) -> tuple[str, bool]:
+    current_aggregate = aggregate(current, known)
     baseline_names = set(baseline)
     current_names = set(current)
     shared = sorted(baseline_names & current_names)
@@ -466,7 +487,8 @@ def render_comparison(
             f"{mark(before.upstream_matched is True)}/{mark(after.upstream_matched is True)} |"
         )
     lines.append("")
-    return "\n".join(lines), is_healthy
+    lines.extend(failure_lines(current.values(), known, current_aggregate))
+    return "\n".join(lines), is_healthy and healthy(current_aggregate)
 
 
 def main() -> int:
@@ -475,7 +497,7 @@ def main() -> int:
         args.elf_sha256 = sha256(args.elf)
         current = load_rows(args.current)
         corpus = load_corpus_context(args.corpus_manifest)
-        known = KnownFailures.load(args.known_failures, args.backend)
+        known = KnownFailures.load(args.known_failures, args.fixtures, args.backend)
         current_aggregate = aggregate(current, known)
         if args.summary_output:
             args.summary_output.parent.mkdir(parents=True, exist_ok=True)

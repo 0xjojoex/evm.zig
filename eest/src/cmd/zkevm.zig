@@ -73,6 +73,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         } else if (std.mem.eql(u8, arg, "--sp1-work-dir")) {
             const value = args.next() orelse return error.MissingSp1WorkDir;
             options.executor.sp1_work_dir = try arena.dupe(u8, value);
+        } else if (isOption(arg)) {
+            return error.UnknownOption;
         } else {
             try paths.append(allocator, try arena.dupe(u8, arg));
         }
@@ -98,6 +100,10 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     // host-startup problems surface as errors above and still fail hard, and an
     // empty run is always a failure.
     if ((!report_only and total.failed > 0) or total.fixtures == 0) std.process.exit(1);
+}
+
+fn isOption(arg: []const u8) bool {
+    return std.mem.startsWith(u8, arg, "-");
 }
 
 fn requiresSequential(options: stateless.Options) bool {
@@ -149,4 +155,11 @@ test "limited and diagnostic zkEVM runs stay sequential" {
     var report = stateless.Report.init(std.testing.allocator);
     defer report.deinit();
     try std.testing.expect(requiresSequential(.{ .report = &report }));
+}
+
+test "unknown options are not fixture paths" {
+    try std.testing.expect(isOption("--executorr"));
+    try std.testing.expect(isOption("-unknown"));
+    try std.testing.expect(!isOption("./-fixture.json"));
+    try std.testing.expect(!isOption("fixtures/blockchain_tests"));
 }

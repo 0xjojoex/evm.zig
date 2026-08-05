@@ -137,13 +137,14 @@ that child converts the guest ELF to a ZisK ROM once at startup — roughly 0.4s
 against ~10ms of execution for a typical fixture — so `--jobs N` pays that setup
 N times and then amortises it across every fixture the worker handles.
 
-`fixtures/guest-known-failures.json` lists fixtures expected to fail on a pinned
-backend, with the upstream cause. `report-guest-cycles.py --known-failures`
-excuses them, and fails if any of them passes or disappears from the corpus — so
-a backend upgrade that fixes one forces the entry to be removed rather than
-letting the list rot. `--report-only` withholds the fixture-failure exit code so
-those rows reach the comparison; configuration, I/O and host-startup failures
-still fail immediately, as does an empty run.
+`fixtures/guest-known-failures.json` records corpus-scoped failures expected on
+a pinned backend, with the upstream cause. `report-guest-cycles.py
+--known-failures` annotates them and fails if any entry passes or disappears
+from its declared corpus, but never waives the exact-execution gate. A backend
+upgrade that fixes one therefore forces its removal rather than letting the
+list rot. `--report-only` withholds the fixture-failure exit code so those rows
+reach the comparison; configuration, I/O and host-startup failures still fail
+immediately, as does an empty run.
 
 `--report` selects a serial run and writes deterministic JSON with one record
 per runnable block. Records include revision, fixture family, validation status,
