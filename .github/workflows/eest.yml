@@ -28,9 +28,12 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Restore zkEVM fixture archive
-        uses: actions/cache@v6
+        id: stateless-cache
+        uses: actions/cache/restore@v6
         with:
           path: .eest/cache
           key: eest-zkevm-${{ runner.os }}-${{ hashFiles('eest.lock') }}
@@ -67,6 +70,16 @@ jobs:
           test "${CORPUS_OUTCOME}" = success
           test "${MUTATIONS_OUTCOME}" = success
 
+      - name: Save zkEVM fixture archive from main
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && steps.stateless-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .eest/cache
+          key: eest-zkevm-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -91,9 +104,12 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Restore execution fixture archive
-        uses: actions/cache@v6
+        id: execution-cache
+        uses: actions/cache/restore@v6
         with:
           path: .eest/cache
           key: eest-execution-${{ runner.os }}-${{ hashFiles('eest.lock') }}
@@ -127,6 +143,16 @@ jobs:
           test "${STATE_TESTS_OUTCOME}" = success
           test "${BLOCK_STF_OUTCOME}" = success
 
+      - name: Save execution fixture archive from main
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && steps.execution-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .eest/cache
+          key: eest-execution-${{ runner.os }}-${{ hashFiles('eest.lock') }}
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -153,9 +179,12 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
 
       - name: Restore consensus fixture archives
-        uses: actions/cache@v6
+        id: consensus-cache
+        uses: actions/cache/restore@v6
         with:
           path: .eest/cache
           key: eest-consensus-${{ runner.os }}-${{ hashFiles('eest.lock') }}
@@ -171,6 +200,16 @@ jobs:
 
       - name: Run EEST sidecar tests
         run: zig build eest-test --summary all
+
+      - name: Save consensus fixture archives from main
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && steps.consensus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .eest/cache
+          key: eest-consensus-${{ runner.os }}-${{ hashFiles('eest.lock') }}
 
       - name: Upload failure log
         if: failure()

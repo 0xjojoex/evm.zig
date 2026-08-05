@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "id": "glamsterdam-devnet-7-115170-115269-46efcf493e235275",
+  "network": "glamsterdam-devnet-7",
+  "catalog_url": "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7",
+  "catalog_generated_at": "2026-08-04T06:49:58.130108842Z",
+  "workload": {
+    "version": "v0.14.1",
+    "commit": "228a9228b1424c2216c78352763558ce1a7a268c",
+    "eest_validation_ref": "tests-zkevm@v0.6.2"
+  },
+  "batches": [
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115170,
+      "batchEndBlock": 115179,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:07:23.960961074Z",
+      "byteLength": 6934839,
+      "sha256": "0x6d907c81576e808d06073e51b34292be27e4833841f3754206668c1588b63ad7",
+      "path": "exports/batches/115170-115179.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115180,
+      "batchEndBlock": 115189,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:07:24.526318199Z",
+      "byteLength": 7688984,
+      "sha256": "0x9f908a99d3806d718c88bfa9c0dd854fad5d512b1fcb2313f95e64b25c89f2c0",
+      "path": "exports/batches/115180-115189.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115190,
+      "batchEndBlock": 115199,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:07:25.084367115Z",
+      "byteLength": 6566044,
+      "sha256": "0x98b8913b3ad7a0678114de527b243ebf2a6fd0f279312e7c59f954bbedb7ab79",
+      "path": "exports/batches/115190-115199.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115200,
+      "batchEndBlock": 115209,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:17:22.868305951Z",
+      "byteLength": 7073895,
+      "sha256": "0xdef3a876f3de0ad16f8591f3b1992a2af27054eebb193e045d94e8cc419df201",
+      "path": "exports/batches/115200-115209.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115210,
+      "batchEndBlock": 115219,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:17:23.392142183Z",
+      "byteLength": 7371559,
+      "sha256": "0xb0d74a73a18e76d9964246ca80b04be611e29701792e563dc6c36b3fcf0c31a4",
+      "path": "exports/batches/115210-115219.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115220,
+      "batchEndBlock": 115229,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:17:23.861494116Z",
+      "byteLength": 6201952,
+      "sha256": "0xc02b704067bec2d0dd300c7c5e449f84778896e5694271ab79c5f72eb09a6319",
+      "path": "exports/batches/115220-115229.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115230,
+      "batchEndBlock": 115239,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:17:24.396003848Z",
+      "byteLength": 7330668,
+      "sha256": "0xb8a47449501f1b320881966d7424473da59c48b463cb57843bc8092791b726a8",
+      "path": "exports/batches/115230-115239.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115240,
+      "batchEndBlock": 115249,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:17:24.917856469Z",
+      "byteLength": 7274629,
+      "sha256": "0xe4ad1f118395c8c8ddf499ace8ad18763b0b1844d9e9c7bacd36afd8643a1c84",
+      "path": "exports/batches/115240-115249.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115250,
+      "batchEndBlock": 115259,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:28:00.331703453Z",
+      "byteLength": 7734159,
+      "sha256": "0x65fef4264c7f520dc4bebf29f9fe4c0725be0de0213f2469f6d1548819a589c8",
+      "path": "exports/batches/115250-115259.tar.zst"
+    },
+    {
+      "schemaVersion": 2,
+      "network": "glamsterdam-devnet-7",
+      "batchStartBlock": 115260,
+      "batchEndBlock": 115269,
+      "batchSize": 10,
+      "artifactCount": 10,
+      "createdAt": "2026-08-01T07:28:01.08792466Z",
+      "byteLength": 8832230,
+      "sha256": "0x30562c14a0ac768861fd44e592408f7d5f3775919eb623ac25cda91427dd0405",
+      "path": "exports/batches/115260-115269.tar.zst"
+    }
+  ]
+}
