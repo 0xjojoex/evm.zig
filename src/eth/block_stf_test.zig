@@ -137,13 +137,15 @@ test "BlockSTF validates a single witnessed transaction" {
         .topics = &receipt_topics,
         .data = &.{},
     };
+    var receipt_logs = try state.LogBuffer.fromLogs(scratch, &.{receipt_log});
+    defer receipt_logs.deinit(scratch);
     const encoded_receipt = try encodeReceipt(scratch, .legacy, .{
         .status = .success,
         .cumulative_gas_used = first_result.gas_used,
-        .logs = .fromSlice(&.{receipt_log}),
+        .logs = receipt_logs.view(),
     });
     const expected_receipts_root = try trie.receiptRoot(scratch, &.{encoded_receipt});
-    const expected_logs_bloom = logsBloom(.fromSlice(&.{receipt_log}));
+    const expected_logs_bloom = logsBloom(receipt_logs.view());
     try std.testing.expectEqualSlices(u8, &expected_receipts_root, &first_result.receipts_root);
     try std.testing.expectEqualSlices(u8, &expected_logs_bloom, &first_result.logs_bloom);
 
@@ -1277,16 +1279,20 @@ test "stateless receipt encoder includes logs and bloom" {
         .topics = &topics,
         .data = &.{ 0xab, 0xcd },
     };
+    var event_logs = try state.LogBuffer.fromLogs(std.testing.allocator, &.{event_log});
+    defer event_logs.deinit(std.testing.allocator);
     var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const before = counted.alloc_index;
     const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .revert,
         .cumulative_gas_used = 30_000,
-        .logs = .fromSlice(&.{event_log}),
+        .logs = event_logs.view(),
     });
     defer counted.allocator().free(encoded);
 
-    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    // Materializing the packed rows into `[]Log` for the RLP schema is the
+    // second allocation; the encoded receipt is the first.
+    try std.testing.expectEqual(before + 2, counted.alloc_index);
     var raw = rlp.Cursor.init(encoded);
     var raw_receipt = try raw.nextList();
     try raw.expectDone();
@@ -1317,25 +1323,30 @@ test "stateless receipt encoder includes logs and bloom" {
 }
 
 test "stateless receipt schema enforces the EVM log topic limit" {
+    // Built as views rather than through `LogBuffer.append`, which rejects a
+    // fifth topic itself. The subject here is the wire schema's independent
+    // limit, so the buffer's guard must not stand in for it.
+    const rows = [_]state.LogBuffer.Row{.{
+        .address = address.addr(0x3000),
+        .topics = .init(0, 4),
+        .data = .{},
+    }};
     const accepted_topics = [_]u256{ 1, 2, 3, 4 };
     const accepted = try encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = .fromSlice(&.{.{
-            .address = address.addr(0x3000),
-            .topics = &accepted_topics,
-            .data = &.{},
-        }}),
+        .logs = .{ .rows = &rows, .topics = &accepted_topics, .data = &.{} },
     });
     defer std.testing.allocator.free(accepted);
 
+    const rejected_rows = [_]state.LogBuffer.Row{.{
+        .address = address.addr(0x3000),
+        .topics = .init(0, 5),
+        .data = .{},
+    }};
     const rejected_topics = [_]u256{ 1, 2, 3, 4, 5 };
     try std.testing.expectError(error.ListLimitExceeded, encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = .fromSlice(&.{.{
-            .address = address.addr(0x3000),
-            .topics = &rejected_topics,
-            .data = &.{},
-        }}),
+        .logs = .{ .rows = &rejected_rows, .topics = &rejected_topics, .data = &.{} },
     }));
 }
 
@@ -1348,10 +1359,21 @@ test "stateless receipt typed decode cleans nested allocation failures" {
                 .topics = &topics,
                 .data = &.{ 0xab, 0xcd },
             }};
+            // Allocation-free so the injected failure index still targets the
+            // decode path this test is about.
+            const rows = [_]state.LogBuffer.Row{.{
+                .address = address.addr(0x3000),
+                .topics = .init(0, 2),
+                .data = .init(0, 2),
+            }};
             const payload: ReceiptPayload = .{
                 .status = 1,
                 .cumulative_gas_used = 21_000,
-                .logs_bloom = logsBloom(.fromSlice(&logs)),
+                .logs_bloom = logsBloom(.{
+                    .rows = &rows,
+                    .topics = &topics,
+                    .data = &.{ 0xab, 0xcd },
+                }),
                 .logs = &logs,
             };
             var out: [512]u8 = undefined;

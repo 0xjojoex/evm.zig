@@ -12,7 +12,6 @@
 
 const std = @import("std");
 
-const Host = @import("../../../Host.zig");
 const bal = @import("../model.zig");
 const observation = @import("../observation.zig");
 const ClaimView = @import("../ClaimView.zig");
@@ -43,7 +42,7 @@ pub fn Lane(comptime Engine: type) type {
             progress_before: vm.BlockResult,
             progress_after: vm.BlockResult,
             result: *const vm.TxExecutionResult,
-            logs: state.TrackedState.LogView,
+            logs: state.LogBuffer.View,
             blob_gas_used_after: u64,
         };
 
@@ -70,13 +69,15 @@ pub fn Lane(comptime Engine: type) type {
             progress_before: vm.BlockResult,
             progress_after: vm.BlockResult,
             result: vm.TxExecutionResult,
-            logs: []Host.Log,
+            logs: state.LogBuffer,
             blob_gas_used_after: u64,
 
             pub fn init(allocator: std.mem.Allocator, included: Included) !OwnedIncluded {
                 const output = try allocator.dupe(u8, included.result.output);
                 errdefer allocator.free(output);
-                const logs = try cloneLogs(allocator, included.logs);
+                // Detach the canonical logs so a staged lane survives the
+                // authoritative executor moving on.
+                const logs = try state.LogBuffer.fromView(allocator, included.logs);
                 var result = included.result.*;
                 result.output = output;
                 return .{
@@ -97,7 +98,7 @@ pub fn Lane(comptime Engine: type) type {
                     .progress_before = self.progress_before,
                     .progress_after = self.progress_after,
                     .result = &self.result,
-                    .logs = .fromSlice(self.logs),
+                    .logs = self.logs.view(),
                     .blob_gas_used_after = self.blob_gas_used_after,
                 };
             }
@@ -252,7 +253,7 @@ fn executionResultEqual(expected: vm.TxExecutionResult, actual: vm.TxExecutionRe
         std.meta.eql(expected.created_address, actual.created_address);
 }
 
-fn logsEqual(expected: state.TrackedState.LogView, actual: state.TrackedState.LogView) bool {
+fn logsEqual(expected: state.LogBuffer.View, actual: state.LogBuffer.View) bool {
     if (expected.len() != actual.len()) return false;
     for (0..expected.len()) |index| {
         const left = expected.get(index);
@@ -265,34 +266,4 @@ fn logsEqual(expected: state.TrackedState.LogView, actual: state.TrackedState.Lo
         }
     }
     return true;
-}
-
-/// Detach the canonical logs so a staged lane survives the authoritative
-/// executor moving on.
-fn cloneLogs(allocator: std.mem.Allocator, source: state.TrackedState.LogView) ![]Host.Log {
-    const logs = try allocator.alloc(Host.Log, source.len());
-    errdefer allocator.free(logs);
-
-    var initialized: usize = 0;
-    errdefer deinitLogItems(allocator, logs[0..initialized]);
-    for (logs, 0..) |*target, index| {
-        const event_log = source.get(index);
-        const topics = try allocator.dupe(u256, event_log.topics);
-        errdefer allocator.free(topics);
-        const data = try allocator.dupe(u8, event_log.data);
-        target.* = .{
-            .address = event_log.address,
-            .topics = topics,
-            .data = data,
-        };
-        initialized += 1;
-    }
-    return logs;
-}
-
-fn deinitLogItems(allocator: std.mem.Allocator, logs: []Host.Log) void {
-    for (logs) |event_log| {
-        allocator.free(@constCast(event_log.topics));
-        allocator.free(@constCast(event_log.data));
-    }
 }

@@ -380,7 +380,7 @@ const OpBlockProgram = struct {
         state: *const State,
         _: *const OpTransaction,
         _: *const OpOutput,
-        _: evmz.state.TrackedState.LogView,
+        _: evmz.state.LogBuffer.View,
     ) Error!InclusionPlan {
         return std.math.add(u64, state.*, 1) catch error.TransactionCountOverflow;
     }
@@ -388,7 +388,7 @@ const OpBlockProgram = struct {
     pub fn included(
         _: *const OpTransaction,
         output: *const OpOutput,
-        _: evmz.state.TrackedState.LogView,
+        _: evmz.state.LogBuffer.View,
         plan: InclusionPlan,
     ) OpIncludedTransaction {
         return .{

@@ -63,7 +63,7 @@ pub const TxReceiptView = struct {
     /// Receipt cumulative gas across included transactions in this block execution.
     cumulative_gas_used: u64 = 0,
     created_address: ?Address = null,
-    logs: state_module.TrackedState.LogView = .empty,
+    logs: state_module.LogBuffer.View = .empty,
 };
 
 /// Summary of included transactions in a `BlockExecution`.

@@ -31,7 +31,10 @@ pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
 pub const AttemptId = checkpoint_types.AttemptId;
 pub const CodeView = artifacts.CodeView;
-pub const LogView = artifacts.LogView;
+/// Emitted logs and their borrowed projection are lane-independent; see
+/// `state/LogBuffer.zig`.
+pub const LogBuffer = @import("../state/LogBuffer.zig");
+pub const LogView = LogBuffer.View;
 pub const ChangesView = Views.ChangesView;
 pub const CommitView = Views.CommitView;
 pub const ObservationsView = Views.ObservationsView;
@@ -183,7 +186,7 @@ pub const BranchCheckpoint = struct {
     allocator: Allocator,
     accounts: []AccountRow,
     storage: []StorageRow,
-    retained_logs: artifacts.LogBuffer,
+    retained_logs: LogBuffer,
     dirty_accounts_len: u32,
     block_changed_accounts_len: u32,
     block_storage_wipes_len: u32,
@@ -380,8 +383,8 @@ accounts: []AccountRow,
 storage: []StorageRow,
 code: artifacts.CodeStore,
 transient_storage: TransientStorageMap,
-logs: artifacts.LogBuffer = .{},
-retained_logs: artifacts.LogBuffer = .{},
+logs: LogBuffer = .{},
+retained_logs: LogBuffer = .{},
 dirty_accounts: std.ArrayList(AccountId) = .empty,
 block_changed_accounts: std.ArrayList(AccountId) = .empty,
 block_storage_wipes: std.ArrayList(AccountId) = .empty,
@@ -695,7 +698,7 @@ pub fn retain(self: *StatelessBlockState, id: AttemptId) void {
     std.debug.assert(self.sealed);
     std.debug.assert(!self.scopeActive());
     self.journal.clearRetainingCapacity();
-    std.mem.swap(artifacts.LogBuffer, &self.logs, &self.retained_logs);
+    std.mem.swap(LogBuffer, &self.logs, &self.retained_logs);
     if (self.transaction_scope_reverted) self.compactAcceptedAccountChanges();
     if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
     self.compactAcceptedStorageChanges();
@@ -776,7 +779,7 @@ pub fn restoreBranch(self: *StatelessBlockState, value: *BranchCheckpoint) void 
     self.dirty_storage.items.len = value.dirty_storage_len;
     self.block_introduced_codes.items.len = value.block_introduced_codes_len;
     self.code.truncateIntroduced(self.allocator, value.introduced_code_len);
-    std.mem.swap(artifacts.LogBuffer, &self.retained_logs, &value.retained_logs);
+    std.mem.swap(LogBuffer, &self.retained_logs, &value.retained_logs);
     self.accepted_generation = value.accepted_generation;
     value.resolved = true;
 }

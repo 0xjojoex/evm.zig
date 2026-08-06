@@ -1,23 +1,13 @@
 //! Typed execution-state transitions referenced by immutable trace metadata.
 
 const std = @import("std");
+const range = @import("../range.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const WordRange = struct {
-    offset: u32 = 0,
-    len: u32 = 0,
-};
-
-pub const ByteRange = struct {
-    offset: u32 = 0,
-    len: u32 = 0,
-};
-
-pub const MemoryWriteRange = struct {
-    offset: u32 = 0,
-    len: u32 = 0,
-};
+pub const WordRange = range.Words;
+pub const ByteRange = range.Bytes;
+pub const MemoryWriteRange = range.Range(MemoryWrite, u32);
 
 pub const MemoryWrite = struct {
     offset: u32,

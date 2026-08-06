@@ -3,6 +3,7 @@
 //! - `Reader`: client/database read interface (root alias `evmz.StateReader`).
 //! - `TrackedState`: accepted branch, transaction rows, and scope rollback.
 //! - `checkpoint`: scope-rollback shapes shared with the stateless lane.
+//! - `LogBuffer`: packed emitted logs, also shared with the stateless lane.
 //! - `Committer`: integration-owned sink for borrowed tracked-state changes.
 //! - `RootProvider`: integration-owned post-state root over borrowed changes.
 //! - `MemoryStore`: in-memory store for seeded pre-state and test/demo commits.
@@ -16,6 +17,7 @@ pub const Account = @import("./state/Account.zig");
 pub const MemoryAccount = @import("./state/MemoryAccount.zig");
 pub const storage = @import("./state/storage.zig");
 pub const checkpoint = @import("./state/checkpoint.zig");
+pub const LogBuffer = @import("./state/LogBuffer.zig");
 pub const Reader = @import("./state/Reader.zig");
 pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
 pub const Committer = @import("./state/Committer.zig");

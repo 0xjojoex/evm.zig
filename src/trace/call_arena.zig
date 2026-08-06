@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Address = @import("../address.zig").Address;
+const range = @import("../range.zig");
 
 pub const Kind = enum(u8) {
     call,
@@ -42,16 +43,7 @@ pub const Status = enum(u8) {
     code_store_out_of_gas_committed,
 };
 
-pub const ByteRange = struct {
-    start: u32 = 0,
-    len: u32 = 0,
-
-    pub fn slice(self: ByteRange, bytes: []const u8) []const u8 {
-        const start: usize = self.start;
-        const len: usize = self.len;
-        return bytes[start .. start + len];
-    }
-};
+pub const ByteRange = range.Bytes;
 
 pub const Row = struct {
     parent_index: ?u32,
@@ -259,7 +251,7 @@ pub const CallArena = struct {
         self.bytes.appendSliceAssumeCapacity(event.output);
 
         const row = &self.rows.items[token.row_index];
-        row.output = .{ .start = output_start, .len = output_len };
+        row.output = .{ .offset = output_start, .len = output_len };
         row.status = event.status;
         if (event.checkpoint_reverted) {
             row.construction_state |= Row.checkpoint_reverted_mask;
@@ -287,7 +279,7 @@ pub const CallArena = struct {
             return error.CallCaptureIndexOverflow;
         _ = std.math.add(u32, byte_start, len_u32) catch
             return error.CallCaptureIndexOverflow;
-        return .{ .start = byte_start, .len = len_u32 };
+        return .{ .offset = byte_start, .len = len_u32 };
     }
 
     fn ensureRows(self: *CallArena, count: usize) !void {
