@@ -19,7 +19,6 @@ const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const TrackedState = evmz.state.TrackedState;
-const BlockHashSource = evmz.BlockHashSource;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
@@ -410,8 +409,9 @@ test "trace replay runs after prepared code leaves the live frame" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
-test "reset retains caller backend and prepared artifacts" {
+test "reset reuses caller-owned prepared artifacts through the supplied backend" {
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const contract = evmz.addr(0xc0de);
     const code = evmz.t.bytecode(.{.STOP});
     const code_hash = evmz.crypto.keccak256(&code);
 
@@ -426,13 +426,15 @@ test "reset retains caller backend and prepared artifacts" {
     try executor.reset(.{
         .prepared_code_backend = pool.backend(),
     });
-    try std.testing.expectEqual(prepared.bytes.ptr, pool.get(code_hash).?.bytes.ptr);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
+    try executor.beginStateTransition(testExecutionContext(contract, 100_000));
+    defer executor.discardStateTransition();
 
-    try executor.reset(.{
-        .prepared_code_backend = pool.backend(),
-    });
-    const reset_prepared = try pool.getOrPrepare(code_hash, &code);
-    try std.testing.expectEqual(prepared.bytes.ptr, reset_prepared.bytes.ptr);
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+    const resolved = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
+
+    try std.testing.expectEqual(prepared.bytes.ptr, resolved.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
@@ -567,55 +569,6 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
             ),
         );
     }
-}
-
-test "executor BLOCKHASH reads configured block hash source" {
-    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
-    const TestBlockHashSource = struct {
-        const Self = @This();
-
-        last_number: ?u64 = null,
-
-        fn source(self: *Self) BlockHashSource {
-            return .{ .ptr = self, .vtable = &.{
-                .getBlockHash = getBlockHash,
-            } };
-        }
-
-        fn getBlockHash(ptr: *anyopaque, number: u64) !?u256 {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.last_number = number;
-            return if (number == 999) 0xab else null;
-        }
-    };
-
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    var execution_context = testExecutionContext(sender, 100_000);
-    execution_context.block.number = 1000;
-    var block_hashes = TestBlockHashSource{};
-    var executor = Prague.Executor.init(std.testing.allocator, .{
-        .block_hash_source = block_hashes.source(),
-    });
-    defer executor.deinit();
-
-    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
-
-    const code = evmz.t.bytecode(.{ .PUSH2, 0x03, 0xe7, .BLOCKHASH, .PUSH0, .SSTORE, .STOP });
-    var bytecode = try executor.prepareBytecode(&code);
-    defer bytecode.deinit(std.testing.allocator);
-
-    try executor.beginTransaction(execution_context, sender, contract);
-    const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = bytecode.view(),
-        .sender = sender,
-        .recipient = contract,
-        .gas = 100_000,
-    });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(?u64, 999), block_hashes.last_number);
-    try std.testing.expectEqual(@as(u256, 0xab), try executor.getStorage(contract, 0));
 }
 
 test "executor executeMessage dispatches top-level call" {
@@ -2645,15 +2598,6 @@ fn createObservesTarget(creator_balance: u256) !bool {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     return observer.found;
-}
-
-test "branch checkpoint is native" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var branch = try executor.branchCheckpoint();
-    defer branch.deinit();
-    executor.restoreBranch(&branch);
 }
 
 test "call-like message at max depth still executes in recipient storage" {

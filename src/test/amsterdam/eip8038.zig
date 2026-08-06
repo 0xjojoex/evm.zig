@@ -7,7 +7,7 @@ const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
 
-test "Amsterdam cold BALANCE and EXTCODE opcodes charge 3000 total account access gas" {
+test "Amsterdam cold BALANCE and EXTCODEHASH charge 3000 total account access gas" {
     try expectAmsterdamColdAccountAccessGas(.BALANCE);
     try expectAmsterdamColdAccountAccessGas(.EXTCODEHASH);
 }

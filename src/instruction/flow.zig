@@ -36,7 +36,7 @@ pub fn afterJump(frame: *CallFrame) !void {
 }
 
 test "jump destinations reject bounds and PUSH data" {
-    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x00, .JUMP }, .invalid);
-    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x02, .JUMP, .JUMPDEST }, .invalid);
+    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0xff, .JUMP }, .invalid);
+    try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x04, .JUMP, .PUSH1, .JUMPDEST }, .invalid);
     try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x04, .JUMP, .STOP, .JUMPDEST }, .success);
 }

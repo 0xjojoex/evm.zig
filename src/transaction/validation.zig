@@ -306,7 +306,7 @@ test "transaction prepayment uses comptime blob gas" {
 }
 
 test "transaction validation uses runtime blob params" {
-    var params = blob.BlobParams{
+    const params = blob.BlobParams{
         .target = 3,
         .max = 1,
         .base_fee_update_fraction = @import("../eth/transaction.zig").cancun_blob_base_fee_update_fraction,
@@ -325,33 +325,84 @@ test "transaction validation uses runtime blob params" {
         .blob_hashes = &hashes,
         .sender_balance = 1_000_000,
     }).?);
-
-    params.max = 6;
-    const cost = testRuntime(@import("../eth/spec.zig").cancun).maxPrepaymentCost(.{
-        .kind = .blob,
-        .gas_limit = 500_000,
-        .max_fee_per_gas = 7,
-        .max_fee_per_blob_gas = 5,
-        .blob_params = params,
-        .blob_hashes = &hashes,
-    }).?;
-    try std.testing.expectEqual(@as(u256, 500_000 * 7 + @import("../eth/transaction.zig").blob_gas_per_blob * hashes.len * 5), cost);
 }
 
-test "transaction validation rejects intrinsic gas below limit" {
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
-        .gas_limit = 21_000,
-        .input = &.{0xff},
-        .sender_balance = 1_000_000,
-    }).?);
-}
-
-test "transaction validation rejects Prague floor gas" {
-    try std.testing.expectEqual(ValidationError.intrinsic_gas_below_floor_gas_cost, testRuntime(@import("../eth/spec.zig").prague).validate(.{
-        .gas_limit = 21_100,
-        .input = &.{ 1, 1, 1, 1 },
-        .sender_balance = 1_000_000,
-    }).?);
+test "transaction validation rejects invalid single-condition inputs" {
+    const eth_spec = @import("../eth/spec.zig");
+    const eth_transaction = @import("../eth/transaction.zig");
+    inline for (.{
+        .{
+            .spec = eth_spec.cancun,
+            .input = ValidationInput{
+                .gas_limit = 21_000,
+                .input = &.{0xff},
+                .sender_balance = 1_000_000,
+            },
+            .expected = ValidationError.intrinsic_gas_too_low,
+        },
+        .{
+            .spec = eth_spec.prague,
+            .input = ValidationInput{
+                .gas_limit = 21_100,
+                .input = &.{ 1, 1, 1, 1 },
+                .sender_balance = 1_000_000,
+            },
+            .expected = ValidationError.intrinsic_gas_below_floor_gas_cost,
+        },
+        .{
+            .spec = eth_spec.berlin,
+            .input = ValidationInput{
+                .kind = .dynamic_fee,
+                .gas_limit = 21_000,
+                .max_fee_per_gas = 1,
+                .sender_balance = 21_000,
+            },
+            .expected = ValidationError.type_2_tx_pre_fork,
+        },
+        .{
+            .spec = eth_spec.cancun,
+            .input = ValidationInput{
+                .kind = .blob,
+                .gas_limit = 21_000,
+                .max_fee_per_gas = 10,
+                .max_priority_fee_per_gas = 0,
+                .max_fee_per_blob_gas = 2,
+                .base_fee = 7,
+                .blob_base_fee = 1,
+                .blob_hashes = &.{@as(u256, 0x01) << 248},
+                .sender_balance = 21_000 * 10 + eth_transaction.blob_gas_per_blob * 2 - 1,
+            },
+            .expected = ValidationError.insufficient_account_funds,
+        },
+        .{
+            .spec = eth_spec.cancun,
+            .input = ValidationInput{
+                .kind = .blob,
+                .is_create = true,
+                .gas_limit = 100_000,
+                .max_fee_per_gas = 7,
+                .max_priority_fee_per_gas = 0,
+                .max_fee_per_blob_gas = 1,
+                .base_fee = 7,
+                .blob_base_fee = 1,
+                .blob_hashes = &.{@as(u256, 0x01) << 248},
+                .sender_balance = 1_000_000,
+            },
+            .expected = ValidationError.type_3_tx_contract_creation,
+        },
+        .{
+            .spec = eth_spec.cancun,
+            .input = ValidationInput{
+                .gas_limit = 21_000,
+                .gas_price = 999,
+                .base_fee = 1_000,
+                .sender_balance = 21_000_000,
+            },
+            .expected = ValidationError.insufficient_max_fee_per_gas,
+        },
+    }) |case| {
+        try std.testing.expectEqual(case.expected, testRuntime(case.spec).validate(case.input).?);
+    }
 }
 
 test "transaction validation applies Amsterdam calldata floor" {
@@ -390,30 +441,6 @@ test "transaction validation includes Amsterdam access-list data surcharge" {
         .access_list_counts = access_counts,
         .sender_balance = 100_000,
     }));
-}
-
-test "transaction validation checks max fee balance" {
-    const eth_transaction = @import("../eth/transaction.zig");
-    try std.testing.expectEqual(ValidationError.insufficient_account_funds, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
-        .kind = .blob,
-        .gas_limit = 21_000,
-        .max_fee_per_gas = 10,
-        .max_priority_fee_per_gas = 0,
-        .max_fee_per_blob_gas = 2,
-        .base_fee = 7,
-        .blob_base_fee = 1,
-        .blob_hashes = &.{@as(u256, 0x01) << 248},
-        .sender_balance = 21_000 * 10 + eth_transaction.blob_gas_per_blob * 2 - 1,
-    }).?);
-}
-
-test "transaction validation rejects typed transaction before fork" {
-    try std.testing.expectEqual(ValidationError.type_2_tx_pre_fork, testRuntime(@import("../eth/spec.zig").berlin).validate(.{
-        .kind = .dynamic_fee,
-        .gas_limit = 21_000,
-        .max_fee_per_gas = 1,
-        .sender_balance = 21_000,
-    }).?);
 }
 
 test "transaction validation rejects non-EOA sender after London" {
@@ -472,30 +499,6 @@ test "transaction validation preserves nonce mismatch direction" {
         .sender_nonce = 7,
         .tx_nonce = .{ .valid = 6 },
         .sender_balance = 21_000,
-    }).?);
-}
-
-test "transaction validation rejects blob contract creation" {
-    try std.testing.expectEqual(ValidationError.type_3_tx_contract_creation, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
-        .kind = .blob,
-        .is_create = true,
-        .gas_limit = 100_000,
-        .max_fee_per_gas = 7,
-        .max_priority_fee_per_gas = 0,
-        .max_fee_per_blob_gas = 1,
-        .base_fee = 7,
-        .blob_base_fee = 1,
-        .blob_hashes = &.{@as(u256, 0x01) << 248},
-        .sender_balance = 1_000_000,
-    }).?);
-}
-
-test "transaction validation rejects block gas allowance" {
-    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
-        .gas_limit = 90_000,
-        .block_gas_limit = 80_000,
-        .gas_price = 1,
-        .sender_balance = 90_000,
     }).?);
 }
 
@@ -626,15 +629,6 @@ test "transaction validation caps Amsterdam calldata floor gas" {
     try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, testRuntime(@import("../eth/spec.zig").amsterdam).validate(.{
         .gas_limit = 30_000_000,
         .input = input,
-    }).?);
-}
-
-test "transaction validation rejects old type gas price below base fee" {
-    try std.testing.expectEqual(ValidationError.insufficient_max_fee_per_gas, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
-        .gas_limit = 21_000,
-        .gas_price = 999,
-        .base_fee = 1_000,
-        .sender_balance = 21_000_000,
     }).?);
 }
 

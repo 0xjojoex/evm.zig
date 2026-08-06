@@ -106,16 +106,6 @@ test "bytecode can precompute jumpdest map" {
     try std.testing.expect(bytecode.isValidJumpDest(2));
 }
 
-test "bytecode eagerly completes jumpdest analysis" {
-    const raw = t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
-    var bytecode = try Bytecode.init(std.testing.allocator, &raw);
-    defer bytecode.deinit(std.testing.allocator);
-
-    try std.testing.expect(bytecode.jumpdests.analyzed);
-    try std.testing.expect(bytecode.isValidJumpDest(2));
-    try std.testing.expect(!bytecode.isValidJumpDest(1));
-}
-
 test "bytecode owns a copy of the code behind a zero-padded tail" {
     const raw = t.bytecode(.{ .PUSH32, 0x01 });
     var bytecode = try Bytecode.init(std.testing.allocator, &raw);

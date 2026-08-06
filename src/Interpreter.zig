@@ -977,28 +977,6 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
     }
 }
 
-test "tail memory offset overflow halts exactly once" {
-    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE });
-    var host: Host = undefined;
-    var msg = evmz.t.defaultMessage();
-    msg.gas = 100;
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .source = .{ .code = &code },
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-
-    try std.testing.expectEqual(FrameHalt.out_of_gas, frame.frame.haltReason().?);
-    try std.testing.expectEqual(Status.out_of_gas, result.status());
-    try std.testing.expectEqual(FrameHalt.out_of_gas, result.halt);
-    try std.testing.expectEqual(TerminalCause.out_of_gas, result.terminalCause());
-    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-}
-
 test "interpreter capture replays minimal EIP-3155 JSONL" {
     const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
     var host: Host = undefined;

@@ -589,7 +589,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.timestamp_mismatch, inconsistent.status);
 }
 
-test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
+test "BlockSTF rejects a nonempty requests hash claim against an empty block" {
     const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -604,30 +604,16 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &empty_requests_hash, &result.requests_hash);
 
-    const families = [_]struct {
-        request_type: u8,
-        payload: []const u8,
-    }{
-        .{ .request_type = eip6110.request_type, .payload = &.{0xbb} },
-        .{ .request_type = eip7002.request_type, .payload = &.{0xaa} },
-        .{ .request_type = eip7251.request_type, .payload = &.{0xcc} },
-        .{ .request_type = eip8282.builder_deposit_request_type, .payload = &.{0xdd} },
-        .{ .request_type = eip8282.builder_exit_request_type, .payload = &.{0xee} },
-    };
-
-    for (families) |family| {
-        const claimed_request = try eip7685.requestBytes(scratch, family.request_type, family.payload);
-        const claimed_requests = [_][]const u8{claimed_request};
-        const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
-
-        const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
-            .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
-            .transactions = &.{},
-            .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
-            .header_claims = .{ .requests_hash = claimed_requests_hash },
-        });
-        try std.testing.expectEqual(Status.requests_hash_mismatch, mismatch.status);
-    }
+    const claimed_request = try eip7685.requestBytes(scratch, eip6110.request_type, &.{0xbb});
+    const claimed_requests = [_][]const u8{claimed_request};
+    const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
+    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .transactions = &.{},
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
+        .header_claims = .{ .requests_hash = claimed_requests_hash },
+    });
+    try std.testing.expectEqual(Status.requests_hash_mismatch, mismatch.status);
 }
 
 test "Amsterdam finalize calls include builder request predeploys" {

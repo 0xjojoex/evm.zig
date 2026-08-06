@@ -121,6 +121,7 @@ test "BYTE with large offset pushes zero" {
 
 test "CLZ is only enabled from Osaka" {
     try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH1, 0x01, .CLZ }, .prague, .invalid);
+    try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH1, 0x01, .CLZ }, .osaka, .success);
 }
 
 test "CLZ treats zero as a value and counts leading zero bits in an EVM word" {

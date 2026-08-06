@@ -266,8 +266,8 @@ fn positiveGas(gas: i64) u64 {
 
 test "effective priority fee follows legacy and dynamic fee policy" {
     const eth = @import("../eth.zig");
-    const Berlin = exactEthereum(eth.berlin);
-    const London = exactEthereum(eth.london);
+    const Berlin = eth.berlin;
+    const London = eth.london;
 
     try std.testing.expectEqual(@as(u256, 7), runtime(Berlin).effectivePriorityFee(.{
         .gas_price = 7,
@@ -294,82 +294,179 @@ test "effective priority fee follows legacy and dynamic fee policy" {
     }));
 }
 
-test "effective priority fee uses exact spec base fee policy" {
+test "settlement cost vectors follow fork and exact-spec policies" {
     const eth = @import("../eth.zig");
-    const input = FeeInput{
-        .gas_price = 12,
-        .base_fee = 10,
-        .max_fee_per_gas = 20,
-        .max_priority_fee_per_gas = 3,
-    };
-
-    try std.testing.expectEqual(@as(u256, 12), runtime(eth.berlin).effectivePriorityFee(input));
-    try std.testing.expectEqual(@as(u256, 3), runtime(eth.london).effectivePriorityFee(input));
-}
-
-test "settlement costs cap gas refund by fork" {
-    const coinbase = address.addr(0xbeef);
-    const settlement = DefaultPlan{
+    const eth_tx = @import("../eth/transaction.zig");
+    const refund_plan = DefaultPlan{
         .gas_limit = 100,
         .intrinsic_gas = 20,
         .floor_gas = 0,
         .gas_price = 5,
         .priority_fee = 2,
-        .fee_recipient = coinbase,
+        .fee_recipient = address.addr(0xbeef),
     };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.london)).defaultCosts(settlement, .{
+    const refund_result = ExecutionGasResult{
         .gas_left = 40,
         .gas_refund = 100,
         .gas_reservoir = 0,
         .state_gas_spent = 0,
-    });
-
-    try std.testing.expectEqual(@as(u64, 48), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 48), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 52), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 260), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
-
-    const pre_london = try runtime(exactEthereum(eth.berlin)).defaultCosts(settlement, .{
-        .gas_left = 40,
-        .gas_refund = 100,
-        .gas_reservoir = 0,
-        .state_gas_spent = 0,
-    });
-    try std.testing.expectEqual(@as(u64, 30), pre_london.gas.used);
-    try std.testing.expectEqual(@as(u64, 70), pre_london.gas.refunded);
-}
-
-test "settlement costs use runtime gas accounting policy" {
-    const eth = @import("../eth.zig");
+    };
     const custom_spec = eth.amsterdam.extend(.{ .settlement = .{
         .gas_refund_cap_divisor = 4,
         .uses_state_gas_accounting = true,
         .applies_calldata_floor_to_block_regular_gas = false,
     } });
-    const settlement = DefaultPlan{
-        .gas_limit = 100,
-        .intrinsic_gas = 20,
-        .floor_gas = 30,
-        .gas_price = 5,
-        .priority_fee = 2,
-        .fee_recipient = address.addr(0xbeef),
-    };
-    const costs = try runtime(custom_spec).defaultCosts(settlement, .{
-        .gas_left = 20,
-        .gas_refund = 100,
-        .gas_reservoir = 30,
-        .state_gas_spent = 7,
-    });
-
-    try std.testing.expectEqual(@as(u64, 38), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 43), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 43), costs.gas.block.regular);
-    try std.testing.expectEqual(@as(u64, 7), costs.gas.block.state);
-    try std.testing.expectEqual(@as(u64, 62), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 310), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 76), costs.fee_payment);
+    inline for (.{
+        .{
+            .spec = eth.london,
+            .plan = refund_plan,
+            .result = refund_result,
+            .expected = DefaultCosts{
+                .gas = .{ .used = 48, .refunded = 52, .block = .{ .total = 48, .regular = 48 } },
+                .payer_refund = 260,
+                .fee_payment = 96,
+            },
+        },
+        .{
+            .spec = eth.berlin,
+            .plan = refund_plan,
+            .result = refund_result,
+            .expected = DefaultCosts{
+                .gas = .{ .used = 30, .refunded = 70, .block = .{ .total = 30, .regular = 30 } },
+                .payer_refund = 350,
+                .fee_payment = 60,
+            },
+        },
+        .{
+            .spec = custom_spec,
+            .plan = DefaultPlan{
+                .gas_limit = 100,
+                .intrinsic_gas = 20,
+                .floor_gas = 30,
+                .gas_price = 5,
+                .priority_fee = 2,
+                .fee_recipient = address.addr(0xbeef),
+            },
+            .result = ExecutionGasResult{
+                .gas_left = 20,
+                .gas_refund = 100,
+                .gas_reservoir = 30,
+                .state_gas_spent = 7,
+            },
+            .expected = DefaultCosts{
+                .gas = .{ .used = 38, .refunded = 62, .block = .{ .total = 43, .regular = 43, .state = 7 } },
+                .payer_refund = 310,
+                .fee_payment = 76,
+            },
+        },
+        .{
+            .spec = eth.prague,
+            .plan = DefaultPlan{
+                .gas_limit = 21_100,
+                .intrinsic_gas = 21_016,
+                .floor_gas = 21_040,
+                .gas_price = 7,
+                .priority_fee = 0,
+                .fee_recipient = address.addr(0xbeef),
+            },
+            .result = ExecutionGasResult{
+                .gas_left = 84,
+                .gas_refund = 20,
+                .gas_reservoir = 0,
+                .state_gas_spent = 0,
+            },
+            .expected = DefaultCosts{
+                .gas = .{ .used = 21_040, .refunded = 60, .block = .{ .total = 21_040, .regular = 21_040 } },
+                .payer_refund = 420,
+                .fee_payment = 0,
+            },
+        },
+        .{
+            .spec = eth.amsterdam,
+            .plan = DefaultPlan{
+                .gas_limit = 200,
+                .intrinsic_gas = 20,
+                .floor_gas = 30,
+                .gas_price = 5,
+                .priority_fee = 2,
+                .fee_recipient = address.addr(0xbeef),
+            },
+            .result = ExecutionGasResult{
+                .gas_left = 20,
+                .gas_refund = 0,
+                .gas_reservoir = 100,
+                .state_gas_spent = 70,
+            },
+            .expected = DefaultCosts{
+                .gas = .{ .used = 80, .refunded = 120, .block = .{ .total = 70, .regular = 30, .state = 70 } },
+                .payer_refund = 600,
+                .fee_payment = 160,
+            },
+        },
+        .{
+            .spec = eth.amsterdam,
+            .plan = refund_plan,
+            .result = refund_result,
+            .expected = DefaultCosts{
+                .gas = .{ .used = 48, .refunded = 52, .block = .{ .total = 60, .regular = 60 } },
+                .payer_refund = 260,
+                .fee_payment = 96,
+            },
+        },
+        .{
+            .spec = eth.amsterdam,
+            .plan = DefaultPlan{
+                .gas_limit = 120_000_000,
+                .intrinsic_gas = 21_000,
+                .floor_gas = 21_000,
+                .gas_price = 10,
+                .priority_fee = 3,
+                .fee_recipient = address.addr(0xbeef),
+            },
+            .result = ExecutionGasResult{
+                .gas_left = 0,
+                .gas_refund = 0,
+                .gas_reservoir = 120_000_000 - eth_tx.max_transaction_gas_limit,
+                .state_gas_spent = 0,
+            },
+            .expected = DefaultCosts{
+                .gas = .{
+                    .used = eth_tx.max_transaction_gas_limit,
+                    .refunded = 120_000_000 - eth_tx.max_transaction_gas_limit,
+                    .block = .{
+                        .total = eth_tx.max_transaction_gas_limit,
+                        .regular = eth_tx.max_transaction_gas_limit,
+                    },
+                },
+                .payer_refund = (120_000_000 - eth_tx.max_transaction_gas_limit) * 10,
+                .fee_payment = eth_tx.max_transaction_gas_limit * 3,
+            },
+        },
+        .{
+            .spec = eth.amsterdam,
+            .plan = DefaultPlan{
+                .gas_limit = 282_798,
+                .intrinsic_gas = 88_198,
+                .floor_gas = 282_776,
+                .gas_price = 10,
+                .priority_fee = 3,
+                .fee_recipient = address.addr(0xbeef),
+            },
+            .result = ExecutionGasResult{
+                .gas_left = 0,
+                .gas_refund = 0,
+                .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
+                .state_gas_spent = 0,
+            },
+            .expected = DefaultCosts{
+                .gas = .{ .used = 282_776, .refunded = 22, .block = .{ .total = 282_776, .regular = 282_776 } },
+                .payer_refund = 220,
+                .fee_payment = 848_328,
+            },
+        },
+    }) |case| {
+        try std.testing.expectEqualDeep(case.expected, try runtime(case.spec).defaultCosts(case.plan, case.result));
+    }
 }
 
 test "settlement policy selects calldata floor contribution to dimensional block gas" {
@@ -407,32 +504,6 @@ test "settlement policy selects calldata floor contribution to dimensional block
     try std.testing.expectEqual(@as(u64, 30), with_floor.gas.block.regular);
 }
 
-test "settlement costs enforce Prague calldata floor after refunds" {
-    // EIP-7623 charges the calldata floor after execution gas refunds.
-    const coinbase = address.addr(0xbeef);
-    const settlement = DefaultPlan{
-        .gas_limit = 21_100,
-        .intrinsic_gas = 21_016,
-        .floor_gas = 21_040,
-        .gas_price = 7,
-        .priority_fee = 0,
-        .fee_recipient = coinbase,
-    };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.prague)).defaultCosts(settlement, .{
-        .gas_left = 84,
-        .gas_refund = 0,
-        .gas_reservoir = 0,
-        .state_gas_spent = 0,
-    });
-
-    try std.testing.expectEqual(@as(u64, 21_040), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 21_040), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 60), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 420), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 0), costs.fee_payment);
-}
-
 test "Amsterdam block gas sums dimensions before selecting the header total" {
     const first = BlockGas.fromDimensions(100, 1);
     const second = BlockGas.fromDimensions(1, 100);
@@ -441,107 +512,4 @@ test "Amsterdam block gas sums dimensions before selecting the header total" {
     try std.testing.expectEqual(@as(u64, 101), combined.regular);
     try std.testing.expectEqual(@as(u64, 101), combined.state);
     try std.testing.expectEqual(@as(u64, 101), combined.total);
-}
-
-test "Amsterdam block gas keeps receipt floor and state-dominant header gas separate" {
-    const settlement = DefaultPlan{
-        .gas_limit = 200,
-        .intrinsic_gas = 20,
-        .floor_gas = 30,
-        .gas_price = 5,
-        .priority_fee = 2,
-        .fee_recipient = address.addr(0xbeef),
-    };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
-        .gas_left = 20,
-        .gas_refund = 0,
-        .gas_reservoir = 100,
-        .state_gas_spent = 70,
-    });
-
-    try std.testing.expectEqual(@as(u64, 80), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 30), costs.gas.block.regular);
-    try std.testing.expectEqual(@as(u64, 70), costs.gas.block.state);
-    try std.testing.expectEqual(@as(u64, 70), costs.gas.block.total);
-}
-
-test "Amsterdam block gas accounting excludes refunds" {
-    const settlement = DefaultPlan{
-        .gas_limit = 100,
-        .intrinsic_gas = 20,
-        .floor_gas = 0,
-        .gas_price = 5,
-        .priority_fee = 2,
-        .fee_recipient = address.addr(0xbeef),
-    };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
-        .gas_left = 40,
-        .gas_refund = 100,
-        .gas_reservoir = 0,
-        .state_gas_spent = 0,
-    });
-
-    try std.testing.expectEqual(@as(u64, 48), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 60), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 52), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 260), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 96), costs.fee_payment);
-}
-
-test "Amsterdam settlement charges capped regular gas for high-gas invalid tx" {
-    const eth_tx = @import("../eth/transaction.zig");
-    const settlement = DefaultPlan{
-        .gas_limit = 120_000_000,
-        .intrinsic_gas = 21_000,
-        .floor_gas = 21_000,
-        .gas_price = 10,
-        .priority_fee = 3,
-        .fee_recipient = address.addr(0xbeef),
-    };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
-        .gas_left = 0,
-        .gas_refund = 0,
-        .gas_reservoir = 120_000_000 - eth_tx.max_transaction_gas_limit,
-        .state_gas_spent = 0,
-    });
-
-    try std.testing.expectEqual(eth_tx.max_transaction_gas_limit, costs.gas.used);
-    try std.testing.expectEqual(eth_tx.max_transaction_gas_limit, costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 120_000_000 - eth_tx.max_transaction_gas_limit), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, (120_000_000 - eth_tx.max_transaction_gas_limit) * 10), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, eth_tx.max_transaction_gas_limit * 3), costs.fee_payment);
-}
-
-test "Amsterdam failed create refills state gas before floor charge" {
-    const eth_tx = @import("../eth/transaction.zig");
-    const settlement = DefaultPlan{
-        .gas_limit = 282_798,
-        .intrinsic_gas = 88_198,
-        .floor_gas = 282_776,
-        .gas_price = 10,
-        .priority_fee = 3,
-        .fee_recipient = address.addr(0xbeef),
-    };
-    const eth = @import("../eth.zig");
-    const costs = try runtime(exactEthereum(eth.amsterdam)).defaultCosts(settlement, .{
-        .gas_left = 0,
-        .gas_refund = 0,
-        .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
-        .state_gas_spent = 0,
-    });
-
-    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.used);
-    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.block.total);
-    try std.testing.expectEqual(@as(u64, 282_776), costs.gas.block.regular);
-    try std.testing.expectEqual(@as(u64, 0), costs.gas.block.state);
-    try std.testing.expectEqual(@as(u64, 22), costs.gas.refunded);
-    try std.testing.expectEqual(@as(u256, 220), costs.payer_refund);
-    try std.testing.expectEqual(@as(u256, 848_328), costs.fee_payment);
-}
-
-fn exactEthereum(comptime spec: ExactSpec) ExactSpec {
-    return spec;
 }

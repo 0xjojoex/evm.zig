@@ -7,6 +7,9 @@ const transaction_runtime = @import("../transaction/runtime.zig");
 test "execution resource plan and preparer have nominal root aliases" {
     try std.testing.expectEqual(evmz.execution_resources.Plan, evmz.ExecutionResourcePlan);
     try std.testing.expectEqual(evmz.execution_resources.Preparer, evmz.ExecutionResourcePreparer);
+}
+
+test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.StateReader, "prefetch"));
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
@@ -32,6 +35,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const other = evmz.addr(0xcccc);
+    const reverted = evmz.addr(0xdddd);
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -49,7 +53,14 @@ test "execution checkpoints stay inside one stable transaction scope" {
 
     var checkpoint = try executor.checkpoint();
     defer checkpoint.deinit();
+    try executor.warmAccount(reverted);
+    try executor.addBalance(reverted, 7);
     try checkpoint.restore();
+
+    try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
+    try std.testing.expect(executor.state.isAccountWarm(other));
+    try std.testing.expect(!executor.state.isAccountWarm(reverted));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(reverted));
 }
 
 test "beginMessageScope derives root identity context and raw warmth" {
@@ -122,11 +133,6 @@ test "beginMessageScope derives root identity context and raw warmth" {
     try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(!executor.state.isAccountWarm(coinbase));
     try std.testing.expect(!executor.state.isAccountWarm(recipient));
-}
-
-test "beginMessageScope closes scope when initial warming fails" {
-    // TrackedState resource limits are intentionally deferred.
-    return error.SkipZigTest;
 }
 
 test "execution checkpoint preserves family pre-scope writes" {

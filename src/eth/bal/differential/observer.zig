@@ -149,22 +149,59 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
             block_access_list_matched: bool,
             transaction_count: usize,
         };
+
+        comptime {
+            assertArtifactComparisonSchema(Artifacts, Comparison);
+        }
     };
 }
 
 fn comparisonStatus(candidate: anytype, canonical: anytype) Status {
-    const matched = candidate.gas_used == canonical.gas_used and
-        candidate.block_gas_used == canonical.block_gas_used and
-        candidate.block_state_gas_used == canonical.block_state_gas_used and
-        candidate.blob_gas_used == canonical.blob_gas_used and
-        std.mem.eql(u8, &candidate.receipts_root, &canonical.receipts_root) and
-        std.mem.eql(u8, &candidate.logs_bloom, &canonical.logs_bloom) and
-        std.mem.eql(u8, &candidate.requests_hash, &canonical.requests_hash) and
-        byteSlicesEqual(candidate.encoded_receipts, canonical.encoded_receipts) and
-        byteSlicesEqual(candidate.requests, canonical.requests) and
-        std.mem.eql(u8, candidate.encoded_block_access_list, canonical.encoded_block_access_list);
-    if (!matched) return .candidate_artifact_mismatch;
+    comptime assertArtifactComparisonSchema(@TypeOf(candidate), @TypeOf(canonical));
+    inline for (@typeInfo(@TypeOf(candidate)).@"struct".fields) |field| {
+        if (!artifactFieldMatches(
+            field.name,
+            @field(candidate, field.name),
+            @field(canonical, field.name),
+        )) return .candidate_artifact_mismatch;
+    }
     return if (canonical.block_access_list_matched) .matched else .candidate_matched;
+}
+
+fn assertArtifactComparisonSchema(comptime Candidate: type, comptime Canonical: type) void {
+    for (@typeInfo(Candidate).@"struct".fields) |field| {
+        if (!@hasField(Canonical, field.name)) {
+            @compileError("candidate artifact missing from comparison: " ++ field.name);
+        }
+    }
+    for (@typeInfo(Canonical).@"struct".fields) |field| {
+        if (!@hasField(Candidate, field.name) and !isComparisonMetadata(field.name)) {
+            @compileError("comparison field is neither an artifact nor metadata: " ++ field.name);
+        }
+    }
+}
+
+fn isComparisonMetadata(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "block_access_list_matched") or
+        std.mem.eql(u8, name, "transaction_count");
+}
+
+fn artifactFieldMatches(comptime name: []const u8, candidate: anytype, canonical: anytype) bool {
+    if (comptime std.mem.eql(u8, name, "encoded_receipts") or
+        std.mem.eql(u8, name, "requests"))
+    {
+        return byteSlicesEqual(candidate, canonical);
+    }
+    if (comptime std.mem.eql(u8, name, "receipts_root") or
+        std.mem.eql(u8, name, "logs_bloom") or
+        std.mem.eql(u8, name, "requests_hash"))
+    {
+        return std.mem.eql(u8, &candidate, &canonical);
+    }
+    if (comptime std.mem.eql(u8, name, "encoded_block_access_list")) {
+        return std.mem.eql(u8, candidate, canonical);
+    }
+    return candidate == canonical;
 }
 
 fn byteSlicesEqual(left: []const []const u8, right: []const []const u8) bool {

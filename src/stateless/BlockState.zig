@@ -2136,7 +2136,7 @@ test "observations survive nested revert while values warmth and dirty IDs rever
     try std.testing.expectEqual(@as(usize, 0), state.dirty_storage.items.len);
 }
 
-test "lifecycle candidates are compact and survive marker rollback" {
+test "dense lifecycle candidates are compact and survive marker rollback" {
     const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{
         .{ .address = address.addr(1) },

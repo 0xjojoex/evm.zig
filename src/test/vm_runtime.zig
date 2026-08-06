@@ -549,9 +549,10 @@ test "explicit backend commit persists then rebases the Executor overlay" {
 
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
     try std.testing.expectEqual(@as(u256, 0x2a), memory.getAccount(contract).?.getStorage(0));
+    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
-test "Executor discardChanges drops retained overlay without touching its reader" {
+test "Executor discardAccepted drops retained overlay without touching its reader" {
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
@@ -581,6 +582,7 @@ test "Executor discardChanges drops retained overlay without touching its reader
 }
 
 test "Amsterdam transaction reports gross block gas separately from receipt gas" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -591,12 +593,12 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try contract_account.storage.put(0, 1);
     try contract_account.setCode(&.{ 0x5f, 0x5f, 0x55, 0x00 });
 
-    var executor = Default.Executor.init(std.testing.allocator, .{
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
 
-    const result = try expectExecuted(try transact(Default, &executor, .{
+    const result = try expectExecuted(try transact(Amsterdam, &executor, .{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = .{
             .sender = sender,
@@ -889,11 +891,6 @@ test "Sequential systemCall updates embedded block gas and restores overflow" {
     const restored = block.progress();
     try std.testing.expectEqual(@as(u64, 5), restored.gas_used);
     try std.testing.expectEqual(@as(u64, 5), restored.block_gas.total);
-}
-
-test "system call finalization failure restores block state" {
-    // TrackedState resource limits are intentionally deferred.
-    return error.SkipZigTest;
 }
 
 test "Sequential includes each transaction before returning" {

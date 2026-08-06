@@ -594,7 +594,7 @@ test "SSZ Container infers embedded child schemas without allocation" {
     try std.testing.expectEqualDeep(value, try Parent.Ssz.decode(&encoded));
 }
 
-test "SSZ fixed Container decodes a sequence with one outer length check" {
+test "SSZ fixed Container decodes sequences and rejects invalid aggregate length" {
     const Item = struct {
         count: u16,
         active: bool,

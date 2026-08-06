@@ -44,5 +44,8 @@ test "delegation codec distinguishes valid, malformed, and unrelated code" {
     try std.testing.expectEqual(target, (try decodeDelegation(&code)).?);
     try std.testing.expectEqual(target, delegationTarget(&code).?);
     try std.testing.expectError(error.InvalidDelegationLength, decodeDelegation(code[0 .. code.len - 1]));
+    code[2] = 1;
+    try std.testing.expectError(error.UnsupportedDelegationVersion, decodeDelegation(&code));
+    try std.testing.expectEqual(@as(?Address, null), delegationTarget(&code));
     try std.testing.expectEqual(@as(?Address, null), try decodeDelegation(&.{ 0x60, 0x00 }));
 }

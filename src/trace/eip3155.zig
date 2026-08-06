@@ -293,7 +293,7 @@ test "EIP-3155 replay converts frame-local refunds to global refunds" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"depth\":2,\"returnData\":\"0x\",\"refund\":7") != null);
 }
 
-test "EIP-3155 replay writes versioned return data" {
+test "EIP-3155 replay selects return data version at each step" {
     var trace_tape = tape.TraceTape.initGrowable(std.testing.allocator);
     defer trace_tape.deinit();
     const mark = try trace_tape.begin(.{});
@@ -314,11 +314,35 @@ test "EIP-3155 replay writes versioned return data" {
         .memory_size = 0,
         .return_data = frame.initial_return_data,
     });
-    try trace_tape.finishStep(step, .{ .pc_next = 1, .gas_after = 8, .outcome = .success, .stack = &.{4} });
+    const next_return_data = try trace_tape.storeReturnData(&.{ 0xca, 0xfe });
+    try trace_tape.finishStep(step, .{
+        .pc_next = 1,
+        .gas_after = 8,
+        .outcome = .success,
+        .stack = &.{4},
+        .return_data = next_return_data,
+    });
+    const next_step = try trace_tape.appendStep(.{
+        .frame_id = 0,
+        .pc = 1,
+        .opcode = @intFromEnum(Opcode.RETURNDATASIZE),
+        .gas_before = 8,
+        .refund_before = 0,
+        .stack_len = 1,
+        .memory_size = 0,
+        .return_data = next_return_data,
+    });
+    try trace_tape.finishStep(next_step, .{
+        .pc_next = 2,
+        .gas_after = 6,
+        .outcome = .success,
+        .stack = &.{ 4, 2 },
+        .return_data = next_return_data,
+    });
     try trace_tape.finishFrame(frame, .{
         .outcome = .success,
         .memory_size = 0,
-        .return_data = frame.initial_return_data,
+        .return_data = next_return_data,
     });
     const span = try trace_tape.finish(mark);
     defer trace_tape.resolve(span) catch unreachable;
@@ -326,5 +350,8 @@ test "EIP-3155 replay writes versioned return data" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try writeSteps(&output.writer, span);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"returnData\":\"0xdeadbeef\"") != null);
+    const initial_index = std.mem.indexOf(u8, output.written(), "\"returnData\":\"0xdeadbeef\"");
+    const next_index = std.mem.indexOf(u8, output.written(), "\"returnData\":\"0xcafe\"");
+    try std.testing.expect(initial_index != null and next_index != null);
+    try std.testing.expect(initial_index.? < next_index.?);
 }

@@ -425,15 +425,11 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expect(!@hasField(EvmExecutionRequest, "authorization_list"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "settlement"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "checkpoint"));
-    try std.testing.expect(!@hasField(Call, "gas"));
-    try std.testing.expect(!@hasField(Call, "gas_reservoir"));
-    try std.testing.expect(!@hasField(Create, "gas"));
-    try std.testing.expect(!@hasField(Create, "gas_reservoir"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "access_list"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "authorization_list"));
 }
 
-test "message identity is independent from gas and preserves create2 salt" {
+test "message identity preserves create2 salt" {
     const sender = [_]u8{0x11} ** 20;
     const recipient = [_]u8{0x22} ** 20;
     const message = try Message.init(.{

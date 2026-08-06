@@ -637,7 +637,7 @@ test "finalization allocation failure preserves enclosing transaction" {
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(addr(1), 2));
 }
 
-test "lifecycle candidates are compact and survive marker rollback" {
+test "sparse lifecycle candidates are compact and survive marker rollback" {
     var state = TrackedState.init(std.testing.allocator);
     defer state.deinit();
 

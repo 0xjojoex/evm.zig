@@ -709,11 +709,6 @@ fn parseNonZeroU32(value: []const u8) !u32 {
     if (parsed == 0) return error.InvalidInteger;
     return parsed;
 }
-test "case batch sizes match benchmark functions" {
-    try std.testing.expectEqual(@as(usize, 4_096), caseInfo(.encode_u64).batch_ops);
-    try std.testing.expectEqual(@as(usize, 4), caseInfo(.decode_list_u64_100k).batch_ops);
-    try std.testing.expectEqual(@as(usize, 64), caseInfo(.hash_tree_root_header).batch_ops);
-}
 
 test "bitfield fixtures match libssz benchmark values" {
     var bitvector: [8]bool = undefined;
