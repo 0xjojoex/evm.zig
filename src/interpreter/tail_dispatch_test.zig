@@ -107,6 +107,7 @@ fn expectPreparedStatus(
     is_static: bool,
     expected_status: Interpreter.Status,
 ) !void {
+    if (comptime !evmz.t.forkEnabled(revision)) return error.SkipZigTest;
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -138,7 +139,7 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const Byzantium = evmz.Vm(evmz.eth.byzantium);
+    const Byzantium = evmz.t.Vm(.byzantium) orelse return error.SkipZigTest;
     var frame = try Byzantium.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -374,7 +375,7 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        const Homestead = evmz.Vm(evmz.eth.homestead);
+        const Homestead = evmz.t.Vm(.homestead) orelse return error.SkipZigTest;
         var frame = try Homestead.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .msg = &msg,

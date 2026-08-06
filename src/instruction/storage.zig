@@ -152,6 +152,7 @@ test "transient storage opcodes are only enabled from Cancun" {
 }
 
 test "SLOAD cold storage access gas comes from the exact spec" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     const spec = evmz.eth.frontier.extend(.{
         .storage = .{ .sload_cold_access_gas = .{ .replace = 11 } },
     });
@@ -181,6 +182,7 @@ test "SLOAD cold storage access gas comes from the exact spec" {
 }
 
 test "SSTORE gas and state gas come from the exact spec" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     const semantics = struct {
         fn sstoreAccessGas(_: AccountAccessStatus) ?i64 {
             return null;
@@ -238,7 +240,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Berlin = evmz.Vm(evmz.eth.berlin);
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -264,7 +266,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -293,7 +295,7 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -319,7 +321,7 @@ test "prepared SSTORE rejects static context before host access" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Osaka = evmz.Vm(evmz.eth.osaka);
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     var frame = try Osaka.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
@@ -345,7 +347,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Berlin = evmz.Vm(evmz.eth.berlin);
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,

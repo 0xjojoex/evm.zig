@@ -98,6 +98,7 @@ test "fork-dependent static gas follows legacy schedules" {
 }
 
 test "execute uses exact instruction availability" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     try expectOpcodeHalt(evmz.eth.frontier, .BASEFEE, .invalid_opcode);
 }
 
@@ -312,6 +313,7 @@ test "instruction boundary resolves EVM faults without throwing" {
 }
 
 test "static gas helper uses resolved rule gas" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();

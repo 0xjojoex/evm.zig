@@ -51,7 +51,10 @@ pub fn ValidatorWithOptions(
 /// Explicit tracked-state oracle for capture and differential diagnostics.
 pub fn TrackedValidator(comptime spec: Spec) type {
     requireAmsterdamSpec(spec);
-    return ValidatorType(block_stf.Bind(.amsterdam, Vm.Vm(spec)));
+    return ValidatorType(block_stf.Bind(
+        .amsterdam,
+        Vm.VmWithOptions(spec, .{ .step_capture = true }),
+    ));
 }
 
 fn requireAmsterdamSpec(comptime spec: Spec) void {

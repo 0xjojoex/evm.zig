@@ -3,7 +3,6 @@ const evmz = @import("../evm.zig");
 const cases = @import("call_fixture_cases.zig");
 const geth_projection = @import("geth_calltracer_projection.zig");
 
-const Default = evmz.Vm(evmz.eth.cancun).Executor;
 const MemoryAccount = evmz.state.MemoryAccount;
 
 const CaptureHarness = struct {
@@ -35,14 +34,31 @@ const CaptureHarness = struct {
 };
 
 test "curated call fixtures satisfy compact client-independent expectations" {
+    // The per-case fork gate resolves revisions from strings at comptime.
+    @setEvalBranchQuota(10_000);
+    var skipped_any = false;
     inline for (cases.all) |case| {
         errdefer std.log.err("call fixture failed: {s}", .{case.id});
-        try runCase(case);
+        if (comptime caseForkEnabled(case)) try runCase(case) else skipped_any = true;
     }
+    // Partial coverage reports as a skip so a narrowed fork set never reads
+    // as a full pass; ci's `all` lane runs every case.
+    if (skipped_any) return error.SkipZigTest;
+}
+
+// Comptime-only; matches field names directly because `std.meta.stringToEnum`
+// builds a comptime StaticStringMap too heavy for this eval scope.
+fn caseForkEnabled(comptime case: cases.Case) bool {
+    for (@typeInfo(evmz.eth.Revision).@"enum".fields) |field| {
+        if (std.mem.eql(u8, field.name, case.fork))
+            return evmz.t.forkEnabled(@field(evmz.eth.Revision, field.name));
+    }
+    // Unknown fork strings fall through to `runCase`, which reports them.
+    return true;
 }
 
 test "transaction validation rejection produces no call frame" {
-    const Cancun = evmz.Vm(evmz.eth.cancun);
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
 
@@ -97,6 +113,7 @@ test "transaction validation rejection produces no call frame" {
 }
 
 test "generated depth-limit tree and nested projection cross 1000 frames" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const recursive = evmz.addr(0x1000);
     const gas: u64 = @intCast(std.math.maxInt(i64));

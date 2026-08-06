@@ -231,6 +231,7 @@ pub fn selfbalance(frame: *CallFrame) !void {
 }
 
 test "BALANCE cold account access gas comes from the exact spec" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     const exact = comptime exact: {
         var result = evmz.eth.frontier.instruction;
         result.account_read_cold_access_gas = 7;
@@ -262,6 +263,7 @@ test "BALANCE cold account access gas comes from the exact spec" {
 }
 
 test "EXTCODESIZE account access gas comes from the exact spec" {
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     const exact = comptime exact: {
         var result = evmz.eth.frontier.instruction;
         result.code_account_cold_access_gas = 9;
@@ -294,6 +296,7 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
 }
 
 test "EXTCODECOPY writes directly and zero pads missing code bytes" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var target_code = [_]u8{ 0xaa, 0xbb, 0xcc };

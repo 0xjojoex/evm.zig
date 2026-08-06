@@ -865,10 +865,10 @@ test "slim exact STF rejects unavailable step capture" {
 
     try std.testing.expectError(
         error.StepCaptureUnavailable,
-        requireStepCaptureSupport(.{ .step_capture = false }, capture),
+        requireStepCaptureSupport(.{}, capture),
     );
-    try requireStepCaptureSupport(.{}, capture);
-    try requireStepCaptureSupport(.{ .step_capture = false }, null);
+    try requireStepCaptureSupport(.{ .step_capture = true }, capture);
+    try requireStepCaptureSupport(.{}, null);
 }
 
 /// Decode raw transaction envelopes once, then validate one block transition

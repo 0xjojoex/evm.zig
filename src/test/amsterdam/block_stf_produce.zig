@@ -907,6 +907,7 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
 }
 
 test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
+    if (comptime !evmz.t.forkEnabled(.prague)) return error.SkipZigTest;
     var outcome = try block_stf.Exact(.prague).produce(std.testing.allocator, .{
         .state_backend = try Backend.fromWitness(
             std.testing.allocator,

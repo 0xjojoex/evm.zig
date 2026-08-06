@@ -68,6 +68,7 @@ test "Env execution context derives opcode-visible gas limit from the environmen
 }
 
 test "exact VM closes the complete spec without revision state" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const Cancun = evmz.Vm(evmz.eth.cancun);
     const Context = Cancun.Context(Cancun.TransactInput);
     const Transition = Cancun.Transition(Cancun.TransactInput);
@@ -93,9 +94,9 @@ test "exact VM closes the complete spec without revision state" {
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
 }
 
-test "exact VM compile options can omit step capture" {
-    const Full = evmz.Vm(evmz.eth.amsterdam);
-    const Slim = evmz.VmWithOptions(evmz.eth.amsterdam, .{ .step_capture = false });
+test "exact VM compile options can opt into step capture" {
+    const Slim = evmz.Vm(evmz.eth.amsterdam);
+    const Full = evmz.VmWithOptions(evmz.eth.amsterdam, .{ .step_capture = true });
 
     comptime {
         std.debug.assert(Full != Slim);
@@ -108,6 +109,7 @@ test "exact VM compile options can omit step capture" {
 }
 
 test "Spec.extend creates a distinct exact VM from static values" {
+    if (comptime !evmz.t.forkEnabled(.london)) return error.SkipZigTest;
     const Strict = evmz.Vm(evmz.eth.london.extend(.{
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
         .call = .{ .base_gas = evmz.eth.london.call.base_gas + 5 },

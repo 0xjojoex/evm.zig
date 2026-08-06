@@ -138,7 +138,7 @@ pub const CaptureContext = capture_context.Context;
 /// Non-consensus capabilities selected when compiling an exact executor.
 pub const CompileOptions = struct {
     /// Include opcode-step capture and its traced dispatch table.
-    step_capture: bool = true,
+    step_capture: bool = false,
 };
 
 /// Compile one exact executor over a concrete state representation.

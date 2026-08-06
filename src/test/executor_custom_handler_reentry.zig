@@ -53,7 +53,7 @@ const reentrant_cancun = blk: {
     instruction.table[@intFromEnum(evmz.Opcode.ADD)].target = .{ .custom = ReentrantInstruction.Handler };
     break :blk evmz.eth.cancun.extend(.{ .instruction = instruction });
 };
-const ReentrantVm = evmz.Vm(reentrant_cancun);
+const ReentrantVm = evmz.VmWithOptions(reentrant_cancun, .{ .step_capture = true });
 
 test "custom instruction host reentry refreshes the parent stack after arena growth" {
     const sender = evmz.addr(0xaaaa);
