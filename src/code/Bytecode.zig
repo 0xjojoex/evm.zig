@@ -1,8 +1,8 @@
 //! Immutable, execution-ready bytecode artifact.
 //!
-//! Construction owns and pads the source bytes, classifies the action loop,
-//! and eagerly completes jumpdest analysis. Execution receives a borrowed
-//! `View`; mutation is limited to owner-side construction/teardown.
+//! Construction owns and pads the source bytes and eagerly completes
+//! jumpdest analysis. Execution receives a borrowed `View`; mutation is
+//! limited to owner-side construction/teardown.
 
 const std = @import("std");
 const JumpDestMap = @import("JumpDestMap.zig");
@@ -20,12 +20,10 @@ const empty_read_bytes: [zero_padding_len]u8 = @splat(0);
 pub const View = struct {
     bytes: []const u8,
     jumpdest_masks: [*]const usize,
-    needs_action_loop: bool,
 
     pub const empty = View{
         .bytes = empty_read_bytes[0..0],
         .jumpdest_masks = JumpDestMap.prepared_empty.bits.masks,
-        .needs_action_loop = false,
     };
 };
 
@@ -33,14 +31,12 @@ pub const View = struct {
 /// in the same allocation; see `readBytes`.
 bytes: []const u8,
 jumpdests: JumpDestMap,
-needs_action_loop: bool,
 
 /// The borrowed zero-length artifact, for callers that resolve code-less
 /// accounts without preparing. Never pass this to `deinit`.
 pub const empty = Bytecode{
     .bytes = empty_read_bytes[0..0],
     .jumpdests = .prepared_empty,
-    .needs_action_loop = false,
 };
 
 pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
@@ -52,10 +48,9 @@ pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Bytecode {
     var self = Bytecode{
         .bytes = read_bytes[0..bytes.len],
         .jumpdests = .empty,
-        .needs_action_loop = false,
     };
     errdefer self.deinit(allocator);
-    self.needs_action_loop = try self.jumpdests.analyzeAndClassifyActions(allocator, self.bytes);
+    try self.jumpdests.analyze(allocator, self.bytes);
 
     return self;
 }
@@ -71,7 +66,6 @@ pub fn view(self: *const Bytecode) View {
     return .{
         .bytes = self.bytes,
         .jumpdest_masks = self.jumpdests.bits.masks,
-        .needs_action_loop = self.needs_action_loop,
     };
 }
 
@@ -110,18 +104,6 @@ test "bytecode can precompute jumpdest map" {
     try std.testing.expect(bytecode.jumpdests.analyzed);
     try std.testing.expect(!bytecode.isValidJumpDest(1));
     try std.testing.expect(bytecode.isValidJumpDest(2));
-}
-
-test "bytecode caches action-loop classification while ignoring push data" {
-    const action_code = t.bytecode(.{ .PUSH1, .CALL, .STATICCALL });
-    var bytecode = try Bytecode.init(std.testing.allocator, &action_code);
-    defer bytecode.deinit(std.testing.allocator);
-    try std.testing.expect(bytecode.needs_action_loop);
-
-    const push_only = t.bytecode(.{ .PUSH1, .CALL, .STOP });
-    var data_bytecode = try Bytecode.init(std.testing.allocator, &push_only);
-    defer data_bytecode.deinit(std.testing.allocator);
-    try std.testing.expect(!data_bytecode.needs_action_loop);
 }
 
 test "bytecode eagerly completes jumpdest analysis" {

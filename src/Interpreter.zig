@@ -251,7 +251,6 @@ pub const CallFrame = struct {
     io: *frame_io.Slot = undefined,
     output_range: Memory.Range = .{},
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
-    needs_action_loop: bool = false,
 
     pub fn init(
         self: *CallFrame,
@@ -286,7 +285,6 @@ pub const CallFrame = struct {
         self.output_range = .{};
         self.jumpdest_masks = options.bytecode.jumpdest_masks;
         self.state = if (code.len == 0) .{ .halted = .success } else .running;
-        self.needs_action_loop = options.bytecode.needs_action_loop;
     }
 
     pub fn deinit(self: *CallFrame) void {

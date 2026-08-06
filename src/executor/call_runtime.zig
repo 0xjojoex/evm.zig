@@ -274,10 +274,7 @@ pub fn bind(comptime Executor: type) type {
                                 break :result try interpreter.executeCapturedUntilSuspended(context.currentFrame());
                             }
                         }
-                        if (call_frame.needs_action_loop) {
-                            break :result try interpreter.executeUntilSuspended();
-                        }
-                        break :result .{ .finished = try interpreter.execute() };
+                        break :result try interpreter.executeUntilSuspended();
                     };
                     switch (run_result) {
                         .suspended => |action| try self.dispatchSuspension(index, action),
