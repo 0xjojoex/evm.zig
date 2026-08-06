@@ -24,13 +24,29 @@ test "full root matches canonical string-key example" {
 }
 
 test "root sorts descriptors without copying key or value bytes" {
+    const low_key = [_]u8{0x11} ** 128;
+    const high_key = [_]u8{0xee} ** 128;
+    const low_value = [_]u8{0xaa} ** 128;
+    const high_value = [_]u8{0xbb} ** 128;
     const entries = [_]mpt.Entry{
-        .{ .key = "horse", .value = "stallion" },
-        .{ .key = "doge", .value = "coin" },
-        .{ .key = "do", .value = "verb" },
-        .{ .key = "dog", .value = "puppy" },
+        .{ .key = &high_key, .value = &high_value },
+        .{ .key = &low_key, .value = &low_value },
     };
-    try expectHex(&(try mpt.init(std.testing.allocator).root(&entries)), "5991bb8c6514148a29db676a14ac506cd2cd5775ace63c30a4fe457715e9ac84");
+    const sorted = [_]mpt.Entry{
+        .{ .key = &low_key, .value = &low_value },
+        .{ .key = &high_key, .value = &high_value },
+    };
+    const trie = mpt.init(std.testing.allocator);
+    const expected = try trie.rootSorted(&sorted);
+
+    const needed = try mpt.rootWorkspaceSize(&entries, true);
+    const buffer = try std.testing.allocator.alloc(u8, needed);
+    defer std.testing.allocator.free(buffer);
+    var workspace = mpt.Workspace.init(buffer);
+    const actual = try trie.rootWithWorkspace(&workspace, &entries);
+
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+    try std.testing.expect(needed - workspace.peak_used_bytes < low_key.len);
 }
 
 test "reported root workspace bound is sufficient for byte-aligned storage" {
@@ -49,7 +65,7 @@ test "reported root workspace bound is sufficient for byte-aligned storage" {
     try std.testing.expect(workspace.peak_used_bytes <= needed);
 }
 
-test "full root handles prefix keys and embedded children" {
+test "full root handles divergent first nibbles and embedded children" {
     const entries = [_]mpt.Entry{
         .{ .key = &[_]u8{0x0f}, .value = "dog" },
         .{ .key = &[_]u8{0x80}, .value = "cat" },
@@ -115,22 +131,25 @@ test "indexed proof lookup authenticates presence and absence without allocation
         0x80, 0x80, 0x80,
         0x80, 0x80, 0x80,
     };
-    const trie = mpt.init(std.testing.allocator);
+    const indexing_trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try indexing_trie.indexNodes(&encoded_nodes);
     defer indexed.deinit();
     try std.testing.expect(indexed.allocationBytes() > 0);
     const index = indexed.index();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    const found = try trie.lookup(root_hash, index, &[_]u8{0x10});
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    const lookup_trie = mpt.init(fixed.allocator());
+    const found = try lookup_trie.lookup(root_hash, index, &[_]u8{0x10});
     switch (found) {
         .present => |value| try std.testing.expectEqualSlices(u8, &[_]u8{0x01}, value),
         .absent => return error.ExpectedPresent,
     }
-    try expectAbsence(.missing_branch_child, try trie.lookup(root_hash, index, &[_]u8{0x11}));
-    try expectAbsence(.divergent_path, try trie.lookup(root_hash, index, &[_]u8{0x20}));
-    try expectAbsence(.empty_trie, try trie.lookup(mpt.empty_root, index, "anything"));
+    try expectAbsence(.missing_branch_child, try lookup_trie.lookup(root_hash, index, &[_]u8{0x11}));
+    try expectAbsence(.divergent_path, try lookup_trie.lookup(root_hash, index, &[_]u8{0x20}));
+    try expectAbsence(.empty_trie, try lookup_trie.lookup(mpt.empty_root, index, "anything"));
 }
 
 test "decoded proof cache preserves lookup and canonicality results" {
@@ -199,10 +218,9 @@ test "node index hashes once, deduplicates, and rejects conflicts" {
     try std.testing.expectError(error.ConflictingNode, constant_trie.indexNodes(&conflicting));
 }
 
-test "raw witness mappings are not a public lookup capability" {
-    try std.testing.expect(!@hasDecl(mpt, "NodeBag"));
-    try std.testing.expect(!@hasDecl(mpt, "NodeRecord"));
-    try std.testing.expect(!@hasDecl(mpt, "NodeIndexStorage"));
+test "authenticated witness index capabilities are opaque" {
+    try std.testing.expect(@typeInfo(mpt.NodeIndex) == .@"opaque");
+    try std.testing.expect(@typeInfo(mpt.IndexedNodes) == .@"opaque");
 }
 
 test "proof lookup distinguishes missing witness from malformed topology" {

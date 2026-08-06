@@ -165,6 +165,7 @@ test "Amsterdam prepare skips sender code read for canonical empty code hash" {
 }
 
 test "prepare accepts delegation-shaped sender code only after EIP-7702 activates" {
+    if (comptime !(evmz.t.forkEnabled(.cancun) and evmz.t.forkEnabled(.prague))) return error.SkipZigTest;
     var delegation_code: [evmz.eth.eip7702.delegation_code_len]u8 = undefined;
     evmz.eip7702.writeDelegationCode(&delegation_code, evmz.addr(0xdddd));
 

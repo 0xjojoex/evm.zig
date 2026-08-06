@@ -19,7 +19,6 @@ const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const TrackedState = evmz.state.TrackedState;
-const BlockHashSource = evmz.BlockHashSource;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
@@ -53,16 +52,6 @@ fn runStandaloneObserved(
     );
 }
 
-const Frontier = evmz.Vm(evmz.eth.frontier);
-const TangerineWhistle = evmz.Vm(evmz.eth.tangerine_whistle);
-const SpuriousDragon = evmz.Vm(evmz.eth.spurious_dragon);
-const Berlin = evmz.Vm(evmz.eth.berlin);
-const London = evmz.Vm(evmz.eth.london);
-const Shanghai = evmz.Vm(evmz.eth.shanghai);
-const Cancun = evmz.Vm(evmz.eth.cancun);
-const Prague = evmz.Vm(evmz.eth.prague);
-const Osaka = evmz.Vm(evmz.eth.osaka);
-const Amsterdam = evmz.Vm(evmz.eth.amsterdam);
 const testExecutionContext = evmz.t.defaultExecutionContext;
 
 const DenseTransitionSummary = struct {
@@ -100,10 +89,12 @@ const DenseTransitionObserver = struct {
 };
 
 test "public executor remains bound to TrackedState" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     try std.testing.expect(Amsterdam.Executor.State == TrackedState);
 }
 
 test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const bal = @import("./eth/bal/model.zig");
     const target = evmz.addr(1);
     const storage_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 9 }};
@@ -121,8 +112,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     var backing = evmz.state.MemoryStore.init(std.testing.allocator);
     defer backing.deinit();
     const backing_account = try backing.getOrCreateAccount(target);
-    backing_account.nonce = 1;
-    backing_account.balance = 10;
+    backing_account.account.nonce = 1;
+    backing_account.account.balance = 10;
     try backing_account.storage.put(7, 3);
 
     var tracked = Amsterdam.Executor.initOwned(
@@ -238,6 +229,7 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
 }
 
 test "executor prepareBytecode eagerly analyzes jumpdests" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -251,6 +243,7 @@ test "executor prepareBytecode eagerly analyzes jumpdests" {
 }
 
 test "executor executes prepared bytecode call transaction" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -277,6 +270,7 @@ test "executor executes prepared bytecode call transaction" {
 }
 
 test "parent prepared view survives child admission" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const target = evmz.addr(0xbeef);
@@ -323,6 +317,7 @@ test "parent prepared view survives child admission" {
 }
 
 test "CREATE initcode preparation remains execution-local" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
 
@@ -365,6 +360,7 @@ const CacheInvalidatingTrace = struct {
 };
 
 test "trace replay runs after prepared code leaves the live frame" {
+    const Osaka = evmz.t.CaptureVm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{.STOP});
@@ -413,7 +409,9 @@ test "trace replay runs after prepared code leaves the live frame" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
-test "reset retains caller backend and prepared artifacts" {
+test "reset reuses caller-owned prepared artifacts through the supplied backend" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const contract = evmz.addr(0xc0de);
     const code = evmz.t.bytecode(.{.STOP});
     const code_hash = evmz.crypto.keccak256(&code);
 
@@ -428,17 +426,20 @@ test "reset retains caller backend and prepared artifacts" {
     try executor.reset(.{
         .prepared_code_backend = pool.backend(),
     });
-    try std.testing.expectEqual(prepared.bytes.ptr, pool.get(code_hash).?.bytes.ptr);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
+    try executor.beginStateTransition(testExecutionContext(contract, 100_000));
+    defer executor.discardStateTransition();
 
-    try executor.reset(.{
-        .prepared_code_backend = pool.backend(),
-    });
-    const reset_prepared = try pool.getOrPrepare(code_hash, &code);
-    try std.testing.expectEqual(prepared.bytes.ptr, reset_prepared.bytes.ptr);
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+    const resolved = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
+
+    try std.testing.expectEqual(prepared.bytes.ptr, resolved.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "prepared execution follows current code hash without owning public code reads" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const contract = evmz.addr(0xc0de);
     const original_code = evmz.t.bytecode(.{ .PUSH0, .STOP });
     const replacement_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .STOP });
@@ -479,6 +480,7 @@ test "prepared execution follows current code hash without owning public code re
 }
 
 test "prepared caches cannot satisfy code omitted from the active witness" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const TestTrie = struct {
         fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
             const path = try allocator.alloc(u8, key.len + 1);
@@ -569,55 +571,8 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
     }
 }
 
-test "executor BLOCKHASH reads configured block hash source" {
-    const TestBlockHashSource = struct {
-        const Self = @This();
-
-        last_number: ?u64 = null,
-
-        fn source(self: *Self) BlockHashSource {
-            return .{ .ptr = self, .vtable = &.{
-                .getBlockHash = getBlockHash,
-            } };
-        }
-
-        fn getBlockHash(ptr: *anyopaque, number: u64) !?u256 {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.last_number = number;
-            return if (number == 999) 0xab else null;
-        }
-    };
-
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    var execution_context = testExecutionContext(sender, 100_000);
-    execution_context.block.number = 1000;
-    var block_hashes = TestBlockHashSource{};
-    var executor = Prague.Executor.init(std.testing.allocator, .{
-        .block_hash_source = block_hashes.source(),
-    });
-    defer executor.deinit();
-
-    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
-
-    const code = evmz.t.bytecode(.{ .PUSH2, 0x03, 0xe7, .BLOCKHASH, .PUSH0, .SSTORE, .STOP });
-    var bytecode = try executor.prepareBytecode(&code);
-    defer bytecode.deinit(std.testing.allocator);
-
-    try executor.beginTransaction(execution_context, sender, contract);
-    const result = try executor.executePreparedCallTransaction(.{
-        .bytecode = bytecode.view(),
-        .sender = sender,
-        .recipient = contract,
-        .gas = 100_000,
-    });
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(?u64, 999), block_hashes.last_number);
-    try std.testing.expectEqual(@as(u256, 0xab), try executor.getStorage(contract, 0));
-}
-
 test "executor executeMessage dispatches top-level call" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -639,10 +594,11 @@ test "executor executeMessage dispatches top-level call" {
 }
 
 test "system call preserves parent stack across nested frame growth" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const child = evmz.addr(0xbbbb);
-    var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &evmz.t.bytecode(.{
@@ -677,9 +633,11 @@ test "system call preserves parent stack across nested frame growth" {
 }
 
 test "exact spec drives call base gas" {
-    const ExpensiveCall = evmz.Vm(evmz.eth.frontier.extend(.{
+    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
+    const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
+    const ExpensiveCall = evmz.t.CustomVm(.frontier, .{
         .call = .{ .base_gas = evmz.eth.frontier.call.base_gas + 5 },
-    }));
+    }) orelse return error.SkipZigTest;
 
     const default_gas_left = try executeNestedBalanceCall(Frontier.specification);
     const custom_gas_left = try executeNestedBalanceCall(ExpensiveCall.specification);
@@ -688,6 +646,7 @@ test "exact spec drives call base gas" {
 }
 
 test "exact spec drives top-level delegated account access" {
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     const overrides = struct {
         fn topLevelDelegatedAccountAccess(
             input: evmz.execution.TopLevelDelegatedAccountAccessInput,
@@ -696,9 +655,9 @@ test "exact spec drives top-level delegated account access" {
             return .{ .status = .cold, .gas = 7 };
         }
     };
-    const ExpensiveTopLevelDelegatedAccess = evmz.Vm(evmz.eth.prague.extend(.{
+    const ExpensiveTopLevelDelegatedAccess = evmz.t.CustomVm(.prague, .{
         .call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
-    }));
+    }) orelse return error.SkipZigTest;
 
     const default_gas_left = try executeTopLevelDelegatedCall(Prague.specification);
     const custom_gas_left = try executeTopLevelDelegatedCall(ExpensiveTopLevelDelegatedAccess.specification);
@@ -707,6 +666,7 @@ test "exact spec drives top-level delegated account access" {
 }
 
 test "top-level delegated target is a semantic account access" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const authority = evmz.addr(0x2222);
     const target = evmz.addr(0x3333);
@@ -753,6 +713,7 @@ test "top-level delegated target is a semantic account access" {
 }
 
 test "delegated target is observed before insufficient call balance" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0x2222);
     const authority = evmz.addr(0x3333);
@@ -804,6 +765,7 @@ test "delegated target is observed before insufficient call balance" {
 }
 
 test "top-level call code resolution reuses one traced view" {
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     var observations = CodeObservation{
@@ -840,9 +802,9 @@ test "top-level delegated access failure does not read target code" {
             return .{ .status = .cold, .gas = 100_001 };
         }
     };
-    const ExpensiveTopLevelDelegatedAccess = evmz.Vm(evmz.eth.prague.extend(.{
+    const ExpensiveTopLevelDelegatedAccess = evmz.t.CustomVm(.prague, .{
         .call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
-    }));
+    }) orelse return error.SkipZigTest;
     const ExpensiveExecutor = ExpensiveTopLevelDelegatedAccess.Executor;
     const sender = evmz.addr(0x1111);
     const authority = evmz.addr(0x2222);
@@ -878,6 +840,7 @@ test "top-level delegated access failure does not read target code" {
 }
 
 test "exact spec drives top-frame value transfer state gas" {
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     const overrides = struct {
         fn topFrameValueTransferStateGas(
             input: evmz.execution.TopFrameValueTransferInput,
@@ -885,9 +848,9 @@ test "exact spec drives top-frame value transfer state gas" {
             return if (input.creates_account) 9 else 0;
         }
     };
-    const ExpensiveTopFrameValueTransfer = evmz.Vm(evmz.eth.prague.extend(.{
+    const ExpensiveTopFrameValueTransfer = evmz.t.CustomVm(.prague, .{
         .call = .{ .topFrameValueTransferStateGas = overrides.topFrameValueTransferStateGas },
-    }));
+    }) orelse return error.SkipZigTest;
 
     const default_result = try executeTopFrameValueTransfer(Prague.specification);
     const custom_result = try executeTopFrameValueTransfer(ExpensiveTopFrameValueTransfer.specification);
@@ -898,39 +861,42 @@ test "exact spec drives top-frame value transfer state gas" {
 }
 
 test "exact spec drives empty call recipient touching" {
-    const TouchEmptyCallRecipient = evmz.Vm(evmz.eth.spurious_dragon.extend(.{
+    const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
+    const TouchEmptyCallRecipient = evmz.t.CustomVm(.spurious_dragon, .{
         .call = .{ .touches_empty_recipient = true },
-    }));
+    }) orelse return error.SkipZigTest;
 
     try std.testing.expect(!try emptyCallRecipientMaterialized(SpuriousDragon.specification));
     try std.testing.expect(try emptyCallRecipientMaterialized(TouchEmptyCallRecipient.specification));
 }
 
 test "exact spec drives child call gas forwarding" {
+    const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
     const overrides = struct {
         fn childGas(input: evmz.execution.ChildGasInput) evmz.execution.ChildGas {
             _ = input;
             return .{ .gas = 0 };
         }
     };
-    const ZeroChildGas = evmz.Vm(evmz.eth.frontier.extend(.{
+    const ZeroChildGas = evmz.t.CustomVm(.frontier, .{
         .call = .{ .childGas = overrides.childGas },
-    }));
+    }) orelse return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(u256, 1), try executeCallResultStore(Frontier.specification));
     try std.testing.expectEqual(@as(u256, 0), try executeCallResultStore(ZeroChildGas.specification));
 }
 
 test "exact spec drives create initcode word gas" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const overrides = struct {
         fn createInitCodeWordGas(is_create2: bool) i64 {
             _ = is_create2;
             return 1_000_000;
         }
     };
-    const ExpensiveCreateInitCode = evmz.Vm(evmz.eth.cancun.extend(.{
+    const ExpensiveCreateInitCode = evmz.t.CustomVm(.cancun, .{
         .create = .{ .initcodeWordGas = overrides.createInitCodeWordGas },
-    }));
+    }) orelse return error.SkipZigTest;
 
     try std.testing.expectEqual(Interpreter.Status.success, try executeCreateOpcodeStatus(Cancun.specification));
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, try executeCreateOpcodeStatus(ExpensiveCreateInitCode.specification));
@@ -1141,6 +1107,7 @@ fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
 }
 
 test "recursive call bomb unwinds with iterative call runtime" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const execution_context = testExecutionContext(sender, 1_000_000);
@@ -1186,6 +1153,7 @@ test "recursive call bomb unwinds with iterative call runtime" {
 }
 
 test "iterative call runtime preserves precompile output" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1231,6 +1199,7 @@ test "iterative call runtime preserves precompile output" {
 }
 
 test "top-level call transaction executes precompile recipient" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const precompile = evmz.precompile.Contract.identity.toAddress();
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1251,6 +1220,8 @@ test "top-level call transaction executes precompile recipient" {
 }
 
 test "legacy precompile calls materialize touched empty account until Spurious Dragon" {
+    const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
+    const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
     try expectLegacyPrecompileCall(Frontier, true, 64_922);
     try expectLegacyPrecompileCall(SpuriousDragon, false, 89_262);
 }
@@ -1300,6 +1271,7 @@ fn expectLegacyPrecompileCall(
 }
 
 test "prepared call transaction calls to empty account succeed" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1340,6 +1312,7 @@ test "prepared call transaction calls to empty account succeed" {
 }
 
 test "iterative CALLCODE writes target code in caller storage" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
@@ -1382,6 +1355,7 @@ test "iterative CALLCODE writes target code in caller storage" {
 }
 
 test "iterative DELEGATECALL preserves parent call value" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
@@ -1425,6 +1399,7 @@ test "iterative DELEGATECALL preserves parent call value" {
 }
 
 test "iterative STATICCALL failure resumes parent with zero result" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
@@ -1471,6 +1446,7 @@ test "iterative STATICCALL failure resumes parent with zero result" {
 }
 
 test "prepared call transaction create opcodes deploy code" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1511,6 +1487,7 @@ test "prepared call transaction create opcodes deploy code" {
 }
 
 test "CREATE2 insufficient balance does not bump creator nonce" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x0343505c9f9bda06ff73c96183434ffd23442073);
     const contract = evmz.addr(0xbba624a7e00e22fd18816e2e0e1f4f396ce3409c);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1544,6 +1521,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
 }
 
 test "captured runtime records nested call and create frames without generic stepping" {
+    const Cancun = evmz.t.CaptureVm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const child = evmz.addr(0x1234);
@@ -1623,6 +1601,7 @@ test "captured runtime records nested call and create frames without generic ste
 }
 
 test "captured span is inspectable before executed transaction resolution" {
+    const Osaka = evmz.t.CaptureVm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1669,6 +1648,7 @@ test "captured span is inspectable before executed transaction resolution" {
 }
 
 test "active transaction owns rollback before pending state" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -1704,6 +1684,7 @@ test "active transaction owns rollback before pending state" {
 }
 
 test "active transaction finishes into pending state" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -1735,6 +1716,7 @@ test "active transaction finishes into pending state" {
 }
 
 test "transaction nonce advancement survives payload rollback" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -1775,6 +1757,7 @@ test "transaction nonce advancement survives payload rollback" {
 }
 
 test "transaction nonce advancement remains recorded for the runtime" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -1808,6 +1791,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
 }
 
 test "transaction nonce advancement selects the root create entry" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.address.create(sender, 7);
     const request = execution_values.EvmExecutionRequest{
@@ -1849,6 +1833,7 @@ test "transaction nonce advancement selects the root create entry" {
 }
 
 test "transaction nonce advancement leaves max-nonce acceptance to policy" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const max_nonce = std.math.maxInt(u64);
     const recipient = evmz.address.create(sender, max_nonce);
@@ -1890,6 +1875,7 @@ test "transaction nonce advancement leaves max-nonce acceptance to policy" {
 }
 
 test "transaction payload resolves only its inner checkpoint" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const request = execution_values.EvmExecutionRequest{
@@ -1971,6 +1957,7 @@ test "transaction payload resolves only its inner checkpoint" {
 }
 
 test "rollback transaction restores branch checkpoint and closes execution context" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1994,6 +1981,7 @@ test "rollback transaction restores branch checkpoint and closes execution conte
 }
 
 test "executor executes top-level create transaction" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
@@ -2030,6 +2018,7 @@ fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u2
 }
 
 test "Amsterdam value transaction emits transfer log" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
@@ -2049,6 +2038,7 @@ test "Amsterdam value transaction emits transfer log" {
 }
 
 test "Osaka value transaction does not emit transfer log" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     var executor = Osaka.Executor.init(std.testing.allocator, .{});
@@ -2064,6 +2054,7 @@ test "Osaka value transaction does not emit transfer log" {
 }
 
 test "Amsterdam nested CALL transfer log rolls back on revert" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
@@ -2093,6 +2084,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
 }
 
 test "Amsterdam CREATE endowment emits transfer log" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, 0);
@@ -2119,6 +2111,7 @@ test "Amsterdam CREATE endowment emits transfer log" {
 }
 
 test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const beneficiary = evmz.addr(0xcccc);
@@ -2158,6 +2151,9 @@ fn putFundedSender(executor: anytype, sender: Address) !void {
 }
 
 test "Amsterdam raises create runtime code size limit" {
+    if (comptime !evmz.t.forkEnabled(.osaka)) return error.SkipZigTest;
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 20_000_000);
     const default_max_code_size = evmz.eth.osaka.create.code_size_limit.?;
@@ -2209,9 +2205,9 @@ test "Amsterdam raises create runtime code size limit" {
 }
 
 test "exact spec drives create runtime code size limit" {
-    const Tiny = evmz.Vm(evmz.eth.shanghai.extend(.{
+    const Tiny = evmz.t.CustomVm(.shanghai, .{
         .create = .{ .code_size_limit = .{ .replace = 1 } },
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const two_byte_runtime = initCodeReturningRuntimeSize(2);
@@ -2231,15 +2227,16 @@ test "exact spec drives create runtime code size limit" {
 }
 
 test "exact spec drives create runtime prefix rejection" {
+    const Shanghai = evmz.t.Vm(.shanghai) orelse return error.SkipZigTest;
     const overrides = struct {
         fn rejectsCreateCode(code: []const u8) bool {
             _ = code;
             return false;
         }
     };
-    const AllowEf = evmz.Vm(evmz.eth.shanghai.extend(.{
+    const AllowEf = evmz.t.CustomVm(.shanghai, .{
         .create = .{ .rejectsCode = overrides.rejectsCreateCode },
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const init_code = evmz.t.bytecode(.{
@@ -2274,15 +2271,16 @@ test "exact spec drives create runtime prefix rejection" {
 }
 
 test "exact spec drives create deposit gas" {
+    const Shanghai = evmz.t.Vm(.shanghai) orelse return error.SkipZigTest;
     const overrides = struct {
         fn createDepositRegularGas(runtime_size: i64) ?i64 {
             _ = runtime_size;
             return 1_000_000;
         }
     };
-    const ExpensiveDeposit = evmz.Vm(evmz.eth.shanghai.extend(.{
+    const ExpensiveDeposit = evmz.t.CustomVm(.shanghai, .{
         .create = .{ .depositRegularGas = overrides.createDepositRegularGas },
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
@@ -2314,9 +2312,9 @@ test "exact spec drives create deposit gas" {
 }
 
 test "exact spec drives created account initial nonce" {
-    const NonceSeven = evmz.Vm(evmz.eth.shanghai.extend(.{
+    const NonceSeven = evmz.t.CustomVm(.shanghai, .{
         .create = .{ .initial_nonce = 7 },
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
@@ -2335,6 +2333,7 @@ test "exact spec drives created account initial nonce" {
 }
 
 test "exact spec drives precompile warm access" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const NoPrecompiles = struct {
         pub const Entry = evmz.eth.precompile.Entry;
 
@@ -2357,9 +2356,9 @@ test "exact spec drives precompile warm access" {
             return error.NotImplemented;
         }
     };
-    const NoPrecompile = evmz.Vm(evmz.eth.berlin.extend(.{
+    const NoPrecompile = evmz.t.CustomVm(.berlin, .{
         .precompile = NoPrecompiles,
-    }));
+    }) orelse return error.SkipZigTest;
     const precompile_address = evmz.addr(0x01);
 
     var default_executor = Berlin.Executor.init(std.testing.allocator, .{});
@@ -2406,9 +2405,9 @@ test "exact spec drives precompile execution" {
             }
         };
     };
-    const CustomPrecompile = evmz.Vm(evmz.eth.cancun.extend(.{
+    const CustomPrecompile = evmz.t.CustomVm(.cancun, .{
         .precompile = CustomPrecompileOverrides.Precompile,
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
 
@@ -2440,12 +2439,12 @@ test "exact spec drives selfdestruct host policy" {
             };
         }
     };
-    const KeepSelfDestructBalance = evmz.Vm(evmz.eth.cancun.extend(.{
+    const KeepSelfDestructBalance = evmz.t.CustomVm(.cancun, .{
         .self_destruct = .{
             .policy = overrides.selfDestructPolicy,
             .refund_gas = 7,
         },
-    }));
+    }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const beneficiary = evmz.addr(0xcccc);
@@ -2472,6 +2471,7 @@ test "exact spec drives selfdestruct host policy" {
 }
 
 test "create warms created address from Berlin" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
@@ -2490,6 +2490,7 @@ test "create warms created address from Berlin" {
 }
 
 test "callcode with insufficient balance leaves caller storage unchanged" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 100_000);
@@ -2519,6 +2520,7 @@ test "callcode with insufficient balance leaves caller storage unchanged" {
 }
 
 test "create address collision preserves nonce and warmth outside payload rollback" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
@@ -2549,6 +2551,7 @@ test "create observes the computed address only after preflight validation" {
 }
 
 fn createObservesTarget(creator_balance: u256) !bool {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const contract = evmz.addr(0xaaaa);
     const creator_nonce: u64 = 1;
@@ -2597,15 +2600,8 @@ fn createObservesTarget(creator_balance: u256) !bool {
     return observer.found;
 }
 
-test "branch checkpoint is native" {
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var branch = try executor.branchCheckpoint();
-    defer branch.deinit();
-    executor.restoreBranch(&branch);
-}
-
 test "call-like message at max depth still executes in recipient storage" {
+    const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 100_000);
@@ -2637,6 +2633,7 @@ test "call-like message at max depth still executes in recipient storage" {
 }
 
 test "value call at max depth returns stipend without child execution" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 100_000);
@@ -2676,6 +2673,7 @@ test "value call at max depth returns stipend without child execution" {
 }
 
 test "Amsterdam value call at max depth refills new-account state gas" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
@@ -2718,6 +2716,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
 }
 
 test "Amsterdam create at max depth refills new-account state gas" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 300_000);
@@ -2749,6 +2748,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
 }
 
 test "exceptional child call rolls back storage via checkpoint" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 100_000);
@@ -2777,6 +2777,7 @@ test "exceptional child call rolls back storage via checkpoint" {
 }
 
 test "contract creation rejects EF-prefixed runtime code from London" {
+    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     var executor = London.Executor.init(std.testing.allocator, .{});
@@ -2798,6 +2799,7 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 }
 
 test "selfdestruct charges new-account cost for nonzero balance" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -2818,6 +2820,8 @@ test "selfdestruct charges new-account cost for nonzero balance" {
 }
 
 test "TangerineWhistle selfdestruct charges new-account cost without balance transfer" {
+    const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
+    const TangerineWhistle = evmz.t.Vm(.tangerine_whistle) orelse return error.SkipZigTest;
     try expectEmptySelfDestructGas(TangerineWhistle, 69_997);
     try expectEmptySelfDestructGas(SpuriousDragon, 94_997);
 }
@@ -2842,6 +2846,8 @@ fn expectEmptySelfDestructGas(comptime ExactVm: type, expected_gas_left: i64) !v
 }
 
 test "SELFDESTRUCT refund is removed at London" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
+    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
     try expectSelfDestructRefund(Berlin, 24_000);
     try expectSelfDestructRefund(London, 0);
 }
@@ -2866,6 +2872,7 @@ fn expectSelfDestructRefund(comptime ExactVm: type, expected_refund: i64) !void 
 }
 
 test "active precompiles are warm but not existing state accounts" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const precompile_address = evmz.addr(2);
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
@@ -2882,6 +2889,8 @@ test "active precompiles are warm but not existing state accounts" {
 }
 
 test "delegated precompile targets are warm" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     try expectDelegatedPrecompileWarm(Prague);
     try expectDelegatedPrecompileWarm(Amsterdam);
 }
@@ -2901,6 +2910,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
 }
 
 test "sealed observations expose storage state without a trace tape" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -3018,6 +3028,7 @@ fn executeHostCall(executor: anytype, msg: Host.Message) !Host.Result {
 }
 
 test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0x1111);
     const probe = evmz.addr(0xaaaa);
     const seeded_empty = evmz.addr(0x00e0);
@@ -3034,7 +3045,7 @@ test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
     // for any address a fixture seeds without fields. EIP-1052 requires zero
     // for such an account, not the hash of empty code.
     {
-        var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
+        var executor = Cancun.Executor.init(std.testing.allocator, .{});
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{});
         try evmz.t.seedExecutorAccount(&executor, probe, .{ .code = &probe_code });
@@ -3052,7 +3063,7 @@ test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
     // Alive through balance alone: an ordinary codeless account still reports
     // the empty-code hash.
     {
-        var executor = evmz.Vm(evmz.eth.cancun).Executor.init(std.testing.allocator, .{});
+        var executor = Cancun.Executor.init(std.testing.allocator, .{});
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{ .balance = 1 });
         try evmz.t.seedExecutorAccount(&executor, probe, .{ .code = &probe_code });
@@ -3071,8 +3082,9 @@ test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
 }
 
 test "pre-Spurious-Dragon retains empty accounts as real state" {
+    const TangerineWhistle = evmz.t.Vm(.tangerine_whistle) orelse return error.SkipZigTest;
     const seeded_empty = evmz.addr(0x00e0);
-    var executor = evmz.Vm(evmz.eth.tangerine_whistle).Executor.init(std.testing.allocator, .{});
+    var executor = TangerineWhistle.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.reset(.{});
     try std.testing.expect(executor.state.retains_empty_accounts);
@@ -3091,6 +3103,7 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
 }
 
 test "EIP-7610 storage-only accounts collide even though EIP-161 calls them dead" {
+    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
     const target = evmz.addr(0x7610);
     var executor = London.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();

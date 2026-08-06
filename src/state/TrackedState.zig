@@ -12,6 +12,7 @@ const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
 const Host = @import("../Host.zig");
+const range = @import("../range.zig");
 const Account = @import("./Account.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
 const StateReader = @import("./Reader.zig");
@@ -65,29 +66,12 @@ const StorageAccess = struct {
     status: Host.AccessStatus,
 };
 
-pub const ByteRange = struct {
-    offset: u32 = 0,
-    len: u32 = 0,
+pub const ByteRange = range.Bytes;
 
-    pub fn slice(self: ByteRange, bytes: []const u8) []const u8 {
-        const offset: usize = self.offset;
-        const len: usize = self.len;
-        std.debug.assert(offset + len <= bytes.len);
-        return bytes[offset..][0..len];
-    }
-};
-
-pub const TopicRange = struct {
-    offset: u32 = 0,
-    len: u8 = 0,
-
-    pub fn slice(self: TopicRange, topics: []const u256) []const u256 {
-        const offset: usize = self.offset;
-        const len: usize = self.len;
-        std.debug.assert(offset + len <= topics.len);
-        return topics[offset..][0..len];
-    }
-};
+/// Emitted logs and their borrowed projection are lane-independent; see
+/// `state/LogBuffer.zig`.
+pub const LogBuffer = @import("./LogBuffer.zig");
+pub const LogView = LogBuffer.View;
 
 allocator: std.mem.Allocator,
 reader: ?StateReader,
@@ -666,132 +650,6 @@ pub const ObservationsView = struct {
     }
 };
 
-pub const LogBuffer = struct {
-    rows: std.ArrayList(LogRow),
-    topics: std.ArrayList(u256),
-    data: std.ArrayList(u8),
-
-    pub const LogRow = struct {
-        address: Address,
-        topics: TopicRange,
-        data: ByteRange,
-    };
-
-    pub const Checkpoint = checkpoint_types.LogCheckpoint;
-
-    fn init() LogBuffer {
-        return .{ .rows = .empty, .topics = .empty, .data = .empty };
-    }
-
-    fn deinit(self: *LogBuffer, allocator: std.mem.Allocator) void {
-        self.rows.deinit(allocator);
-        self.topics.deinit(allocator);
-        self.data.deinit(allocator);
-        self.* = undefined;
-    }
-
-    fn clone(self: *const LogBuffer, allocator: std.mem.Allocator) !LogBuffer {
-        var result = LogBuffer.init();
-        errdefer result.deinit(allocator);
-        try result.rows.appendSlice(allocator, self.rows.items);
-        try result.topics.appendSlice(allocator, self.topics.items);
-        try result.data.appendSlice(allocator, self.data.items);
-        return result;
-    }
-
-    fn checkpoint(self: *const LogBuffer) LogBuffer.Checkpoint {
-        return .{
-            .rows_len = index32(self.rows.items.len),
-            .topics_len = index32(self.topics.items.len),
-            .data_len = index32(self.data.items.len),
-        };
-    }
-
-    fn truncate(self: *LogBuffer, checkpoint_state: LogBuffer.Checkpoint) void {
-        std.debug.assert(checkpoint_state.rows_len <= self.rows.items.len);
-        std.debug.assert(checkpoint_state.topics_len <= self.topics.items.len);
-        std.debug.assert(checkpoint_state.data_len <= self.data.items.len);
-        self.rows.items.len = checkpoint_state.rows_len;
-        self.topics.items.len = checkpoint_state.topics_len;
-        self.data.items.len = checkpoint_state.data_len;
-    }
-
-    fn clearRetainingCapacity(self: *LogBuffer) void {
-        self.truncate(.{ .rows_len = 0, .topics_len = 0, .data_len = 0 });
-    }
-
-    fn append(self: *LogBuffer, allocator: std.mem.Allocator, event_log: Host.Log) !void {
-        if (event_log.topics.len > 4) return error.TooManyLogTopics;
-        std.debug.assert(self.rows.items.len < std.math.maxInt(u32));
-        const topics = topicRange(self.topics.items.len, event_log.topics.len);
-        const data = byteRange(self.data.items.len, event_log.data.len);
-        try self.rows.ensureUnusedCapacity(allocator, 1);
-        try self.topics.ensureUnusedCapacity(allocator, event_log.topics.len);
-        try self.data.ensureUnusedCapacity(allocator, event_log.data.len);
-
-        self.topics.appendSliceAssumeCapacity(event_log.topics);
-        self.data.appendSliceAssumeCapacity(event_log.data);
-        self.rows.appendAssumeCapacity(.{
-            .address = event_log.address,
-            .topics = topics,
-            .data = data,
-        });
-    }
-};
-
-/// Borrowed arena projection. Retained logs remain readable until the next
-/// transaction begins; discard and explicit clearing invalidate them sooner.
-pub const LogView = union(enum) {
-    arena: Packed,
-    flat: []const Host.Log,
-
-    pub const Packed = struct {
-        rows: []const LogBuffer.LogRow,
-        topics: []const u256,
-        data: []const u8,
-
-        pub const empty: Packed = .{
-            .rows = &.{},
-            .topics = &.{},
-            .data = &.{},
-        };
-    };
-
-    pub const empty: LogView = .{ .arena = .empty };
-
-    pub fn fromSlice(logs: []const Host.Log) LogView {
-        return .{ .flat = logs };
-    }
-
-    pub fn len(self: LogView) usize {
-        return switch (self) {
-            .arena => |arena| arena.rows.len,
-            .flat => |logs| logs.len,
-        };
-    }
-
-    pub fn contiguous(self: LogView) ?[]const Host.Log {
-        return switch (self) {
-            .arena => null,
-            .flat => |logs| logs,
-        };
-    }
-
-    pub fn get(self: LogView, index: usize) Host.Log {
-        return switch (self) {
-            .arena => |arena| blk: {
-                const row = arena.rows[index];
-                break :blk .{
-                    .address = row.address,
-                    .topics = row.topics.slice(arena.topics),
-                    .data = row.data.slice(arena.data),
-                };
-            },
-            .flat => |logs| logs[index],
-        };
-    }
-};
-
 /// Borrowed cumulative branch facts. Projectors own output policy and
 /// allocation; this view only exposes the accepted state representation.
 pub const AcceptedView = struct {
@@ -828,7 +686,7 @@ pub const PendingView = struct {
     }
 
     pub fn logs(self: PendingView) LogView {
-        return logBufferView(&self.transaction().logs);
+        return self.transaction().logs.view();
     }
 
     /// Transaction-local changes relative to the accepted branch.
@@ -1215,7 +1073,7 @@ pub const Transaction = struct {
             .introduced_code = CodeHashSet.init(allocator),
             .scope = Scope.init(allocator),
             .undo = Journal.init(),
-            .logs = LogBuffer.init(),
+            .logs = .{},
             .sealed = false,
         };
     }
@@ -1286,7 +1144,7 @@ pub fn initWithStateReader(allocator: std.mem.Allocator, reader: ?StateReader) T
         .tx = null,
         .cached_tx = null,
         .transaction_reuse_active = false,
-        .retained_logs = LogBuffer.init(),
+        .retained_logs = .{},
     };
 }
 
@@ -1318,7 +1176,7 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
     var account = account_value;
     defer account.deinit();
 
-    const code_hash = account.code_hash orelse crypto.keccak256(account.code);
+    const code_hash = account.account.code_hash;
     if (!std.mem.eql(u8, &crypto.keccak256(account.code), &code_hash)) return error.CodeHashMismatch;
     if (account.code.len != 0) _ = try self.cacheCode(code_hash, account.code, false);
 
@@ -1334,11 +1192,7 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
 
     // Seeding is the other way base state arrives, so it normalizes like a
     // reader load: on a fork without empty accounts, seeding one seeds nothing.
-    const seeded = Account{
-        .nonce = account.nonce,
-        .balance = account.balance,
-        .code_hash = code_hash,
-    };
+    const seeded = account.account;
     try self.accepted.accounts.put(address, .{
         .value = if (self.dropsEmptyAccount(seeded)) .absent else .{ .loaded = seeded },
     });
@@ -1554,7 +1408,7 @@ pub fn pendingView(self: *const TrackedState) PendingView {
 
 pub fn logView(self: *const TrackedState) LogView {
     const logs = if (self.tx) |*tx| &tx.logs else &self.retained_logs;
-    return logBufferView(logs);
+    return logs.view();
 }
 
 pub fn scopeActive(self: *const TrackedState) bool {
@@ -2238,14 +2092,6 @@ pub fn discardAccepted(self: *TrackedState) void {
     self.reset(reader);
 }
 
-fn logBufferView(logs: *const LogBuffer) LogView {
-    return .{ .arena = .{
-        .rows = logs.rows.items,
-        .topics = logs.topics.items,
-        .data = logs.data.items,
-    } };
-}
-
 fn mutableTransaction(self: *TrackedState) *Transaction {
     std.debug.assert(self.tx != null);
     const tx = &self.tx.?;
@@ -2266,17 +2112,10 @@ fn acceptedAccountExistence(self: *TrackedState, address: Address) !AccountValue
     return value;
 }
 
-/// EIP-161 emptiness: nonce, balance, and code only.
-///
-/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`. That gap
-/// is the EIP-7610 residue, so a caller that needs leaf presence rather than
-/// liveness - `createCollision` is the only one - has to ask `accountHasStorage`
-/// separately instead of reading absence as "nothing is there".
+/// The fork half of EIP-161 emptiness. The value half is `Account.isEip161Empty`.
 fn dropsEmptyAccount(self: *const TrackedState, account: Account) bool {
     if (self.retains_empty_accounts) return false;
-    return account.nonce == 0 and
-        account.balance == 0 and
-        std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
+    return account.isEip161Empty();
 }
 
 fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {
@@ -2399,7 +2238,7 @@ fn cacheCode(
     std.debug.assert(std.mem.eql(u8, &crypto.keccak256(code_bytes), &code_hash));
     if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
     if (self.code.entries.get(code_hash)) |entry| return entry.slice(&self.code);
-    _ = byteRange(0, code_bytes.len);
+    std.debug.assert(code_bytes.len <= std.math.maxInt(u32));
 
     try self.code.entries.ensureUnusedCapacity(1);
     const tail_index = if (self.code.chunks.items.len == 0)
@@ -2414,11 +2253,11 @@ fn cacheCode(
     } else try self.appendCodeChunk(code_bytes.len);
 
     const chunk = &self.code.chunks.items[chunk_index];
-    const range = byteRange(@as(usize, chunk.used), code_bytes.len);
-    const entry = CodeEntry.init(chunk_index, range, introduced);
+    const code_range: ByteRange = .init(@as(usize, chunk.used), code_bytes.len);
+    const entry = CodeEntry.init(chunk_index, code_range, introduced);
     const start: usize = chunk.used;
     @memcpy(chunk.bytes[start..][0..code_bytes.len], code_bytes);
-    chunk.used += range.len;
+    chunk.used += code_range.len;
     self.code.entries.putAssumeCapacityNoClobber(code_hash, entry);
     self.code.used_bytes += code_bytes.len;
     return entry.slice(&self.code);
@@ -2692,25 +2531,7 @@ fn index32(value: usize) u32 {
     return @intCast(value);
 }
 
-fn byteRange(offset: usize, len: usize) ByteRange {
-    const offset_u32 = index32(offset);
-    const len_u32 = index32(len);
-    std.debug.assert(len_u32 <= std.math.maxInt(u32) - offset_u32);
-    return .{ .offset = offset_u32, .len = len_u32 };
-}
-
-fn topicRange(offset: usize, len: usize) TopicRange {
-    std.debug.assert(len <= 4);
-    const offset_u32 = index32(offset);
-    const len_u32 = index32(len);
-    std.debug.assert(len_u32 <= std.math.maxInt(u32) - offset_u32);
-    return .{ .offset = offset_u32, .len = @intCast(len) };
-}
-
 comptime {
-    std.debug.assert(@sizeOf(ByteRange) == 8);
-    std.debug.assert(@sizeOf(TopicRange) == 8);
-    std.debug.assert(@sizeOf(LogBuffer.LogRow) == 36);
     std.debug.assert(@sizeOf(CodeEntry) == 12);
     std.debug.assert(@sizeOf(Journal.Entry) == 8);
 }

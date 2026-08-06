@@ -143,6 +143,7 @@ const StatefulVm = evmz.Vm(evmz.eth.cancun.extend(.{
 }));
 
 test "family precompile runtime can use host state and keeps EVM rollback semantics" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
@@ -183,6 +184,7 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
 }
 
 test "Executor reset preserves and replaces the precompile runtime" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
@@ -208,6 +210,7 @@ test "Executor reset preserves and replaces the precompile runtime" {
 }
 
 test "runtime precompile output survives synchronous host reentry" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
@@ -225,6 +228,7 @@ test "runtime precompile output survives synchronous host reentry" {
 }
 
 test "reentrant precompile call preserves parent stack across arena growth" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const parent = evmz.addr(0xbbbb);
     const child = evmz.addr(0x5678);

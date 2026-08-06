@@ -8,11 +8,6 @@ const interpreter_module = support.interpreter_module;
 const system = support.system;
 const transaction = support.transaction;
 const Default = support.Default;
-const Berlin = evmz.Vm(evmz.eth.berlin);
-const London = evmz.Vm(evmz.eth.london);
-const Cancun = evmz.Vm(evmz.eth.cancun);
-const Prague = evmz.Vm(evmz.eth.prague);
-const Osaka = evmz.Vm(evmz.eth.osaka);
 const EthValidationError = support.EthValidationError;
 const addr = support.addr;
 const BlockHashSource = support.BlockHashSource;
@@ -71,6 +66,7 @@ fn storageChange(
 }
 
 test "Executor account code remains overlay-owned and traced with a prepared backend entry" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const contract = addr(0xc0de);
     const code = [_]u8{ 0x60, 0x00 };
     var memory = MemoryStore.init(std.testing.allocator);
@@ -129,6 +125,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
 }
 
 test "Executor runs low-level standalone call" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -167,6 +164,7 @@ test "Executor runs low-level standalone call" {
 }
 
 test "Executor runs low-level standalone create" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const create_address = address.create(sender, 0);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -203,6 +201,7 @@ test "Executor runs low-level standalone create" {
 }
 
 test "transaction STF validates and executes a call" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -334,6 +333,7 @@ test "copied execution handles cannot discard a newer transaction" {
 }
 
 test "Executed retainResult retains state and returns the validated output" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
     var executor = Cancun.Executor.init(std.testing.allocator, .{});
@@ -363,6 +363,7 @@ test "Executed retainResult retains state and returns the validated output" {
 }
 
 test "transaction STF forwards BLOCKHASH to the Executor source" {
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     const TestBlockHashSource = struct {
         const Self = @This();
 
@@ -413,6 +414,7 @@ test "transaction STF forwards BLOCKHASH to the Executor source" {
 }
 
 test "transaction STF reports successful create address" {
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const create_address = address.create(sender, 0);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -449,6 +451,7 @@ test "transaction STF reports successful create address" {
 }
 
 test "transaction STF returns rejected validation result" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
@@ -475,6 +478,7 @@ test "transaction STF returns rejected validation result" {
 }
 
 test "rejected transaction preserves the retained Executor overlay" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -513,6 +517,7 @@ test "rejected transaction preserves the retained Executor overlay" {
 }
 
 test "explicit backend commit persists then rebases the Executor overlay" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -544,9 +549,11 @@ test "explicit backend commit persists then rebases the Executor overlay" {
 
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
     try std.testing.expectEqual(@as(u256, 0x2a), memory.getAccount(contract).?.getStorage(0));
+    try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 }
 
-test "Executor discardChanges drops retained overlay without touching its reader" {
+test "Executor discardAccepted drops retained overlay without touching its reader" {
+    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -575,6 +582,7 @@ test "Executor discardChanges drops retained overlay without touching its reader
 }
 
 test "Amsterdam transaction reports gross block gas separately from receipt gas" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -585,12 +593,12 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try contract_account.storage.put(0, 1);
     try contract_account.setCode(&.{ 0x5f, 0x5f, 0x55, 0x00 });
 
-    var executor = Default.Executor.init(std.testing.allocator, .{
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
     });
     defer executor.deinit();
 
-    const result = try expectExecuted(try transact(Default, &executor, .{
+    const result = try expectExecuted(try transact(Amsterdam, &executor, .{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = .{
             .sender = sender,
@@ -672,6 +680,7 @@ test "rejected transaction clears the Executor log surface" {
 }
 
 test "transaction STF uses comptime transaction gas policy" {
+    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -705,11 +714,11 @@ test "transaction STF uses comptime transaction gas policy" {
             return 42_000;
         }
     };
-    const HighIntrinsicVm = evmz.Vm(evmz.eth.london.extend(.{
+    const HighIntrinsicVm = evmz.t.CustomVm(.london, .{
         .transaction = .{
             .intrinsicBaseGas = Overrides.intrinsicBaseGas,
         },
-    }));
+    }) orelse return error.SkipZigTest;
     var custom_executor = HighIntrinsicVm.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
     });
@@ -731,6 +740,7 @@ test "transaction STF uses comptime transaction gas policy" {
 }
 
 test "exact spec owns total transaction gas limit as a value" {
+    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
@@ -738,9 +748,9 @@ test "exact spec owns total transaction gas limit as a value" {
 
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
-    const Strict = evmz.Vm(evmz.eth.london.extend(.{
+    const Strict = evmz.t.CustomVm(.london, .{
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
-    }));
+    }) orelse return error.SkipZigTest;
     var strict_executor = Strict.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
     });
@@ -800,9 +810,9 @@ test "exact spec owns block hooks as static dispatch" {
             return calls;
         }
     };
-    const Hooked = evmz.Vm(evmz.eth.cancun.extend(.{
+    const Hooked = evmz.t.CustomVm(.cancun, .{
         .block = .{ .beforeBlock = hooks.beforeBlock },
-    }));
+    }) orelse return error.SkipZigTest;
     var executor = Hooked.Executor.init(std.testing.allocator, .{
         .state_reader = memory.reader(),
     });
@@ -849,6 +859,7 @@ test "Sequential validation rejection skips rollback snapshot" {
 }
 
 test "Sequential systemCall updates embedded block gas and restores overflow" {
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     const recipient = addr(0xbbbb);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
@@ -880,11 +891,6 @@ test "Sequential systemCall updates embedded block gas and restores overflow" {
     const restored = block.progress();
     try std.testing.expectEqual(@as(u64, 5), restored.gas_used);
     try std.testing.expectEqual(@as(u64, 5), restored.block_gas.total);
-}
-
-test "system call finalization failure restores block state" {
-    // TrackedState resource limits are intentionally deferred.
-    return error.SkipZigTest;
 }
 
 test "Sequential includes each transaction before returning" {

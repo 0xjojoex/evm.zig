@@ -328,9 +328,8 @@ fn benchJumpDestMap(allocator: std.mem.Allocator, bytes: []const u8) void {
     var accepted: usize = 0;
     for (0..jumpdest_map_ops_per_run) |_| {
         var map = evmz.code.JumpDestMap.empty;
-        const needs_action_loop = map.analyzeAndClassifyActions(allocator, bytes) catch unreachable;
+        map.analyze(allocator, bytes) catch unreachable;
         accepted +%= @intFromBool(map.isValidPrepared(bytes, bytes.len - 1));
-        accepted +%= @intFromBool(needs_action_loop);
         map.deinit(allocator);
     }
     std.mem.doNotOptimizeAway(accepted);

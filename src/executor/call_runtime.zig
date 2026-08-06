@@ -274,10 +274,7 @@ pub fn bind(comptime Executor: type) type {
                                 break :result try interpreter.executeCapturedUntilSuspended(context.currentFrame());
                             }
                         }
-                        if (call_frame.needs_action_loop) {
-                            break :result try interpreter.executeUntilSuspended();
-                        }
-                        break :result .{ .finished = try interpreter.execute() };
+                        break :result try interpreter.executeUntilSuspended();
                     };
                     switch (run_result) {
                         .suspended => |action| try self.dispatchSuspension(index, action),
@@ -1732,7 +1729,7 @@ pub fn bind(comptime Executor: type) type {
 }
 
 test "CREATE final stabilization reuses already-stable output" {
-    const Berlin = evmz.Vm(evmz.eth.berlin);
+    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const Executor = Berlin.Executor;
     const runtime = bind(Executor);
 
@@ -1757,13 +1754,15 @@ test "CREATE final stabilization reuses already-stable output" {
 test "EIP-7610 creation collision applies retroactively to every revision" {
     const target = evmz.addr(0x1234);
 
-    inline for (std.enums.values(evmz.eth.Revision)) |revision| {
+    // Sweeps only the fork set compiled into this build; ci's `all` lane
+    // restores the full retroactive matrix.
+    inline for (evmz.t.enabled_revisions) |revision| {
         try expectCreationCollision(revision, target);
     }
 }
 
 test "interior checkpoint guard restores unresolved state and preserves commits" {
-    const Cancun = evmz.Vm(evmz.eth.cancun);
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Cancun.Executor;
     const runtime = bind(Executor);
     const address = evmz.addr(0x1234);
@@ -1806,7 +1805,7 @@ fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address
 }
 
 test "nested call runtime owns its segment and keeps capture indices global" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const runtime = bind(Executor);
     const child_address = evmz.addr(0x3333);

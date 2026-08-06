@@ -2,14 +2,10 @@
 //!
 //! Parent code bytes remain borrowed from the sealed witness and are indexed
 //! once by full hash. Code created during execution is copied into stable
-//! block-lifetime storage. Logs own packed topic/data bytes so host borrows
-//! never escape their callback lifetime.
+//! block-lifetime storage.
 
 const std = @import("std");
-const checkpoint_types = @import("../state/checkpoint.zig");
-const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
-const Host = @import("../Host.zig");
 const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
 
 const Allocator = std.mem.Allocator;
@@ -219,149 +215,6 @@ pub const CodeStore = struct {
     }
 };
 
-// TODO: Range() utils candidate
-pub const ByteRange = struct {
-    offset: u32 = 0,
-    len: u32 = 0,
-
-    fn slice(self: ByteRange, bytes: []const u8) []const u8 {
-        const offset: usize = self.offset;
-        const len: usize = self.len;
-        std.debug.assert(offset + len <= bytes.len);
-        return bytes[offset..][0..len];
-    }
-};
-
-pub const TopicRange = struct {
-    offset: u32 = 0,
-    len: u8 = 0,
-
-    fn slice(self: TopicRange, topics: []const u256) []const u256 {
-        const offset: usize = self.offset;
-        const len: usize = self.len;
-        std.debug.assert(offset + len <= topics.len);
-        return topics[offset..][0..len];
-    }
-};
-
-pub const LogBuffer = struct {
-    pub const Row = struct {
-        address: Address,
-        topics: TopicRange,
-        data: ByteRange,
-    };
-
-    pub const Checkpoint = checkpoint_types.LogCheckpoint;
-
-    rows: std.ArrayList(Row) = .empty,
-    topics: std.ArrayList(u256) = .empty,
-    data: std.ArrayList(u8) = .empty,
-
-    pub fn deinit(self: *LogBuffer, allocator: Allocator) void {
-        self.rows.deinit(allocator);
-        self.topics.deinit(allocator);
-        self.data.deinit(allocator);
-        self.* = undefined;
-    }
-
-    pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBuffer {
-        var result = LogBuffer{};
-        errdefer result.deinit(allocator);
-        try result.rows.appendSlice(allocator, self.rows.items);
-        try result.topics.appendSlice(allocator, self.topics.items);
-        try result.data.appendSlice(allocator, self.data.items);
-        return result;
-    }
-
-    pub fn checkpoint(self: *const LogBuffer) Checkpoint {
-        return .{
-            .rows_len = index32(self.rows.items.len),
-            .topics_len = index32(self.topics.items.len),
-            .data_len = index32(self.data.items.len),
-        };
-    }
-
-    pub fn truncate(self: *LogBuffer, value: Checkpoint) void {
-        std.debug.assert(value.rows_len <= self.rows.items.len);
-        std.debug.assert(value.topics_len <= self.topics.items.len);
-        std.debug.assert(value.data_len <= self.data.items.len);
-        self.rows.items.len = value.rows_len;
-        self.topics.items.len = value.topics_len;
-        self.data.items.len = value.data_len;
-    }
-
-    pub fn clearRetainingCapacity(self: *LogBuffer) void {
-        self.truncate(.{ .rows_len = 0, .topics_len = 0, .data_len = 0 });
-    }
-
-    pub fn append(self: *LogBuffer, allocator: Allocator, event_log: Host.Log) !void {
-        if (event_log.topics.len > 4) return error.TooManyLogTopics;
-        const topics = topicRange(self.topics.items.len, event_log.topics.len);
-        const data = byteRange(self.data.items.len, event_log.data.len);
-        try self.rows.ensureUnusedCapacity(allocator, 1);
-        try self.topics.ensureUnusedCapacity(allocator, event_log.topics.len);
-        try self.data.ensureUnusedCapacity(allocator, event_log.data.len);
-        self.topics.appendSliceAssumeCapacity(event_log.topics);
-        self.data.appendSliceAssumeCapacity(event_log.data);
-        self.rows.appendAssumeCapacity(.{
-            .address = event_log.address,
-            .topics = topics,
-            .data = data,
-        });
-    }
-
-    pub fn view(self: *const LogBuffer) LogView {
-        return .{ .rows = self.rows.items, .topics = self.topics.items, .data = self.data.items };
-    }
-
-    pub fn allocationBytes(self: *const LogBuffer) usize {
-        return self.rows.capacity * @sizeOf(Row) +
-            self.topics.capacity * @sizeOf(u256) + self.data.capacity;
-    }
-};
-
-pub const LogView = struct {
-    rows: []const LogBuffer.Row,
-    topics: []const u256,
-    data: []const u8,
-
-    pub const empty: LogView = .{ .rows = &.{}, .topics = &.{}, .data = &.{} };
-
-    pub fn len(self: LogView) usize {
-        return self.rows.len;
-    }
-
-    pub fn contiguous(_: LogView) ?[]const Host.Log {
-        return null;
-    }
-
-    pub fn get(self: LogView, index: usize) Host.Log {
-        const row = self.rows[index];
-        return .{
-            .address = row.address,
-            .topics = row.topics.slice(self.topics),
-            .data = row.data.slice(self.data),
-        };
-    }
-};
-
-fn byteRange(offset: usize, len: usize) ByteRange {
-    std.debug.assert(offset <= std.math.maxInt(u32));
-    std.debug.assert(len <= std.math.maxInt(u32));
-    return .{ .offset = @intCast(offset), .len = @intCast(len) };
-}
-
-fn topicRange(offset: usize, len: usize) TopicRange {
-    std.debug.assert(offset <= std.math.maxInt(u32));
-    std.debug.assert(len <= 4);
-    return .{ .offset = @intCast(offset), .len = @intCast(len) };
-}
-
-fn index32(value: usize) u32 {
-    std.debug.assert(value <= std.math.maxInt(u32));
-    return @intCast(value);
-}
-
 test "code store authenticates borrowed codes and owns introduced code" {
     const parent_code = [_]u8{ 0x60, 0x00 };
     var store = try CodeStore.init(std.testing.allocator, &.{&parent_code});
@@ -409,23 +262,4 @@ test "code store authenticates borrowed codes and owns introduced code" {
     const reintroduced = try store.cacheIntroduced(std.testing.allocator, &second);
     try std.testing.expect(reintroduced.newly_introduced != null);
     try std.testing.expectEqual(second_cached.ref, reintroduced.ref);
-}
-
-test "packed log buffer owns callback bytes and truncates to checkpoint" {
-    var logs = LogBuffer{};
-    defer logs.deinit(std.testing.allocator);
-    var topics = [_]u256{1};
-    var data = [_]u8{ 2, 3 };
-    const checkpoint_value = logs.checkpoint();
-    try logs.append(std.testing.allocator, .{
-        .address = [_]u8{4} ** 20,
-        .topics = &topics,
-        .data = &data,
-    });
-    topics[0] = 9;
-    data[0] = 9;
-    try std.testing.expectEqual(@as(u256, 1), logs.view().get(0).topics[0]);
-    try std.testing.expectEqual(@as(u8, 2), logs.view().get(0).data[0]);
-    logs.truncate(checkpoint_value);
-    try std.testing.expectEqual(@as(usize, 0), logs.view().len());
 }

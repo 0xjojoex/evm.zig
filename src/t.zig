@@ -8,6 +8,81 @@ const ExecutionContext = evmz.execution.ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
 
+/// Fork revisions this test build compiles exact VMs for, resolved from the
+/// `test_forks` preset in build options: `head` = latest, `dev` = the local
+/// default workhorse set, `all` = every revision. Options without the field
+/// (production module, sibling consumers) enable everything.
+pub const enabled_revisions: []const evmz.eth.Revision = resolveEnabledRevisions();
+
+fn resolveEnabledRevisions() []const evmz.eth.Revision {
+    const Revision = evmz.eth.Revision;
+    const options = @import("build_options");
+    if (!@hasDecl(options, "test_forks")) return std.enums.values(Revision);
+    const preset = options.test_forks;
+    if (std.mem.eql(u8, preset, "all")) return std.enums.values(Revision);
+    if (std.mem.eql(u8, preset, "head")) return &.{Revision.latest};
+    // prague stays in `dev`: it is the pre-BAL boundary and the fork most
+    // amsterdam-lane tests compare against.
+    if (std.mem.eql(u8, preset, "dev")) return &.{ .cancun, .prague, Revision.stable, Revision.latest };
+    @compileError("unknown test_forks preset '" ++ preset ++ "'");
+}
+
+/// Whether this test build compiles the exact VM for `revision`.
+///
+/// Prefer the fused constructors below; use this directly only when a test
+/// needs a gate without constructing an engine. The condition must stay
+/// comptime-known: a comptime-true return prunes the rest of the body from
+/// analysis and codegen while still reporting SKIP at runtime.
+pub fn forkEnabled(comptime revision: evmz.eth.Revision) bool {
+    return comptime std.mem.findScalar(evmz.eth.Revision, enabled_revisions, revision) != null;
+}
+
+/// Exact test engine for `revision`, or null when the `test_forks` preset
+/// excludes it. The only sanctioned way for tests to build a fork engine:
+/// `const Berlin = t.Vm(.berlin) orelse return error.SkipZigTest;`
+/// The comptime-known null makes the unwrap prune everything after it, so a
+/// disabled fork costs no analysis or codegen and still reports SKIP.
+pub fn Vm(comptime revision: evmz.eth.Revision) ?type {
+    if (comptime !forkEnabled(revision)) return null;
+    return evmz.Vm(evmz.eth.specAt(revision));
+}
+
+/// Exact test engine with step capture compiled in, gated like `Vm`. Step
+/// capture is opt-in (`CompileOptions.step_capture`): each capture engine
+/// carries its own 256-handler traced dispatch table, so only tests that
+/// read step tapes should pay for one:
+/// `const Latest = t.CaptureVm(.latest) orelse return error.SkipZigTest;`
+pub fn CaptureVm(comptime revision: evmz.eth.Revision) ?type {
+    if (comptime !forkEnabled(revision)) return null;
+    return evmz.VmWithOptions(evmz.eth.specAt(revision), .{ .step_capture = true });
+}
+
+/// Exact test engine for `specAt(base).extend(patch)`, gated on `base` like
+/// `Vm`. Every distinct patch compiles its own full stack, so route custom
+/// specs through here to keep that cost visible and gateable:
+/// `const Tiny = t.CustomVm(.shanghai, .{ ... }) orelse return error.SkipZigTest;`
+pub fn CustomVm(comptime base: evmz.eth.Revision, comptime patch: evmz.eth.Spec.Patch) ?type {
+    if (comptime !forkEnabled(base)) return null;
+    return evmz.Vm(evmz.eth.specAt(base).extend(patch));
+}
+
+/// Exact block-STF namespace for `revision`, gated like `Vm`:
+/// `const Stf = t.BlockStf(.frontier) orelse return error.SkipZigTest;`
+pub fn BlockStf(comptime revision: evmz.eth.Revision) ?type {
+    if (comptime !forkEnabled(revision)) return null;
+    return evmz.eth.block_stf.Exact(revision);
+}
+
+/// Block-STF namespace over a step-capture engine, gated like `BlockStf`.
+/// Same cost warning as `CaptureVm`: one traced dispatch table per engine.
+pub fn CaptureBlockStf(comptime revision: evmz.eth.Revision) ?type {
+    if (comptime !forkEnabled(revision)) return null;
+    return evmz.eth.block_stf.Bind(
+        revision,
+        evmz.VmWithOptions(evmz.eth.specAt(revision), .{ .step_capture = true }),
+    );
+}
+
 /// Decode a comptime hex string literal into a fixed-size byte array.
 pub fn hexBytes(comptime hex: []const u8) [hex.len / 2]u8 {
     @setEvalBranchQuota(10_000);
@@ -441,8 +516,8 @@ pub const MemoryAccountSeed = struct {
 
 pub fn seedExecutorAccount(executor: anytype, address: Address, seed: MemoryAccountSeed) !void {
     var account = evmz.state.MemoryAccount.init(executor.allocator);
-    account.nonce = seed.nonce;
-    account.balance = seed.balance;
+    account.account.nonce = seed.nonce;
+    account.account.balance = seed.balance;
     if (seed.code.len != 0) {
         account.setCode(seed.code) catch |err| {
             account.deinit();
@@ -454,8 +529,8 @@ pub fn seedExecutorAccount(executor: anytype, address: Address, seed: MemoryAcco
 
 pub fn seedStoreAccount(store: anytype, address: Address, seed: MemoryAccountSeed) !void {
     var account = try store.getOrCreateAccount(address);
-    account.nonce = seed.nonce;
-    account.balance = seed.balance;
+    account.account.nonce = seed.nonce;
+    account.account.balance = seed.balance;
     if (seed.code.len != 0) try account.setCode(seed.code);
 }
 
@@ -535,6 +610,7 @@ pub const BytecodeResult = struct {
 };
 
 pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, comptime revision: evmz.eth.Revision) !BytecodeResult {
+    if (comptime !forkEnabled(revision)) return error.SkipZigTest;
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = host,
@@ -581,6 +657,7 @@ pub fn expectBytecodeStackTopByRevision(comptime items: anytype, comptime revisi
 }
 
 pub fn expectStackByRevision(code: []const u8, comptime revision: evmz.eth.Revision, expected: []const u256) !void {
+    if (comptime !forkEnabled(revision)) return error.SkipZigTest;
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();

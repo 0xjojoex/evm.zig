@@ -110,12 +110,13 @@ pub fn getOrCreateAccount(self: *MemoryStore, address: Address) !*MemoryAccount 
 
 /// Copy an account into the in-memory pre-state using the store allocator.
 pub fn putAccount(self: *MemoryStore, address: Address, account: *const MemoryAccount) !void {
-    const code_hash = accountCodeHash(account);
+    // `code` and `account.code_hash` are both public, so a caller can hand over
+    // a pair that disagrees. Re-derive rather than trust it.
+    const code_hash = account.account.code_hash;
     if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &code_hash)) return error.CodeHashMismatch;
 
     var owned = try account.clone(self.allocator);
     errdefer owned.deinit();
-    owned.code_hash = code_hash;
 
     if (!self.accounts.contains(address)) try self.accounts.ensureUnusedCapacity(1);
     if (owned.code.len != 0) try self.putCode(code_hash, owned.code);
@@ -183,12 +184,11 @@ pub fn stateRootWithOptions(self: *MemoryStore, allocator: std.mem.Allocator, op
     var account_it = self.accounts.iterator();
     while (account_it.next()) |entry| {
         const storage_root = try accountStorageRoot(scratch, entry.value_ptr);
-        const code_hash = accountCodeHash(entry.value_ptr);
         const account = trie.Account{
-            .nonce = entry.value_ptr.nonce,
-            .balance = entry.value_ptr.balance,
+            .nonce = entry.value_ptr.account.nonce,
+            .balance = entry.value_ptr.account.balance,
             .storage_root = storage_root,
-            .code_hash = code_hash,
+            .code_hash = entry.value_ptr.account.code_hash,
         };
         if (options.empty_accounts == .omit and account.hasNoState()) continue;
 
@@ -259,17 +259,18 @@ fn applyChangesInPlace(self: *MemoryStore, changes: ChangesView) !void {
         const change = changes.accounts.at(account_index);
         const update = change.account orelse continue;
         const account = try self.getOrCreateAccount(change.address);
-        const previous_code_hash = accountCodeHash(account);
-        account.nonce = update.nonce;
-        account.balance = update.balance;
+        const previous_code_hash = account.account.code_hash;
+        account.account.nonce = update.nonce;
+        account.account.balance = update.balance;
         if (!std.mem.eql(u8, &previous_code_hash, &update.code_hash)) {
             const code = if (std.mem.eql(u8, &update.code_hash, &evmz.crypto.keccak256_empty))
                 &.{}
             else
                 try self.codeForHash(update.code_hash);
+            // `setCode` re-derives the hash, which must land on `update`'s.
             try account.setCode(code);
+            std.debug.assert(std.mem.eql(u8, &account.account.code_hash, &update.code_hash));
         }
-        account.code_hash = update.code_hash;
     }
 
     var wipe_index: u32 = 0;
@@ -311,11 +312,7 @@ fn accountExists(ptr: *anyopaque, address: Address) !bool {
 fn loadAccount(ptr: *anyopaque, address: Address) !?Account {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const account = self.accounts.getPtr(address) orelse return null;
-    return .{
-        .nonce = account.nonce,
-        .balance = account.balance,
-        .code_hash = accountCodeHash(account),
-    };
+    return account.account;
 }
 
 fn loadCode(ptr: *anyopaque, hash: [32]u8) ![]const u8 {
@@ -329,7 +326,7 @@ fn codeForHash(self: *MemoryStore, hash: [32]u8) ![]const u8 {
 
     var account_it = self.accounts.valueIterator();
     while (account_it.next()) |account| {
-        if (!std.mem.eql(u8, &accountCodeHash(account), &hash)) continue;
+        if (!std.mem.eql(u8, &account.account.code_hash, &hash)) continue;
         if (!std.mem.eql(u8, &evmz.crypto.keccak256(account.code), &hash)) return error.CodeHashMismatch;
         return account.code;
     }
@@ -375,17 +372,13 @@ fn accountStorageRoot(allocator: std.mem.Allocator, account: *const MemoryAccoun
     return try trie.root(allocator, pairs.items);
 }
 
-fn accountCodeHash(account: *const MemoryAccount) [32]u8 {
-    return account.code_hash orelse evmz.crypto.keccak256(account.code);
-}
-
 test "memory store exposes state reader" {
     const address = addr(0xabc);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
     var account = try memory.getOrCreateAccount(address);
-    account.balance = 99;
+    account.account.balance = 99;
     try account.setCode(&.{0x5f});
     try account.storage.put(7, 0xaa);
 
@@ -418,8 +411,8 @@ test "memory store computes full state root" {
     defer memory.deinit();
 
     var account = try memory.getOrCreateAccount(address);
-    account.nonce = 7;
-    account.balance = 99;
+    account.account.nonce = 7;
+    account.account.balance = 99;
     try account.setCode(&.{ 0x60, 0x00 });
     try account.storage.put(1, 42);
 
@@ -472,7 +465,7 @@ test "memory store copies a borrowed account" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     const source = arena.allocator();
     var account = MemoryAccount.init(source);
-    account.balance = 11;
+    account.account.balance = 11;
     try account.setCode(&.{0x5f});
     try account.storage.put(1, 2);
     try memory.putAccount(address, &account);
@@ -494,7 +487,7 @@ test "memory store rejects empty code with non-empty explicit hash" {
 
     var account = MemoryAccount.init(std.testing.allocator);
     defer account.deinit();
-    account.code_hash = [_]u8{0xaa} ** 32;
+    account.account.code_hash = [_]u8{0xaa} ** 32;
 
     try std.testing.expectError(error.CodeHashMismatch, memory.putAccount(address, &account));
     try std.testing.expect(memory.getAccount(address) == null);
@@ -523,7 +516,7 @@ test "memory store consumes cumulative wipe then write from a borrowed view" {
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
     const base = try memory.getOrCreateAccount(address);
-    base.balance = 1;
+    base.account.balance = 1;
     try base.storage.put(1, 11);
     try base.storage.put(2, 22);
 

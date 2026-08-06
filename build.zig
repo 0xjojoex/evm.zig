@@ -34,7 +34,10 @@ const TestConfig = struct {
     packages: PackageModules,
     stateless_profile: *std.Build.Module,
     native_build_options: *std.Build.Step.Options,
-    zkvm_build_options: *std.Build.Step.Options,
+    native_test_options: *std.Build.Step.Options,
+    native_test_options_all: *std.Build.Step.Options,
+    zkvm_test_options: *std.Build.Step.Options,
+    zkvm_test_options_all: *std.Build.Step.Options,
     native_precompiles: NativePrecompileDeps,
     xkcp: ?*std.Build.Step.Compile,
     libsecp256k1: ?*std.Build.Step.Compile,
@@ -43,7 +46,9 @@ const TestConfig = struct {
 
 const TestSteps = struct {
     native: *std.Build.Step,
+    native_all: *std.Build.Step,
     zkvm: *std.Build.Step,
+    zkvm_all: *std.Build.Step,
     packages: *std.Build.Step,
     selected: *std.Build.Step,
 };
@@ -112,6 +117,7 @@ pub fn build(b: *std.Build) void {
         native_keccak,
         native_secp256k1,
         stateless_schemas,
+        null,
     );
     const zkvm_build_options = buildOptions(
         b,
@@ -119,7 +125,17 @@ pub fn build(b: *std.Build) void {
         .std,
         .std,
         stateless_schemas,
+        null,
     );
+    const test_forks = b.option(
+        TestForks,
+        "test-forks",
+        "Fork revisions compiled into unit tests (ci always builds all)",
+    ) orelse .dev;
+    const native_test_options = buildOptions(b, .native, native_keccak, native_secp256k1, stateless_schemas, test_forks);
+    const native_test_options_all = buildOptions(b, .native, native_keccak, native_secp256k1, stateless_schemas, .all);
+    const zkvm_test_options = buildOptions(b, .zkvm, .std, .std, stateless_schemas, test_forks);
+    const zkvm_test_options_all = buildOptions(b, .zkvm, .std, .std, stateless_schemas, .all);
     const build_options = if (is_native_profile) native_build_options else zkvm_build_options;
     const stateless_profile_none_mod = b.createModule(.{
         .root_source_file = b.path("guest/profile_none.zig"),
@@ -262,7 +278,10 @@ pub fn build(b: *std.Build) void {
         .packages = packages,
         .stateless_profile = stateless_profile_none_mod,
         .native_build_options = native_build_options,
-        .zkvm_build_options = zkvm_build_options,
+        .native_test_options = native_test_options,
+        .native_test_options_all = native_test_options_all,
+        .zkvm_test_options = zkvm_test_options,
+        .zkvm_test_options_all = zkvm_test_options_all,
         .native_precompiles = native_precompile_deps,
         .xkcp = xkcp_object,
         .libsecp256k1 = libsecp256k1_object,
@@ -270,8 +289,9 @@ pub fn build(b: *std.Build) void {
     });
     const ci_step = b.step("ci", "Run deterministic pull-request verification");
     ci_step.dependOn(&core_check.step);
-    ci_step.dependOn(tests.native);
-    ci_step.dependOn(tests.zkvm);
+    // ci always verifies the full fork matrix; -Dtest-forks cannot weaken it.
+    ci_step.dependOn(tests.native_all);
+    ci_step.dependOn(tests.zkvm_all);
     ci_step.dependOn(tests.packages);
     ci_step.dependOn(tidy_step);
     ci_step.dependOn(fmt_step);
@@ -424,7 +444,7 @@ pub fn build(b: *std.Build) void {
     );
     const guest_input_path = b.option([]const u8, "guest-input", "Path to zkVM guest input");
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write zkVM public output");
-    const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .basic;
+    const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .@"stateless-ere";
     const guest_zisk_strip = b.option(bool, "guest-zisk-strip", "Strip symbols from the ZisK guest ELF") orelse false;
     const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse true;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
@@ -487,11 +507,12 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-// `b.option` validates and lists these in `zig build --help`, so the accepted
-// values live in the type rather than in hand-written checks.
+// `b.option` validates and lists these in `zig build --help`
 const Profile = enum { native, zkvm };
 const KeccakBackend = enum { std, xkcp };
 const Secp256k1Backend = enum { std, libsecp256k1 };
+// Membership is resolved in `src/t.zig`.
+const TestForks = enum { head, dev, all };
 
 /// Accelerated backends only exist for the architectures we build assembly for,
 /// and never under the zkVM profile.
@@ -525,12 +546,16 @@ fn buildOptions(
     native_keccak: KeccakBackend,
     native_secp256k1: Secp256k1Backend,
     stateless_schemas: []const []const u8,
+    test_forks: ?TestForks,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(Profile, "profile", profile);
     options.addOption(KeccakBackend, "native_keccak", native_keccak);
     options.addOption(Secp256k1Backend, "native_secp256k1", native_secp256k1);
     options.addOption([]const []const u8, "stateless_schemas", stateless_schemas);
+    // Test-only: absent from production and guest options so the knob can
+    // never dirty shipped artifacts. `t.zig` treats a missing field as `all`.
+    if (test_forks) |preset| options.addOption([]const u8, "test_forks", @tagName(preset));
     return options;
 }
 
@@ -595,11 +620,30 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
     return module;
 }
 
+/// Forward `zig build test -- <substring>` to the custom runner as runtime
+/// filters; argv changes re-run the cached binary without recompiling.
+fn runTests(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step {
+    const run = b.addRunArtifact(tests);
+    if (b.args) |args| run.addArgs(args);
+    return &run.step;
+}
+
 fn addTests(b: *std.Build, config: TestConfig) TestSteps {
+    // Compile-time pruning stays a deliberate build option; ad-hoc filtering
+    // belongs to the runner's TEST_FILTER env var, which needs no recompile.
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Compile only tests whose names contain this filter (repeatable)",
+    ) orelse &.{};
+    const test_runner = std.Build.Step.Compile.TestRunner{
+        .path = b.path("tools/test_runner.zig"),
+        .mode = .simple,
+    };
     const native_test_mod = createEvmzModule(b, .{
         .target = config.target,
         .optimize = config.optimize,
-        .build_options = config.native_build_options,
+        .build_options = config.native_test_options,
         .stateless_profile = config.stateless_profile,
         .packages = config.packages,
         .native_precompiles = config.native_precompiles,
@@ -609,17 +653,42 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     const native_tests = b.addTest(.{
         .name = "evmz-native-tests",
         .root_module = native_test_mod,
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
+        .test_runner = test_runner,
     });
+
     // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
     native_tests.use_llvm = true;
     const native_step = b.step("test-evmz-native", "Run native-profile evmz tests");
-    native_step.dependOn(&b.addRunArtifact(native_tests).step);
+    native_step.dependOn(runTests(b, native_tests));
+
+    const native_all_test_mod = createEvmzModule(b, .{
+        .target = config.target,
+        .optimize = config.optimize,
+        .build_options = config.native_test_options_all,
+        .stateless_profile = config.stateless_profile,
+        .packages = config.packages,
+        .native_precompiles = config.native_precompiles,
+        .xkcp = config.xkcp,
+        .libsecp256k1 = config.libsecp256k1,
+    });
+    const native_all_tests = b.addTest(.{
+        .name = "evmz-native-all-tests",
+        .root_module = native_all_test_mod,
+        .filters = test_filters,
+        .test_runner = test_runner,
+    });
+    native_all_tests.use_llvm = true;
+    const native_all_step = b.step(
+        "test-evmz-native-all",
+        "Run native-profile evmz tests with the full fork matrix",
+    );
+    native_all_step.dependOn(runTests(b, native_all_tests));
 
     const zkvm_test_mod = createEvmzModule(b, .{
         .target = config.target,
         .optimize = config.optimize,
-        .build_options = config.zkvm_build_options,
+        .build_options = config.zkvm_test_options,
         .stateless_profile = config.stateless_profile,
         .packages = config.packages,
     });
@@ -642,7 +711,8 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     const zkvm_tests = b.addTest(.{
         .name = "evmz-zkvm-tests",
         .root_module = zkvm_test_mod,
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
+        .test_runner = test_runner,
     });
     zkvm_tests.use_llvm = true;
     const provider_tests = b.addTest(.{
@@ -651,8 +721,31 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     });
     provider_tests.use_llvm = true;
     const zkvm_step = b.step("test-evmz-zkvm", "Run zkVM-profile evmz semantic tests");
-    zkvm_step.dependOn(&b.addRunArtifact(zkvm_tests).step);
+    zkvm_step.dependOn(runTests(b, zkvm_tests));
     zkvm_step.dependOn(&b.addRunArtifact(provider_tests).step);
+
+    const zkvm_all_test_mod = createEvmzModule(b, .{
+        .target = config.target,
+        .optimize = config.optimize,
+        .build_options = config.zkvm_test_options_all,
+        .stateless_profile = config.stateless_profile,
+        .packages = config.packages,
+    });
+    zkvm_all_test_mod.addObject(provider);
+    zkvm_all_test_mod.link_libcpp = true;
+    const zkvm_all_tests = b.addTest(.{
+        .name = "evmz-zkvm-all-tests",
+        .root_module = zkvm_all_test_mod,
+        .filters = test_filters,
+        .test_runner = test_runner,
+    });
+    zkvm_all_tests.use_llvm = true;
+    const zkvm_all_step = b.step(
+        "test-evmz-zkvm-all",
+        "Run zkVM-profile evmz semantic tests with the full fork matrix",
+    );
+    zkvm_all_step.dependOn(runTests(b, zkvm_all_tests));
+    zkvm_all_step.dependOn(&b.addRunArtifact(provider_tests).step);
 
     const ssz_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -660,7 +753,8 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
             .target = config.target,
             .optimize = config.optimize,
         }),
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
+        .test_runner = test_runner,
     });
     const rlp_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -668,7 +762,8 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
             .target = config.target,
             .optimize = config.optimize,
         }),
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
+        .test_runner = test_runner,
     });
     const mpt_tests_mod = b.createModule(.{
         .root_source_file = b.path("pkg/mpt/test.zig"),
@@ -678,12 +773,13 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     mpt_tests_mod.addImport("mpt", config.packages.mpt);
     const mpt_tests = b.addTest(.{
         .root_module = mpt_tests_mod,
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
+        .test_runner = test_runner,
     });
     const packages_step = b.step("test-packages", "Run SSZ, RLP, and MPT tests");
-    packages_step.dependOn(&b.addRunArtifact(ssz_tests).step);
-    packages_step.dependOn(&b.addRunArtifact(rlp_tests).step);
-    packages_step.dependOn(&b.addRunArtifact(mpt_tests).step);
+    packages_step.dependOn(runTests(b, ssz_tests));
+    packages_step.dependOn(runTests(b, rlp_tests));
+    packages_step.dependOn(runTests(b, mpt_tests));
 
     const selected_step = b.step("test", "Run unit tests for the selected profile");
     selected_step.dependOn(if (config.selected_profile == .native) native_step else zkvm_step);
@@ -691,7 +787,9 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
 
     return .{
         .native = native_step,
+        .native_all = native_all_step,
         .zkvm = zkvm_step,
+        .zkvm_all = zkvm_all_step,
         .packages = packages_step,
         .selected = selected_step,
     };

@@ -306,7 +306,7 @@ fn measureEvmzCaptureExact(
     capture_memory: bool,
     growable: bool,
 ) !Measurement {
-    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
+    const ExactVm = evmz.VmWithOptions(evmz.eth.specAt(revision), .{ .step_capture = true });
     var counting_host = common.CountingHost.init(allocator, .null);
     defer counting_host.deinit();
     var host = counting_host.host();

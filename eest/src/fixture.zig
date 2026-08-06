@@ -272,10 +272,10 @@ pub fn accountFromJson(allocator: std.mem.Allocator, account: *const std.json.Ob
     var result = MemoryAccount.init(allocator);
     errdefer result.deinit();
 
-    result.balance = if (account.get("balance")) |value| try parseU256FromValue(value) else 0;
-    result.nonce = if (account.get("nonce")) |value| try parseU64FromValue(value) else 0;
+    result.account.balance = if (account.get("balance")) |value| try parseU256FromValue(value) else 0;
+    result.account.nonce = if (account.get("nonce")) |value| try parseU64FromValue(value) else 0;
     if (account.get("code")) |value| {
-        result.code = try parseBytesFromValue(allocator, value);
+        result.adoptCode(try parseBytesFromValue(allocator, value));
     }
 
     if (account.get("storage")) |storage_value| {

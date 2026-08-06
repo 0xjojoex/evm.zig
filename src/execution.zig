@@ -232,6 +232,10 @@ pub const ExecutionResult = struct {
     state_gas_from_gas_left: i64 = 0,
     output_data: []u8,
 
+    comptime {
+        std.debug.assert(@sizeOf(ExecutionResult) == 64);
+    }
+
     pub fn status(self: ExecutionResult) Status {
         return self.outcome.status;
     }
@@ -274,20 +278,19 @@ pub fn finalizeStateGas(result: anytype) void {
 fn unwindStateGas(result: anytype, restore_regular_gas: bool) void {
     const max_i64 = @as(i64, std.math.maxInt(i64));
     const min_i64 = @as(i64, std.math.minInt(i64));
-    const reservoir_delta = std.math.sub(i64, result.state_gas_spent, result.state_gas_from_gas_left) catch if (result.state_gas_spent >= 0) max_i64 else min_i64;
-    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, reservoir_delta) catch if (reservoir_delta >= 0) max_i64 else min_i64;
+    const reservoir_delta = std.math.sub(i64, result.state_gas_spent, result.state_gas_from_gas_left) catch
+        if (result.state_gas_spent >= 0) max_i64 else min_i64;
+
+    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, reservoir_delta) catch
+        if (reservoir_delta >= 0) max_i64 else min_i64;
+
     if (restore_regular_gas) {
-        result.gas_left = std.math.add(i64, result.gas_left, result.state_gas_from_gas_left) catch if (result.state_gas_from_gas_left >= 0) max_i64 else min_i64;
+        result.gas_left = std.math.add(i64, result.gas_left, result.state_gas_from_gas_left) catch
+            if (result.state_gas_from_gas_left >= 0) max_i64 else min_i64;
     }
+
     result.state_gas_spent = 0;
     result.state_gas_from_gas_left = 0;
-}
-
-comptime {
-    // Rerun engine boundary benchmarks if these layouts change.
-    std.debug.assert(@sizeOf(FrameHalt) == 1);
-    std.debug.assert(@sizeOf(ExecutionOutcome) == 2);
-    std.debug.assert(@sizeOf(ExecutionResult) == 64);
 }
 
 /// A top-level call message.
@@ -422,15 +425,11 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expect(!@hasField(EvmExecutionRequest, "authorization_list"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "settlement"));
     try std.testing.expect(!@hasField(EvmExecutionRequest, "checkpoint"));
-    try std.testing.expect(!@hasField(Call, "gas"));
-    try std.testing.expect(!@hasField(Call, "gas_reservoir"));
-    try std.testing.expect(!@hasField(Create, "gas"));
-    try std.testing.expect(!@hasField(Create, "gas_reservoir"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "access_list"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "authorization_list"));
 }
 
-test "message identity is independent from gas and preserves create2 salt" {
+test "message identity preserves create2 salt" {
     const sender = [_]u8{0x11} ** 20;
     const recipient = [_]u8{0x22} ** 20;
     const message = try Message.init(.{

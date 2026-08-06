@@ -46,7 +46,7 @@ fn BalDifferentialOperations(
         pub fn appendCandidateDepositRequestData(
             allocator: std.mem.Allocator,
             output: *std.ArrayList(u8),
-            logs: state.TrackedState.LogView,
+            logs: state.LogBuffer.View,
         ) !void {
             if (revision.isImpl(.prague))
                 try eip6110.appendRequestDataFromLogs(allocator, output, logs);
@@ -60,7 +60,7 @@ fn BalDifferentialOperations(
             return encodeReceipt(allocator, kind, receipt);
         }
 
-        pub fn candidateLogsBloom(logs: state.TrackedState.LogView) [256]u8 {
+        pub fn candidateLogsBloom(logs: state.LogBuffer.View) [256]u8 {
             return logsBloom(logs);
         }
 
@@ -865,10 +865,10 @@ test "slim exact STF rejects unavailable step capture" {
 
     try std.testing.expectError(
         error.StepCaptureUnavailable,
-        requireStepCaptureSupport(.{ .step_capture = false }, capture),
+        requireStepCaptureSupport(.{}, capture),
     );
-    try requireStepCaptureSupport(.{}, capture);
-    try requireStepCaptureSupport(.{ .step_capture = false }, null);
+    try requireStepCaptureSupport(.{ .step_capture = true }, capture);
+    try requireStepCaptureSupport(.{}, null);
 }
 
 /// Decode raw transaction envelopes once, then validate one block transition
@@ -1314,9 +1314,9 @@ fn serialFold(
                 .blob_gas_used_after = next_blob_gas_used,
             });
         }
-        mergeLogsBloom(&block_logs_bloom, logsBloomView(receipt.logs));
+        mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
         if (revision.isImpl(.prague)) {
-            eip6110.appendRequestDataFromLogView(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
+            eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
                 error.InvalidRequest => {
                     const progress = block.progress();
                     return .{
@@ -2082,18 +2082,13 @@ pub fn encodeReceipt(allocator: std.mem.Allocator, kind: transaction.TxKind, rec
 }
 
 fn encodeReceiptView(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: anytype) ![]u8 {
-    var owned_logs: ?[]Log = null;
-    defer if (owned_logs) |logs| allocator.free(logs);
-    const logs: []const Log = receipt.logs.contiguous() orelse blk: {
-        const materialized = try allocator.alloc(Log, receipt.logs.len());
-        owned_logs = materialized;
-        for (materialized, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
-        break :blk materialized;
-    };
+    const logs = try allocator.alloc(Log, receipt.logs.len());
+    defer allocator.free(logs);
+    for (logs, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
     const payload: ReceiptPayload = .{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
-        .logs_bloom = logsBloomView(receipt.logs),
+        .logs_bloom = logsBloom(receipt.logs),
         .logs = logs,
     };
     const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
@@ -2127,11 +2122,7 @@ fn transactionType(kind: transaction.TxKind) ?u8 {
     };
 }
 
-pub fn logsBloom(logs: state.TrackedState.LogView) [256]u8 {
-    return logsBloomView(logs);
-}
-
-fn logsBloomView(logs: anytype) [256]u8 {
+pub fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
     var bloom = [_]u8{0} ** 256;
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);

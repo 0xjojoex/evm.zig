@@ -142,14 +142,19 @@ fn release(executor: anytype, generation: u64) void {
 }
 
 test "block hook collections preserve insertion order" {
-    const first = [_]u8{0x11} ** 20;
-    const second = [_]u8{0x22} ** 20;
+    const first_sender = [_]u8{0x11} ** 20;
+    const first_recipient = [_]u8{0x22} ** 20;
+    const second_sender = [_]u8{0x33} ** 20;
+    const second_recipient = [_]u8{0x44} ** 20;
     var calls = BlockSystemCalls{};
-    calls.append(.{ .sender = first, .recipient = second, .gas = 7 });
+    calls.append(.{ .sender = first_sender, .recipient = first_recipient, .gas = 7 });
+    calls.append(.{ .sender = second_sender, .recipient = second_recipient, .gas = 11 });
 
-    try std.testing.expectEqual(@as(usize, 1), calls.slice().len);
-    try std.testing.expectEqual(first, calls.slice()[0].sender);
-    try std.testing.expectEqual(second, calls.slice()[0].recipient);
+    try std.testing.expectEqual(@as(usize, 2), calls.slice().len);
+    try std.testing.expectEqual(first_sender, calls.slice()[0].sender);
+    try std.testing.expectEqual(first_recipient, calls.slice()[0].recipient);
+    try std.testing.expectEqual(second_sender, calls.slice()[1].sender);
+    try std.testing.expectEqual(second_recipient, calls.slice()[1].recipient);
 }
 
 /// Internal flat binder used by a concrete VM program's `Block(...)` closure.

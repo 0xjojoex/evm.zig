@@ -2,8 +2,6 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 
 const CaptureContext = evmz.executor.CaptureContext;
-const Default = evmz.Vm(evmz.eth.cancun).Executor;
-const FrontierExecutor = evmz.Vm(evmz.eth.frontier).Executor;
 const MemoryAccount = evmz.state.MemoryAccount;
 
 const CaptureHarness = struct {
@@ -36,7 +34,7 @@ const CaptureHarness = struct {
 
 fn seedCode(executor: anytype, address: evmz.Address, code: []const u8, balance: u256) !void {
     var account = MemoryAccount.init(std.testing.allocator);
-    account.balance = balance;
+    account.account.balance = balance;
     try account.setCode(code);
     try executor.state.seedAccount(address, account);
 }
@@ -56,6 +54,7 @@ test "call capture exports client-independent primitives without a projection" {
 }
 
 test "call capture distinguishes STATICCALL from inherited-static CALL" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -105,6 +104,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
 }
 
 test "call capture closes an immediate insufficient-balance call" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -141,6 +141,7 @@ test "call capture closes an immediate insufficient-balance call" {
 }
 
 test "root insufficient-balance capture preserves unspent gas" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const code_recipient = evmz.addr(0x1000);
     const precompile_recipient = evmz.addr(0x0004);
@@ -180,6 +181,7 @@ test "root insufficient-balance capture preserves unspent gas" {
 }
 
 test "call capture retains immediate depth-limit cause" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const child = evmz.addr(0x1234);
 
@@ -221,6 +223,7 @@ test "call capture retains immediate depth-limit cause" {
 }
 
 test "call capture retains opcode-local CALL depth attempt" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -271,6 +274,7 @@ test "call capture retains opcode-local CALL depth attempt" {
 }
 
 test "call capture retains opcode-local CREATE precheck attempts" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const create_zero = evmz.t.bytecode(.{
@@ -331,8 +335,8 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         defer executor.deinit();
 
         var root_account = MemoryAccount.init(std.testing.allocator);
-        root_account.nonce = case.nonce;
-        root_account.balance = case.balance;
+        root_account.account.nonce = case.nonce;
+        root_account.account.balance = case.balance;
         try root_account.setCode(case.code);
         try executor.state.seedAccount(root, root_account);
 
@@ -375,6 +379,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
 }
 
 test "call capture distinguishes CREATE collision from rollback" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const root_nonce = 7;
@@ -387,12 +392,12 @@ test "call capture distinguishes CREATE collision from rollback" {
     defer executor.deinit();
 
     var root_account = MemoryAccount.init(std.testing.allocator);
-    root_account.nonce = root_nonce;
+    root_account.account.nonce = root_nonce;
     try root_account.setCode(&root_code);
     try executor.state.seedAccount(root, root_account);
 
     var target_account = MemoryAccount.init(std.testing.allocator);
-    target_account.nonce = 1;
+    target_account.account.nonce = 1;
     try executor.state.seedAccount(target, target_account);
 
     var capture: CaptureHarness = undefined;
@@ -420,6 +425,7 @@ test "call capture distinguishes CREATE collision from rollback" {
 }
 
 test "call capture retains invalid deployed code and local rollback" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const target = evmz.address.create(root, 0);
@@ -460,6 +466,7 @@ test "call capture retains invalid deployed code and local rollback" {
 }
 
 test "call capture retains Frontier committed code-store out-of-gas" {
+    const FrontierExecutor = (evmz.t.Vm(.frontier) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const target = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{
@@ -469,7 +476,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
     var executor = FrontierExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
+    sender_account.account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;
@@ -502,6 +509,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
 }
 
 test "call capture retains pinned Geth v1.17.4 frame error categories" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const invalid_opcode = [_]u8{0x0c};
@@ -557,6 +565,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
 }
 
 test "call capture retains pinned write-protection category" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -592,6 +601,7 @@ test "call capture retains pinned write-protection category" {
 }
 
 test "call capture records SELFDESTRUCT as a semantic child" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const beneficiary = evmz.addr(0xbeef);
@@ -627,6 +637,7 @@ test "call capture records SELFDESTRUCT as a semantic child" {
 }
 
 test "root CREATE capture closes after runtime-code finalization" {
+    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const created = evmz.addr(0x1234);
     const init_code = evmz.t.bytecode(.{
@@ -638,7 +649,7 @@ test "root CREATE capture closes after runtime-code finalization" {
     var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
+    sender_account.account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;

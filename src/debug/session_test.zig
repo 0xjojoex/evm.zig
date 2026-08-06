@@ -122,7 +122,7 @@ fn stepOut(controlled: anytype, current: session.Pause) !session.Pause {
 }
 
 test "debug session matches uninterrupted execution" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const runtime = call_runtime.bind(Executor);
     const driver = session.bind(Executor);
@@ -214,7 +214,7 @@ test "debug session matches uninterrupted execution" {
 }
 
 test "debug session matches call, create, precompile, and terminal outcomes" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const empty = [_]u8{};
     const create = evmz.t.bytecode(.{
         .PUSH0, .PUSH0,  .PUSH0, .CREATE,
@@ -256,7 +256,7 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
 }
 
 test "debug session dispatches a child and resumes its parent" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -366,7 +366,7 @@ test "debug session dispatches a child and resumes its parent" {
 }
 
 test "debug session can substitute a call before continuing" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -443,7 +443,7 @@ test "debug session can substitute a call before continuing" {
 }
 
 test "debug session mismatch remains canonical when dispatched" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -509,7 +509,7 @@ test "debug session mismatch remains canonical when dispatched" {
 }
 
 test "debug session can substitute a create before continuing" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -589,7 +589,7 @@ test "debug session can substitute a create before continuing" {
 }
 
 test "debug session aborts at child and action boundaries" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -686,6 +686,7 @@ test "debug session aborts at child and action boundaries" {
 }
 
 test "debug session resolves and executes a custom instruction" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const square_byte: u8 = 0xb0;
     const Square = struct {
         pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
@@ -703,7 +704,7 @@ test "debug session resolves and executes a custom instruction" {
         }, .{ .custom = Square });
         break :instructions instructions;
     };
-    const Exact = evmz.Vm(evmz.eth.cancun.extend(.{ .instruction = custom_instructions }));
+    const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const runtime = call_runtime.bind(Executor);
     const driver = session.bind(Executor);
@@ -801,7 +802,7 @@ test "debug session resolves and executes a custom instruction" {
 }
 
 test "debug session rejects an active capture context" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -839,7 +840,7 @@ test "debug session rejects an active capture context" {
 }
 
 test "debug session inspection rebinds to the active frame" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);
@@ -945,7 +946,7 @@ const ArmedFailingAllocator = struct {
 };
 
 test "failed debug session init leaves no prepared-code execution scope" {
-    const Exact = evmz.Vm(evmz.eth.cancun);
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const driver = session.bind(Executor);
     const sender = evmz.addr(0x1111);

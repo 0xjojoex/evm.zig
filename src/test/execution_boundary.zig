@@ -1,21 +1,21 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 
-const BerlinExecutor = evmz.Vm(evmz.eth.berlin).Executor;
-const ShanghaiExecutor = evmz.Vm(evmz.eth.shanghai).Executor;
-const CancunExecutor = evmz.Vm(evmz.eth.cancun).Executor;
-const AmsterdamExecutor = evmz.Vm(evmz.eth.amsterdam).Executor;
 const trace = evmz.trace;
 const transaction_runtime = @import("../transaction/runtime.zig");
 
 test "execution resource plan and preparer have nominal root aliases" {
     try std.testing.expectEqual(evmz.execution_resources.Plan, evmz.ExecutionResourcePlan);
     try std.testing.expectEqual(evmz.execution_resources.Preparer, evmz.ExecutionResourcePreparer);
+}
+
+test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.StateReader, "prefetch"));
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
 
 test "discarding a manual state transition rolls back its mutations" {
+    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const account = evmz.addr(0xaaaa);
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
@@ -31,9 +31,11 @@ test "discarding a manual state transition rolls back its mutations" {
 }
 
 test "execution checkpoints stay inside one stable transaction scope" {
+    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const other = evmz.addr(0xcccc);
+    const reverted = evmz.addr(0xdddd);
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -51,10 +53,18 @@ test "execution checkpoints stay inside one stable transaction scope" {
 
     var checkpoint = try executor.checkpoint();
     defer checkpoint.deinit();
+    try executor.warmAccount(reverted);
+    try executor.addBalance(reverted, 7);
     try checkpoint.restore();
+
+    try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
+    try std.testing.expect(executor.state.isAccountWarm(other));
+    try std.testing.expect(!executor.state.isAccountWarm(reverted));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(reverted));
 }
 
 test "beginMessageScope derives root identity context and raw warmth" {
+    const ShanghaiExecutor = (evmz.t.Vm(.shanghai) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const coinbase = evmz.addr(0xcccc);
@@ -125,12 +135,8 @@ test "beginMessageScope derives root identity context and raw warmth" {
     try std.testing.expect(!executor.state.isAccountWarm(recipient));
 }
 
-test "beginMessageScope closes scope when initial warming fails" {
-    // TrackedState resource limits are intentionally deferred.
-    return error.SkipZigTest;
-}
-
 test "execution checkpoint preserves family pre-scope writes" {
+    const ShanghaiExecutor = (evmz.t.Vm(.shanghai) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
@@ -158,6 +164,7 @@ test "execution checkpoint preserves family pre-scope writes" {
 }
 
 test "checkpoint commit retains state and restore rolls back without closing scope" {
+    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const additional = evmz.addr(0xcccc);
@@ -218,6 +225,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 }
 
 test "checkpoint nests LIFO and deinit restores an open token" {
+    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
@@ -242,6 +250,7 @@ test "checkpoint nests LIFO and deinit restores an open token" {
 }
 
 test "successive checkpoints receive distinct ids" {
+    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
@@ -266,6 +275,7 @@ test "successive checkpoints receive distinct ids" {
 }
 
 test "checkpoint revert preserves reads without retaining storage effects" {
+    const AmsterdamExecutor = (evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const Observer = struct {
@@ -305,6 +315,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
 }
 
 test "executeStandalone owns success and revert scope lifecycles" {
+    const ShanghaiExecutor = (evmz.t.Vm(.shanghai) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const success_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
@@ -336,6 +347,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
 }
 
 test "bounded trace capture failure rolls back the standalone operation" {
+    const ShanghaiExecutor = (evmz.t.CaptureVm(.shanghai) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .STOP });
@@ -396,6 +408,7 @@ test "bounded trace capture failure rolls back the standalone operation" {
 }
 
 test "captured CALL publishes return data and parent memory output after resume" {
+    const CancunExecutor = (evmz.t.CaptureVm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const child = evmz.addr(0x1234);
@@ -459,6 +472,7 @@ test "captured CALL publishes return data and parent memory output after resume"
 }
 
 test "nested CREATE revert output survives child frame release" {
+    const CancunExecutor = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const code = evmz.t.bytecode(.{

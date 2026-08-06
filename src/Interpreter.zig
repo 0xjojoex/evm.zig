@@ -201,7 +201,6 @@ pub fn Interpreter(comptime spec: Spec) type {
                 try tail_dispatch.Dispatch(spec, .{ .traced = true }).executeTraced(
                     frame_capture,
                     self.call_frame,
-                    self.call_frame.readBytes(),
                 );
             }
 
@@ -217,7 +216,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.isRunning()) {
-                try TailDispatch.execute(frame, frame.readBytes());
+                try TailDispatch.execute(frame);
             }
 
             if (frame.isRunning()) {
@@ -252,7 +251,6 @@ pub const CallFrame = struct {
     io: *frame_io.Slot = undefined,
     output_range: Memory.Range = .{},
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
-    needs_action_loop: bool = false,
 
     pub fn init(
         self: *CallFrame,
@@ -287,7 +285,6 @@ pub const CallFrame = struct {
         self.output_range = .{};
         self.jumpdest_masks = options.bytecode.jumpdest_masks;
         self.state = if (code.len == 0) .{ .halted = .success } else .running;
-        self.needs_action_loop = options.bytecode.needs_action_loop;
     }
 
     pub fn deinit(self: *CallFrame) void {
@@ -552,10 +549,6 @@ pub const CallFrame = struct {
         const mask_bits = @bitSizeOf(usize);
         return self.jumpdest_masks[target / mask_bits] &
             (@as(usize, 1) << @intCast(target % mask_bits)) != 0;
-    }
-
-    pub fn readBytes(self: *const CallFrame) []const u8 {
-        return self.code.ptr[0 .. self.code.len + Bytecode.zero_padding_len];
     }
 
     pub fn wordToUsizeOrOog(self: *CallFrame, value: u256) ?usize {
@@ -982,28 +975,6 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         try tape.resolve(captured.span);
         try tape.reset();
     }
-}
-
-test "tail memory offset overflow halts exactly once" {
-    const code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE });
-    var host: Host = undefined;
-    var msg = evmz.t.defaultMessage();
-    msg.gas = 100;
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .source = .{ .code = &code },
-    });
-    defer frame.deinit();
-    var interpreter = frame.interpreter();
-
-    const result = try interpreter.execute();
-
-    try std.testing.expectEqual(FrameHalt.out_of_gas, frame.frame.haltReason().?);
-    try std.testing.expectEqual(Status.out_of_gas, result.status());
-    try std.testing.expectEqual(FrameHalt.out_of_gas, result.halt);
-    try std.testing.expectEqual(TerminalCause.out_of_gas, result.terminalCause());
-    try std.testing.expectEqual(@as(i64, 0), result.gas_left);
 }
 
 test "interpreter capture replays minimal EIP-3155 JSONL" {

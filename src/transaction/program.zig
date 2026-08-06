@@ -349,7 +349,7 @@ pub fn Context(
         pub fn accountSummary(
             self: *Self,
             account_address: Address,
-        ) ContextError!?ExecutorType.TransactionAccountSummary {
+        ) ContextError!?state.Account {
             return self.activeExecutor().transactionAccountSummary(account_address) catch |err|
                 return executor_errors.normalize(err);
         }
@@ -446,12 +446,8 @@ pub fn Context(
 
         fn preparationAccountSummary(ptr: *anyopaque, account_address: Address) !?tx.PreparationAccount {
             const runtime: *RuntimeType = @ptrCast(@alignCast(ptr));
-            const account = (runtime.executor.getAccountOrLoad(account_address) catch |err| return executor_errors.normalize(err)) orelse return null;
-            return .{
-                .nonce = account.nonce,
-                .balance = account.balance,
-                .code_hash = account.code_hash,
-            };
+            return runtime.executor.getAccountOrLoad(account_address) catch |err|
+                return executor_errors.normalize(err);
         }
 
         fn preparationCode(ptr: *anyopaque, account_address: Address, expected_hash: [32]u8) ![]const u8 {

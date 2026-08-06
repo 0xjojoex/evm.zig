@@ -8,6 +8,7 @@ const std = @import("std");
 const Address = @import("../address.zig").Address;
 const Account = @import("../state/Account.zig");
 const artifacts = @import("artifacts.zig");
+const LogBuffer = @import("../state/LogBuffer.zig");
 
 pub fn ViewType(comptime State: type) type {
     return struct {
@@ -341,7 +342,7 @@ pub fn ViewType(comptime State: type) type {
                 return self.state.active_attempt_id.?;
             }
 
-            pub fn logs(self: PendingView) artifacts.LogView {
+            pub fn logs(self: PendingView) LogBuffer.View {
                 self.assertSealed();
                 return self.state.logs.view();
             }

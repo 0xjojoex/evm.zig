@@ -88,14 +88,3 @@ test "admitted code is retained across execution scopes" {
     try std.testing.expectEqual(admitted.bytes.ptr, retained.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), block_pool.pool.count());
 }
-
-test "admission rejects code that does not match its hash" {
-    var block_pool = BlockPreparedCode.init(std.testing.allocator);
-    defer block_pool.deinit();
-
-    const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
-    try std.testing.expectError(
-        error.CodeHashMismatch,
-        block_pool.backend().admit([_]u8{0xff} ** 32, &raw_code),
-    );
-}

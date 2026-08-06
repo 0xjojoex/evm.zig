@@ -134,43 +134,59 @@ test "trace capture stores one memory transition only when requested" {
 
     var target = tape.TraceTape.initGrowable(std.testing.allocator);
     defer target.deinit();
-    const mark = try target.begin(.{ .memory = .writes });
-    var capture = try TraceCapture.init(&target, .{
-        .frame_id = 0,
-        .parent_frame_id = null,
-        .depth = 0,
-        .kind = .root,
-        .initial_stack = &.{ 0x2a, 0 },
-    });
-    try capture.beginStep(.{
-        .frame_id = undefined,
-        .pc = 0,
-        .opcode = 0x52,
-        .gas_before = 10,
-        .refund_before = 0,
-        .stack_len = 2,
-        .memory_size = 0,
-        .memory_write = .{ .offset = 0, .size = 32 },
-    });
-    var memory = [_]u8{0} ** 32;
-    memory[31] = 0x2a;
-    try capture.finishStep(.{
-        .pc_next = 1,
-        .gas_after = 4,
-        .outcome = .success,
-        .stack = &.{},
-        .memory = &memory,
-    });
-    try capture.finishFrame(.{ .outcome = .success, .memory_size = memory.len });
-    const span = try target.finish(mark);
-    defer target.resolve(span) catch unreachable;
+    const cases = [_]struct {
+        profile: tape.CaptureProfile,
+        expected_writes: usize,
+    }{
+        .{ .profile = .{ .memory = .writes }, .expected_writes = 1 },
+        .{ .profile = .{}, .expected_writes = 0 },
+    };
 
-    var cursor = tape.TraceCursor.init(span);
-    cursor.enterFrame(span.frames[0]);
-    cursor.finishStep(span.steps[0]);
-    try std.testing.expectEqual(@as(usize, 32), cursor.memorySize());
-    const writes = try cursor.memoryWrites();
-    try std.testing.expectEqual(@as(usize, 1), writes.len);
-    try std.testing.expectEqual(@as(u32, 0), writes[0].offset);
-    try std.testing.expectEqualSlices(u8, &memory, cursor.memoryWriteBytes(writes[0]));
+    for (cases) |case| {
+        const mark = try target.begin(case.profile);
+        var capture = try TraceCapture.init(&target, .{
+            .frame_id = 0,
+            .parent_frame_id = null,
+            .depth = 0,
+            .kind = .root,
+            .initial_stack = &.{ 0x2a, 0 },
+        });
+        try capture.beginStep(.{
+            .frame_id = undefined,
+            .pc = 0,
+            .opcode = 0x52,
+            .gas_before = 10,
+            .refund_before = 0,
+            .stack_len = 2,
+            .memory_size = 0,
+            .memory_write = .{ .offset = 0, .size = 32 },
+        });
+        var memory = [_]u8{0} ** 32;
+        memory[31] = 0x2a;
+        try capture.finishStep(.{
+            .pc_next = 1,
+            .gas_after = 4,
+            .outcome = .success,
+            .stack = &.{},
+            .memory = &memory,
+        });
+        try capture.finishFrame(.{ .outcome = .success, .memory_size = memory.len });
+        const span = try target.finish(mark);
+        errdefer target.resolve(span) catch unreachable;
+
+        try std.testing.expectEqual(case.expected_writes, span.transitions.memory_writes.len);
+        var cursor = tape.TraceCursor.init(span);
+        cursor.enterFrame(span.frames[0]);
+        cursor.finishStep(span.steps[0]);
+        try std.testing.expectEqual(@as(usize, 32), cursor.memorySize());
+        if (case.expected_writes == 0) {
+            try std.testing.expectError(error.TraceCapabilityUnavailable, cursor.memoryWrites());
+        } else {
+            const writes = try cursor.memoryWrites();
+            try std.testing.expectEqual(@as(usize, 1), writes.len);
+            try std.testing.expectEqual(@as(u32, 0), writes[0].offset);
+            try std.testing.expectEqualSlices(u8, &memory, cursor.memoryWriteBytes(writes[0]));
+        }
+        try target.resolve(span);
+    }
 }

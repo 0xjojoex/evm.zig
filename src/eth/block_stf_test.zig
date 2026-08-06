@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const block_stf = @import("block_stf.zig");
+const t = @import("../t.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
@@ -27,7 +28,6 @@ const Backend = @import("../backend.zig").Backend;
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
 const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalStatelessVm(eth_spec.amsterdam));
-const Exact = block_stf.Exact;
 const FinalizeBlockContext = block_stf.FinalizeBlockContext;
 const ObservationTarget = block_stf.ObservationTarget;
 const empty_requests_hash = block_stf.empty_requests_hash;
@@ -69,6 +69,7 @@ fn testRootChecksWithWithdrawals(header_state: [32]u8, local_transactions: [32]u
 }
 
 test "BlockSTF validates a single witnessed transaction" {
+    const StfFrontier = t.BlockStf(.frontier) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -118,7 +119,7 @@ test "BlockSTF validates a single witnessed transaction" {
     const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const first_result = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -136,13 +137,15 @@ test "BlockSTF validates a single witnessed transaction" {
         .topics = &receipt_topics,
         .data = &.{},
     };
+    var receipt_logs = try state.LogBuffer.fromLogs(scratch, &.{receipt_log});
+    defer receipt_logs.deinit(scratch);
     const encoded_receipt = try encodeReceipt(scratch, .legacy, .{
         .status = .success,
         .cumulative_gas_used = first_result.gas_used,
-        .logs = .fromSlice(&.{receipt_log}),
+        .logs = receipt_logs.view(),
     });
     const expected_receipts_root = try trie.receiptRoot(scratch, &.{encoded_receipt});
-    const expected_logs_bloom = logsBloom(.fromSlice(&.{receipt_log}));
+    const expected_logs_bloom = logsBloom(receipt_logs.view());
     try std.testing.expectEqualSlices(u8, &expected_receipts_root, &first_result.receipts_root);
     try std.testing.expectEqualSlices(u8, &expected_logs_bloom, &first_result.logs_bloom);
 
@@ -187,7 +190,8 @@ test "BlockSTF validates a single witnessed transaction" {
     var trace_tape = trace.TraceTape.initGrowable(scratch);
     defer trace_tape.deinit();
 
-    const result = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const StfFrontierCapture = t.CaptureBlockStf(.frontier) orelse return error.SkipZigTest;
+    const result = try StfFrontierCapture.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -218,7 +222,7 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
     try std.testing.expect(trace_recorder.storage_writes > 0);
 
-    const gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -231,7 +235,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.gas_used_mismatch, gas_mismatch.status);
 
-    const block_gas_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const block_gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -244,7 +248,7 @@ test "BlockSTF validates a single witnessed transaction" {
     });
     try std.testing.expectEqual(Status.block_gas_used_mismatch, block_gas_mismatch.status);
 
-    const logs_bloom_mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const logs_bloom_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
         .transactions = &tx_input,
@@ -259,6 +263,7 @@ test "BlockSTF validates a single witnessed transaction" {
 }
 
 test "BlockSTF stores PREVRANDAO as EVM word" {
+    const StfMerge = t.BlockStf(.merge) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -313,7 +318,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     };
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
 
-    const first_result = try Exact(.merge).applyAssumeDecoded(scratch, .{
+    const first_result = try StfMerge.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -325,7 +330,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);
 
-    const result = try Exact(.merge).applyAssumeDecoded(scratch, .{
+    const result = try StfMerge.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000, .prev_randao = prev_randao },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -342,6 +347,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
 }
 
 test "BlockSTF reports root mismatches and invalid witness" {
+    const StfFrontier = t.BlockStf(.frontier) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -357,7 +363,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
         .encoded = "tx0",
     }};
 
-    const mismatch = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -369,7 +375,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
 
-    const invalid = try Exact(.frontier).applyAssumeDecoded(scratch, .{
+    const invalid = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
         .transactions = &tx_input,
@@ -384,6 +390,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
 }
 
 test "BlockSTF validates withdrawals root" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -413,7 +420,7 @@ test "BlockSTF validates withdrawals root" {
     };
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
-    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -428,7 +435,7 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
-    const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -443,6 +450,7 @@ test "BlockSTF validates withdrawals root" {
 }
 
 test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL index" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -469,7 +477,7 @@ test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL 
         .{ .address = recipient_b },
     });
 
-    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -485,6 +493,7 @@ test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL 
 }
 
 test "BlockSTF applies Cancun block-start system contract" {
+    const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -524,7 +533,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
     const parent_hash = [_]u8{0x11} ** 32;
 
-    const result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
+    const result = try StfCancun.applyAssumeDecoded(scratch, .{
         .env = .{ .number = 1, .timestamp = timestamp, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
@@ -549,7 +558,8 @@ test "BlockSTF applies Cancun block-start system contract" {
 }
 
 test "BlockSTF rejects missing or inconsistent parent context" {
-    const missing = try Exact(.cancun).applyAssumeDecoded(std.testing.allocator, .{
+    const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
+    const missing = try StfCancun.applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2 },
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -558,7 +568,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
     const parent_hash = [_]u8{0x11} ** 32;
-    const inconsistent = try Exact(.cancun).applyAssumeDecoded(std.testing.allocator, .{
+    const inconsistent = try StfCancun.applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
@@ -581,12 +591,13 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.timestamp_mismatch, inconsistent.status);
 }
 
-test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
+test "BlockSTF rejects a nonempty requests hash claim against an empty block" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -595,30 +606,16 @@ test "BlockSTF makes requests_hash_mismatch reachable for each request family" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &empty_requests_hash, &result.requests_hash);
 
-    const families = [_]struct {
-        request_type: u8,
-        payload: []const u8,
-    }{
-        .{ .request_type = eip6110.request_type, .payload = &.{0xbb} },
-        .{ .request_type = eip7002.request_type, .payload = &.{0xaa} },
-        .{ .request_type = eip7251.request_type, .payload = &.{0xcc} },
-        .{ .request_type = eip8282.builder_deposit_request_type, .payload = &.{0xdd} },
-        .{ .request_type = eip8282.builder_exit_request_type, .payload = &.{0xee} },
-    };
-
-    for (families) |family| {
-        const claimed_request = try eip7685.requestBytes(scratch, family.request_type, family.payload);
-        const claimed_requests = [_][]const u8{claimed_request};
-        const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
-
-        const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
-            .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
-            .transactions = &.{},
-            .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
-            .header_claims = .{ .requests_hash = claimed_requests_hash },
-        });
-        try std.testing.expectEqual(Status.requests_hash_mismatch, mismatch.status);
-    }
+    const claimed_request = try eip7685.requestBytes(scratch, eip6110.request_type, &.{0xbb});
+    const claimed_requests = [_][]const u8{claimed_request};
+    const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
+    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .transactions = &.{},
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
+        .header_claims = .{ .requests_hash = claimed_requests_hash },
+    });
+    try std.testing.expectEqual(Status.requests_hash_mismatch, mismatch.status);
 }
 
 test "Amsterdam finalize calls include builder request predeploys" {
@@ -651,6 +648,7 @@ test "Amsterdam finalize calls include builder request predeploys" {
 }
 
 test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reachable" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -680,25 +678,26 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
         },
     };
 
-    const mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, input);
+    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, input);
     try std.testing.expectEqual(Status.block_hash_mismatch, mismatch.status);
     try std.testing.expect(!std.mem.eql(u8, &zero_hash, &mismatch.block_hash));
 
     var valid_input = input;
     valid_input.header_hash_claim.?.block_hash = mismatch.block_hash;
-    const valid = try Exact(.amsterdam).applyAssumeDecoded(scratch, valid_input);
+    const valid = try StfAmsterdam.applyAssumeDecoded(scratch, valid_input);
     try std.testing.expectEqual(Status.valid, valid.status);
     try std.testing.expectEqualSlices(u8, &mismatch.block_hash, &valid.block_hash);
 }
 
 test "BlockSTF compares derived block access list artifact and hash claims" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
-    const valid = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const valid = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -710,7 +709,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
-    const artifact_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const artifact_mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
@@ -718,7 +717,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
-    const hash_mismatch = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const hash_mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -727,7 +726,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
-    const malformed_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const malformed_claim = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
@@ -735,7 +734,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.invalid_block_access_list, malformed_claim.status);
 
-    const oversized_claim = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const oversized_claim = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -855,6 +854,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
 }
 
 test "BlockSTF records zero withdrawals as block access list accesses" {
+    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -870,7 +870,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     const claimed_accounts = [_]eth_bal.AccountChanges{.{ .address = withdrawal.address }};
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try Exact(.amsterdam).applyAssumeDecoded(scratch, .{
+    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -887,6 +887,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
 }
 
 test "BlockSTF validates blob gas header fields" {
+    const StfPrague = t.BlockStf(.prague) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -940,7 +941,7 @@ test "BlockSTF validates blob gas header fields" {
     };
     const expected_custom_excess_blob_gas = prague_schedule.withParams(custom_blob_params).calcExcessBlobGasForSchedule(parent_blob_gas).?;
 
-    const first_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
+    const first_result = try StfPrague.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -955,7 +956,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(expected_blob_gas_used, first_result.blob_gas_used);
     try std.testing.expectEqual(expected_excess_blob_gas, first_result.excess_blob_gas.?);
 
-    const result = try Exact(.prague).applyAssumeDecoded(scratch, .{
+    const result = try StfPrague.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -972,7 +973,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.valid, result.status);
 
-    const custom_schedule_result = try Exact(.prague).applyAssumeDecoded(scratch, .{
+    const custom_schedule_result = try StfPrague.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -990,7 +991,7 @@ test "BlockSTF validates blob gas header fields" {
     try std.testing.expectEqual(Status.valid, custom_schedule_result.status);
     try std.testing.expect(expected_custom_excess_blob_gas != expected_excess_blob_gas);
 
-    const blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
+    const blob_gas_mismatch = try StfPrague.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -1004,7 +1005,7 @@ test "BlockSTF validates blob gas header fields" {
     });
     try std.testing.expectEqual(Status.blob_gas_used_mismatch, blob_gas_mismatch.status);
 
-    const excess_blob_gas_mismatch = try Exact(.prague).applyAssumeDecoded(scratch, .{
+    const excess_blob_gas_mismatch = try StfPrague.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -1020,6 +1021,8 @@ test "BlockSTF validates blob gas header fields" {
 }
 
 test "BlockSTF rejects cumulative blob gas above the block params cap" {
+    const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
+    const StfShanghai = t.BlockStf(.shanghai) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1090,7 +1093,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
         .encoded = "oversized-blobtx",
     }};
 
-    const oversized_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
+    const oversized_result = try StfCancun.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
@@ -1100,7 +1103,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
     try std.testing.expectEqual(@as(?usize, 0), oversized_result.tx_index);
     try std.testing.expectEqual(@as(u64, 0), oversized_result.blob_gas_used);
 
-    const pre_cancun_result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
+    const pre_cancun_result = try StfShanghai.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &oversized_transactions,
@@ -1115,7 +1118,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
         .max = 1,
         .base_fee_update_fraction = cancun_schedule.base_fee_update_fraction,
     };
-    const custom_schedule_result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
+    const custom_schedule_result = try StfCancun.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000, .blob_base_fee = 1, .blob_params = custom_blob_params },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = transactions[0..1],
@@ -1124,7 +1127,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, custom_schedule_result.status);
     try std.testing.expectEqual(@as(?usize, 0), custom_schedule_result.tx_index);
 
-    const result = try Exact(.cancun).applyAssumeDecoded(scratch, .{
+    const result = try StfCancun.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 42_000, .blob_base_fee = 1 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &transactions,
@@ -1137,6 +1140,7 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
 }
 
 test "BlockSTF applies withdrawals to state balances" {
+    const StfShanghai = t.BlockStf(.shanghai) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1155,7 +1159,7 @@ test "BlockSTF applies withdrawals to state balances" {
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
     const expected_withdrawals_root = try trie.withdrawalsRoot(scratch, &withdrawals);
 
-    const result = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
+    const result = try StfShanghai.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -1176,7 +1180,7 @@ test "BlockSTF applies withdrawals to state balances" {
         .amount = withdrawals[0].amount + 1,
     }};
     const mutated_withdrawals_root = try trie.withdrawalsRoot(scratch, &mutated_withdrawals);
-    const mutated = try Exact(.shanghai).applyAssumeDecoded(scratch, .{
+    const mutated = try StfShanghai.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &mutated_withdrawals,
@@ -1191,6 +1195,9 @@ test "BlockSTF applies withdrawals to state balances" {
 }
 
 test "BlockSTF rejects fork-inactive body fields before state access" {
+    const StfMerge = t.BlockStf(.merge) orelse return error.SkipZigTest;
+    const StfPrague = t.BlockStf(.prague) orelse return error.SkipZigTest;
+    const StfShanghai = t.BlockStf(.shanghai) orelse return error.SkipZigTest;
     const withdrawal = Withdrawal{
         .index = 0,
         .validator_index = 0,
@@ -1199,7 +1206,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     };
     const roots = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash);
 
-    const pre_shanghai = try Exact(.merge).applyAssumeDecoded(std.testing.allocator, .{
+    const pre_shanghai = try StfMerge.applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &.{withdrawal},
@@ -1207,7 +1214,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_shanghai.status);
 
-    const pre_cancun = try Exact(.shanghai).applyAssumeDecoded(std.testing.allocator, .{
+    const pre_cancun = try StfShanghai.applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .parent_blob_gas = .{
@@ -1219,7 +1226,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     });
     try std.testing.expectEqual(Status.invalid_block_body, pre_cancun.status);
 
-    const pre_amsterdam = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
+    const pre_amsterdam = try StfPrague.applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{},
@@ -1231,7 +1238,7 @@ test "BlockSTF rejects fork-inactive body fields before state access" {
     // verifier supplies one for every block, so a pre-Amsterdam block must stay
     // valid and simply report `.not_run`.
     var report = block_stf.BalDifferentialReport{};
-    const pre_amsterdam_differential = try Exact(.prague).applyAssumeDecoded(std.testing.allocator, .{
+    const pre_amsterdam_differential = try StfPrague.applyAssumeDecoded(std.testing.allocator, .{
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .bal_differential = &report,
@@ -1272,16 +1279,20 @@ test "stateless receipt encoder includes logs and bloom" {
         .topics = &topics,
         .data = &.{ 0xab, 0xcd },
     };
+    var event_logs = try state.LogBuffer.fromLogs(std.testing.allocator, &.{event_log});
+    defer event_logs.deinit(std.testing.allocator);
     var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const before = counted.alloc_index;
     const encoded = try encodeReceipt(counted.allocator(), .legacy, .{
         .status = .revert,
         .cumulative_gas_used = 30_000,
-        .logs = .fromSlice(&.{event_log}),
+        .logs = event_logs.view(),
     });
     defer counted.allocator().free(encoded);
 
-    try std.testing.expectEqual(before + 1, counted.alloc_index);
+    // Materializing the packed rows into `[]Log` for the RLP schema is the
+    // second allocation; the encoded receipt is the first.
+    try std.testing.expectEqual(before + 2, counted.alloc_index);
     var raw = rlp.Cursor.init(encoded);
     var raw_receipt = try raw.nextList();
     try raw.expectDone();
@@ -1312,25 +1323,30 @@ test "stateless receipt encoder includes logs and bloom" {
 }
 
 test "stateless receipt schema enforces the EVM log topic limit" {
+    // Built as views rather than through `LogBuffer.append`, which rejects a
+    // fifth topic itself. The subject here is the wire schema's independent
+    // limit, so the buffer's guard must not stand in for it.
+    const rows = [_]state.LogBuffer.Row{.{
+        .address = address.addr(0x3000),
+        .topics = .init(0, 4),
+        .data = .{},
+    }};
     const accepted_topics = [_]u256{ 1, 2, 3, 4 };
     const accepted = try encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = .fromSlice(&.{.{
-            .address = address.addr(0x3000),
-            .topics = &accepted_topics,
-            .data = &.{},
-        }}),
+        .logs = .{ .rows = &rows, .topics = &accepted_topics, .data = &.{} },
     });
     defer std.testing.allocator.free(accepted);
 
+    const rejected_rows = [_]state.LogBuffer.Row{.{
+        .address = address.addr(0x3000),
+        .topics = .init(0, 5),
+        .data = .{},
+    }};
     const rejected_topics = [_]u256{ 1, 2, 3, 4, 5 };
     try std.testing.expectError(error.ListLimitExceeded, encodeReceipt(std.testing.allocator, .legacy, .{
         .status = .success,
-        .logs = .fromSlice(&.{.{
-            .address = address.addr(0x3000),
-            .topics = &rejected_topics,
-            .data = &.{},
-        }}),
+        .logs = .{ .rows = &rejected_rows, .topics = &rejected_topics, .data = &.{} },
     }));
 }
 
@@ -1343,10 +1359,21 @@ test "stateless receipt typed decode cleans nested allocation failures" {
                 .topics = &topics,
                 .data = &.{ 0xab, 0xcd },
             }};
+            // Allocation-free so the injected failure index still targets the
+            // decode path this test is about.
+            const rows = [_]state.LogBuffer.Row{.{
+                .address = address.addr(0x3000),
+                .topics = .init(0, 2),
+                .data = .init(0, 2),
+            }};
             const payload: ReceiptPayload = .{
                 .status = 1,
                 .cumulative_gas_used = 21_000,
-                .logs_bloom = logsBloom(.fromSlice(&logs)),
+                .logs_bloom = logsBloom(.{
+                    .rows = &rows,
+                    .topics = &topics,
+                    .data = &.{ 0xab, 0xcd },
+                }),
                 .logs = &logs,
             };
             var out: [512]u8 = undefined;

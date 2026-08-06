@@ -156,11 +156,12 @@ pub const Env = struct {
 };
 
 /// Minimal account proof consumed during exact-spec transaction preparation.
-pub const PreparationAccount = struct {
-    nonce: u64,
-    balance: u256,
-    code_hash: [32]u8,
-};
+///
+/// This is `state.Account` itself, not a narrowed copy of it: that value is
+/// already the whole account minus code bytes and storage. What this boundary
+/// narrows is the *capability* — see `PreparationStateAccess` below — so a
+/// separate value type would only be a second name for the same three fields.
+pub const PreparationAccount = @import("../state/Account.zig");
 
 /// Read-only state capability available to exact-spec transaction preparation.
 ///

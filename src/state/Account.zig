@@ -21,8 +21,34 @@
 //! yet still owns a trie leaf, so `createCollision` must refuse to build over
 //! it even though reads report it absent.
 
+const std = @import("std");
+
 const crypto = @import("../crypto.zig");
+
+const Account = @This();
 
 nonce: u64 = 0,
 balance: u256 = 0,
 code_hash: [32]u8 = crypto.keccak256_empty,
+
+/// EIP-161 emptiness: nonce, balance, and code only.
+///
+/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`. That gap
+/// is the EIP-7610 residue, so a caller that needs leaf presence rather than
+/// liveness - `createCollision` is the only one - has to ask `accountHasStorage`
+/// separately instead of reading absence as "nothing is there".
+///
+/// This is the value half only. Whether an empty account is *dropped* is a fork
+/// question owned by the state lanes; see `Spec.retains_empty_accounts`.
+pub fn isEip161Empty(self: Account) bool {
+    return self.nonce == 0 and
+        self.balance == 0 and
+        std.mem.eql(u8, &self.code_hash, &crypto.keccak256_empty);
+}
+
+test "EIP-161 emptiness ignores storage and tracks each field" {
+    try std.testing.expect((Account{}).isEip161Empty());
+    try std.testing.expect(!(Account{ .nonce = 1 }).isEip161Empty());
+    try std.testing.expect(!(Account{ .balance = 1 }).isEip161Empty());
+    try std.testing.expect(!(Account{ .code_hash = [_]u8{0xaa} ** 32 }).isEip161Empty());
+}

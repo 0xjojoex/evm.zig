@@ -1525,7 +1525,7 @@ test "MPT state root consumes tracked changes" {
     try std.testing.expectEqualSlices(u8, &empty_root_hash, &wiped_direct);
 }
 
-test "MPT state root reuses authenticated present account" {
+test "MPT state roots agree with cached and witness-loaded accounts" {
     const TrackedState = @import("../state/TrackedState.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1548,8 +1548,8 @@ test "MPT state root reuses authenticated present account" {
     var state = TrackedState.init(scratch);
     defer state.deinit();
     var seeded = MemoryAccount.init(scratch);
-    seeded.nonce = previous.nonce;
-    seeded.balance = previous.balance;
+    seeded.account.nonce = previous.nonce;
+    seeded.account.balance = previous.balance;
     try state.seedAccount(target, seeded);
     const attempt = state.beginTransaction();
     state.beginScope();

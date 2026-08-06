@@ -331,8 +331,7 @@ fn callRequestSystemContract(
 
 test "before block calls Prague and Cancun system contracts" {
     const ethereum = evmz.eth;
-    const Prague = evmz.Vm(ethereum.prague);
-    const Amsterdam = evmz.Vm(ethereum.amsterdam);
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     var executor = Prague.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -365,16 +364,6 @@ test "before block calls Prague and Cancun system contracts" {
         try std.testing.expectEqual(@as(u64, 0), call.state_gas);
     }
 
-    const amsterdam_calls = Amsterdam.specification.block.beforeBlock(.{
-        .number = 1,
-        .timestamp = 12,
-        .parent_hash = parent_hash,
-        .parent_beacon_block_root = beacon_root,
-    });
-    for (amsterdam_calls.slice()) |call| {
-        try std.testing.expectEqual(ethereum.system_call_state_gas, call.state_gas);
-    }
-
     try applyBeforeBlock(&executor, execution_context, .{
         .number = 1,
         .timestamp = 12,
@@ -393,6 +382,21 @@ test "before block calls Prague and Cancun system contracts" {
         &parent_hash,
         .legacy(ethereum.system_call_gas),
     )).status());
+}
+
+test "Amsterdam before-block system calls reserve state gas" {
+    const ethereum = evmz.eth;
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const calls = Amsterdam.specification.block.beforeBlock(.{
+        .number = 1,
+        .timestamp = 12,
+        .parent_hash = [_]u8{0xaa} ** 32,
+        .parent_beacon_block_root = [_]u8{0xbb} ** 32,
+    });
+
+    for (calls.slice()) |call| {
+        try std.testing.expectEqual(ethereum.system_call_state_gas, call.state_gas);
+    }
 }
 
 test "Amsterdam block hook executes state growth from the system-call reservoir" {

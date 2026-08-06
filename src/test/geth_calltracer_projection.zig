@@ -268,10 +268,10 @@ const Validation = struct {
     }
 };
 
-fn rangeValid(range: call_arena.ByteRange, bytes: []const u8) bool {
-    const start: usize = range.start;
-    const len: usize = range.len;
-    return start <= bytes.len and len <= bytes.len - start;
+fn rangeValid(byte_range: call_arena.ByteRange, bytes: []const u8) bool {
+    const offset: usize = byte_range.offset;
+    const len: usize = byte_range.len;
+    return offset <= bytes.len and len <= bytes.len - offset;
 }
 
 fn writeGethFrameHead(

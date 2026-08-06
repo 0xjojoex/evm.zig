@@ -138,7 +138,7 @@ pub const CaptureContext = capture_context.Context;
 /// Non-consensus capabilities selected when compiling an exact executor.
 pub const CompileOptions = struct {
     /// Include opcode-step capture and its traced dispatch table.
-    step_capture: bool = true,
+    step_capture: bool = false,
 };
 
 /// Compile one exact executor over a concrete state representation.
@@ -346,20 +346,9 @@ pub fn ExecutorType(
             };
         }
 
-        pub const TransactionAccountSummary = struct {
-            nonce: u64,
-            balance: u256,
-            code_hash: [32]u8,
-        };
-
-        pub fn transactionAccountSummary(self: *Self, account_address: Address) !?TransactionAccountSummary {
+        pub fn transactionAccountSummary(self: *Self, account_address: Address) !?AccountState {
             transaction_runtime.requireActive(self);
-            const account = try self.getAccountOrLoad(account_address) orelse return null;
-            return .{
-                .nonce = account.nonce,
-                .balance = account.balance,
-                .code_hash = account.code_hash,
-            };
+            return self.getAccountOrLoad(account_address);
         }
 
         pub fn advanceTransactionNonce(

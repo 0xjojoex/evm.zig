@@ -216,7 +216,8 @@ test "default matrix operations are direct host operations" {
     }
 }
 
-test "boundary lookup finds selected boundary" {
-    const boundaries = [_]Boundary{ .zig, .evmc };
-    try std.testing.expect(containsBoundary(&boundaries, .evmc));
+test "boundary lookup distinguishes selected and omitted boundaries" {
+    const boundaries = [_]Boundary{.zig};
+    try std.testing.expect(containsBoundary(&boundaries, .zig));
+    try std.testing.expect(!containsBoundary(&boundaries, .evmc));
 }

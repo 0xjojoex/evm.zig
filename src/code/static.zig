@@ -14,18 +14,11 @@ pub fn View(comptime source: []const u8) type {
         source.len,
         @bitSizeOf(usize),
     ) catch unreachable);
-    const Analysis = struct {
-        masks: [mask_count]usize,
-        needs_action_loop: bool,
-    };
-    const analysis: Analysis = analysis: {
+    const masks: [mask_count]usize = masks: {
         @setEvalBranchQuota(20_000);
-        var result = Analysis{
-            .masks = [_]usize{0} ** mask_count,
-            .needs_action_loop = false,
-        };
-        result.needs_action_loop = scanner.markJumpDests(&result.masks, source);
-        break :analysis result;
+        var result = [_]usize{0} ** mask_count;
+        scanner.markJumpDestWords(&result, source);
+        break :masks result;
     };
 
     return struct {
@@ -33,8 +26,7 @@ pub fn View(comptime source: []const u8) type {
             [_]u8{0} ** Bytecode.zero_padding_len;
         pub const view = Bytecode.View{
             .bytes = read_bytes[0..source.len],
-            .jumpdest_masks = &analysis.masks,
-            .needs_action_loop = analysis.needs_action_loop,
+            .jumpdest_masks = &masks,
         };
     };
 }
@@ -54,10 +46,6 @@ test "static view matches runtime preparation" {
     defer runtime.deinit(std.testing.allocator);
 
     try std.testing.expectEqualSlices(u8, &raw, Prepared.view.bytes);
-    try std.testing.expectEqual(
-        runtime.needs_action_loop,
-        Prepared.view.needs_action_loop,
-    );
     const mask_count = std.math.divCeil(
         usize,
         raw.len,
