@@ -1176,7 +1176,7 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
     var account = account_value;
     defer account.deinit();
 
-    const code_hash = account.code_hash orelse crypto.keccak256(account.code);
+    const code_hash = account.account.code_hash;
     if (!std.mem.eql(u8, &crypto.keccak256(account.code), &code_hash)) return error.CodeHashMismatch;
     if (account.code.len != 0) _ = try self.cacheCode(code_hash, account.code, false);
 
@@ -1192,11 +1192,7 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
 
     // Seeding is the other way base state arrives, so it normalizes like a
     // reader load: on a fork without empty accounts, seeding one seeds nothing.
-    const seeded = Account{
-        .nonce = account.nonce,
-        .balance = account.balance,
-        .code_hash = code_hash,
-    };
+    const seeded = account.account;
     try self.accepted.accounts.put(address, .{
         .value = if (self.dropsEmptyAccount(seeded)) .absent else .{ .loaded = seeded },
     });
@@ -2116,17 +2112,10 @@ fn acceptedAccountExistence(self: *TrackedState, address: Address) !AccountValue
     return value;
 }
 
-/// EIP-161 emptiness: nonce, balance, and code only.
-///
-/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`. That gap
-/// is the EIP-7610 residue, so a caller that needs leaf presence rather than
-/// liveness - `createCollision` is the only one - has to ask `accountHasStorage`
-/// separately instead of reading absence as "nothing is there".
+/// The fork half of EIP-161 emptiness. The value half is `Account.isEip161Empty`.
 fn dropsEmptyAccount(self: *const TrackedState, account: Account) bool {
     if (self.retains_empty_accounts) return false;
-    return account.nonce == 0 and
-        account.balance == 0 and
-        std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
+    return account.isEip161Empty();
 }
 
 fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {

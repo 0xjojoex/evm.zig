@@ -48,7 +48,7 @@ pub const transactions = [_]block_stf.TransactionInput{
 
 pub fn initState(store: *evmz.state.MemoryStore) !void {
     const sender_account = try store.getOrCreateAccount(sender);
-    sender_account.balance = sender_start_balance;
+    sender_account.account.balance = sender_start_balance;
     const target_account = try store.getOrCreateAccount(target);
     try target_account.setCode(&target_code);
 }

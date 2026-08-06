@@ -1926,16 +1926,17 @@ fn nextGeneration(current: u32) u32 {
 fn accountExecutionValue(fact: records.AccountFact) AccountValue {
     return switch (fact.parent) {
         .absent => .absent,
-        .present => |parent| if (parent.nonce == 0 and
-            parent.balance == 0 and
-            std.mem.eql(u8, &parent.code_hash, &crypto.keccak256_empty))
-            .absent
-        else
-            .{ .present = .{
+        .present => |parent| blk: {
+            // Dropping `storage_root` is the point: liveness here is EIP-161,
+            // which ignores storage. `createCollision` asks `accountHasStorage`
+            // for the EIP-7610 residue instead.
+            const account: Account = .{
                 .nonce = parent.nonce,
                 .balance = parent.balance,
                 .code_hash = parent.code_hash,
-            } },
+            };
+            break :blk if (account.isEip161Empty()) .absent else .{ .present = account };
+        },
     };
 }
 

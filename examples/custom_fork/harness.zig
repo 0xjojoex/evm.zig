@@ -42,7 +42,7 @@ pub fn transact(comptime VmType: type, allocator: std.mem.Allocator, request: Re
     defer memory.deinit();
     for (request.accounts) |account| {
         const stored = try memory.getOrCreateAccount(account.address);
-        stored.balance = account.balance;
+        stored.account.balance = account.balance;
         if (account.code.len != 0) try stored.setCode(account.code);
     }
 

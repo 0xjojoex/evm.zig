@@ -527,7 +527,7 @@ test "block builder coalesces transitions at one access index" {
     var state = State.init(allocator);
     defer state.deinit();
     var seeded = MemoryAccount.init(allocator);
-    seeded.balance = 10;
+    seeded.account.balance = 10;
     try state.seedAccount(target, seeded);
 
     var builder = BlockBuilder.init(allocator);

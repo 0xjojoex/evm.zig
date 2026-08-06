@@ -76,7 +76,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             errdefer executor.deinit();
 
             var sender = evmz.state.MemoryAccount.init(allocator);
-            sender.balance = std.math.maxInt(u256);
+            sender.account.balance = std.math.maxInt(u256);
             try executor.state.seedAccount(common.caller_address, sender);
 
             var contract = evmz.state.MemoryAccount.init(allocator);

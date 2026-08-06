@@ -516,8 +516,8 @@ pub const MemoryAccountSeed = struct {
 
 pub fn seedExecutorAccount(executor: anytype, address: Address, seed: MemoryAccountSeed) !void {
     var account = evmz.state.MemoryAccount.init(executor.allocator);
-    account.nonce = seed.nonce;
-    account.balance = seed.balance;
+    account.account.nonce = seed.nonce;
+    account.account.balance = seed.balance;
     if (seed.code.len != 0) {
         account.setCode(seed.code) catch |err| {
             account.deinit();
@@ -529,8 +529,8 @@ pub fn seedExecutorAccount(executor: anytype, address: Address, seed: MemoryAcco
 
 pub fn seedStoreAccount(store: anytype, address: Address, seed: MemoryAccountSeed) !void {
     var account = try store.getOrCreateAccount(address);
-    account.nonce = seed.nonce;
-    account.balance = seed.balance;
+    account.account.nonce = seed.nonce;
+    account.account.balance = seed.balance;
     if (seed.code.len != 0) try account.setCode(seed.code);
 }
 

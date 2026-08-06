@@ -1548,8 +1548,8 @@ test "MPT state roots agree with cached and witness-loaded accounts" {
     var state = TrackedState.init(scratch);
     defer state.deinit();
     var seeded = MemoryAccount.init(scratch);
-    seeded.nonce = previous.nonce;
-    seeded.balance = previous.balance;
+    seeded.account.nonce = previous.nonce;
+    seeded.account.balance = previous.balance;
     try state.seedAccount(target, seeded);
     const attempt = state.beginTransaction();
     state.beginScope();

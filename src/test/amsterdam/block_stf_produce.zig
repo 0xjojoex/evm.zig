@@ -122,7 +122,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
     };
     try std.testing.expectEqual(
         withdrawal_gwei_in_wei,
-        producer_state.getAccount(recipient).?.balance,
+        producer_state.getAccount(recipient).?.account.balance,
     );
     try std.testing.expectEqualSlices(
         u8,
@@ -162,7 +162,7 @@ test "BlockSTF produced BAL round trips through compare mode" {
     try std.testing.expectEqual(bal.DifferentialStatus.matched, differential_report.status);
     try std.testing.expectEqual(
         withdrawal_gwei_in_wei,
-        verifier_state.getAccount(recipient).?.balance,
+        verifier_state.getAccount(recipient).?.account.balance,
     );
 }
 
@@ -207,7 +207,7 @@ test "BlockSTF BAL differential rejects correlated claimed values" {
 
     var pre_state = state.MemoryStore.init(std.testing.allocator);
     defer pre_state.deinit();
-    (try pre_state.getOrCreateAccount(sender)).balance = 100_000_000;
+    (try pre_state.getOrCreateAccount(sender)).account.balance = 100_000_000;
     try (try pre_state.getOrCreateAccount(target)).setCode(&target_code);
 
     var producer_state = try pre_state.clone(std.testing.allocator);
@@ -311,7 +311,7 @@ test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as abs
 
     var pre_state = state.MemoryStore.init(std.testing.allocator);
     defer pre_state.deinit();
-    (try pre_state.getOrCreateAccount(sender)).balance = 100_000_000;
+    (try pre_state.getOrCreateAccount(sender)).account.balance = 100_000_000;
     try (try pre_state.getOrCreateAccount(probe)).setCode(&probe_code);
 
     var producer_state = try pre_state.clone(std.testing.allocator);
@@ -368,15 +368,15 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     var memory = state.MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
     const sender_account = try memory.getOrCreateAccount(decoded.sender);
-    sender_account.nonce = @intCast(decoded.nonce.?);
-    sender_account.balance = decoded.value +
+    sender_account.account.nonce = @intCast(decoded.nonce.?);
+    sender_account.account.balance = decoded.value +
         @as(u256, decoded.gas_limit) * decoded.gas_price + 1;
     const target = decoded.to.?;
     // Alive, not merely present. A bare 21000-gas transfer only fits when the
     // recipient already exists, and from EIP-161 on a zero-nonce, zero-balance,
     // codeless account is not an account at all.
     const target_seed_balance: u256 = 1;
-    (try memory.getOrCreateAccount(target)).balance = target_seed_balance;
+    (try memory.getOrCreateAccount(target)).account.balance = target_seed_balance;
     var verifier_state = try memory.clone(std.testing.allocator);
     defer verifier_state.deinit();
     var parallel_verifier_state = try memory.clone(std.testing.allocator);
@@ -403,8 +403,8 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
         &raw_transactions,
     );
     try std.testing.expectEqualSlices(u8, &expected_root, &produced.output.transactions_root);
-    try std.testing.expectEqual(@as(u64, 10), memory.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(target_seed_balance + decoded.value, memory.getAccount(target).?.balance);
+    try std.testing.expectEqual(@as(u64, 10), memory.getAccount(decoded.sender).?.account.nonce);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, memory.getAccount(target).?.account.balance);
 
     const verified = try block_stf.Exact(.amsterdam).apply(std.testing.allocator, .{
         .env = blockEnv(30_000_000),
@@ -417,8 +417,8 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     });
     try std.testing.expectEqual(block_stf.Status.valid, verified.status);
     try std.testing.expectEqualSlices(u8, &expected_root, &verified.transactions_root);
-    try std.testing.expectEqual(@as(u64, 10), verifier_state.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(target_seed_balance + decoded.value, verifier_state.getAccount(target).?.balance);
+    try std.testing.expectEqual(@as(u64, 10), verifier_state.getAccount(decoded.sender).?.account.nonce);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, verifier_state.getAccount(target).?.account.balance);
 
     const parallel_reader = parallel_verifier_state.concurrentReader();
     var parallel_report = bal.Report{};
@@ -445,8 +445,8 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     try std.testing.expectEqual(bal.DifferentialStatus.matched, parallel_report.status);
     try std.testing.expectEqual(@as(usize, 1), parallel_report.parallel_submitted_lanes);
     try std.testing.expectEqualSlices(u8, &expected_root, &parallel_verified.transactions_root);
-    try std.testing.expectEqual(@as(u64, 10), parallel_verifier_state.getAccount(decoded.sender).?.nonce);
-    try std.testing.expectEqual(target_seed_balance + decoded.value, parallel_verifier_state.getAccount(target).?.balance);
+    try std.testing.expectEqual(@as(u64, 10), parallel_verifier_state.getAccount(decoded.sender).?.account.nonce);
+    try std.testing.expectEqual(target_seed_balance + decoded.value, parallel_verifier_state.getAccount(target).?.account.balance);
 }
 
 test "BlockSTF parallel raw API owns decode failure cleanup" {
@@ -499,7 +499,7 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
 
     var producer_state = state.MemoryStore.init(std.testing.allocator);
     defer producer_state.deinit();
-    (try producer_state.getOrCreateAccount(sender)).balance = 1_000_000;
+    (try producer_state.getOrCreateAccount(sender)).account.balance = 1_000_000;
     try (try producer_state.getOrCreateAccount(target)).setCode(&target_code);
     // Keep Amsterdam lifecycle calls valid without adding their unrelated
     // storage behavior to this BLOCKHASH capability test.

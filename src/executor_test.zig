@@ -112,8 +112,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     var backing = evmz.state.MemoryStore.init(std.testing.allocator);
     defer backing.deinit();
     const backing_account = try backing.getOrCreateAccount(target);
-    backing_account.nonce = 1;
-    backing_account.balance = 10;
+    backing_account.account.nonce = 1;
+    backing_account.account.balance = 10;
     try backing_account.storage.put(7, 3);
 
     var tracked = Amsterdam.Executor.initOwned(

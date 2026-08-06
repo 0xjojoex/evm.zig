@@ -477,7 +477,7 @@ fn retainEthereum(outcome: anytype) !evmz.TxExecutionResult {
 
 fn seedTestAccount(executor: anytype, account_address: Address, balance: u256, code: []const u8) !void {
     var account = evmz.state.MemoryAccount.init(std.testing.allocator);
-    account.balance = balance;
+    account.account.balance = balance;
     if (code.len != 0) try account.setCode(code);
     try executor.state.seedAccount(account_address, account);
 }
@@ -749,7 +749,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     var memory = evmz.state.MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
     var sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 100;
+    sender_account.account.balance = 100;
     var recipient_account = try memory.getOrCreateAccount(recipient);
     try recipient_account.setCode(&runtime_code);
 

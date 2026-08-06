@@ -258,8 +258,8 @@ fn seedAccount(
     code: []const u8,
 ) !void {
     var account = MemoryAccount.init(std.testing.allocator);
-    account.balance = balance;
-    account.nonce = nonce;
+    account.account.balance = balance;
+    account.account.nonce = nonce;
     try account.setCode(code);
     try executor.state.seedAccount(address, account);
 }

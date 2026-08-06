@@ -34,7 +34,7 @@ const CaptureHarness = struct {
 
 fn seedCode(executor: anytype, address: evmz.Address, code: []const u8, balance: u256) !void {
     var account = MemoryAccount.init(std.testing.allocator);
-    account.balance = balance;
+    account.account.balance = balance;
     try account.setCode(code);
     try executor.state.seedAccount(address, account);
 }
@@ -335,8 +335,8 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         defer executor.deinit();
 
         var root_account = MemoryAccount.init(std.testing.allocator);
-        root_account.nonce = case.nonce;
-        root_account.balance = case.balance;
+        root_account.account.nonce = case.nonce;
+        root_account.account.balance = case.balance;
         try root_account.setCode(case.code);
         try executor.state.seedAccount(root, root_account);
 
@@ -392,12 +392,12 @@ test "call capture distinguishes CREATE collision from rollback" {
     defer executor.deinit();
 
     var root_account = MemoryAccount.init(std.testing.allocator);
-    root_account.nonce = root_nonce;
+    root_account.account.nonce = root_nonce;
     try root_account.setCode(&root_code);
     try executor.state.seedAccount(root, root_account);
 
     var target_account = MemoryAccount.init(std.testing.allocator);
-    target_account.nonce = 1;
+    target_account.account.nonce = 1;
     try executor.state.seedAccount(target, target_account);
 
     var capture: CaptureHarness = undefined;
@@ -476,7 +476,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
     var executor = FrontierExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
+    sender_account.account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;
@@ -649,7 +649,7 @@ test "root CREATE capture closes after runtime-code finalization" {
     var executor = Default.init(std.testing.allocator, .{});
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
-    sender_account.balance = 1_000_000;
+    sender_account.account.balance = 1_000_000;
     try executor.state.seedAccount(sender, sender_account);
 
     var capture: CaptureHarness = undefined;

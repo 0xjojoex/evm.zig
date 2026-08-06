@@ -333,9 +333,9 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     try std.testing.expectEqual(@as(usize, 1), rejected_report.folded_transactions);
     // The successful prefix is speculative until the complete block is
     // accepted. Rejecting transaction one must roll transaction zero back.
-    try std.testing.expectEqual(@as(u64, 0), rejected_store.getAccount(sender).?.nonce);
-    try std.testing.expectEqual(sender_start_balance, rejected_store.getAccount(sender).?.balance);
-    try std.testing.expectEqual(@as(u256, 0), rejected_store.getAccount(target).?.balance);
+    try std.testing.expectEqual(@as(u64, 0), rejected_store.getAccount(sender).?.account.nonce);
+    try std.testing.expectEqual(sender_start_balance, rejected_store.getAccount(sender).?.account.balance);
+    try std.testing.expectEqual(@as(u256, 0), rejected_store.getAccount(target).?.account.balance);
     try std.testing.expectEqual(@as(u256, 0), rejected_store.getAccount(target).?.getStorage(storage_slot));
 
     var parallel_rejected_store = evmz.state.MemoryStore.init(std.testing.allocator);
@@ -367,7 +367,7 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     );
     try std.testing.expectEqual(@as(usize, 1), parallel_rejected_report.parallel_submitted_lanes);
     try std.testing.expectEqual(@as(usize, 1), parallel_rejected_report.folded_transactions);
-    try std.testing.expectEqual(@as(u64, 0), parallel_rejected_store.getAccount(sender).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), parallel_rejected_store.getAccount(sender).?.account.nonce);
     try std.testing.expectEqual(@as(u256, 0), parallel_rejected_store.getAccount(target).?.getStorage(storage_slot));
 
     const lied_sender_nonce_changes = [_]bal.NonceChange{.{

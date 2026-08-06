@@ -1211,8 +1211,8 @@ test "tracked observations match recorder after inner rollback" {
     var state = State.init(allocator);
     defer state.deinit();
     var seeded = MemoryAccount.init(allocator);
-    seeded.balance = 10;
-    seeded.nonce = 3;
+    seeded.account.balance = 10;
+    seeded.account.nonce = 3;
     try seeded.setCode(&original_code);
     try seeded.storage.put(7, 11);
     try state.seedAccount(target, seeded);
@@ -1317,8 +1317,8 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var state = State.init(allocator);
     defer state.deinit();
     var seeded = MemoryAccount.init(allocator);
-    seeded.balance = 10;
-    seeded.nonce = 3;
+    seeded.account.balance = 10;
+    seeded.account.nonce = 3;
     try seeded.setCode(&original_code);
     try seeded.storage.put(7, 11);
     try state.seedAccount(target, seeded);
