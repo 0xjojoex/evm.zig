@@ -332,7 +332,7 @@ jobs:
             --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
-          release_elf="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-v${ZISK_VERSION}.elf"
+          release_elf="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
           install -D -m 0644 "${elf}" "${release_elf}"
           check_args=()
           if [[ "${RELEASE_GATE}" == true ]]; then

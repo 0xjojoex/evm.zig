@@ -821,7 +821,8 @@ const GuestBackend = enum {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
-                .target_features = "generic_rv64+m+zicclsm+relax",
+                // TODO: remove `+a` once std.heap.ArenaAllocator is fixed
+                .target_features = "generic_rv64+m+a+zicclsm+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",

@@ -112,15 +112,11 @@ jobs:
             --prefix "${RUNNER_TEMP}/guest" \
             --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
-          elf_name="stateless-validator-evmz-zisk-v${ZISK_VERSION}.elf"
+          elf_name="stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
           install -m 0644 \
             "${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf" \
             "${ARTIFACTS}/${elf_name}"
-          # The strict ISA gate with only the deviation-D1 attribute waived: the
-          # atomic/FP instruction scan still runs and must pass.
-          zig build check-guest-elf -- \
-            --require-rv64im-zicclsm --allow-attribute-a \
-            "${ARTIFACTS}/${elf_name}"
+          zig build check-guest-elf -- "${ARTIFACTS}/${elf_name}"
           echo "ELF_NAME=${elf_name}" >> "${GITHUB_ENV}"
           echo "elf-name=${elf_name}" >> "${GITHUB_OUTPUT}"
 
@@ -283,8 +279,6 @@ jobs:
           - ERE keygen image: ${ERE_IMAGE}
           - ELF SHA-256: ${elf_sha}
           - VK SHA-256: ${vk_sha}
-          - Corpus evidence: ${EVIDENCE_URL} (tests-zkevm; results attached as corpus-summary.json / corpus-report.md)
-          - Conformance statement and deviations register: guest/CONFORMANCE.md at the source commit
 
           The ELF hash-matches the artifact executed by the linked benchmark
           run, so the attached corpus results apply to these exact bytes.

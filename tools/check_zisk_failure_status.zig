@@ -12,7 +12,7 @@ const Options = struct {
     host: []const u8,
     elf: []const u8,
     host_args: []const []const u8,
-    /// Canary mode for conformance deviation D2 (guest/CONFORMANCE.md): passes
+    /// Canary mode for conformance deviation: passes
     /// while the ZisK startup library still discards main's nonzero return, and
     /// fails loudly the day it starts propagating, so the waiver gets removed.
     expect_no_propagation: bool = false,

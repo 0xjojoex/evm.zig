@@ -334,7 +334,7 @@ const Checker = struct {
     }
 };
 
-/// The attribute waiver covers conformance deviation D1 (guest/CONFORMANCE.md):
+/// The attribute waiver covers conformance deviation:
 /// the vendor static library declares `A` while contributing no atomic
 /// instructions. The `.text` opcode scan stays unconditional, so the waiver
 /// never excuses actual atomics.
