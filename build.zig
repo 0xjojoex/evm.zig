@@ -212,6 +212,8 @@ pub fn build(b: *std.Build) void {
 
     const tidy_step = addTidy(b);
     const fmt_step = addFmtCheck(b);
+    const check_guest_elf_tests = addCheckGuestElf(b);
+    const check_zisk_failure_status_tests = addCheckZiskFailureStatus(b);
 
     const debug_description = "Run the interactive controlled-execution debugger";
     if (is_native_profile) {
@@ -293,6 +295,8 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(tests.native_all);
     ci_step.dependOn(tests.zkvm_all);
     ci_step.dependOn(tests.packages);
+    ci_step.dependOn(check_guest_elf_tests);
+    ci_step.dependOn(check_zisk_failure_status_tests);
     ci_step.dependOn(tidy_step);
     ci_step.dependOn(fmt_step);
 
@@ -817,7 +821,8 @@ const GuestBackend = enum {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
-                .target_features = "generic_rv64+m+a+relax",
+                // TODO: remove `+a` once std.heap.ArenaAllocator is fixed
+                .target_features = "generic_rv64+m+a+zicclsm+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",
@@ -887,11 +892,13 @@ const GuestCompilePolicy = struct {
 
 const GuestPayload = enum {
     basic,
+    @"exit-failure-probe",
     @"stateless-ere",
 
     fn source(self: GuestPayload) []const u8 {
         return switch (self) {
             .basic => "guest/payload/basic.zig",
+            .@"exit-failure-probe" => "guest/payload/exit_failure_probe.zig",
             .@"stateless-ere" => "guest/payload/stateless_ere.zig",
         };
     }
@@ -1003,7 +1010,7 @@ fn addGuest(
     build_options: *std.Build.Step.Options,
 ) void {
     const config = backend.config();
-    // A zero heap_bytes collapses _evmz_heap_bottom onto _evmz_heap_top, which the
+    // A zero heap_bytes collapses _heap_start onto _heap_end, which the guest
     // allocator reads as unreachable. Every other memory bound is left to the linker
     // script, which unlike this function knows the guest's own data and bss sizes.
     const unbuildable: ?[]const u8 = if (provider_path_option == null)
@@ -1204,6 +1211,59 @@ fn addTidy(b: *std.Build) *std.Build.Step {
     const step = b.step("tidy", "Report unused private declarations and orphan files");
     step.dependOn(&run.step);
     return step;
+}
+
+fn addCheckGuestElf(b: *std.Build) *std.Build.Step {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/check_guest_elf.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const executable = b.addExecutable(.{
+        .name = "check-guest-elf",
+        .root_module = module,
+    });
+    const run = b.addRunArtifact(executable);
+    if (b.args) |args| run.addArgs(args);
+    b.step("check-guest-elf", "Validate a zkEVM guest ELF").dependOn(&run.step);
+
+    const tests = b.addTest(.{
+        .name = "check-guest-elf-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_guest_elf.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    return &b.addRunArtifact(tests).step;
+}
+
+fn addCheckZiskFailureStatus(b: *std.Build) *std.Build.Step {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/check_zisk_failure_status.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const executable = b.addExecutable(.{
+        .name = "check-zisk-failure-status",
+        .root_module = module,
+    });
+    const run = b.addRunArtifact(executable);
+    if (b.args) |args| run.addArgs(args);
+    b.step(
+        "check-zisk-failure-status",
+        "Require ZisK to propagate a failure-probe guest return",
+    ).dependOn(&run.step);
+
+    const tests = b.addTest(.{
+        .name = "check-zisk-failure-status-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_zisk_failure_status.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    return &b.addRunArtifact(tests).step;
 }
 
 fn addFmtCheck(b: *std.Build) *std.Build.Step {

@@ -51,7 +51,7 @@ pub const BasicProof = struct {
     storage_slot0_low: u32,
 };
 
-pub fn evmz_guest_entry() callconv(.c) void {
+pub fn evmz_guest_entry() callconv(.c) c_int {
     var fixed = guest_allocator.fixedBufferAllocator();
     const proof = runBasicFixture(fixed.allocator()) catch |err| {
         evmz_guest_output = .{
@@ -64,7 +64,7 @@ pub fn evmz_guest_entry() callconv(.c) void {
             0,
             @truncate(@intFromError(err)),
         };
-        return;
+        return 1;
     };
 
     evmz_guest_output = .{
@@ -77,6 +77,7 @@ pub fn evmz_guest_entry() callconv(.c) void {
         cryptoSmokeWord(),
         0,
     };
+    return 0;
 }
 
 comptime {
@@ -91,13 +92,16 @@ comptime {
     }
 }
 
-fn ziskMain() callconv(.c) void {
-    evmz_guest_entry();
+fn ziskMain() callconv(.c) c_int {
+    const status = evmz_guest_entry();
+    if (status != 0) return status;
     writeZiskOutput();
+    return 0;
 }
 
 fn sp1Main() callconv(.c) c_int {
-    evmz_guest_entry();
+    const status = evmz_guest_entry();
+    if (status != 0) return status;
     guest_io.writeOutput(std.mem.sliceAsBytes(&evmz_guest_output));
     return 0;
 }

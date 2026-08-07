@@ -21,7 +21,7 @@ on:
         default: main
         type: string
       publish:
-        description: Advance the release branch, tag, and GitHub release
+        description: Advance the release branch and tag, then create a draft GitHub release
         required: true
         default: false
         type: boolean
@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   release:
-    name: ${{ inputs.publish && 'Release' || 'Dry run' }} ${{ inputs.package }} ${{ inputs.version }}
+    name: ${{ inputs.publish && 'Draft release' || 'Dry run' }} ${{ inputs.package }} ${{ inputs.version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -126,4 +126,5 @@ jobs:
           gh release create "${TAG}" \
             --verify-tag \
             --title "${PACKAGE} v${VERSION}" \
-            --notes-file "${notes}"
+            --notes-file "${notes}" \
+            --draft

@@ -55,11 +55,10 @@ SECTIONS
   } >ram AT>ram :bss
 
   . = ALIGN(16);
-  PROVIDE(_evmz_heap_bottom = .);
+  _heap_start = .;
   . = . + _evmz_payload_heap_size;
-  PROVIDE(_evmz_heap_top = .);
-  PROVIDE(_evmz_heap_size = _evmz_heap_top - _evmz_heap_bottom);
-  ASSERT(_evmz_heap_top <= ORIGIN(ram) + LENGTH(ram), "evmz heap exceeds RAM")
+  _heap_end = .;
+  ASSERT(_heap_end <= ORIGIN(ram) + LENGTH(ram), "evmz heap exceeds RAM")
 
   . = ALIGN(8);
   PROVIDE(_init_stack_top = . + _stack_size);

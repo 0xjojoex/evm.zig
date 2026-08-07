@@ -11,6 +11,7 @@ on:
       - src/**
       - guest/**
       - eest/**
+      - .github/actions/build-zisk-artifacts/**
       - .github/workflows/guest-benchmark.yml
   push:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - src/**
       - guest/**
       - eest/**
+      - .github/actions/build-zisk-artifacts/**
       - .github/workflows/guest-benchmark.yml
   schedule:
     - cron: "23 2 * * *"
@@ -35,7 +37,10 @@ on:
           - rolling
           - tests-zkevm
       release_gate:
-        description: Require the selected tests-zkevm workflow revision to be on main
+        description: >-
+          Final-RC bar: require the source on main, the strict unwaived ISA
+          gate, a propagating termination probe, and zero known-failure
+          allowances (tests-zkevm only)
         required: true
         default: false
         type: boolean
@@ -114,7 +119,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/zisk-artifacts
           key: >-
-            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('.github/actions/build-zisk-artifacts/action.yml', 'guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
 
       - name: Install common system dependencies
         run: |
@@ -132,22 +137,6 @@ jobs:
             libomp5-18 \
             libopenmpi3t64 \
             libsodium23
-
-      - name: Install ZisK build dependencies
-        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang \
-            libclang-dev \
-            libgmp-dev \
-            libomp-dev \
-            libopenmpi-dev \
-            libsodium-dev \
-            nasm \
-            nlohmann-json3-dev \
-            pkg-config \
-            xz-utils
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -302,61 +291,18 @@ jobs:
             echo "path=${summary}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Install pinned ZisK toolchain
-        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL \
-            "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_COMMIT}/ziskup/ziskup" \
-            -o "${RUNNER_TEMP}/ziskup"
-          chmod +x "${RUNNER_TEMP}/ziskup"
-          sudo "${RUNNER_TEMP}/ziskup" \
-            --system \
-            --version "${ZISK_VERSION}" \
-            --prefix "${ZISK_HOME}" \
-            --owner "$(id -un):$(id -gn)" \
-            --cpu \
-            --nokey \
-            --yes \
-            --force
-          "${ZISK_HOME}/bin/cargo-zisk" toolchain install \
-            --toolchain-version "${ZISK_RUST_TOOLCHAIN}"
-          zisk_sysroot="$(rustup run zisk rustc --print sysroot)"
-          host_cargo="$(rustup which cargo)"
-          test -x "${host_cargo}"
-          if [[ ! -e "${zisk_sysroot}/bin/cargo" ]]; then
-            ln -s "${host_cargo}" "${zisk_sysroot}/bin/cargo"
-          fi
-          if rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf \
-            | grep -Eq 'target_feature="(zbb|zbkb|zbs)"'; then
-            echo "error: incompatible ZisK Rust target" >&2
-            exit 1
-          fi
-          echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
-
-      - name: Prepare pinned ZisK source
-        if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
-        run: |
-          git init "${ZISK_SOURCE}"
-          git -C "${ZISK_SOURCE}" remote add origin https://github.com/0xPolygonHermez/zisk.git
-          git -C "${ZISK_SOURCE}" fetch --depth 1 origin "${ZISK_COMMIT}"
-          git -C "${ZISK_SOURCE}" checkout --detach FETCH_HEAD
-          test "$(git -C "${ZISK_SOURCE}" rev-parse HEAD)" = "${ZISK_COMMIT}"
-
       - name: Build pinned ZisK artifacts
         if: matrix.backend == 'zisk' && steps.zisk-cache.outputs.cache-hit != 'true'
-        working-directory: ${{ runner.temp }}/zisk-source
-        run: |
-          "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
-          cargo build --locked --release \
-            --manifest-path "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/Cargo.toml"
-          provider="$(find target/elf -type f -name libziskos_staticlib.a -print -quit)"
-          test -n "${provider}"
-          install -D -m 0755 \
-            "${GITHUB_WORKSPACE}/guest/runtime/zisk/host/target/release/evmz-zisk-host" \
-            "${ZISK_ARTIFACTS}/evmz-zisk-host"
-          install -D -m 0644 \
-            "${provider}" \
-            "${ZISK_ARTIFACTS}/libziskos_staticlib.a"
+        uses: ./.github/actions/build-zisk-artifacts
+        with:
+          version: ${{ env.ZISK_VERSION }}
+          commit: ${{ env.ZISK_COMMIT }}
+          rust-toolchain: ${{ env.ZISK_RUST_TOOLCHAIN }}
+          zisk-home: ${{ env.ZISK_HOME }}
+          source-dir: ${{ env.ZISK_SOURCE }}
+          artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
+          build-host: "true"
+          host-manifest: ${{ github.workspace }}/guest/runtime/zisk/host/Cargo.toml
 
       - name: Resolve pinned ZisK artifacts
         if: matrix.backend == 'zisk'
@@ -375,21 +321,42 @@ jobs:
         if: matrix.backend == 'zisk'
         env:
           PROVIDER: ${{ steps.zisk.outputs.provider }}
+          RELEASE_GATE: ${{ inputs.release_gate }}
         run: |
           zig build guest-zisk \
             -Dguest-payload=stateless-ere \
+            -Dstateless-schema=0x1501 \
             -Doptimize=ReleaseFast \
             "-Dziskos-staticlib=${PROVIDER}" \
             --prefix "${RUNNER_TEMP}/guest" \
             --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
+          release_elf="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
+          install -D -m 0644 "${elf}" "${release_elf}"
+          check_args=()
+          if [[ "${RELEASE_GATE}" == true ]]; then
+            check_args+=(--require-rv64im-zicclsm)
+          fi
+          zig build check-guest-elf -- "${check_args[@]}" "${release_elf}"
+          if [[ "${RELEASE_GATE}" == true ]]; then
+            zig build guest-zisk \
+              -Dguest-payload=exit-failure-probe \
+              -Doptimize=ReleaseFast \
+              "-Dziskos-staticlib=${PROVIDER}" \
+              --prefix "${RUNNER_TEMP}/failure-probe" \
+              --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+              --summary all
+            zig build check-zisk-failure-status -- \
+              "${{ steps.zisk.outputs.host }}" \
+              "${RUNNER_TEMP}/failure-probe/guest/zisk/evmz-guest-zisk.elf"
+          fi
           if riscv64-unknown-elf-objdump -d "${elf}" \
             | grep -E '[[:space:]]rev8[[:space:]]' >/dev/null; then
             echo "error: ZisK guest contains unsupported rev8" >&2
             exit 1
           fi
-          echo "CANDIDATE_ELF=${elf}" >> "${GITHUB_ENV}"
+          echo "CANDIDATE_ELF=${release_elf}" >> "${GITHUB_ENV}"
           echo "GUEST_HOST=${{ steps.zisk.outputs.host }}" >> "${GITHUB_ENV}"
 
       - name: Restore SP1 build cache
@@ -425,6 +392,7 @@ jobs:
             --target-dir "${SP1_HOST_TARGET}"
           zig build guest-sp1 \
             -Dguest-payload=stateless-ere \
+            -Dstateless-schema=0x1501 \
             -Doptimize=ReleaseFast \
             "-Dsp1-staticlib=${SP1_SDK_ROOT}/libzkevm.a" \
             --prefix "${RUNNER_TEMP}/guest" \
@@ -569,11 +537,14 @@ jobs:
         with:
           name: guest-${{ matrix.backend }}-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ env.CANDIDATE_ELF }}
             guest-cycle-report.md
             guest-cycle-summary.json
             resolved-manifest.json
           if-no-files-found: warn
-          retention-days: 14
+          # The guest release's evidence gate hash-matches its ELF against this
+          # artifact; long retention keeps quiet-main releases dispatchable.
+          retention-days: 90
 
       - name: Save pinned ZisK artifacts from main
         if: >-
@@ -584,7 +555,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/zisk-artifacts
           key: >-
-            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
+            zisk-artifacts-v1-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ env.ZISK_VERSION }}-${{ env.ZISK_COMMIT }}-${{ env.ZISK_RUST_TOOLCHAIN }}-${{ hashFiles('.github/actions/build-zisk-artifacts/action.yml', 'guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}
 
       - name: Save SP1 build cache from main
         if: >-
