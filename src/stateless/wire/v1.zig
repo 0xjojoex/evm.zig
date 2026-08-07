@@ -1205,7 +1205,7 @@ fn validateStatelessUsing(
 /// Recovery also authenticates the sender used by the decoded transaction, so
 /// execution reuses that prepared value instead of recovering a second time.
 /// Returned slices borrow decoded input or storage owned by `allocator`; guest
-/// callers should use one block-lifetime arena.
+/// callers should give it their invocation-lifetime allocator.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
     const payload = input.new_payload_request.payloadView();

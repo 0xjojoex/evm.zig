@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const rlp = @import("rlp");
+const ResettableRegion = @import("resettable_region");
 
 const catalog = @import("catalog.zig");
 const errors = @import("error.zig");
@@ -23,20 +24,20 @@ pub const Update = struct {
 };
 
 pub const Workspace = struct {
-    arena: std.heap.ArenaAllocator,
+    region: ResettableRegion,
 
     pub fn init(allocator: Allocator) Workspace {
-        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        return .{ .region = ResettableRegion.init(allocator) };
     }
 
     pub fn deinit(self: *Workspace) void {
-        self.arena.deinit();
+        self.region.deinit();
         self.* = undefined;
     }
 
     fn reset(self: *Workspace) Allocator {
-        _ = self.arena.reset(.retain_capacity);
-        return self.arena.allocator();
+        self.region.resetRetainingCapacity();
+        return self.region.allocator();
     }
 };
 

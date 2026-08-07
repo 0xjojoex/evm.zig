@@ -1,27 +1,28 @@
 const std = @import("std");
+const ResettableRegion = @import("resettable_region");
 
 pub const Slot = struct {
-    arena: std.heap.ArenaAllocator,
+    region: ResettableRegion,
 
     pub fn init(parent_allocator: std.mem.Allocator) Slot {
-        return .{ .arena = std.heap.ArenaAllocator.init(parent_allocator) };
+        return .{ .region = ResettableRegion.init(parent_allocator) };
     }
 
     pub fn deinit(self: *Slot) void {
-        self.arena.deinit();
+        self.region.deinit();
         self.* = undefined;
     }
 
     pub fn reset(self: *Slot) void {
-        _ = self.arena.reset(.retain_capacity);
+        self.region.resetRetainingCapacity();
     }
 
     pub fn allocator(self: *Slot) std.mem.Allocator {
-        return self.arena.allocator();
+        return self.region.allocator();
     }
 
     pub fn capacity(self: *const Slot) usize {
-        return self.arena.queryCapacity();
+        return self.region.capacity();
     }
 };
 
