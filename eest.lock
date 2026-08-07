@@ -4,11 +4,11 @@
 # ethereum/execution-specs. `Spec.stable` remains Osaka; this lock is for the
 # active `Spec.latest` fixture lane.
 repo=ethereum/execution-specs
-version=tests-glamsterdam-devnet@v7.2.0
+version=tests-glamsterdam-devnet@v8.1.0
 artifact=fixtures_glamsterdam-devnet.tar.gz
-url=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v7.2.0/fixtures_glamsterdam-devnet.tar.gz
-sha256=29ba214eaf37c880c845179994cb62e82a0fb63e58f83e6c640d85f3e7d7a796
-dest=.eest/fixtures/tests-glamsterdam-devnet-v7.2.0
+url=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v8.1.0/fixtures_glamsterdam-devnet.tar.gz
+sha256=3bdb3783c988d8a2dbc0dd6bb2dc0986b4559829513229a48bcc2840557c2e22
+dest=.eest/fixtures/tests-glamsterdam-devnet-v8.1.0
 
 # Benchmark fixture download defaults. Benchmark fixtures are published on the
 # tests-benchmark release track in ethereum/execution-specs.

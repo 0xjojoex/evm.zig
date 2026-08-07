@@ -446,9 +446,9 @@ test "settlement cost vectors follow fork and exact-spec policies" {
         .{
             .spec = eth.amsterdam,
             .plan = DefaultPlan{
-                .gas_limit = 282_798,
-                .intrinsic_gas = 88_198,
-                .floor_gas = 282_776,
+                .gas_limit = 283_798,
+                .intrinsic_gas = 89_198,
+                .floor_gas = 283_776,
                 .gas_price = 10,
                 .priority_fee = 3,
                 .fee_recipient = address.addr(0xbeef),
@@ -460,9 +460,9 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .state_gas_spent = 0,
             },
             .expected = DefaultCosts{
-                .gas = .{ .used = 282_776, .refunded = 22, .block = .{ .total = 282_776, .regular = 282_776 } },
+                .gas = .{ .used = 283_776, .refunded = 22, .block = .{ .total = 283_776, .regular = 283_776 } },
                 .payer_refund = 220,
-                .fee_payment = 848_328,
+                .fee_payment = 851_328,
             },
         },
     }) |case| {

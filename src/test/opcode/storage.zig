@@ -146,7 +146,10 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - 3_000 - 10_000), result.gas_left);
+    try std.testing.expectEqual(
+        @as(i64, 100_000 - 3 - 3 - evmz.eth.eip8038.cold_storage_access_cost - evmz.eth.eip8038.storage_write_cost),
+        result.gas_left,
+    );
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, @intCast(evmz.eth.eip8037.storage_set_state_gas)), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
@@ -154,12 +157,12 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
 }
 
-test "prepared cold Amsterdam SSTORE out of access gas stops before storage write" {
+test "prepared cold Amsterdam SSTORE at stipend stops before storage access" {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    msg.gas = 3 + 3 + 2_500;
+    msg.gas = 3 + 3 + evmz.eth.gas.call_stipend;
     const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
@@ -176,7 +179,7 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status());
-    try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
 }

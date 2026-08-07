@@ -22,11 +22,8 @@ pub const system_max_sstores_per_call: u64 = 16;
 /// Amsterdam transaction base cost before calldata, access list, authorization, or create costs.
 pub const tx_base_cost: u64 = 12_000;
 
-/// Extra regular gas for a value-bearing top-level transaction.
-pub const tx_value_cost: u64 = 4_244;
-
-/// Regular gas for the value-transfer log emitted by Amsterdam value transfers.
-pub const transfer_log_cost: u64 = 1_756;
+/// Extra regular gas for a non-CREATE, non-self top-level value transfer.
+pub const tx_value_cost: u64 = 6_000;
 
 /// Regular code-deposit hash cost per 32-byte word; code bytes themselves are state-gas.
 pub const code_deposit_word_cost: u64 = 6;
