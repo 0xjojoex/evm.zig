@@ -133,7 +133,7 @@ fn selectInput(allocator: std.mem.Allocator, bytes: []const u8, options: Options
 test "selects stateless input from fixture JSON" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
-    const output = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
+    const output = try evmz.stateless.wire.validateStatelessBytesReusable(std.testing.allocator, input);
     defer std.testing.allocator.free(output);
 
     const input_hex = try hexAlloc(std.testing.allocator, input);

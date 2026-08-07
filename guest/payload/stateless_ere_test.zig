@@ -11,7 +11,7 @@ test "stateless ERE payload emits canonical SSZ output" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
 
-    const expected = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
+    const expected = try evmz.stateless.wire.validateStatelessBytesReusable(std.testing.allocator, input);
     defer std.testing.allocator.free(expected);
 
     for (0..2) |_| {
@@ -24,7 +24,7 @@ test "stateless ERE payload emits canonical SSZ output" {
 
 test "stateless ERE guest path releases malformed-input scratch" {
     const malformed = [_]u8{0};
-    const expected = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, &malformed);
+    const expected = try evmz.stateless.wire.validateStatelessBytesReusable(std.testing.allocator, &malformed);
     defer std.testing.allocator.free(expected);
 
     for (0..2) |_| {

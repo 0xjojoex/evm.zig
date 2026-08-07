@@ -45,6 +45,8 @@ pub const StatelessValidationResult = primary.StatelessValidationResult;
 pub const smokeInput = v1_smoke.smokeInput;
 pub const smokeInputBytes = v1_smoke.smokeInputBytes;
 
+/// Validates one guest invocation. Scratch and output share the caller-owned
+/// invocation lifetime and are released together after the output is consumed.
 pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
     inline for (schemas[1..]) |Schema| {
         if (claims(Schema, bytes)) return Schema.validateStatelessBytes(allocator, bytes);
@@ -52,13 +54,13 @@ pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) E
     return primary.validateStatelessBytes(allocator, bytes);
 }
 
-/// Validates one invocation whose scratch and result allocations share a
-/// caller-owned lifetime. Reusable callers must use `validateStatelessBytes`.
-pub fn validateStatelessBytesOneShot(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
+/// Releases validation scratch before returning output owned by `allocator`.
+/// Invocation-scoped callers should use `validateStatelessBytes` directly.
+pub fn validateStatelessBytesReusable(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
     inline for (schemas[1..]) |Schema| {
-        if (claims(Schema, bytes)) return Schema.validateStatelessBytesOneShot(allocator, bytes);
+        if (claims(Schema, bytes)) return Schema.validateStatelessBytesReusable(allocator, bytes);
     }
-    return primary.validateStatelessBytesOneShot(allocator, bytes);
+    return primary.validateStatelessBytesReusable(allocator, bytes);
 }
 
 pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Status {
@@ -153,7 +155,7 @@ test "router dispatches schema-prefixed bytes to the schema that claims them" {
     const bytes = try smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(bytes);
 
-    const output = try validateStatelessBytes(std.testing.allocator, bytes);
+    const output = try validateStatelessBytesReusable(std.testing.allocator, bytes);
     defer std.testing.allocator.free(output);
 
     const result = try StatelessValidationResult.decode(std.testing.allocator, output);
@@ -166,9 +168,22 @@ test "router hands prefixes nothing claims to the primary schema" {
     defer std.testing.allocator.free(bytes);
     bytes[0] = 0xff;
 
-    const output = try validateStatelessBytes(std.testing.allocator, bytes);
+    const output = try validateStatelessBytesReusable(std.testing.allocator, bytes);
     defer std.testing.allocator.free(output);
 
     const result = try StatelessValidationResult.decode(std.testing.allocator, output);
     try std.testing.expect(!result.successful_validation);
+}
+
+test "reusable validation releases scratch before allocating output" {
+    const bytes = try smokeInputBytes(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    const backing = try std.testing.allocator.alloc(u8, 16 * 1024 * 1024);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+
+    const output = try validateStatelessBytesReusable(fixed.allocator(), bytes);
+    try std.testing.expect(fixed.isLastAllocation(output));
+    fixed.allocator().free(output);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
