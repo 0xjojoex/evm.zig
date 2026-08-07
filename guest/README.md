@@ -85,15 +85,19 @@ model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 
 The `Guest benchmark` workflow is the single execute-only guest performance
 surface; ZisK is currently the only enabled backend. Pull requests and pushes
-to `main` replay the immutable 100-block `glamsterdam-devnet-7` snapshot in
-[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json),
-and a nightly run resolves the latest ten complete R2 batches. Correctness is
-the gate — every archive digest, execution, and public output must match —
-while cycle changes never fail the workflow. When
-[`../eest/fixtures/guest-release-baseline.json`](../eest/fixtures/guest-release-baseline.json)
-names immutable release ELFs, the runner also reports aggregate and per-block
-deltas against them. ZisK steps and SP1 cycles stay separate metrics, and
-emulator execution duration is never treated as proving time.
+to `main` replay the digest-pinned `tests-zkevm` corpus, a nightly run
+resolves the latest ten complete `glamsterdam-devnet-7` R2 batches, and
+`workflow_dispatch` also offers the immutable 100-block snapshot in
+[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json).
+Correctness is the gate — every archive digest, execution, and public output
+must match — while cycle changes never fail the workflow. ZisK steps and SP1
+cycles stay separate metrics, and emulator execution duration is never treated
+as proving time.
+
+Reports are absolute: the workflow measures the candidate ELF and does not
+compare against a release. There is no stored release baseline, because no
+guest release exists to be a baseline yet. `report-guest-cycles.py --baseline
+<dir>` still renders per-block deltas between two local result sets.
 
 `zig build zkevm -- --executor zisk|sp1` runs the same ERE-shaped
 measurements locally; pass `--zisk-host`/`--zisk-elf` or
