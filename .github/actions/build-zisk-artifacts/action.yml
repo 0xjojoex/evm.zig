@@ -1,0 +1,139 @@
+name: Build pinned ZisK artifacts
+description: Install pinned ZisK sources and build its guest provider and optional evmz host
+
+inputs:
+  version:
+    description: ZisK release version passed to ziskup
+    required: true
+  commit:
+    description: Exact ZisK source commit
+    required: true
+  rust-toolchain:
+    description: ZisK Rust toolchain version
+    required: true
+  zisk-home:
+    description: Installation directory for the ZisK SDK
+    required: true
+  source-dir:
+    description: Checkout and build directory for ZisK
+    required: true
+  artifacts-dir:
+    description: Output directory for stable artifact paths
+    required: true
+  build-host:
+    description: Build the evmz ZisK host alongside the provider
+    required: false
+    default: "false"
+  host-manifest:
+    description: Cargo manifest for the evmz ZisK host
+    required: false
+    default: ""
+
+outputs:
+  provider:
+    description: Path to libziskos_staticlib.a
+    value: ${{ steps.artifacts.outputs.provider }}
+  host:
+    description: Path to evmz-zisk-host, or empty when build-host is false
+    value: ${{ steps.artifacts.outputs.host }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install ZisK build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          clang \
+          libclang-dev \
+          libgmp-dev \
+          libomp-dev \
+          libopenmpi-dev \
+          libsodium-dev \
+          nasm \
+          nlohmann-json3-dev \
+          pkg-config \
+          xz-utils
+
+    - name: Install pinned ZisK toolchain
+      shell: bash
+      env:
+        ZISK_VERSION: ${{ inputs.version }}
+        ZISK_COMMIT: ${{ inputs.commit }}
+        ZISK_RUST_TOOLCHAIN: ${{ inputs.rust-toolchain }}
+        ZISK_HOME: ${{ inputs.zisk-home }}
+      run: |
+        curl -fsSL \
+          "https://raw.githubusercontent.com/0xPolygonHermez/zisk/${ZISK_COMMIT}/ziskup/ziskup" \
+          -o "${RUNNER_TEMP}/ziskup"
+        chmod +x "${RUNNER_TEMP}/ziskup"
+        sudo "${RUNNER_TEMP}/ziskup" \
+          --system \
+          --version "${ZISK_VERSION}" \
+          --prefix "${ZISK_HOME}" \
+          --owner "$(id -un):$(id -gn)" \
+          --cpu \
+          --nokey \
+          --yes \
+          --force
+        "${ZISK_HOME}/bin/cargo-zisk" toolchain install \
+          --toolchain-version "${ZISK_RUST_TOOLCHAIN}"
+        zisk_sysroot="$(rustup run zisk rustc --print sysroot)"
+        host_cargo="$(rustup which cargo)"
+        test -x "${host_cargo}"
+        if [[ ! -e "${zisk_sysroot}/bin/cargo" ]]; then
+          ln -s "${host_cargo}" "${zisk_sysroot}/bin/cargo"
+        fi
+        if rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf \
+          | grep -Eq 'target_feature="(zbb|zbkb|zbs)"'; then
+          echo "error: incompatible ZisK Rust target" >&2
+          exit 1
+        fi
+        echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
+
+    - name: Checkout pinned ZisK source
+      shell: bash
+      env:
+        ZISK_COMMIT: ${{ inputs.commit }}
+        ZISK_SOURCE: ${{ inputs.source-dir }}
+      run: |
+        git init "${ZISK_SOURCE}"
+        git -C "${ZISK_SOURCE}" remote add origin https://github.com/0xPolygonHermez/zisk.git
+        git -C "${ZISK_SOURCE}" fetch --depth 1 origin "${ZISK_COMMIT}"
+        git -C "${ZISK_SOURCE}" checkout --detach FETCH_HEAD
+        test "$(git -C "${ZISK_SOURCE}" rev-parse HEAD)" = "${ZISK_COMMIT}"
+
+    - name: Build pinned ZisK artifacts
+      id: artifacts
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      env:
+        ARTIFACTS_DIR: ${{ inputs.artifacts-dir }}
+        BUILD_HOST: ${{ inputs.build-host }}
+        HOST_MANIFEST: ${{ inputs.host-manifest }}
+        ZISK_HOME: ${{ inputs.zisk-home }}
+        ZISK_SOURCE: ${{ inputs.source-dir }}
+      run: |
+        set -euo pipefail
+        "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
+        provider="$(find "${ZISK_SOURCE}/target/elf" -type f -name libziskos_staticlib.a -print -quit)"
+        test -s "${provider}"
+        install -D -m 0644 \
+          "${provider}" \
+          "${ARTIFACTS_DIR}/libziskos_staticlib.a"
+        echo "provider=${ARTIFACTS_DIR}/libziskos_staticlib.a" >> "${GITHUB_OUTPUT}"
+
+        host=""
+        if [[ "${BUILD_HOST}" == true ]]; then
+          test -n "${HOST_MANIFEST}"
+          cargo build --locked --release --manifest-path "${HOST_MANIFEST}"
+          host_source="$(dirname "${HOST_MANIFEST}")/target/release/evmz-zisk-host"
+          test -x "${host_source}"
+          install -D -m 0755 \
+            "${host_source}" \
+            "${ARTIFACTS_DIR}/evmz-zisk-host"
+          host="${ARTIFACTS_DIR}/evmz-zisk-host"
+        fi
+        echo "host=${host}" >> "${GITHUB_OUTPUT}"

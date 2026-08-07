@@ -12,6 +12,7 @@ involved.
 
 ```sh
 zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+  -Dstateless-schema=0x1501 \
   -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 ```
 

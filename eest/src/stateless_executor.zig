@@ -10,10 +10,6 @@ const std = @import("std");
 const evmz = @import("evmz");
 const ere_io = @import("stateless_ere_io.zig");
 
-/// Magic the guest payload writes instead of a result when it fails before
-/// producing one. See `guest/payload/stateless_ere.zig`.
-const guest_error_magic = "EVMZERR1";
-
 pub const Target = enum {
     native,
     zisk,
@@ -194,8 +190,7 @@ fn executeSp1(
     return canonicalOutcome(allocator, public, canonical_len, cycles, elapsed_ns);
 }
 
-/// Strips guest framing. A guest that failed before producing a result writes
-/// its error magic instead, which is a crash rather than a wrong output.
+/// Strips guest framing after the host has confirmed a successful guest exit.
 fn canonicalOutcome(
     allocator: std.mem.Allocator,
     payload: []const u8,
@@ -203,15 +198,6 @@ fn canonicalOutcome(
     cycles: u64,
     duration_nanos: u64,
 ) !Outcome {
-    if (std.mem.startsWith(u8, payload, guest_error_magic)) {
-        const code = if (payload.len >= guest_error_magic.len + 4)
-            std.mem.readInt(u32, payload[8..12], .little)
-        else
-            0;
-        return .{ .crashed = .{
-            .reason = try std.fmt.allocPrint(allocator, "guest reported error {d}", .{code}),
-        } };
-    }
     if (payload.len < canonical_len) return .{ .crashed = .{
         .reason = try std.fmt.allocPrint(
             allocator,
@@ -382,16 +368,6 @@ test "a guest public region shorter than the expected result is a crash" {
     var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);
-}
-
-test "guest error magic becomes a crash rather than a wrong output" {
-    var payload: [32]u8 = [_]u8{0} ** 32;
-    @memcpy(payload[0..8], guest_error_magic);
-    std.mem.writeInt(u32, payload[8..12], 9, .little);
-
-    var outcome = try canonicalOutcome(std.testing.allocator, &payload, 69, 0, 0);
-    defer outcome.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("guest reported error 9", outcome.crashed.reason);
 }
 
 test "native execution returns the validator's own result bytes" {

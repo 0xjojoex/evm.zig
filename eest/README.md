@@ -128,8 +128,8 @@ A guest writes into a fixed-width public region and an encoded
 `StatelessValidationResult` is variable-size, so the meaningful length cannot be
 recovered from the region alone; the executor takes it from the fixture's own
 expected output and requires the remainder of the region to be zero. A guest
-that fails before producing a result writes an `EVMZERR1` marker instead, which
-is reported as a crash rather than as a wrong output.
+that fails before producing a result returns a nonzero exit status, which the
+host reports as a crash rather than as a wrong output.
 
 Guest runs share one session across every root, so a guest host child converts
 the ELF to a ROM once per worker rather than once per corpus batch. Each worker owns one host child process, and

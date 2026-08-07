@@ -1,0 +1,301 @@
+name: Guest release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (guest-vX.Y.Z or guest-vX.Y.Z-rc.N)"
+        required: true
+        type: string
+      ref:
+        description: Commit on main to release
+        required: true
+        default: main
+        type: string
+      dry_run:
+        description: >-
+          Stop after building, validating, and matching corpus evidence; skip
+          the verification key, signing, and the draft release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-release
+  cancel-in-progress: false
+
+env:
+  ZISK_VERSION: 1.0.0-alpha
+  ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
+  ZISK_RUST_TOOLCHAIN: zisk-1.0.0
+  # ere-server-zisk:58ca85b, pinned by digest so the VK provenance is immutable.
+  ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:a21622ab8a9b2502f40307208b593f500a22373201e9ae37c2558a7eadb52e17
+
+jobs:
+  build:
+    name: Build and verify ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      elf-name: ${{ steps.elf.outputs.elf-name }}
+      source-commit: ${{ steps.source.outputs.commit }}
+      evidence-url: ${{ steps.evidence.outputs.run-url }}
+
+    steps:
+      - name: Require a guest release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "${TAG}" =~ ^guest-v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Require a source commit on main
+        id: source
+        run: |
+          set -euo pipefail
+          source_commit="$(git rev-parse HEAD)"
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main
+          echo "SOURCE_COMMIT=${source_commit}" >> "${GITHUB_ENV}"
+          echo "commit=${source_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve build paths
+        run: |
+          {
+            echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
+            echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
+            echo "ZISK_ARTIFACTS=${RUNNER_TEMP}/zisk-artifacts"
+            echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts"
+          } >> "${GITHUB_ENV}"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Deliberately unconditional: releases never restore zisk-artifacts-v1.
+      - name: Build fresh pinned ZisK artifacts
+        id: zisk
+        uses: ./.github/actions/build-zisk-artifacts
+        with:
+          version: ${{ env.ZISK_VERSION }}
+          commit: ${{ env.ZISK_COMMIT }}
+          rust-toolchain: ${{ env.ZISK_RUST_TOOLCHAIN }}
+          zisk-home: ${{ env.ZISK_HOME }}
+          source-dir: ${{ env.ZISK_SOURCE }}
+          artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
+
+      - name: Build and validate guest ELF
+        id: elf
+        env:
+          PROVIDER: ${{ steps.zisk.outputs.provider }}
+        run: |
+          set -euo pipefail
+          test -s "${PROVIDER}"
+          mkdir -p "${ARTIFACTS}"
+          zig build guest-zisk \
+            -Dguest-payload=stateless-ere \
+            -Dstateless-schema=0x1501 \
+            -Doptimize=ReleaseFast \
+            "-Dziskos-staticlib=${PROVIDER}" \
+            --prefix "${RUNNER_TEMP}/guest" \
+            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+            --summary all
+          elf_name="stateless-validator-evmz-zisk-v${ZISK_VERSION}.elf"
+          install -m 0644 \
+            "${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf" \
+            "${ARTIFACTS}/${elf_name}"
+          # The strict ISA gate with only the deviation-D1 attribute waived: the
+          # atomic/FP instruction scan still runs and must pass.
+          zig build check-guest-elf -- \
+            --require-rv64im-zicclsm --allow-attribute-a \
+            "${ARTIFACTS}/${elf_name}"
+          echo "ELF_NAME=${elf_name}" >> "${GITHUB_ENV}"
+          echo "elf-name=${elf_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require corpus evidence for these exact bytes
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          elf_sha="$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)"
+          runs="$(gh run list --workflow guest-benchmark.yml --branch main \
+            --status success --limit 20 --json databaseId,headSha,url)"
+          ordered="$(jq -r --arg sha "${SOURCE_COMMIT}" \
+            '([.[] | select(.headSha == $sha)] + [.[] | select(.headSha != $sha)])
+             | .[] | "\(.databaseId)\t\(.url)"' <<<"${runs}")"
+          evidence_url=""
+          while IFS=$'\t' read -r run_id run_url; do
+            [[ -n "${run_id}" ]] || continue
+            artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+              --jq '[.artifacts[]
+                     | select(.expired | not)
+                     | select(.name | startswith("guest-zisk-tests-zkevm-"))
+                     | .name] | sort | last // empty')"
+            [[ -n "${artifact}" ]] || continue
+            evidence_dir="${RUNNER_TEMP}/evidence"
+            rm -rf "${evidence_dir}"
+            gh run download "${run_id}" --name "${artifact}" --dir "${evidence_dir}" || continue
+            tested="$(find "${evidence_dir}" -name 'stateless-validator-evmz-zisk-*.elf' -print -quit)"
+            [[ -n "${tested}" ]] || continue
+            tested_sha="$(sha256sum "${tested}" | cut -d ' ' -f 1)"
+            if [[ "${tested_sha}" == "${elf_sha}" ]]; then
+              evidence_url="${run_url}"
+              install -m 0644 "${evidence_dir}/guest-cycle-summary.json" "${ARTIFACTS}/corpus-summary.json"
+              install -m 0644 "${evidence_dir}/guest-cycle-report.md" "${ARTIFACTS}/corpus-report.md"
+              install -m 0644 "${evidence_dir}/resolved-manifest.json" "${ARTIFACTS}/corpus-manifest.json"
+              break
+            fi
+            echo "note: ${run_url} tested sha256 ${tested_sha}; this build is ${elf_sha}"
+          done <<<"${ordered}"
+          if [[ -z "${evidence_url}" ]]; then
+            echo "error: no successful tests-zkevm benchmark artifact matches this ELF (sha256 ${elf_sha})" >&2
+            echo "Dispatch 'Guest benchmark' with corpus=tests-zkevm on ${SOURCE_COMMIT}, wait for green, then rerun this release." >&2
+            exit 1
+          fi
+          echo "run-url=${evidence_url}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "## Corpus evidence"
+            echo ""
+            echo "- ELF SHA-256: \`${elf_sha}\`"
+            echo "- Matched benchmark run: ${evidence_url}"
+            echo "- Reproducibility: fresh cache-free build matches the tested artifact byte-for-byte"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release bundle
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          path: release-artifacts
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft ${{ inputs.tag }}
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: release-bundle
+          path: release-artifacts
+
+      - name: Resolve bundle paths
+        env:
+          ELF_NAME: ${{ needs.build.outputs.elf-name }}
+        run: |
+          set -euo pipefail
+          echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts" >> "${GITHUB_ENV}"
+          echo "ELF_NAME=${ELF_NAME}" >> "${GITHUB_ENV}"
+          test -s "${GITHUB_WORKSPACE}/release-artifacts/${ELF_NAME}"
+          test -s "${GITHUB_WORKSPACE}/release-artifacts/corpus-summary.json"
+
+      - name: Free disk space for VK generation
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache
+
+      - name: Generate ZisK verification key
+        run: |
+          set -euo pipefail
+          vk_name="${ELF_NAME%.elf}.vk"
+          docker pull "${ERE_IMAGE}"
+          docker run --rm \
+            -v "${ARTIFACTS}:/output" \
+            "${ERE_IMAGE}" \
+            --elf-path "/output/${ELF_NAME}" \
+            keygen \
+            --program-vk-path "/output/${vk_name}"
+          test "$(stat -c %s "${ARTIFACTS}/${vk_name}")" -eq 32
+          echo "VK_NAME=${vk_name}" >> "${GITHUB_ENV}"
+
+      - name: Install Minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+
+      - name: Hash and sign release assets
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${MINISIGN_SECRET_KEY}"
+          test -n "${MINISIGN_PUBLIC_KEY}"
+          test -n "${MINISIGN_PASSWORD}"
+          (
+            cd "${ARTIFACTS}"
+            sha256sum "${ELF_NAME}" "${VK_NAME}" corpus-summary.json corpus-report.md corpus-manifest.json > SHA256SUMS
+          )
+          secret_key="${RUNNER_TEMP}/minisign.key"
+          public_key="${ARTIFACTS}/minisign.pub"
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${secret_key}"
+          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${public_key}"
+          for file in "${ARTIFACTS}/${ELF_NAME}" "${ARTIFACTS}/${VK_NAME}" "${ARTIFACTS}/SHA256SUMS"; do
+            filename="$(basename "${file}")"
+            printf '%s\n' "${MINISIGN_PASSWORD}" | minisign \
+              -Sm "${file}" \
+              -s "${secret_key}" \
+              -x "${file}.minisig" \
+              -t "${filename}"
+          done
+          rm -f "${secret_key}"
+
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.source-commit }}
+          EVIDENCE_URL: ${{ needs.build.outputs.evidence-url }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/release-notes.md"
+          elf_sha="$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)"
+          vk_sha="$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)"
+          cat > "${notes}" <<EOF
+          ZisK guest pre-release for integration testing.
+
+          - Source commit: ${SOURCE_COMMIT}
+          - ZisK: v${ZISK_VERSION} (${ZISK_COMMIT})
+          - ERE keygen image: ${ERE_IMAGE}
+          - ELF SHA-256: ${elf_sha}
+          - VK SHA-256: ${vk_sha}
+          - Corpus evidence: ${EVIDENCE_URL} (tests-zkevm; results attached as corpus-summary.json / corpus-report.md)
+          - Conformance statement and deviations register: guest/CONFORMANCE.md at the source commit
+
+          The ELF hash-matches the artifact executed by the linked benchmark
+          run, so the attached corpus results apply to these exact bytes.
+          Publishing this draft marks it as a pre-release; final conformance
+          claims remain separate maintainer decisions.
+          EOF
+          gh release create "${TAG}" \
+            -R "${GITHUB_REPOSITORY}" \
+            --target "${SOURCE_COMMIT}" \
+            --title "${TAG}" \
+            --notes-file "${notes}" \
+            --draft \
+            --prerelease \
+            "${ARTIFACTS}"/*

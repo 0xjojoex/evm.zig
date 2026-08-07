@@ -62,11 +62,11 @@ SECTIONS
      * and SP1's ELF loader walks p_memsz, inserting a zero word for every
      * address past p_filesz. An emitted heap section costs ~2M initial
      * memory-image entries per run.
-     */
+    */
     . = ALIGN(16);
-    _evmz_heap_bottom = .;
+    _heap_start = .;
     . = . + _evmz_payload_heap_size;
-    _evmz_heap_top = .;
+    _heap_end = .;
 
     . = ALIGN(16);
     _end = .;
@@ -75,8 +75,6 @@ SECTIONS
 
     __input_start = __sp1_max_memory - __sp1_input_region;
     __input_end = __sp1_max_memory;
-    _heap_start = _end;
-    _heap_end = __input_start;
 
     ASSERT(_end <= __input_start, "evmz heap overlaps SP1 input region")
 

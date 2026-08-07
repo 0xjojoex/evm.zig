@@ -4,8 +4,8 @@ const guest_options = @import("guest_options");
 
 pub const MeteredFixedBufferAllocator = evmz.fixed_buffer_meter.MeteredFixedBufferAllocator;
 
-extern var _evmz_heap_bottom: u8;
-extern var _evmz_heap_top: u8;
+extern var _heap_start: u8;
+extern var _heap_end: u8;
 
 const NativeHeap = if (guest_options.backend != .native) struct {
     fn buffer() []u8 {
@@ -30,8 +30,8 @@ const NativeHeap = if (guest_options.backend != .native) struct {
 
 pub fn fixedBuffer() []u8 {
     if (comptime guest_options.backend != .native) {
-        const bottom = @intFromPtr(&_evmz_heap_bottom);
-        const top = @intFromPtr(&_evmz_heap_top);
+        const bottom = @intFromPtr(&_heap_start);
+        const top = @intFromPtr(&_heap_end);
         if (top <= bottom) unreachable;
         if (bottom % 16 != 0) unreachable;
 

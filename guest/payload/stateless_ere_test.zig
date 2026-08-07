@@ -2,6 +2,11 @@ const std = @import("std");
 const evmz = @import("evmz");
 const payload = @import("guest_payload_stateless_ere");
 
+test "stateless ERE entry returns failure when input is unavailable" {
+    try std.testing.expectEqual(@as(c_int, 1), payload.evmz_guest_entry());
+    try std.testing.expect(payload.evmz_guest_error != 0);
+}
+
 test "stateless ERE payload emits canonical SSZ output" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
