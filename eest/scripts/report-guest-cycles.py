@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Summarise report-only guest cycles against an optional release baseline."""
+"""Summarise report-only guest cycles against an optional prior result set."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -95,7 +94,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sp1", default="v6.3.1")
     parser.add_argument("--fixtures", default="tests-zkevm@v0.6.2")
     parser.add_argument("--corpus-manifest", type=Path)
-    parser.add_argument("--baseline-summary", type=Path)
     parser.add_argument("--summary-output", type=Path)
     parser.add_argument("--known-failures", type=Path)
     parser.add_argument("--allow-known-failures", action="store_true")
@@ -270,38 +268,6 @@ def summary_document(
     }
 
 
-def load_summary(args: argparse.Namespace, corpus: CorpusContext) -> Aggregate | None:
-    if args.baseline_summary is None:
-        return None
-    document = json.loads(args.baseline_summary.read_text())
-    expected = {
-        "schema_version": 1,
-        "backend": args.backend,
-        "metric": metric(args),
-        "corpus": args.fixtures,
-        "corpus_digest": corpus.digest,
-    }
-    for key, value in expected.items():
-        if document.get(key) != value:
-            raise ValueError(f"baseline summary {key} mismatch")
-    # Provenance, not equality: the baseline and the candidate are different
-    # ELFs by construction, so only require the recorded hash to be well formed.
-    recorded_elf = document.get("elf_sha256")
-    if not isinstance(recorded_elf, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded_elf):
-        raise ValueError("baseline summary elf_sha256 is missing or malformed")
-    baseline = Aggregate(
-        fixture_count=int(document["fixture_count"]),
-        crashes=int(document["crashes"]),
-        upstream_matches=int(document["upstream_matches"]),
-        total=int(document["total"]),
-    )
-    if baseline.fixture_count <= 0 or baseline.crashes != 0:
-        raise ValueError("baseline summary is not a successful release run")
-    if baseline.upstream_matches != baseline.fixture_count:
-        raise ValueError("baseline summary has incomplete upstream matches")
-    return baseline
-
-
 def header(args: argparse.Namespace, corpus: CorpusContext) -> list[str]:
     lines = [
         f"# {'ZisK' if args.backend == 'zisk' else 'SP1'} execution {metric(args)}",
@@ -335,7 +301,7 @@ def render_absolute(
 
     lines = header(args, corpus)
     lines.extend((
-        f"No stored baseline was available; reporting absolute {metric_singular(args)} counts only.",
+        f"No baseline result set was given; reporting absolute {metric_singular(args)} counts only.",
         "",
         f"| Fixtures | Known failures | Unexpected failures | Crashes | Upstream matches | Total {metric(args)} |",
         "| ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -366,39 +332,6 @@ def render_absolute(
             f"{mark(row.upstream_matched is True)} |"
         )
     lines.append("")
-    lines.extend(failure_lines(current.values(), known, current_aggregate))
-    return "\n".join(lines), healthy(current_aggregate, args.allow_known_failures)
-
-
-def render_aggregate_comparison(
-    args: argparse.Namespace,
-    baseline: Aggregate,
-    current: dict[str, Row],
-    corpus: CorpusContext,
-    known: KnownFailures,
-) -> tuple[str, bool]:
-    current_aggregate = aggregate(current, known)
-    delta = current_aggregate.total - baseline.total
-    comparable = current_aggregate.known_failures == 0
-    delta_value = f"{delta:+,}" if comparable else "n/a"
-    delta_pct = pct(delta, baseline.total) if comparable else "n/a"
-    lines = header(args, corpus)
-    lines.extend((
-        f"| Baseline fixtures | Current fixtures | Known failures | Unexpected failures | Crashes | Current upstream matches | Baseline {metric(args)} | Current {metric(args)} | Delta | Delta % |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        f"| {baseline.fixture_count} | {current_aggregate.fixture_count} | "
-        f"{current_aggregate.known_failures} | {current_aggregate.unexpected_failures} | "
-        f"{current_aggregate.crashes} | "
-        f"{current_aggregate.upstream_matches}/{current_aggregate.fixture_count} | "
-        f"{baseline.total:,} | {current_aggregate.total:,} | {delta_value} | "
-        f"{delta_pct} |",
-        "",
-    ))
-    if not comparable:
-        lines.extend((
-            "Step totals are not compared because known failures produced no measurement.",
-            "",
-        ))
     lines.extend(failure_lines(current.values(), known, current_aggregate))
     return "\n".join(lines), healthy(current_aggregate, args.allow_known_failures)
 
@@ -522,11 +455,8 @@ def main() -> int:
                 json.dumps(summary_document(args, corpus, current_aggregate), indent=2) + "\n"
             )
         baseline = load_rows(args.baseline) if args.baseline and args.baseline.is_dir() else {}
-        baseline_summary = load_summary(args, corpus)
         if baseline:
             report, is_healthy = render_comparison(args, baseline, current, corpus, known)
-        elif baseline_summary:
-            report, is_healthy = render_aggregate_comparison(args, baseline_summary, current, corpus, known)
         else:
             report, is_healthy = render_absolute(args, current, corpus, known)
         args.output.parent.mkdir(parents=True, exist_ok=True)
