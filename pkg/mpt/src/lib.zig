@@ -31,6 +31,7 @@ pub const StdKeccak256Context = hash.StdKeccak256Context;
 pub const Workspace = @import("workspace.zig").Workspace;
 pub const Entry = root_mod.Entry;
 pub const rootWorkspaceSize = root_mod.workspaceSize;
+pub const rootWorkspaceSizeForLimits = root_mod.workspaceSizeForLimits;
 pub const Absence = proof.Absence;
 pub const Lookup = proof.Lookup;
 pub const LookupCache = proof.LookupCache;

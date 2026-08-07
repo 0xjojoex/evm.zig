@@ -65,6 +65,17 @@ test "reported root workspace bound is sufficient for byte-aligned storage" {
     try std.testing.expect(workspace.peak_used_bytes <= needed);
 }
 
+test "root workspace limit sizing matches materialized entries" {
+    const entries = [_]mpt.Entry{
+        .{ .key = "do", .value = "verb" },
+        .{ .key = "horse", .value = "stallion" },
+    };
+    try std.testing.expectEqual(
+        try mpt.rootWorkspaceSize(&entries, true),
+        try mpt.rootWorkspaceSizeForLimits(entries.len, "horse".len, "stallion".len, true),
+    );
+}
+
 test "full root handles divergent first nibbles and embedded children" {
     const entries = [_]mpt.Entry{
         .{ .key = &[_]u8{0x0f}, .value = "dog" },

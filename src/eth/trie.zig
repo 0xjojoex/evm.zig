@@ -80,6 +80,102 @@ pub const empty_root_hash = mpt.empty_root;
 
 pub const Pair = mpt.Entry;
 
+const IndexKey = [1 + @sizeOf(usize)]u8;
+
+/// Exact scratch for one ordered-trie root. Index keys and entry descriptors
+/// stay live while the MPT builder uses its separately sized flat workspace.
+const OrderedTrieWorkspace = struct {
+    backing: []u8,
+    pairs: []Pair,
+    keys: []IndexKey,
+    root_buffer: []u8,
+
+    fn init(
+        allocator: Allocator,
+        encoded_values: []const []const u8,
+    ) Error!OrderedTrieWorkspace {
+        var max_value_bytes: usize = 0;
+        for (encoded_values) |value| max_value_bytes = @max(max_value_bytes, value.len);
+        const max_key_bytes = fixedRlpEncodedLen(usize, encoded_values.len - 1);
+        const root_buffer_len = try mpt.rootWorkspaceSizeForLimits(
+            encoded_values.len,
+            max_key_bytes,
+            max_value_bytes,
+            true,
+        );
+        var backing_len: usize = 0;
+        backing_len = try addWorkspaceRegion(Pair, backing_len, encoded_values.len);
+        backing_len = try addWorkspaceRegion(IndexKey, backing_len, encoded_values.len);
+        backing_len = try addWorkspaceRegion(u8, backing_len, root_buffer_len);
+        const backing = try allocator.alloc(u8, backing_len);
+        errdefer allocator.free(backing);
+        var fixed = std.heap.FixedBufferAllocator.init(backing);
+        const pairs = fixed.allocator().alloc(Pair, encoded_values.len) catch unreachable;
+        const keys = fixed.allocator().alloc(IndexKey, encoded_values.len) catch unreachable;
+        for (pairs, keys, encoded_values, 0..) |*pair, *key, value, index| {
+            pair.* = .{
+                .key = indexKeyInto(key, index),
+                .value = value,
+            };
+        }
+        const root_buffer = fixed.allocator().alloc(u8, root_buffer_len) catch unreachable;
+        return .{
+            .backing = backing,
+            .pairs = pairs,
+            .keys = keys,
+            .root_buffer = root_buffer,
+        };
+    }
+
+    fn deinit(self: *OrderedTrieWorkspace, allocator: Allocator) void {
+        allocator.free(self.backing);
+        self.* = undefined;
+    }
+};
+
+/// Withdrawal encodings have to coexist with ordered-root construction, so
+/// they own a distinct exact outer workspace rather than borrowing root scratch.
+const WithdrawalWorkspace = struct {
+    backing: []u8,
+    values: [][]const u8,
+    encoded: []u8,
+
+    fn init(allocator: Allocator, withdrawals: []const Withdrawal) Error!WithdrawalWorkspace {
+        var encoded_len: usize = 0;
+        for (withdrawals) |withdrawal| {
+            encoded_len = std.math.add(
+                usize,
+                encoded_len,
+                fixedRlpEncodedLen(Withdrawal, withdrawal),
+            ) catch return error.ResourceLimitExceeded;
+        }
+        var backing_len: usize = 0;
+        backing_len = try addWorkspaceRegion([]const u8, backing_len, withdrawals.len);
+        backing_len = try addWorkspaceRegion(u8, backing_len, encoded_len);
+        const backing = try allocator.alloc(u8, backing_len);
+        errdefer allocator.free(backing);
+        var fixed = std.heap.FixedBufferAllocator.init(backing);
+        const values = fixed.allocator().alloc([]const u8, withdrawals.len) catch unreachable;
+        const encoded = fixed.allocator().alloc(u8, encoded_len) catch unreachable;
+        var offset: usize = 0;
+        for (values, withdrawals) |*value, withdrawal| {
+            const len = fixedRlpEncodedLen(Withdrawal, withdrawal);
+            value.* = encodeFixedRlpInto(
+                Withdrawal,
+                encoded[offset .. offset + len],
+                withdrawal,
+            );
+            offset += len;
+        }
+        return .{ .backing = backing, .values = values, .encoded = encoded };
+    }
+
+    fn deinit(self: *WithdrawalWorkspace, allocator: Allocator) void {
+        allocator.free(self.backing);
+        self.* = undefined;
+    }
+};
+
 pub const Account = struct {
     nonce: u64 = 0,
     balance: u256 = 0,
@@ -343,18 +439,10 @@ pub fn cachedProof(root_hash: [32]u8, indexed: *const IndexedNodes, cache: *Proo
 pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8) Error![32]u8 {
     if (encoded_values.len == 0) return empty_root_hash;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const pairs = try scratch.alloc(Pair, encoded_values.len);
-    for (pairs, encoded_values, 0..) |*pair, value, index| {
-        pair.* = .{
-            .key = try indexKey(scratch, index),
-            .value = value,
-        };
-    }
-    return try root(allocator, pairs);
+    var scratch = try OrderedTrieWorkspace.init(allocator, encoded_values);
+    defer scratch.deinit(allocator);
+    var root_workspace = mpt.Workspace.init(scratch.root_buffer);
+    return structuralTrie(allocator).rootWithWorkspace(&root_workspace, scratch.pairs);
 }
 
 pub fn transactionRoot(allocator: Allocator, encoded_transactions: []const []const u8) Error![32]u8 {
@@ -368,15 +456,9 @@ pub fn receiptRoot(allocator: Allocator, encoded_receipts: []const []const u8) E
 pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Error![32]u8 {
     if (withdrawals.len == 0) return empty_root_hash;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const values = try scratch.alloc([]const u8, withdrawals.len);
-    for (values, withdrawals) |*value, withdrawal| {
-        value.* = try withdrawalValue(scratch, withdrawal);
-    }
-    return orderedTrieRoot(allocator, values);
+    var scratch = try WithdrawalWorkspace.init(allocator, withdrawals);
+    defer scratch.deinit(allocator);
+    return orderedTrieRoot(allocator, scratch.values);
 }
 
 pub fn updateRoot(allocator: Allocator, root_hash: [32]u8, nodes: []const []const u8, updates: []const Update) UpdateError![32]u8 {
@@ -730,11 +812,8 @@ pub fn withdrawalValue(allocator: Allocator, withdrawal: Withdrawal) Allocator.E
     return encodeFixedRlp(Withdrawal, allocator, withdrawal);
 }
 
-fn indexKey(allocator: Allocator, index: usize) Allocator.Error![]u8 {
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-    try writerInt(&out, usize, index);
-    return try writerOwned(&out);
+fn indexKeyInto(out: *IndexKey, index: usize) []const u8 {
+    return rlp.encode(usize, out, index) catch unreachable;
 }
 
 fn loadAccountOrEmpty(
@@ -980,6 +1059,24 @@ fn encodeFixedRlp(
     };
 }
 
+fn fixedRlpEncodedLen(comptime T: type, value: anytype) usize {
+    return rlp.encodedLen(T, value) catch unreachable;
+}
+
+fn encodeFixedRlpInto(comptime T: type, out: []u8, value: anytype) []const u8 {
+    return rlp.encode(T, out, value) catch unreachable;
+}
+
+fn addWorkspaceRegion(comptime T: type, offset: usize, count: usize) Error!usize {
+    if (count == 0) return offset;
+    const aligned = std.math.add(usize, offset, @alignOf(T) - 1) catch
+        return error.ResourceLimitExceeded;
+    const bytes = std.math.mul(usize, @sizeOf(T), count) catch
+        return error.ResourceLimitExceeded;
+    return std.math.add(usize, aligned, bytes) catch
+        error.ResourceLimitExceeded;
+}
+
 fn writerBytes(writer: *rlp.Writer, value: []const u8) Allocator.Error!void {
     writer.bytes(value) catch |err| switch (err) {
         error.NoSpaceLeft => unreachable,
@@ -1100,6 +1197,23 @@ test "MPT withdrawals root encodes ordered withdrawals" {
     try t.expectHex(value0, "d8010294000000000000000000000000000000000000100003");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &withdrawals)), "ba94e67f1ff34df6be897a534b805005dc84403f69a89614daa2283fa8b1862f");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+}
+
+test "ordered trie exact workspaces reclaim fixed backing" {
+    const values = [_][]const u8{ "cat", "dog" };
+    const withdrawals = [_]Withdrawal{.{
+        .index = 1,
+        .validator_index = 2,
+        .address = address.addr(0x1000),
+        .amount = 3,
+    }};
+    var backing: [64 * 1024]u8 align(16) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+
+    _ = try orderedTrieRoot(fixed.allocator(), &values);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+    _ = try withdrawalsRoot(fixed.allocator(), &withdrawals);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "MPT root rejects duplicate keys" {
