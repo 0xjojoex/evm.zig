@@ -124,6 +124,7 @@ pub fn bind(comptime Executor: type) type {
             frames: *FrameStore,
             frame_base: usize,
             capture_context: ?*CaptureContext,
+            top_frame_resolved: bool,
 
             pub fn init(executor: *Executor) CallRuntime {
                 return .{
@@ -132,12 +133,25 @@ pub fn bind(comptime Executor: type) type {
                     .frames = &executor.frame_store,
                     .frame_base = executor.frame_store.len(),
                     .capture_context = executor.currentCaptureContext(),
+                    .top_frame_resolved = false,
                 };
             }
 
             pub fn deinit(self: *CallRuntime) void {
+                self.abort();
+            }
+
+            /// Restore every unresolved child checkpoint owned by this runtime.
+            fn abort(self: *CallRuntime) void {
+                if (self.top_frame_resolved) self.popResolvedFrame();
                 while (self.frames.len() > self.frame_base) {
-                    self.popFrame();
+                    const index = self.frames.len() - 1;
+                    switch (self.frames.control(index).kind) {
+                        .root_call => {},
+                        .call => |checkpoint_state| self.executor.state.revertToCheckpoint(checkpoint_state),
+                        .create => |child| self.executor.state.revertToCheckpoint(child.checkpoint_state),
+                    }
+                    self.dropFrame();
                 }
             }
 
@@ -241,10 +255,17 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            pub fn popFrame(self: *CallRuntime) void {
+            fn dropFrame(self: *CallRuntime) void {
                 std.debug.assert(self.frames.len() > self.frame_base);
                 if (self.stepCaptureContext()) |context| context.popFrame();
                 self.frames.pop();
+            }
+
+            /// Drop the top frame after `finishFrame` resolved its checkpoint.
+            pub fn popResolvedFrame(self: *CallRuntime) void {
+                std.debug.assert(self.top_frame_resolved);
+                self.top_frame_resolved = false;
+                self.dropFrame();
             }
 
             inline fn stepCaptureContext(self: *CallRuntime) ?*CaptureContext {
@@ -280,13 +301,13 @@ pub fn bind(comptime Executor: type) type {
                             const host_result = try self.finishFrame(index, result);
                             if (self.frames.len() == self.frame_base + 1) {
                                 const stable = try stabilizeFinalResult(self.executor, host_result);
-                                self.popFrame();
+                                self.popResolvedFrame();
                                 return stable;
                             }
 
                             const parent_index = self.frames.len() - 2;
                             try self.resumeSuspended(parent_index, host_result);
-                            self.popFrame();
+                            self.popResolvedFrame();
                         },
                     }
                 }
@@ -419,6 +440,8 @@ pub fn bind(comptime Executor: type) type {
             }
 
             pub fn finishFrame(self: *CallRuntime, frame_index: usize, result: FrameResult) !Host.Result {
+                std.debug.assert(!self.top_frame_resolved);
+                std.debug.assert(frame_index == self.frames.len() - 1);
                 const control = self.frames.control(frame_index).*;
                 const frame_kind = control.kind;
                 const call_capture = control.call_capture;
@@ -462,6 +485,7 @@ pub fn bind(comptime Executor: type) type {
                 if (call_capture) |token| {
                     finishCallCaptureReserved(self.callCaptureContext().?, token, host_result);
                 }
+                self.top_frame_resolved = true;
                 return host_result;
             }
         };
@@ -1343,8 +1367,8 @@ pub fn bind(comptime Executor: type) type {
                     defer runtime.deinit();
                     try runtime.prepareNested();
                     try runtime.pushChildCall(msg, child.checkpoint_state, child.bytecode, null);
-                    const result = try runtime.run();
                     checkpoint.disarm();
+                    const result = try runtime.run();
                     break :blk result;
                 },
             };
@@ -1381,8 +1405,8 @@ pub fn bind(comptime Executor: type) type {
                     defer runtime.deinit();
                     try runtime.prepareNested();
                     try runtime.pushChildCreate(child, null);
-                    const result = try runtime.run();
                     checkpoint.disarm();
+                    const result = try runtime.run();
                     break :blk result;
                 },
             };
@@ -1649,6 +1673,118 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
         checkpoint.commit();
     }
     try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(address));
+}
+
+test "call runtime abort skips resolved top and restores enclosing checkpoint" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Executor = Cancun.Executor;
+    const runtime = bind(Executor);
+    const sender = evmz.addr(0x1111);
+    const root_address = evmz.addr(0x2222);
+    const parent_write = evmz.addr(0x3333);
+    const child_write = evmz.addr(0x4444);
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 100_000),
+        sender,
+        root_address,
+    );
+    defer executor.discardStateTransition();
+
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+    var bytecode = try executor.prepareBytecode(&.{0x00});
+    defer bytecode.deinit(std.testing.allocator);
+
+    const root_message = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = root_address,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = root_address,
+    };
+    var call = runtime.CallRuntime.init(&executor);
+    defer call.deinit();
+    try call.prepare();
+    try call.pushRootCall(root_message, bytecode.view());
+
+    const parent_checkpoint = executor.state.checkpoint();
+    try executor.state.addBalance(parent_write, 7);
+    var parent_message = root_message;
+    parent_message.depth = 1;
+    try call.pushChildCall(parent_message, parent_checkpoint, bytecode.view(), null);
+
+    const child_checkpoint = executor.state.checkpoint();
+    try executor.state.addBalance(child_write, 9);
+    var child_message = root_message;
+    child_message.depth = 2;
+    try call.pushChildCall(child_message, child_checkpoint, bytecode.view(), null);
+
+    const child_index = call.frames.len() - 1;
+    const child_frame = call.frames.frame(child_index);
+    child_frame.halt(.success);
+    _ = try call.finishFrame(child_index, child_frame.result());
+
+    call.deinit();
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(parent_write));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(child_write));
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
+}
+
+test "nested runtime error restores its transferred checkpoint once" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+    const fail_byte: u8 = 0xb0;
+    const Fail = struct {
+        pub inline fn execute(comptime _: type, _: *Interpreter.CallFrame) anyerror!void {
+            return error.ForcedRuntimeFailure;
+        }
+    };
+    const custom_instructions = comptime instructions: {
+        var instructions = evmz.eth.cancun.instruction;
+        instructions.install(.SQUARE, fail_byte, .{
+            .static_gas = 0,
+            .stack_in = 0,
+            .stack_out = 0,
+        }, .{ .custom = Fail });
+        break :instructions instructions;
+    };
+    const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
+    const Executor = Exact.Executor;
+    const runtime = bind(Executor);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10 });
+    var recipient_account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    try recipient_account.setCode(&.{fail_byte});
+    try executor.state.seedAccount(recipient, recipient_account);
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 100_000),
+        sender,
+        recipient,
+    );
+    defer executor.discardStateTransition();
+
+    try std.testing.expectError(error.ForcedRuntimeFailure, runtime.resolveHostCall(&executor, .{
+        .depth = 1,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 7,
+        .code_address = recipient,
+    }));
+    try std.testing.expectEqual(@as(u256, 10), try executor.state.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
 fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address) !void {
