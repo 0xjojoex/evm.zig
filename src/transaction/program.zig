@@ -290,8 +290,8 @@ pub fn Context(
         }
 
         /// Open an inner rollback checkpoint without resolving the transaction.
-        pub fn checkpoint(self: *Self) ContextError!ExecutorType.ExecutionCheckpoint {
-            return self.activeExecutor().checkpoint() catch |err| return executor_errors.normalize(err);
+        pub fn checkpoint(self: *Self) ExecutorType.ExecutionCheckpoint {
+            return self.activeExecutor().checkpoint();
         }
 
         /// Execute the root payload under its own inner rollback checkpoint.

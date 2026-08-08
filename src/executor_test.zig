@@ -52,6 +52,21 @@ fn runStandaloneObserved(
     );
 }
 
+fn beginCreateScope(
+    executor: anytype,
+    context: execution_values.ExecutionContext,
+    create: execution_values.Create,
+    gas: execution_values.ExecutionGas,
+) !execution_values.EvmExecutionRequest {
+    const request = execution_values.EvmExecutionRequest{
+        .context = context,
+        .message = .{ .create = create },
+        .gas = gas,
+    };
+    try executor.beginMessageScope(request, .{});
+    return request;
+}
+
 const testExecutionContext = evmz.t.defaultExecutionContext;
 
 const DenseTransitionSummary = struct {
@@ -162,9 +177,9 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try dense.addBalance(target, 5);
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
 
-    var tracked_checkpoint = try tracked.checkpoint();
+    var tracked_checkpoint = tracked.checkpoint();
     defer tracked_checkpoint.deinit();
-    var dense_checkpoint = try dense.checkpoint();
+    var dense_checkpoint = dense.checkpoint();
     defer dense_checkpoint.deinit();
 
     const tracked_load = try tracked.state.loadStorage(target, 7);
@@ -181,8 +196,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try tracked.addBalance(target, 7);
     try dense.addBalance(target, 7);
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try tracked_checkpoint.restore();
-    try dense_checkpoint.restore();
+    tracked_checkpoint.restore();
+    dense_checkpoint.restore();
     try std.testing.expectEqual(@as(u256, 15), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try dense.getStorage(target, 7));
@@ -330,12 +345,12 @@ test "CREATE initcode preparation remains execution-local" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-    const result = (try executor.executeCreate(.{
+    const request = try beginCreateScope(&executor, execution_context, .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
-    }, .legacy(100_000))).expectCreate();
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
     executor.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -1904,7 +1919,7 @@ test "transaction payload resolves only its inner checkpoint" {
         try executor.state.addBalance(sender, 7);
         try transaction_runtime.beginExecution(&executor, request, .{});
 
-        var preparation_checkpoint = try executor.checkpoint();
+        var preparation_checkpoint = executor.checkpoint();
         defer preparation_checkpoint.deinit();
         try executor.state.addBalance(sender, 5);
 
@@ -1914,7 +1929,7 @@ test "transaction payload resolves only its inner checkpoint" {
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
 
-        try preparation_checkpoint.commit();
+        preparation_checkpoint.commit();
         const executed = Cancun.Executor.Executed(void){
             .executor = &executor,
             .generation = transaction_runtime.finish(&executor),
@@ -1991,12 +2006,12 @@ test "executor executes top-level create transaction" {
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
 
-    try executor.beginCreateTransaction(execution_context, sender);
-    const result = (try executor.executeCreate(.{
+    const request = try beginCreateScope(&executor, execution_context, .{
         .sender = sender,
         .recipient = create_address,
         .init_code = init_code,
-    }, .legacy(100_000))).expectCreate();
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
@@ -2478,11 +2493,14 @@ test "create warms created address from Berlin" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = init_code,
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expect(executor.state.isAccountWarm(create_address));
@@ -2530,10 +2548,14 @@ test "create address collision preserves nonce and warmth outside payload rollba
     const create_address = evmz.address.create(sender, 0);
     try evmz.t.seedExecutorAccount(&executor, create_address, .{ .nonce = 1 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = &.{0x00},
+        .value = 1,
+    }, .legacy(100_000));
     defer executor.discardStateTransition();
-
-    const result = (try executor.executeCreateTransaction(sender, create_address, &.{0x00}, .legacy(100_000), 1)).expectCreate();
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
@@ -2784,11 +2806,14 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-
     const init_code = &.{ 0x60, 0xef, 0x60, 0x00, 0x53, 0x60, 0x10, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = init_code,
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);

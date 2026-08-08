@@ -161,7 +161,6 @@ pub fn ExecutorType(
         pub const specification = spec;
         pub const compile_options = options_value;
         pub const State = StateModel;
-        pub const ScopeCheckpoint = StateModel.Checkpoint;
         pub const BranchCheckpoint = StateModel.BranchCheckpoint;
         pub const Error = ErrorType;
         pub const Services = ExecutorServices;
@@ -503,13 +502,13 @@ pub fn ExecutorType(
             parent_id: usize,
             open: bool = true,
 
-            pub fn commit(self: *ExecutionCheckpoint) !void {
+            pub fn commit(self: *ExecutionCheckpoint) void {
                 self.validateClose();
                 self.executor.state.commitCheckpoint(self.journal_checkpoint);
                 self.finishClose();
             }
 
-            pub fn restore(self: *ExecutionCheckpoint) !void {
+            pub fn restore(self: *ExecutionCheckpoint) void {
                 self.validateClose();
                 self.executor.state.revertToCheckpoint(self.journal_checkpoint);
                 self.finishClose();
@@ -750,16 +749,6 @@ pub fn ExecutorType(
             try warmTransactionAccesses(self, sender, recipient);
         }
 
-        /// Open a manual create transaction scope.
-        ///
-        /// This is the create counterpart to `beginTransaction`; there is no recipient
-        /// to warm before the create address is derived during execution.
-        pub fn beginCreateTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address) !void {
-            try self.openTransactionScope(context, .normal);
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, null);
-        }
-
         /// Open a direct message-execution scope from its authoritative context.
         ///
         /// This is open-only: callers own checkpoint placement, execution, and
@@ -865,7 +854,7 @@ pub fn ExecutorType(
         }
 
         /// Open one journal-backed checkpoint inside the active execution scope.
-        pub fn checkpoint(self: *Self) !ExecutionCheckpoint {
+        pub fn checkpoint(self: *Self) ExecutionCheckpoint {
             self.requireTransactionScope();
             std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
             const id = self.next_checkpoint_id + 1;
@@ -1077,18 +1066,6 @@ pub fn ExecutorType(
             return runtime.executePreparedCallTransaction(self, options);
         }
 
-        /// Execute a raw create inside an already-open create tx scope.
-        pub fn executeCreateTransaction(
-            self: *Self,
-            sender: Address,
-            recipient: Address,
-            init_code: []const u8,
-            gas: execution_values.ExecutionGas,
-            value: u256,
-        ) !Self.EvmResult {
-            return runtime.executeCreateTransaction(self, sender, recipient, init_code, gas, value);
-        }
-
         /// Execute a raw create/create2 message inside an already-open tx scope.
         pub fn executeCreate(self: *Self, message: Self.Create, gas: execution_values.ExecutionGas) !Self.EvmResult {
             return runtime.executeCreate(self, message, gas);
@@ -1143,16 +1120,16 @@ pub fn ExecutorType(
             try self.beginMessageScopeContext(context, message, scope_init, mode);
             errdefer self.discardStateTransition();
 
-            var pre_execution = try self.checkpoint();
+            var pre_execution = self.checkpoint();
             defer pre_execution.deinit();
 
             const result = try self.executeMessage(message, gas);
             if (executionRolledBack(result.status())) {
-                try pre_execution.restore();
+                pre_execution.restore();
                 try self.retainStateTransitionWithObserver(observer);
             } else {
                 try self.finalizeTransactionState();
-                try pre_execution.commit();
+                pre_execution.commit();
                 try self.retainStateTransitionWithObserver(observer);
             }
             return result;
@@ -1247,7 +1224,7 @@ pub fn ExecutorType(
             errdefer self.discardStateTransition();
 
             self.clearLastOutput();
-            var execution_checkpoint = try self.checkpoint();
+            var execution_checkpoint = self.checkpoint();
             defer execution_checkpoint.deinit();
 
             const resolved = try runtime.resolveCode(self, recipient);
@@ -1273,10 +1250,10 @@ pub fn ExecutorType(
             _ = host_result.expectCall();
 
             if (executionRolledBack(host_result.status())) {
-                try execution_checkpoint.restore();
+                execution_checkpoint.restore();
                 try self.retainStateTransitionWithObserver(observer);
             } else {
-                try execution_checkpoint.commit();
+                execution_checkpoint.commit();
                 try self.commitTransactionWithObserver(observer);
             }
 

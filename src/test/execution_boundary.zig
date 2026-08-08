@@ -51,11 +51,11 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try std.testing.expect(executor.state.isAccountWarm(contract));
     try std.testing.expect(executor.state.isAccountWarm(other));
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
     try executor.warmAccount(reverted);
     try executor.addBalance(reverted, 7);
-    try checkpoint.restore();
+    checkpoint.restore();
 
     try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(other));
@@ -149,10 +149,10 @@ test "execution checkpoint preserves family pre-scope writes" {
     try executor.state.setBalance(sender, 7);
     try transaction_runtime.beginExecution(&executor, request(sender, contract), .{});
 
-    var execution_checkpoint = try executor.checkpoint();
+    var execution_checkpoint = executor.checkpoint();
     defer execution_checkpoint.deinit();
     try executor.state.setBalance(sender, 9);
-    try execution_checkpoint.restore();
+    execution_checkpoint.restore();
 
     try std.testing.expectEqual(@as(u256, 7), executor.getAccount(sender).?.balance);
     const executed = ShanghaiExecutor.Executed(void){
@@ -196,16 +196,16 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     );
     defer executor.discardStateTransition();
 
-    var committed = try executor.checkpoint();
+    var committed = executor.checkpoint();
     defer committed.deinit();
     _ = try executor.state.setStorage(contract, 7, 1);
-    try committed.commit();
+    committed.commit();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     var host = executor.host();
     _ = try host.getExecutionContext();
 
-    var reverted = try executor.checkpoint();
+    var reverted = executor.checkpoint();
     defer reverted.deinit();
     _ = try executor.state.setStorage(contract, 7, 2);
     try executor.state.warmAccount(additional);
@@ -214,7 +214,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         .topics = &.{3},
         .data = &.{0x42},
     });
-    try reverted.restore();
+    reverted.restore();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.isAccountWarm(additional));
@@ -234,15 +234,15 @@ test "checkpoint nests LIFO and deinit restores an open token" {
     defer executor.discardStateTransition();
 
     {
-        var outer = try executor.checkpoint();
+        var outer = executor.checkpoint();
         defer outer.deinit();
         _ = try executor.state.setStorage(contract, 7, 1);
 
-        var inner = try executor.checkpoint();
+        var inner = executor.checkpoint();
         defer inner.deinit();
         _ = try executor.state.setStorage(contract, 7, 2);
 
-        try inner.restore();
+        inner.restore();
         try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     }
 
@@ -258,19 +258,19 @@ test "successive checkpoints receive distinct ids" {
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
 
-    var first = try executor.checkpoint();
+    var first = executor.checkpoint();
     const first_id = first.id;
     _ = try executor.state.setStorage(contract, 7, 1);
-    try first.commit();
+    first.commit();
     first.deinit();
 
-    var current = try executor.checkpoint();
+    var current = executor.checkpoint();
     defer current.deinit();
     try std.testing.expect(first_id != current.id);
     _ = try executor.state.setStorage(contract, 7, 2);
 
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
-    try current.restore();
+    current.restore();
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
 }
 
@@ -306,10 +306,10 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     );
     defer executor.discardStateTransition();
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(contract, 8, 1);
-    try checkpoint.restore();
+    checkpoint.restore();
     try executor.observe().retainStateTransition(&observations);
     try std.testing.expect(observations.found);
 }

@@ -233,7 +233,7 @@ pub fn bind(
             executable: PreparedTransaction,
             initial_gas: execution.ExecutionGas,
         ) Error!execution.ExecutionResult {
-            var preparation_checkpoint = try context.checkpoint();
+            var preparation_checkpoint = context.checkpoint();
             defer preparation_checkpoint.deinit();
 
             var gas = PreExecutionGas.init(initial_gas);
@@ -245,7 +245,7 @@ pub fn bind(
                 &gas,
             );
             if (!authorized) {
-                preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                preparation_checkpoint.restore();
                 return gas.includedOutOfGas();
             }
             try warmDelegatedTransactionTarget(context, executable.message);
@@ -256,16 +256,14 @@ pub fn bind(
                 gas.gas,
             ));
             if (outcome.stage == .preparation) {
-                preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                preparation_checkpoint.restore();
                 return gas.includedOutOfGas();
             }
 
             var result = outcome.result;
             gas.foldInto(&result);
-            if (executionRolledBack(result.outcome.status)) {
-                preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
-            } else {
-                preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
+            preparation_checkpoint.commit();
+            if (!executionRolledBack(result.outcome.status)) {
                 try context.finalizeState();
             }
             return result;

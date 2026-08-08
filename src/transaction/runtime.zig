@@ -25,33 +25,18 @@ pub fn begin(executor: anytype, mode: Mode) !void {
     std.debug.assert(executor.checkpoint_top == 0);
     std.debug.assert(!executor.state.scopeActive());
 
-    const state_attempt_id = switch (mode) {
-        .normal => executor.state.beginTransaction(),
-        .observed => executor.state.beginObservedTransaction(),
-        .captured => |capture| blk: {
-            std.debug.assert(capture.isActive());
-            break :blk executor.state.beginObservedTransaction();
-        },
-    };
+    if (mode.captureContext()) |capture| std.debug.assert(capture.isActive());
+    const state_attempt_id = if (mode.observesState())
+        executor.state.beginObservedTransaction()
+    else
+        executor.state.beginTransaction();
     std.debug.assert(executor.next_transaction_generation != std.math.maxInt(u64));
     executor.next_transaction_generation += 1;
-    switch (mode) {
-        .normal => executor.transaction_runtime_state = .{
-            .state_attempt_id = state_attempt_id,
-            .generation = executor.next_transaction_generation,
-            .mode = .normal,
-        },
-        .observed => executor.transaction_runtime_state = .{
-            .state_attempt_id = state_attempt_id,
-            .generation = executor.next_transaction_generation,
-            .mode = .observed,
-        },
-        .captured => |capture| executor.transaction_runtime_state = .{
-            .state_attempt_id = state_attempt_id,
-            .generation = executor.next_transaction_generation,
-            .mode = .{ .captured = capture },
-        },
-    }
+    executor.transaction_runtime_state = .{
+        .state_attempt_id = state_attempt_id,
+        .generation = executor.next_transaction_generation,
+        .mode = mode,
+    };
 }
 
 pub fn initializeMessageScope(
@@ -124,14 +109,14 @@ pub fn runPayload(
     std.debug.assert(!runtime_state.payload_started);
     runtime_state.payload_started = true;
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
 
     const outcome = try executor.executeTransactionRequestPhased(request);
     if (outcome.stage == .preparation or executionRolledBack(outcome.result.outcome.status)) {
-        try checkpoint.restore();
+        checkpoint.restore();
     } else {
-        try checkpoint.commit();
+        checkpoint.commit();
     }
     return outcome;
 }
@@ -159,14 +144,14 @@ pub fn runPrelude(
     executor.state.beginScope();
     errdefer closeExecutionScope(executor);
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
     const result = try executor.executeTransactionRequest(request);
     if (executionRolledBack(result.outcome.status)) {
-        try checkpoint.restore();
+        checkpoint.restore();
     } else {
         try executor.finalizeTransactionState();
-        try checkpoint.commit();
+        checkpoint.commit();
     }
     closeExecutionScope(executor);
     return result;
@@ -188,8 +173,6 @@ pub fn discard(executor: anytype) void {
     closeExecutionScope(executor);
     executor.state.discard(state_attempt_id);
     executor.clearLastOutput();
-    executor.execution_context = null;
-    executor.scope_root = null;
     executor.transaction_runtime_state = null;
 }
 
