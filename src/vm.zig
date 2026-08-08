@@ -208,10 +208,6 @@ fn VmCore(
 
     return struct {
         const Self = @This();
-        const IgnorePending = struct {
-            pub fn observe(_: @This(), _: ExecutorType.State.PendingView) !void {}
-        };
-
         pub const specification = spec;
         pub const compile_options = options_value;
         pub const BlockState = BlockStateType;
@@ -395,7 +391,7 @@ fn VmCore(
             }
 
             pub fn transact(self: *@This(), tx: Transaction) !BlockExecution.Outcome {
-                return self.transactMode(tx, .normal, IgnorePending{});
+                return self.transactMode(tx, .normal, {});
             }
 
             fn transactMode(
@@ -495,7 +491,7 @@ fn VmCore(
 
             /// Execute non-transaction block work and account its regular gas.
             pub fn systemCall(self: *@This(), call: SystemCall) !EvmResult {
-                return self.systemCallMode(call, .normal, IgnorePending{});
+                return self.systemCallMode(call, .normal, {});
             }
 
             fn systemCallMode(
@@ -577,13 +573,12 @@ fn VmCore(
                     call.input,
                     .legacy(call.gas),
                 ),
-                .observed => try executor.observe().executeSystemCall(
+                .observed => try executor.observe(observer).executeSystemCall(
                     env.executionContext(.{ .origin = call.sender }),
                     call.sender,
                     call.recipient,
                     call.input,
                     .legacy(call.gas),
-                    observer,
                 ),
                 .captured => |context| try executor.capture(context).executeSystemCall(
                     env.executionContext(.{ .origin = call.sender }),

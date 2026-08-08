@@ -14,6 +14,15 @@ test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
 
+test "Executor observation boundary hides StateModel pending views" {
+    const Executor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const Executed = Executor.Executed(void);
+
+    try std.testing.expect(@hasDecl(Executor, "Observation"));
+    try std.testing.expect(@hasDecl(Executed, "observation"));
+    try std.testing.expect(!@hasDecl(Executed, "pendingView"));
+}
+
 test "discarding a manual state transition rolls back its mutations" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const account = evmz.addr(0xaaaa);
@@ -172,8 +181,8 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
-            const storage = pending.observations().storage;
+        pub fn observe(self: *@This(), observation: BerlinExecutor.Observation) !void {
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -189,7 +198,8 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     var observations = Observer{ .contract = contract };
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.observe().beginTransaction(
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
@@ -220,7 +230,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     try std.testing.expect(!executor.state.isAccountWarm(additional));
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     _ = try host.getExecutionContext();
-    try executor.observe().retainStateTransition(&observations);
+    try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }
 
@@ -282,8 +292,8 @@ test "checkpoint revert preserves reads without retaining storage effects" {
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
-            const storage = pending.observations().storage;
+        pub fn observe(self: *@This(), observation: AmsterdamExecutor.Observation) !void {
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -299,7 +309,8 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     var observations = Observer{ .contract = contract };
     var executor = AmsterdamExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.observe().beginTransaction(
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
@@ -310,7 +321,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(contract, 8, 1);
     checkpoint.restore();
-    try executor.observe().retainStateTransition(&observations);
+    try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }
 

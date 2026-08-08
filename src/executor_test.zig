@@ -45,10 +45,9 @@ fn runStandaloneObserved(
     gas: execution_values.ExecutionGas,
     observer: anytype,
 ) !Host.Result {
-    return executor.observe().executeStandalone(
+    return executor.observe(observer).executeStandalone(
         .{ .context = context, .message = message, .gas = gas },
         .{},
-        observer,
     );
 }
 
@@ -85,10 +84,10 @@ const DenseTransitionObserver = struct {
     code_hash: [32]u8,
     summary: ?DenseTransitionSummary = null,
 
-    pub fn observe(self: *@This(), pending: anytype) !void {
-        const changes = pending.changes();
-        const observations = pending.observations();
-        const logs = pending.logs();
+    pub fn observe(self: *@This(), observation: anytype) !void {
+        const changes = observation.changes();
+        const observations = observation.observations();
+        const logs = observation.logs();
         self.summary = .{
             .account_changes = changes.accounts.len(),
             .storage_changes = changes.storage_writes.len(),
@@ -157,9 +156,13 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     defer dense.deinit();
 
     const context = testExecutionContext(target, 100_000);
-    try tracked.observe().beginStateTransition(context);
+    var tracked_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    var dense_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    const observed_tracked = tracked.observe(&tracked_observer);
+    const observed_dense = dense.observe(&dense_observer);
+    try observed_tracked.beginStateTransition(context);
     defer tracked.discardStateTransition();
-    try dense.observe().beginStateTransition(context);
+    try observed_dense.beginStateTransition(context);
     defer dense.discardStateTransition();
 
     const undeclared = evmz.addr(2);
@@ -206,8 +209,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
 
     tracked.discardStateTransition();
     dense.discardStateTransition();
-    try tracked.observe().beginStateTransition(context);
-    try dense.observe().beginStateTransition(context);
+    try observed_tracked.beginStateTransition(context);
+    try observed_dense.beginStateTransition(context);
     try std.testing.expectEqual(@as(u256, 10), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try tracked.getStorage(target, 7));
@@ -226,10 +229,10 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     _ = try tracked.state.setStorage(target, 7, 11);
     _ = try dense.state.setStorage(target, 7, 11);
 
-    var tracked_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
-    var dense_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
-    try tracked.observe().retainStateTransition(&tracked_observer);
-    try dense.observe().retainStateTransition(&dense_observer);
+    tracked_observer.code_hash = replacement_hash;
+    dense_observer.code_hash = replacement_hash;
+    try observed_tracked.retainStateTransition();
+    try observed_dense.retainStateTransition();
     try std.testing.expectEqualDeep(tracked_observer.summary, dense_observer.summary);
     try std.testing.expectEqual(@as(usize, 1), dense.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
@@ -688,8 +691,8 @@ test "top-level delegated target is a semantic account access" {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
@@ -736,8 +739,8 @@ test "delegated target is observed before insufficient call balance" {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
@@ -1000,10 +1003,10 @@ const CodeObservation = struct {
 
     pub fn observe(
         self: *@This(),
-        pending: TrackedState.PendingView,
+        observation: anytype,
     ) !void {
         self.calls += 1;
-        const view = pending.observations();
+        const view = observation.observations();
         var code_reads: u32 = 0;
         var required_found = false;
         var index: u32 = 0;
@@ -2581,8 +2584,8 @@ fn createObservesTarget(creator_balance: u256) !bool {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 if (std.mem.eql(u8, &accounts.at(index).address, &self.target))
@@ -2945,9 +2948,9 @@ test "sealed observations expose storage state without a trace tape" {
         expected: u256,
         calls: usize = 0,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
+        pub fn observe(self: *@This(), observation: anytype) !void {
             self.calls += 1;
-            const storage = pending.observations().storage;
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -2979,10 +2982,11 @@ test "sealed observations expose storage state without a trace tape" {
             0x00, // STOP
         },
     });
-    try executor.observe().beginTransaction(execution_context, sender, contract);
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(execution_context, sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    try executor.observe().retainStateTransition(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), observations.calls);

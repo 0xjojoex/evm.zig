@@ -1027,9 +1027,9 @@ fn ObservationCollector(comptime BlockState: type) type {
 
         pub fn observe(
             self: *@This(),
-            pending: BlockState.State.PendingView,
+            observation: anytype,
         ) !void {
-            const observations = pending.observations();
+            const observations = observation.observations();
             if (self.builder) |builder| {
                 try builder.append(observations, self.block_access_index);
             }
@@ -1864,7 +1864,7 @@ fn applyWithdrawals(
     observer: anytype,
 ) !void {
     if (withdrawals.len == 0) return;
-    const observed = executor.observe();
+    const observed = executor.observe(observer);
     try observed.beginStateTransition(execution_context);
     errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
@@ -1875,7 +1875,7 @@ fn applyWithdrawals(
             else => return err,
         };
     }
-    try observed.commitTransaction(observer);
+    try observed.commitTransaction();
 }
 
 fn applyWithdrawalsNormal(

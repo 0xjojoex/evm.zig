@@ -69,10 +69,6 @@ const uint256 = @import("./uint256.zig");
 
 const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
 
-const IgnorePending = struct {
-    pub fn observe(_: IgnorePending, _: anytype) !void {}
-};
-
 const ScopeRoot = struct {
     sender: Address,
     recipient: ?Address,
@@ -226,6 +222,26 @@ pub fn ExecutorType(
             payload_started: bool = false,
         };
 
+        /// Callback-scoped semantic view of one sealed transition.
+        /// StateModel attempt identity and resolution remain private to Executor.
+        pub const Observation = struct {
+            log_view: StateModel.LogView,
+            changes_view: StateModel.ChangesView,
+            observations_view: StateModel.ObservationsView,
+
+            pub fn logs(self: Observation) StateModel.LogView {
+                return self.log_view;
+            }
+
+            pub fn changes(self: Observation) StateModel.ChangesView {
+                return self.changes_view;
+            }
+
+            pub fn observations(self: Observation) StateModel.ObservationsView {
+                return self.observations_view;
+            }
+        };
+
         /// The exclusive externally copyable owner of one completed but
         /// unresolved transaction. Executor keeps the phase state; this value
         /// carries the generation needed to reject stale copies.
@@ -246,7 +262,7 @@ pub fn ExecutorType(
                 pub fn view(self: *const Execution) View {
                     return .{
                         .output = &self.output_value,
-                        .logs = self.pendingView().logs(),
+                        .logs = self.logs(),
                     };
                 }
 
@@ -258,23 +274,26 @@ pub fn ExecutorType(
 
                 /// Borrow transaction logs while this result is unresolved.
                 pub fn logs(self: Execution) StateModel.LogView {
-                    return self.pendingView().logs();
+                    _ = self.state();
+                    return self.executor.state.pendingView().logs();
                 }
 
-                /// Borrow the complete sealed state view before resolution.
-                pub fn pendingView(self: Execution) StateModel.PendingView {
+                /// Borrow the callback-scoped semantic observation before resolution.
+                pub fn observation(self: Execution) Observation {
                     _ = self.state();
-                    return self.executor.state.pendingView();
+                    return self.executor.currentObservation();
                 }
 
                 /// Borrow net state changes before resolution.
                 pub fn changes(self: Execution) StateModel.ChangesView {
-                    return self.pendingView().changes();
+                    _ = self.state();
+                    return self.executor.state.pendingView().changes();
                 }
 
                 /// Borrow retained state observations before resolution.
                 pub fn observations(self: Execution) StateModel.ObservationsView {
-                    return self.pendingView().observations();
+                    _ = self.state();
+                    return self.executor.state.pendingView().observations();
                 }
 
                 /// Accept this transaction's sealed state into the Executor branch.
@@ -318,82 +337,82 @@ pub fn ExecutorType(
             };
         }
 
-        pub const ObservedExecutor = struct {
-            executor: *Self,
+        pub fn ObservedExecutor(comptime Observer: type) type {
+            return struct {
+                executor: *Self,
+                observer: Observer,
 
-            pub fn beginTransaction(
-                self: @This(),
-                context: execution_values.ExecutionContext,
-                sender: Address,
-                recipient: Address,
-            ) !void {
-                try self.executor.beginTransactionMode(context, sender, recipient, .observed);
-            }
+                pub fn beginTransaction(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                    sender: Address,
+                    recipient: Address,
+                ) !void {
+                    try self.executor.beginTransactionMode(context, sender, recipient, .observed);
+                }
 
-            pub fn beginMessageScope(
-                self: @This(),
-                request: execution_values.EvmExecutionRequest,
-                scope_init: execution_values.ExecutionScopeInit,
-            ) !void {
-                try self.executor.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
-            }
+                pub fn beginMessageScope(
+                    self: @This(),
+                    request: execution_values.EvmExecutionRequest,
+                    scope_init: execution_values.ExecutionScopeInit,
+                ) !void {
+                    try self.executor.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
+                }
 
-            pub fn beginStateTransition(
-                self: @This(),
-                context: execution_values.ExecutionContext,
-            ) !void {
-                try self.executor.openTransactionScope(context, .observed);
-            }
+                pub fn beginStateTransition(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                ) !void {
+                    try self.executor.openTransactionScope(context, .observed);
+                }
 
-            pub fn commitTransaction(self: @This(), observer: anytype) !void {
-                try self.executor.commitTransactionWithObserver(observer);
-            }
+                pub fn commitTransaction(self: @This()) !void {
+                    try self.executor.commitTransactionWithObserver(self.observer);
+                }
 
-            pub fn retainStateTransition(self: @This(), observer: anytype) !void {
-                try self.executor.retainStateTransitionWithObserver(observer);
-            }
+                pub fn retainStateTransition(self: @This()) !void {
+                    try self.executor.retainStateTransitionWithObserver(self.observer);
+                }
 
-            pub fn executeStandalone(
-                self: @This(),
-                request: execution_values.EvmExecutionRequest,
-                scope_init: execution_values.ExecutionScopeInit,
-                observer: anytype,
-            ) !Self.EvmResult {
-                return self.executor.runStandaloneContext(
-                    request.context,
-                    request.message,
-                    request.gas,
-                    scope_init,
-                    .observed,
-                    observer,
-                );
-            }
+                pub fn executeStandalone(
+                    self: @This(),
+                    request: execution_values.EvmExecutionRequest,
+                    scope_init: execution_values.ExecutionScopeInit,
+                ) !Self.EvmResult {
+                    return self.executor.runStandaloneContext(
+                        request.context,
+                        request.message,
+                        request.gas,
+                        scope_init,
+                        .observed,
+                        self.observer,
+                    );
+                }
 
-            pub fn executeSystemCall(
-                self: @This(),
-                context: execution_values.ExecutionContext,
-                sender: Address,
-                recipient: Address,
-                input: []const u8,
-                gas: execution_values.ExecutionGas,
-                observer: anytype,
-            ) !execution_values.ExecutionResult {
-                return self.executor.executeSystemCallMode(
-                    context,
-                    sender,
-                    recipient,
-                    input,
-                    gas,
-                    .observed,
-                    observer,
-                );
-            }
-        };
+                pub fn executeSystemCall(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                    sender: Address,
+                    recipient: Address,
+                    input: []const u8,
+                    gas: execution_values.ExecutionGas,
+                ) !execution_values.ExecutionResult {
+                    return self.executor.executeSystemCallMode(
+                        context,
+                        sender,
+                        recipient,
+                        input,
+                        gas,
+                        .observed,
+                        self.observer,
+                    );
+                }
+            };
+        }
 
-        /// Borrow an observed execution view. The facade selects instrumentation
-        /// and a pending-state consumer; Executor keeps all lifecycle ownership.
-        pub fn observe(self: *Self) ObservedExecutor {
-            return .{ .executor = self };
+        /// Bind an observer to observed execution operations.
+        pub fn observe(self: *Self, observer: anytype) ObservedExecutor(@TypeOf(observer)) {
+            return .{ .executor = self, .observer = observer };
         }
 
         pub const CapturedExecutor = struct {
@@ -426,7 +445,7 @@ pub fn ExecutorType(
                     gas,
                     .{},
                     .{ .captured = self.context },
-                    IgnorePending{},
+                    {},
                 );
             }
 
@@ -879,9 +898,18 @@ pub fn ExecutorType(
             return self.state.acceptedView();
         }
 
+        fn currentObservation(self: *const Self) Observation {
+            const pending = self.state.pendingView();
+            return .{
+                .log_view = pending.logs(),
+                .changes_view = pending.changes(),
+                .observations_view = pending.observations(),
+            };
+        }
+
         /// Run protocol finalization, retain the transition, and close its scope.
         pub fn commitTransaction(self: *Self) !void {
-            try self.commitTransactionWithObserver(IgnorePending{});
+            try self.commitTransactionWithObserver({});
         }
 
         fn commitTransactionWithObserver(self: *Self, observer: anytype) !void {
@@ -917,7 +945,7 @@ pub fn ExecutorType(
         /// deliberately owns finalization. Failure cleanup must use
         /// `discardStateTransition`.
         pub fn retainStateTransition(self: *Self) void {
-            self.retainStateTransitionWithObserver(IgnorePending{}) catch unreachable;
+            self.retainStateTransitionWithObserver({}) catch unreachable;
         }
 
         fn retainStateTransitionWithObserver(self: *Self, observer: anytype) !void {
@@ -951,11 +979,12 @@ pub fn ExecutorType(
             const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.seal(state_attempt_id);
-            observer.observe(self.state.pendingView()) catch |err| {
-                self.state.discard(state_attempt_id);
-                self.closeManualTransactionLifetime();
-                return err;
-            };
+            if (comptime @TypeOf(observer) != void)
+                observer.observe(self.currentObservation()) catch |err| {
+                    self.state.discard(state_attempt_id);
+                    self.closeManualTransactionLifetime();
+                    return err;
+                };
             self.state.retain(state_attempt_id);
             self.closeManualTransactionLifetime();
         }
@@ -1092,7 +1121,7 @@ pub fn ExecutorType(
                 request.gas,
                 scope_init,
                 .normal,
-                IgnorePending{},
+                {},
             );
         }
 
@@ -1191,7 +1220,7 @@ pub fn ExecutorType(
                 input,
                 gas,
                 .normal,
-                IgnorePending{},
+                {},
             );
         }
 

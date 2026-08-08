@@ -8,10 +8,6 @@ const ExecutionContext = evmz.execution.ExecutionContext;
 const Interpreter = evmz.interpreter;
 const InstrumentationMode = @import("instrumentation.zig").Mode;
 
-const IgnorePending = struct {
-    pub fn observe(_: IgnorePending, _: anytype) !void {}
-};
-
 pub const BeforeBlockContext = block_program.BeforeBlockContext;
 pub const BeforeTransactionContext = block_program.BeforeTransactionContext;
 pub const AfterTransactionContext = block_program.AfterTransactionContext;
@@ -22,7 +18,7 @@ pub const FinalizeBlockContext = block_program.FinalizeBlockContext;
 /// - EIP-2935 stores the previous block hash from Prague onward.
 pub fn applyBeforeBlock(executor: anytype, execution_context: ExecutionContext, context: BeforeBlockContext) !void {
     const calls = @TypeOf(executor.*).specification.block.beforeBlock(context);
-    try applySystemCalls(executor, execution_context, &calls, .normal, IgnorePending{});
+    try applySystemCalls(executor, execution_context, &calls, .normal, {});
 }
 
 pub fn applyBeforeBlockObserved(
@@ -60,7 +56,7 @@ pub fn applyBeforeTransactionPrelude(
 
 pub fn applyAfterTransaction(executor: anytype, execution_context: ExecutionContext, context: AfterTransactionContext) !void {
     const calls = @TypeOf(executor.*).specification.block.afterTransaction(context);
-    try applySystemCalls(executor, execution_context, &calls, .normal, IgnorePending{});
+    try applySystemCalls(executor, execution_context, &calls, .normal, {});
 }
 
 pub fn applyAfterTransactionObserved(
@@ -96,7 +92,7 @@ pub fn applyFinalizeBlock(
         allocator,
         context,
         .normal,
-        IgnorePending{},
+        {},
     );
 }
 
@@ -223,13 +219,12 @@ fn callSystemContract(
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
-        .observed => try executor.observe().executeSystemCall(
+        .observed => try executor.observe(observer).executeSystemCall(
             execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
-            observer,
         ),
         .captured => |capture| try executor.capture(capture).executeSystemCall(
             execution_context,
@@ -295,13 +290,12 @@ fn callRequestSystemContract(
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
-        .observed => try executor.observe().executeSystemCall(
+        .observed => try executor.observe(observer).executeSystemCall(
             execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
-            observer,
         ),
         .captured => |capture| try executor.capture(capture).executeSystemCall(
             execution_context,

@@ -314,7 +314,7 @@ fn BoundBlockProgram(
                 transaction_value,
                 null,
                 .normal,
-                IgnorePending{},
+                {},
             ) catch |err| return @errorCast(err);
         }
 
@@ -329,7 +329,7 @@ fn BoundBlockProgram(
                 transaction_value,
                 prelude,
                 .normal,
-                IgnorePending{},
+                {},
             ) catch |err| return @errorCast(err);
         }
 
@@ -378,7 +378,8 @@ fn BoundBlockProgram(
                         view.logs,
                         plan,
                     );
-                    try observer.observe(executed.pendingView());
+                    if (comptime @TypeOf(observer) != void)
+                        try observer.observe(executed.observation());
                     executed.retain();
                     ImplementationType.applyInclude(&self.state, plan);
                     break :blk .{ .included = included };
@@ -411,10 +412,6 @@ fn BoundBlockProgram(
             executor.discardAccepted();
             release(executor, self.generation);
         }
-
-        const IgnorePending = struct {
-            pub fn observe(_: IgnorePending, _: ExecutorType.State.PendingView) !void {}
-        };
     };
 }
 

@@ -169,10 +169,10 @@ pub fn Lane(comptime Engine: type) type {
 
             pub fn observe(
                 self: *ObservationCollector,
-                pending: Engine.Executor.State.PendingView,
+                transition_view: Engine.Executor.Observation,
             ) !void {
                 var transition = try tracked_state_projector.materialize(
-                    pending.observations(),
+                    transition_view.observations(),
                     self.allocator,
                 );
                 defer transition.deinit(self.allocator);

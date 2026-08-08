@@ -132,7 +132,7 @@ const EmptyBeforeTransactionVm = VmFor(evmz.eth.amsterdam, .{
 const ObservationCounter = struct {
     calls: usize = 0,
 
-    pub fn observe(self: *@This(), _: evmz.state.TrackedState.PendingView) !void {
+    pub fn observe(self: *@This(), _: anytype) !void {
         self.calls += 1;
     }
 };
@@ -140,7 +140,7 @@ const ObservationCounter = struct {
 const FailingObservation = struct {
     calls: usize = 0,
 
-    pub fn observe(self: *@This(), _: evmz.state.TrackedState.PendingView) !void {
+    pub fn observe(self: *@This(), _: anytype) !void {
         self.calls += 1;
         return error.TestObservationFailure;
     }
@@ -360,9 +360,9 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
         found: bool = false,
         calls: usize = 0,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
+        pub fn observe(self: *@This(), observation: LifecycleVm.Executor.Observation) !void {
             self.calls += 1;
-            const storage = pending.observations().storage;
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;

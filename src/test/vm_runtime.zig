@@ -79,9 +79,9 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         code_hash: [32]u8,
         calls: usize = 0,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
+        pub fn observe(self: *@This(), observation: Osaka.Executor.Observation) !void {
             self.calls += 1;
-            const view = pending.observations();
+            const view = observation.observations();
             var index: u32 = 0;
             while (index < view.accounts.len()) : (index += 1) {
                 const fact = view.accounts.at(index);
@@ -111,10 +111,11 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         .code_hash = code_hash,
     };
     const prepared = try prepared_pool.getOrPrepare(code_hash, &code);
-    try executor.observe().beginStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
+    const observed = executor.observe(&observations);
+    try observed.beginStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
     const view = try executor.getCode(contract);
-    try executor.observe().retainStateTransition(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expect(view.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view);
