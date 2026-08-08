@@ -129,8 +129,13 @@ pub const CallArena = struct {
     bytes: std.ArrayList(u8) = .empty,
     active_rows: std.ArrayList(u32) = .empty,
     root_count: u32 = 0,
-    operation_open: bool = false,
-    completed: bool = false,
+    phase: Phase = .idle,
+
+    const Phase = enum {
+        idle,
+        recording,
+        completed,
+    };
 
     pub fn init(allocator: std.mem.Allocator) CallArena {
         return .{ .allocator = allocator };
@@ -150,7 +155,7 @@ pub const CallArena = struct {
     }
 
     pub fn deinit(self: *CallArena) void {
-        std.debug.assert(!self.operation_open);
+        std.debug.assert(self.phase != .recording);
         if (self.allocator) |allocator| {
             self.rows.deinit(allocator);
             self.bytes.deinit(allocator);
@@ -160,40 +165,37 @@ pub const CallArena = struct {
     }
 
     pub fn begin(self: *CallArena) !void {
-        if (self.operation_open) return error.CallCaptureOperationActive;
+        if (self.phase == .recording) return error.CallCaptureOperationActive;
         self.rows.clearRetainingCapacity();
         self.bytes.clearRetainingCapacity();
         self.active_rows.clearRetainingCapacity();
         self.root_count = 0;
-        self.completed = false;
-        self.operation_open = true;
+        self.phase = .recording;
     }
 
     pub fn finish(self: *CallArena) !Span {
-        if (!self.operation_open) return error.CallCaptureOperationNotActive;
+        if (self.phase != .recording) return error.CallCaptureOperationNotActive;
         if (self.active_rows.items.len != 0) return error.ActiveCallCaptures;
-        self.operation_open = false;
-        self.completed = true;
+        self.phase = .completed;
         return self.span();
     }
 
     pub fn abort(self: *CallArena) !void {
-        if (!self.operation_open) return error.CallCaptureOperationNotActive;
+        if (self.phase != .recording) return error.CallCaptureOperationNotActive;
         self.rows.clearRetainingCapacity();
         self.bytes.clearRetainingCapacity();
         self.active_rows.clearRetainingCapacity();
         self.root_count = 0;
-        self.operation_open = false;
-        self.completed = false;
+        self.phase = .idle;
     }
 
     pub fn latest(self: *const CallArena) ?Span {
-        if (!self.completed) return null;
+        if (self.phase != .completed) return null;
         return self.span();
     }
 
     pub fn start(self: *CallArena, event: Start) !Token {
-        if (!self.operation_open) return error.CallCaptureOperationNotActive;
+        if (self.phase != .recording) return error.CallCaptureOperationNotActive;
 
         const row_index = std.math.cast(u32, self.rows.items.len) orelse
             return error.CallCaptureIndexOverflow;
@@ -235,14 +237,14 @@ pub const CallArena = struct {
     }
 
     pub fn reserveOutput(self: *CallArena, output_len: usize) !void {
-        if (!self.operation_open) return error.CallCaptureOperationNotActive;
+        if (self.phase != .recording) return error.CallCaptureOperationNotActive;
         _ = try self.rangeForAppend(output_len);
         try self.ensureBytes(output_len);
     }
 
     /// Finish is infallible once `reserveOutput` has succeeded for this output.
     pub fn finishReserved(self: *CallArena, token: Token, event: Finish) void {
-        std.debug.assert(self.operation_open);
+        std.debug.assert(self.phase == .recording);
         std.debug.assert(self.active_rows.getLastOrNull() == token.row_index);
         std.debug.assert(self.bytes.capacity - self.bytes.items.len >= event.output.len);
 

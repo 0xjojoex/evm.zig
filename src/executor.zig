@@ -250,12 +250,6 @@ pub fn ExecutorType(
                     };
                 }
 
-                /// Borrow the family output while this result is unresolved.
-                pub fn output(self: *const Execution) *const Output {
-                    _ = self.state();
-                    return &self.output_value;
-                }
-
                 /// Copy the family output while leaving state unresolved.
                 pub fn result(self: Execution) Output {
                     _ = self.state();
@@ -265,12 +259,6 @@ pub fn ExecutorType(
                 /// Borrow transaction logs while this result is unresolved.
                 pub fn logs(self: Execution) StateModel.LogView {
                     return self.pendingView().logs();
-                }
-
-                /// Return the Executor allocator after validating this generation.
-                pub fn allocator(self: Execution) std.mem.Allocator {
-                    _ = self.state();
-                    return self.executor.allocator;
                 }
 
                 /// Borrow the complete sealed state view before resolution.
@@ -955,9 +943,7 @@ pub fn ExecutorType(
             const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.discard(state_attempt_id);
-            self.manual_state_attempt = null;
-            self.execution_context = null;
-            self.scope_root = null;
+            self.closeManualTransactionLifetime();
         }
 
         fn resolveManualTransaction(self: *Self, observer: anytype) !void {
@@ -967,12 +953,14 @@ pub fn ExecutorType(
             self.state.seal(state_attempt_id);
             observer.observe(self.state.pendingView()) catch |err| {
                 self.state.discard(state_attempt_id);
-                self.manual_state_attempt = null;
-                self.execution_context = null;
-                self.scope_root = null;
+                self.closeManualTransactionLifetime();
                 return err;
             };
             self.state.retain(state_attempt_id);
+            self.closeManualTransactionLifetime();
+        }
+
+        fn closeManualTransactionLifetime(self: *Self) void {
             self.manual_state_attempt = null;
             self.execution_context = null;
             self.scope_root = null;

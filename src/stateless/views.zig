@@ -250,10 +250,6 @@ pub fn ViewType(comptime State: type) type {
         pub const AcceptedView = struct {
             state: *const State,
 
-            pub fn generation(self: AcceptedView) u64 {
-                return self.state.accepted_generation;
-            }
-
             pub fn hasChanges(self: AcceptedView) bool {
                 return self.changes().hasChanges();
             }
@@ -335,11 +331,6 @@ pub fn ViewType(comptime State: type) type {
             pub fn accepted(self: PendingView) AcceptedView {
                 self.assertSealed();
                 return .{ .state = self.state };
-            }
-
-            pub fn attemptId(self: PendingView) State.AttemptId {
-                self.assertSealed();
-                return self.state.active_attempt_id.?;
             }
 
             pub fn logs(self: PendingView) LogBuffer.View {

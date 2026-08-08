@@ -119,7 +119,6 @@ pub fn executorFor(block: anytype) @TypeOf(block.transaction_runtime.executor) {
 }
 
 pub fn requireActive(block: anytype) void {
-    std.debug.assert(!block.finished);
     const executor = executorFor(block);
     std.debug.assert(executor.active_block_execution_generation == block.generation);
 }
@@ -234,7 +233,6 @@ fn BoundBlockProgram(
         generation: u64,
         environment: Env,
         state: ImplementationType.State,
-        finished: bool = false,
 
         fn Instrumented(comptime Observer: type) type {
             return struct {
@@ -401,7 +399,6 @@ fn BoundBlockProgram(
             requireActive(self);
             const result = ImplementationType.finish(&self.environment, &self.state);
             release(executorFor(self), self.generation);
-            self.finished = true;
             return result;
         }
 
@@ -409,12 +406,10 @@ fn BoundBlockProgram(
         ///
         /// This is the idempotent cleanup operation for `defer`.
         pub fn discardIfUnfinished(self: *Self) void {
-            if (self.finished) return;
             const executor = executorFor(self);
             if (executor.active_block_execution_generation != self.generation) return;
             executor.discardAccepted();
             release(executor, self.generation);
-            self.finished = true;
         }
 
         const IgnorePending = struct {

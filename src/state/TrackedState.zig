@@ -655,10 +655,6 @@ pub const ObservationsView = struct {
 pub const AcceptedView = struct {
     handle: *const anyopaque,
 
-    pub fn generation(self: AcceptedView) u64 {
-        return self.tracked().generation;
-    }
-
     pub fn hasChanges(self: AcceptedView) bool {
         return self.changes().hasChanges();
     }
@@ -679,10 +675,6 @@ pub const PendingView = struct {
 
     pub fn accepted(self: PendingView) AcceptedView {
         return self.tracked().acceptedView();
-    }
-
-    pub fn attemptId(self: PendingView) AttemptId {
-        return self.transaction().id;
     }
 
     pub fn logs(self: PendingView) LogView {
