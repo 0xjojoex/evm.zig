@@ -45,12 +45,8 @@ pub fn Tracked(comptime spec: anytype) type {
 
         pub fn checkSpec(_: @TypeOf(spec)) void {}
 
-        pub fn initState(allocator: std.mem.Allocator, reader: ?Reader) State {
-            return State.initForSpec(allocator, spec, reader);
-        }
-
         pub fn initExecutorState(allocator: std.mem.Allocator, options: ExecutorStateInit) State {
-            return initState(allocator, options.reader);
+            return State.initForSpec(allocator, spec, options.reader);
         }
 
         pub fn witnessBackend(

@@ -424,7 +424,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
-test "a new executor reuses caller-owned prepared artifacts through the supplied backend" {
+test "executor uses caller-owned prepared artifacts through the supplied backend" {
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const contract = evmz.addr(0xc0de);
     const code = evmz.t.bytecode(.{.STOP});
@@ -432,18 +432,12 @@ test "a new executor reuses caller-owned prepared artifacts through the supplied
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
+    const prepared = try pool.getOrPrepare(code_hash, &code);
     var executor = Osaka.Executor.init(std.testing.allocator, .{
         .state = .{},
         .services = .{ .prepared_code_backend = pool.backend() },
     });
     defer executor.deinit();
-
-    const prepared = try pool.getOrPrepare(code_hash, &code);
-    executor.deinit();
-    executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .prepared_code_backend = pool.backend() },
-    });
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
     try executor.beginStateTransition(testExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();

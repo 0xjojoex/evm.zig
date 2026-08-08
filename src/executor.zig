@@ -568,26 +568,6 @@ pub fn ExecutorType(
             try self.state.observeAccountAccess(account_address);
         }
 
-        /// Replace the owned state after verifying the current executor is idle.
-        pub fn replaceState(self: *Self, state: State, services: Services) void {
-            std.debug.assert(!self.hasActiveBlockExecution());
-            std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
-            std.debug.assert(!self.state.scopeActive());
-            std.debug.assert(self.prepared_code_execution_depth == 0);
-
-            self.state.deinit();
-            self.state = state;
-            self.execution_context = null;
-            self.scope_root = null;
-            self.manual_state_attempt = null;
-            self.block_hash_source = services.block_hash_source;
-            self.precompile_runtime = services.precompile_runtime;
-            self.prepared_code_backend = services.prepared_code_backend;
-            self.clearLastOutput();
-        }
-
         pub fn beginPreparedCodeExecution(self: *Self) void {
             if (self.prepared_code_execution_depth == 0) {
                 std.debug.assert(self.prepared_code_execution == null);

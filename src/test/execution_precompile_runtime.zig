@@ -184,29 +184,30 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     );
 }
 
-test "executor construction selects the precompile runtime" {
+test "executor construction selects the supplied precompile runtime" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
+    var first_executor = StatefulVm.Executor.init(std.testing.allocator, .{
         .state = .{},
         .services = .{ .precompile_runtime = first_runtime.service() },
     });
-    defer executor.deinit();
+    defer first_executor.deinit();
 
-    const first = (try executor.executeStandalone(
+    const first = (try first_executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
-    executor.deinit();
-    executor = StatefulVm.Executor.init(std.testing.allocator, .{
+    var second_executor = StatefulVm.Executor.init(std.testing.allocator, .{
         .state = .{},
         .services = .{ .precompile_runtime = second_runtime.service() },
     });
-    const second = (try executor.executeStandalone(
+    defer second_executor.deinit();
+
+    const second = (try second_executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
         .{},
     )).expectCall();

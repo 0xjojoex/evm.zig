@@ -53,7 +53,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         claim: *const ClaimView,
         report: *Report,
         accumulator: Accumulator,
-        claim_executor: ?Engine.Executor = null,
         parallel_batch: ?Schedule = null,
         active: bool = true,
 
@@ -116,9 +115,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         pub fn deinit(self: *Self) void {
             self.discardPending();
             if (self.parallel_batch) |*batch| batch.deinit();
-            if (self.claim_executor) |*executor| executor.deinit();
             self.accumulator.deinit();
-            self.claim_executor = null;
         }
 
         fn laneContext(self: *const Self) Lane.Context {
@@ -344,19 +341,14 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             reader: Reader,
             executor_options: Engine.Executor.Services,
         ) !void {
-            if (self.claim_executor) |*executor|
-                executor.replaceState(
-                    Engine.BlockState.initState(self.allocator, reader),
-                    executor_options,
-                )
-            else
-                self.claim_executor = Engine.Executor.init(self.allocator, .{
-                    .state = .{ .reader = reader },
-                    .services = executor_options,
-                });
+            var executor = Engine.Executor.init(self.allocator, .{
+                .state = .{ .reader = reader },
+                .services = executor_options,
+            });
+            defer executor.deinit();
 
             const progress = self.accumulator.progress;
-            var runtime = Engine.init(&self.claim_executor.?);
+            var runtime = Engine.init(&executor);
             const outcome = try runtime.transact(.{
                 .env = self.env,
                 .tx = rejected.transaction,
