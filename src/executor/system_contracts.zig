@@ -319,7 +319,7 @@ fn callRequestSystemContract(
 test "before block calls Prague and Cancun system contracts" {
     const ethereum = evmz.eth;
     const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
-    var executor = Prague.Executor.init(std.testing.allocator, .{});
+    var executor = Prague.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var history_code_buf: [83]u8 = undefined;
@@ -407,7 +407,7 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
         .block = .{ .beforeBlock = ReservoirBlock.beforeBlock },
     }));
 
-    var executor = ReservoirVm.Executor.init(std.testing.allocator, .{});
+    var executor = ReservoirVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var recipient_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try recipient_account.setCode(&.{
@@ -448,7 +448,7 @@ test "finalize block copies successful system contract output into typed request
     const RequestVm = evmz.Vm(ethereum.prague.extend(.{
         .block = .{ .finalizeBlock = RequestBlock.finalizeBlock },
     }));
-    var executor = RequestVm.Executor.init(std.testing.allocator, .{});
+    var executor = RequestVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     const request_code = [_]u8{
@@ -502,7 +502,7 @@ test "finalize block rejects missing required system contract code" {
     const RequiredVm = evmz.Vm(ethereum.prague.extend(.{
         .block = .{ .finalizeBlock = RequiredBlock.finalizeBlock },
     }));
-    var executor = RequiredVm.Executor.init(std.testing.allocator, .{});
+    var executor = RequiredVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(&executor, testExecutionContext(), std.testing.allocator, .{

@@ -216,7 +216,7 @@ test "Sequential exposes spec-owned lifecycle phases with derived facts" {
     }
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -268,7 +268,7 @@ test "Sequential does not run before-transaction hooks for rejected transactions
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -299,7 +299,7 @@ test "Sequential failing before-transaction prelude discards the opened attempt"
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -325,7 +325,7 @@ test "Sequential empty before-transaction prelude stays in one observed transiti
     EmptyBeforeTransactionBlock.invocations.store(0, .monotonic);
     var observations = ObservationCounter{};
     var executor = EmptyBeforeTransactionVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -376,7 +376,7 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
     };
     var observations = Observer{ .address = LifecycleBlock.before_transaction_address };
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -412,7 +412,7 @@ test "Sequential block rejection restores before-transaction hook and payload wr
     try evmz.t.seedStoreAccount(&memory, payload, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -452,7 +452,7 @@ test "Sequential discard restores included hook and payload without allocating" 
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = LifecycleVm.Executor.init(failing_allocator.allocator(), .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -493,7 +493,7 @@ test "Sequential restores a system call when outer commit observation fails" {
     try evmz.t.seedStoreAccount(&memory, recipient, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -529,7 +529,7 @@ test "Sequential restores included transaction progress when outer observation f
     try evmz.t.seedStoreAccount(&memory, LifecycleBlock.before_transaction_address, .{ .code = &lifecycle_code });
 
     var executor = LifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -561,7 +561,7 @@ test "block lifecycle hook batches restore earlier calls when a later call fails
     try evmz.t.seedStoreAccount(&memory, AtomicLifecycleBlock.recipient, .{ .code = &lifecycle_code });
 
     var executor = AtomicLifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -582,7 +582,7 @@ test "Sequential finish flushes the final included transaction after hook" {
     try evmz.t.seedStoreAccount(&memory, FinishLifecycleBlock.recipient, .{ .code = &lifecycle_code });
 
     var executor = FinishLifecycleVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -610,7 +610,7 @@ test "Sequential next transaction stops when the previous after hook fails" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = RejectingAfterTransactionVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -639,9 +639,9 @@ test "Sequential next transaction stops when the previous after hook fails" {
 }
 
 test "independent Executors admit independent Sequential lifetimes" {
-    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
+    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer first_executor.deinit();
-    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
+    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer second_executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &first_executor, .{ .gas_limit = 1_000_000 });
@@ -654,7 +654,7 @@ test "independent Executors admit independent Sequential lifetimes" {
 }
 
 test "stale Sequential cleanup cannot resolve a later generation" {
-    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 });

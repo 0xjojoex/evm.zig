@@ -37,15 +37,17 @@ test "dense BlockSTF does not expose callable block production" {
     }
 }
 
-test "ordinary VM constructs its tracked executor without exposing the state domain" {
+test "ordinary VM constructs executor state through its state domain" {
     const ExactVm = evmz.Vm(evmz.eth.amsterdam);
 
     comptime {
         std.debug.assert(ExactVm.BlockState.State == evmz.state.TrackedState);
-        std.debug.assert(@hasField(ExactVm.Executor.Init, "state_reader"));
+        std.debug.assert(@hasField(ExactVm.Executor.Init, "state"));
+        std.debug.assert(@hasField(ExactVm.Executor.Init, "services"));
+        std.debug.assert(@hasField(ExactVm.BlockState.ExecutorStateInit, "reader"));
     }
 
-    var executor = ExactVm.Executor.init(std.testing.allocator, .{});
+    var executor = ExactVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try std.testing.expect(executor.state.reader == null);
 }
@@ -81,7 +83,7 @@ test "exact VM closes the complete spec without revision state" {
         std.debug.assert(@typeInfo(TransitionContextPointer).pointer.child == Context);
         std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
             Cancun.specification,
-            Cancun.BlockState.State,
+            Cancun.BlockState,
             Cancun.compile_options,
         ));
     }
@@ -129,7 +131,7 @@ test "Spec.extend creates a distinct exact VM from static values" {
     try evmz.t.seedStoreAccount(&memory, addr(0xaaaa), .{ .balance = 10_000_000 });
 
     var executor = Strict.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     const outcome = try transact(Strict, &executor, .{
@@ -159,7 +161,7 @@ test "custom transaction program remains bound to the exact Executor" {
         std.debug.assert(Program.Executor == Default.Executor);
         std.debug.assert(Program.Executor == evmz.executor.ExecutorType(
             Program.specification,
-            Default.BlockState.State,
+            Default.BlockState,
             Default.compile_options,
         ));
         std.debug.assert(Program.Context == Context);

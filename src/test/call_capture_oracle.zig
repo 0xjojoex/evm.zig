@@ -62,7 +62,7 @@ test "transaction validation rejection produces no call frame" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
 
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Cancun.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedAccount(&executor, sender, 10_000_000, 0, &.{});
 
@@ -123,7 +123,7 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedAccount(&executor, sender, 10_000_000, 0, &.{});
     try seedAccount(&executor, recursive, 0, 0, &recursive_code);
@@ -191,7 +191,7 @@ fn runCase(comptime case: cases.Case) !void {
     const sender = try evmz.address.fromHex(cases.sender);
     const recipient = try evmz.address.fromHex(case.recipient);
 
-    var executor = ExactVm.Executor.init(std.testing.allocator, .{});
+    var executor = ExactVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedAccount(
         &executor,

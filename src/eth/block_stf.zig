@@ -1120,7 +1120,7 @@ fn serialFold(
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    const admitted_state = Engine.BlockState.admit(allocator, .{
+    const executor_state = Engine.BlockState.admit(allocator, .{
         .backend = &state_backend,
         .validated_claim = if (claimed_block_access_list) |*claim| claim.accounts else null,
         .precheck_claim_state = input.precheck_block_access_list_state,
@@ -1129,9 +1129,12 @@ fn serialFold(
         error.InvalidWitness => return .{ .status = .invalid_witness },
         else => return err,
     };
-    var executor = Engine.Executor.initOwned(allocator, admitted_state, .{
-        .prepared_code_backend = input.prepared_code_backend,
-        .block_hash_source = input.block_hash_source,
+    var executor = Engine.Executor.init(allocator, .{
+        .state = executor_state,
+        .services = .{
+            .prepared_code_backend = input.prepared_code_backend,
+            .block_hash_source = input.block_hash_source,
+        },
     });
     defer executor.deinit();
     if (claimed_block_access_counts) |counts| {

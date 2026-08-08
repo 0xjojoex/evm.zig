@@ -1,7 +1,7 @@
 //! Compile-time block-state representations the engine is parameterized on.
 //!
-//! Each owns representation-specific admission and commitment while the
-//! executor sees only its concrete `State` type.
+//! Each owns representation-specific executor construction, admission, and
+//! commitment while the executor uses one uniform domain contract.
 
 const std = @import("std");
 
@@ -37,6 +37,9 @@ pub const CommitError = error{
 pub fn Tracked(comptime spec: anytype) type {
     return struct {
         pub const State = TrackedState;
+        pub const ExecutorStateInit = struct {
+            reader: ?Reader = null,
+        };
         pub const block_production = true;
         pub const external_observation_capture = true;
 
@@ -44,6 +47,10 @@ pub fn Tracked(comptime spec: anytype) type {
 
         pub fn initState(allocator: std.mem.Allocator, reader: ?Reader) State {
             return State.initForSpec(allocator, spec, reader);
+        }
+
+        pub fn initExecutorState(allocator: std.mem.Allocator, options: ExecutorStateInit) State {
+            return initState(allocator, options.reader);
         }
 
         pub fn witnessBackend(
@@ -58,11 +65,11 @@ pub fn Tracked(comptime spec: anytype) type {
         pub fn admit(
             allocator: std.mem.Allocator,
             input: AdmissionInput,
-        ) AdmissionError!State {
+        ) AdmissionError!ExecutorStateInit {
             if (input.precheck_claim_state) {
                 if (input.validated_claim) |claim| try precheckClaim(allocator, input.backend, claim);
             }
-            return initState(allocator, input.backend.reader());
+            return .{ .reader = input.backend.reader() };
         }
 
         pub fn stateRoot(
@@ -100,6 +107,7 @@ pub fn Tracked(comptime spec: anytype) type {
 /// admissible, which today means Amsterdam but is not scoped to it.
 pub const BalStateless = struct {
     pub const State = BlockState;
+    pub const ExecutorStateInit = State;
     pub const block_production = false;
     pub const external_observation_capture = false;
 
@@ -107,6 +115,10 @@ pub const BalStateless = struct {
         if (!spec.block.block_access_list) {
             @compileError("BalStateless requires a block-access-list specification");
         }
+    }
+
+    pub fn initExecutorState(_: std.mem.Allocator, state: ExecutorStateInit) State {
+        return state;
     }
 
     pub fn witnessBackend(
@@ -121,7 +133,7 @@ pub const BalStateless = struct {
     pub fn admit(
         allocator: std.mem.Allocator,
         input: AdmissionInput,
-    ) AdmissionError!State {
+    ) AdmissionError!ExecutorStateInit {
         const claim = input.validated_claim orelse return error.InvalidBlockAccessList;
         var plan = ClaimPlan.initAssumeValidated(allocator, claim) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var executor = evmz.Evm.Executor.init(allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 

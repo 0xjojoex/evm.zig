@@ -82,7 +82,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
     ReentrantInstruction.root_stack_moved = false;
     ReentrantInstruction.root_capture_stable = false;
 
-    var executor = ReentrantVm.Executor.init(std.testing.allocator, .{});
+    var executor = ReentrantVm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var tape = evmz.trace.TraceTape.initGrowable(std.testing.allocator);

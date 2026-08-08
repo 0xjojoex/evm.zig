@@ -24,7 +24,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, std.math.maxInt(u64));
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var executor = Executor.init(std.testing.allocator, .{});
+    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -45,7 +45,7 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     const contract = evmz.addr(0xbbbb);
     const beneficiary = evmz.addr(0xcccc);
     const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
-    var executor = Executor.init(std.testing.allocator, .{});
+    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -64,7 +64,7 @@ test "Amsterdam top-level create to alive target skips new-account state gas" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
-    var executor = Executor.init(std.testing.allocator, .{});
+    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -92,7 +92,7 @@ test "Amsterdam created contract selfdestruct removes empty account at commit" {
     const create_address = evmz.address.create(sender, 0);
     const init_code = evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT });
     const execution_context = testExecutionContext(sender, 1_000_000);
-    var executor = Executor.init(std.testing.allocator, .{});
+    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });
@@ -117,7 +117,7 @@ test "Amsterdam top-level delegated call charges cold target access" {
     const authority = evmz.addr(0xbbbb);
     const target = evmz.addr(0xcccc);
     const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Executor.init(std.testing.allocator, .{});
+    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });

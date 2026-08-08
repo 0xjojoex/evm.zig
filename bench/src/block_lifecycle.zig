@@ -181,7 +181,7 @@ fn runGrowableLifecycle(comptime Engine: type, allocator: std.mem.Allocator, opt
     defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var executor = Engine.Executor.init(allocator, .{ .state_reader = memory.reader() });
+    var executor = Engine.Executor.init(allocator, .{ .state = .{ .reader = memory.reader() } });
     errdefer executor.deinit();
 
     var block = try Engine.BlockExecution.init(

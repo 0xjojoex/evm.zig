@@ -147,11 +147,10 @@ pub fn Lane(comptime Engine: type) type {
                 reader: Reader,
                 options: Engine.Executor.Services,
             ) !void {
-                self.executor = Engine.Executor.initOwned(
-                    allocator,
-                    Engine.BlockState.initState(allocator, reader),
-                    options,
-                );
+                self.executor = Engine.Executor.init(allocator, .{
+                    .state = .{ .reader = reader },
+                    .services = options,
+                });
             }
 
             pub fn deinit(self: *CapturedExecution) void {

@@ -257,7 +257,7 @@ fn runEvmzCase(
     geth_rows: []const GethRow,
 ) !bool {
     const Executor = evmz.Vm(evmz.eth.specAt(revision)).Executor;
-    var executor = Executor.init(allocator, .{});
+    var executor = Executor.init(allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedAccount(&executor, allocator, try evmz.address.fromHex(cases.sender), try parseHexInt(u256, case.sender_balance), 0, &.{});
     for (case.accounts) |account| {

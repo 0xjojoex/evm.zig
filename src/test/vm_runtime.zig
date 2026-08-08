@@ -100,8 +100,8 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     var prepared_pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer prepared_pool.deinit();
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-        .prepared_code_backend = prepared_pool.backend(),
+        .state = .{ .reader = memory.reader() },
+        .services = .{ .prepared_code_backend = prepared_pool.backend() },
     });
     defer executor.deinit();
 
@@ -136,7 +136,7 @@ test "Executor runs low-level standalone call" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -174,7 +174,7 @@ test "Executor runs low-level standalone create" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Berlin.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -212,7 +212,7 @@ test "transaction STF validates and executes a call" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -252,7 +252,7 @@ test "executed transaction discards without allocating" {
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = Default.Executor.init(failing_allocator.allocator(), .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -294,7 +294,7 @@ test "copied execution handles cannot discard a newer transaction" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -337,7 +337,7 @@ test "Executed retainResult retains state and returns the validated output" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Cancun.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
@@ -393,8 +393,8 @@ test "transaction STF forwards BLOCKHASH to the Executor source" {
 
     var block_hashes = TestBlockHashSource{};
     var executor = Prague.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-        .block_hash_source = block_hashes.source(),
+        .state = .{ .reader = memory.reader() },
+        .services = .{ .block_hash_source = block_hashes.source() },
     });
     defer executor.deinit();
 
@@ -424,7 +424,7 @@ test "transaction STF reports successful create address" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
 
     var executor = Berlin.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -460,7 +460,7 @@ test "transaction STF returns rejected validation result" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .nonce = 7, .balance = 10_000_000 });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -489,7 +489,7 @@ test "rejected transaction preserves the retained Executor overlay" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -528,7 +528,7 @@ test "explicit backend commit persists then rebases the Executor overlay" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -564,7 +564,7 @@ test "Executor discardAccepted drops retained overlay without touching its reade
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -595,7 +595,7 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try contract_account.setCode(&.{ 0x5f, 0x5f, 0x55, 0x00 });
 
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -621,7 +621,7 @@ test "Executor exposes borrowed logs after transaction retention" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -650,7 +650,7 @@ test "rejected transaction clears the Executor log surface" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -690,7 +690,7 @@ test "transaction STF uses comptime transaction gas policy" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = London.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -721,7 +721,7 @@ test "transaction STF uses comptime transaction gas policy" {
         },
     }) orelse return error.SkipZigTest;
     var custom_executor = HighIntrinsicVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer custom_executor.deinit();
 
@@ -753,7 +753,7 @@ test "exact spec owns total transaction gas limit as a value" {
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
     }) orelse return error.SkipZigTest;
     var strict_executor = Strict.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer strict_executor.deinit();
 
@@ -773,7 +773,7 @@ test "exact spec owns total transaction gas limit as a value" {
     );
 
     var standard_executor = London.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer standard_executor.deinit();
     var default_vm = London.init(&standard_executor);
@@ -815,7 +815,7 @@ test "exact spec owns block hooks as static dispatch" {
         .block = .{ .beforeBlock = hooks.beforeBlock },
     }) orelse return error.SkipZigTest;
     var executor = Hooked.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     var block = try Hooked.Sequential.init(&executor, .{
@@ -837,7 +837,7 @@ test "Sequential validation rejection skips rollback snapshot" {
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = Default.Executor.init(failing_allocator.allocator(), .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -867,7 +867,7 @@ test "Sequential systemCall updates embedded block gas and restores overflow" {
     try evmz.t.seedStoreAccount(&memory, recipient, .{ .code = &.{ 0x60, 0x00, 0x50, 0x00 } });
 
     var executor = Prague.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     var block = try Prague.Sequential.init(&executor, .{
@@ -903,7 +903,7 @@ test "Sequential includes each transaction before returning" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -946,7 +946,7 @@ test "Sequential discardIfUnfinished drops included executions" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -971,7 +971,7 @@ test "Sequential discardIfUnfinished drops included executions" {
 }
 
 test "Sequential endTransactions closes the transaction phase" {
-    var executor = Default.Executor.init(std.testing.allocator, .{});
+    var executor = Default.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var block = try Default.Sequential.init(&executor, .{
@@ -996,7 +996,7 @@ test "Sequential rejects an overlay retained outside its lifetime" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -1036,7 +1036,7 @@ test "Sequential rejects transaction whose gas limit exceeds remaining block dim
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -1079,7 +1079,7 @@ test "Sequential returns included result and borrowed receipt view" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 

@@ -135,7 +135,7 @@ pub fn EngineType(
         spec,
         options_value,
         BlockState,
-        executor_module.ExecutorType(spec, BlockState.State, options_value),
+        executor_module.ExecutorType(spec, BlockState, options_value),
     );
 }
 

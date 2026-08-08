@@ -500,7 +500,7 @@ pub fn main(init: std.process.Init) !void {
 fn runExample(comptime Family: type, allocator: std.mem.Allocator) !void {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Family.Evm.Executor.init(allocator, .{});
+    var executor = Family.Evm.Executor.init(allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Family.Vm.init(&executor);
 
@@ -564,7 +564,7 @@ test "deposit codec preserves the exact typed envelope" {
 test "successful deposit preserves mint and advances nonce" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
 
@@ -590,7 +590,7 @@ test "successful deposit preserves mint and advances nonce" {
 test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
     try seedTestAccount(&executor, recipient, 0, &.{ 0x5f, 0x5f, 0xfd });
@@ -616,7 +616,7 @@ test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
 test "insufficient-value deposit becomes an included failure after mint" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
 
@@ -640,7 +640,7 @@ test "insufficient-value deposit becomes an included failure after mint" {
 
 test "intrinsic-gas failure is included after mint with one nonce increment" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
 
@@ -663,7 +663,7 @@ test "intrinsic-gas failure is included after mint with one nonce increment" {
 
 test "create deposit derives address from the pre-execution deposit nonce" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
 
@@ -689,7 +689,7 @@ test "create deposit derives address from the pre-execution deposit nonce" {
 
 test "legacy system deposit is rejected before lifecycle writes" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
 
@@ -714,7 +714,7 @@ test "legacy system deposit is rejected before lifecycle writes" {
 
 test "Ethereum rejection remains tagged through the OP transaction program" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
     try seedTestAccount(&executor, sender, 100, &.{});
@@ -754,7 +754,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     try recipient_account.setCode(&runtime_code);
 
     var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     var block = try Ecotone.Block.init(
@@ -836,7 +836,7 @@ test "OP input assembly owns execution environment normalization" {
 
 test "Ecotone rejects blob transactions while retaining Cancun execution" {
     const sender = address.addr(0xaaaa);
-    var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Ecotone.Vm.init(&executor);
 
@@ -874,7 +874,7 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
         .blob_base_fee = 99,
     };
 
-    var ethereum_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
+    var ethereum_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer ethereum_executor.deinit();
     var ethereum_vm = Ecotone.Vm.init(&ethereum_executor);
     try seedTestAccount(&ethereum_executor, sender, 1, &.{});
@@ -891,7 +891,7 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
     try std.testing.expectEqual(evmz.TxStatus.success, ethereum_output.status);
     try expectWordOne(ethereum_output.output);
 
-    var deposit_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
+    var deposit_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer deposit_executor.deinit();
     var deposit_vm = Ecotone.Vm.init(&deposit_executor);
     try seedTestAccount(&deposit_executor, recipient, 0, &runtime_code);
@@ -950,7 +950,7 @@ test "deposit transition uses its exact spec value" {
         .transaction = .{ .total_gas_limit = .{ .replace = 1 } },
     }));
 
-    var executor = Limited.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Limited.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Limited.Vm.init(&executor);
     const result = try retainDeposit(try vm.transact(Limited.input(
@@ -972,7 +972,7 @@ test "unresolved Ethereum transaction keeps exclusive state ownership" {
     const deposit_recipient = address.addr(0xcccc);
     const env = evmz.Env{ .chain_id = 10, .gas_limit = 30_000_000 };
 
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
     try seedTestAccount(&executor, sender, 100, &.{});
@@ -1007,7 +1007,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
     const deposit_recipient = address.addr(0xcccc);
     const env = evmz.Env{ .chain_id = 10, .gas_limit = 30_000_000 };
 
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
+    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var vm = Canyon.Vm.init(&executor);
     try seedTestAccount(&executor, sender, 100, &.{});

@@ -668,8 +668,8 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
             try seedMemoryStore(allocator, store, pre);
 
             var executor = ExactVm.Executor.init(allocator, .{
-                .state_reader = store.reader(),
-                .block_hash_source = EestStateBlockHashSource.source(),
+                .state = .{ .reader = store.reader() },
+                .services = .{ .block_hash_source = EestStateBlockHashSource.source() },
             });
             errdefer executor.deinit();
 

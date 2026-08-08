@@ -72,7 +72,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             runtime_code: []const u8,
             proxy_target_runtime_code: ?[]const u8,
         ) !Self {
-            var executor = Executor.init(allocator, .{});
+            var executor = Executor.init(allocator, .{ .state = .{} });
             errdefer executor.deinit();
 
             var sender = evmz.state.MemoryAccount.init(allocator);

@@ -72,7 +72,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
@@ -114,7 +114,7 @@ test "call capture closes an immediate insufficient-balance call" {
         .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
@@ -146,7 +146,7 @@ test "root insufficient-balance capture preserves unspent gas" {
     const gas: u64 = 200_000;
 
     for ([_]evmz.Address{ code_recipient, precompile_recipient }) |recipient| {
-        var executor = Default.init(std.testing.allocator, .{});
+        var executor = Default.init(std.testing.allocator, .{ .state = .{} });
         defer executor.deinit();
         try seedCode(&executor, code_recipient, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
 
@@ -182,7 +182,7 @@ test "call capture retains immediate depth-limit cause" {
     const sender = evmz.addr(0xaaaa);
     const child = evmz.addr(0x1234);
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var capture: CaptureHarness = undefined;
@@ -229,7 +229,7 @@ test "call capture retains opcode-local CALL depth attempt" {
         .POP,   .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
@@ -326,7 +326,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
     for (cases) |case| {
         errdefer std.log.err("opcode-local create case failed: {s}", .{case.name});
 
-        var executor = Default.init(std.testing.allocator, .{});
+        var executor = Default.init(std.testing.allocator, .{ .state = .{} });
         defer executor.deinit();
 
         var root_account = MemoryAccount.init(std.testing.allocator);
@@ -382,7 +382,7 @@ test "call capture distinguishes CREATE collision from rollback" {
         .PUSH0, .PUSH0, .PUSH0, .CREATE, .POP, .STOP,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var root_account = MemoryAccount.init(std.testing.allocator);
@@ -431,7 +431,7 @@ test "call capture retains invalid deployed code and local rollback" {
         0x01,   .PUSH0,        .RETURN,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
 
@@ -465,7 +465,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
         .PUSH1, 0x01, .PUSH1, 0x00, .RETURN,
     });
 
-    var executor = FrontierExecutor.init(std.testing.allocator, .{});
+    var executor = FrontierExecutor.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.account.balance = 1_000_000;
@@ -530,7 +530,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
     for (cases) |case| {
         errdefer std.log.err("pinned call error case failed: {s}", .{case.name});
 
-        var executor = Default.init(std.testing.allocator, .{});
+        var executor = Default.init(std.testing.allocator, .{ .state = .{} });
         defer executor.deinit();
         try seedCode(&executor, root, case.code, 0);
 
@@ -566,7 +566,7 @@ test "call capture retains pinned write-protection category" {
     });
     const child_code = evmz.t.bytecode(.{.SSTORE});
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
@@ -598,7 +598,7 @@ test "call capture records SELFDESTRUCT as a semantic child" {
         .PUSH2, 0xbe, 0xef, .SELFDESTRUCT,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 9);
 
@@ -634,7 +634,7 @@ test "root CREATE capture closes after runtime-code finalization" {
         .RETURN,
     });
 
-    var executor = Default.init(std.testing.allocator, .{});
+    var executor = Default.init(std.testing.allocator, .{ .state = .{} });
     defer executor.deinit();
     var sender_account = MemoryAccount.init(std.testing.allocator);
     sender_account.account.balance = 1_000_000;

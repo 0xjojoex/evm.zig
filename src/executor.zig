@@ -139,14 +139,14 @@ pub const CompileOptions = struct {
     step_capture: bool = false,
 };
 
-/// Compile one exact executor over a concrete state representation.
+/// Compile one exact executor over a state domain.
 ///
-/// `initOwned` and `resetOwned` take ownership of `StateModel`. Admission,
+/// The domain defines how its executor state is constructed. Admission,
 /// authenticated facts, and commitment construction remain outside this
 /// executor boundary.
 pub fn ExecutorType(
     comptime spec: ExactSpec,
-    comptime StateModel: type,
+    comptime StateDomain: type,
     comptime options_value: CompileOptions,
 ) type {
     return struct {
@@ -156,27 +156,14 @@ pub fn ExecutorType(
 
         pub const specification = spec;
         pub const compile_options = options_value;
-        pub const State = StateModel;
-        pub const BranchCheckpoint = StateModel.BranchCheckpoint;
+        pub const State = StateDomain.State;
+        pub const BranchCheckpoint = State.BranchCheckpoint;
         pub const Error = ErrorType;
         pub const Services = ExecutorServices;
-        pub const Init = if (StateModel.standalone_reader_initialization)
-            struct {
-                state_reader: ?state_io.StateReader = null,
-                prepared_code_backend: ?prepared_code.Backend = null,
-                block_hash_source: ?BlockHashSource = null,
-                precompile_runtime: ?execution_values.PrecompileRuntime = null,
-            }
-        else
-            Services;
-        pub const init = if (StateModel.standalone_reader_initialization)
-            initTracked
-        else
-            initOwned;
-        pub const reset = if (StateModel.standalone_reader_initialization)
-            resetTracked
-        else
-            resetOwned;
+        pub const Init = struct {
+            state: StateDomain.ExecutorStateInit,
+            services: Services = .{},
+        };
         pub const PreparedCallTransaction = PreparedCallTransactionType;
         pub const Call = CallType;
         pub const Create = CreateType;
@@ -187,7 +174,7 @@ pub fn ExecutorType(
         pub const default_max_live_frames = default_max_live_frames_value;
 
         allocator: std.mem.Allocator,
-        state: StateModel,
+        state: State,
         frame_store: FrameStore,
         call_scratch_slots: CallScratchSlots,
         prepared_code_scratch: call_scratch_storage.Slot,
@@ -209,12 +196,12 @@ pub fn ExecutorType(
         last_call_output: frame_io.ByteSlot,
 
         const ManualStateAttempt = struct {
-            id: StateModel.AttemptId,
+            id: State.AttemptId,
             mode: InstrumentationMode,
         };
 
         const TransactionRuntimeState = struct {
-            state_attempt_id: StateModel.AttemptId,
+            state_attempt_id: State.AttemptId,
             generation: u64,
             mode: InstrumentationMode,
             phase: enum { active, pending } = .active,
@@ -223,21 +210,21 @@ pub fn ExecutorType(
         };
 
         /// Callback-scoped semantic view of one sealed transition.
-        /// StateModel attempt identity and resolution remain private to Executor.
+        /// State attempt identity and resolution remain private to Executor.
         pub const Observation = struct {
-            log_view: StateModel.LogView,
-            changes_view: StateModel.ChangesView,
-            observations_view: StateModel.ObservationsView,
+            log_view: State.LogView,
+            changes_view: State.ChangesView,
+            observations_view: State.ObservationsView,
 
-            pub fn logs(self: Observation) StateModel.LogView {
+            pub fn logs(self: Observation) State.LogView {
                 return self.log_view;
             }
 
-            pub fn changes(self: Observation) StateModel.ChangesView {
+            pub fn changes(self: Observation) State.ChangesView {
                 return self.changes_view;
             }
 
-            pub fn observations(self: Observation) StateModel.ObservationsView {
+            pub fn observations(self: Observation) State.ObservationsView {
                 return self.observations_view;
             }
         };
@@ -255,7 +242,7 @@ pub fn ExecutorType(
 
                 pub const View = struct {
                     output: *const Output,
-                    logs: StateModel.LogView,
+                    logs: State.LogView,
                 };
 
                 /// Borrow family output and logs while this result is unresolved.
@@ -273,7 +260,7 @@ pub fn ExecutorType(
                 }
 
                 /// Borrow transaction logs while this result is unresolved.
-                pub fn logs(self: Execution) StateModel.LogView {
+                pub fn logs(self: Execution) State.LogView {
                     _ = self.state();
                     return self.executor.state.pendingView().logs();
                 }
@@ -285,13 +272,13 @@ pub fn ExecutorType(
                 }
 
                 /// Borrow net state changes before resolution.
-                pub fn changes(self: Execution) StateModel.ChangesView {
+                pub fn changes(self: Execution) State.ChangesView {
                     _ = self.state();
                     return self.executor.state.pendingView().changes();
                 }
 
                 /// Borrow retained state observations before resolution.
-                pub fn observations(self: Execution) StateModel.ObservationsView {
+                pub fn observations(self: Execution) State.ObservationsView {
                     _ = self.state();
                     return self.executor.state.pendingView().observations();
                 }
@@ -504,7 +491,7 @@ pub fn ExecutorType(
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Self,
-            journal_checkpoint: StateModel.Checkpoint,
+            journal_checkpoint: State.Checkpoint,
             id: usize,
             parent_id: usize,
             open: bool = true,
@@ -541,34 +528,26 @@ pub fn ExecutorType(
             }
         };
 
-        /// Take exclusive ownership of an already-admitted state value.
-        pub fn initOwned(allocator: std.mem.Allocator, state: State, options: Services) Self {
+        /// Construct and take exclusive ownership of domain state.
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
+            return initWithState(
+                allocator,
+                StateDomain.initExecutorState(allocator, options.state),
+                options.services,
+            );
+        }
+
+        fn initWithState(allocator: std.mem.Allocator, state: State, services: Services) Self {
             return .{
                 .allocator = allocator,
                 .state = state,
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
-                .block_hash_source = options.block_hash_source,
-                .precompile_runtime = options.precompile_runtime,
-                .prepared_code_backend = options.prepared_code_backend,
+                .block_hash_source = services.block_hash_source,
+                .precompile_runtime = services.precompile_runtime,
+                .prepared_code_backend = services.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
-            };
-        }
-
-        fn initTracked(allocator: std.mem.Allocator, options: Init) Self {
-            return initOwned(
-                allocator,
-                State.initForSpec(allocator, spec, options.state_reader),
-                servicesFromTrackedOptions(options),
-            );
-        }
-
-        fn servicesFromTrackedOptions(options: Init) Services {
-            return .{
-                .prepared_code_backend = options.prepared_code_backend,
-                .block_hash_source = options.block_hash_source,
-                .precompile_runtime = options.precompile_runtime,
             };
         }
 
@@ -590,7 +569,7 @@ pub fn ExecutorType(
         }
 
         /// Replace the owned state after verifying the current executor is idle.
-        pub fn resetOwned(self: *Self, state: State, options: Services) void {
+        pub fn replaceState(self: *Self, state: State, services: Services) void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
             std.debug.assert(self.checkpoint_top == 0);
@@ -603,27 +582,9 @@ pub fn ExecutorType(
             self.execution_context = null;
             self.scope_root = null;
             self.manual_state_attempt = null;
-            self.block_hash_source = options.block_hash_source;
-            self.precompile_runtime = options.precompile_runtime;
-            self.prepared_code_backend = options.prepared_code_backend;
-            self.clearLastOutput();
-        }
-
-        fn resetTracked(self: *Self, options: Init) !void {
-            std.debug.assert(!self.hasActiveBlockExecution());
-            std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
-            std.debug.assert(!self.state.scopeActive());
-            std.debug.assert(self.prepared_code_execution_depth == 0);
-
-            self.state.reset(options.state_reader);
-            self.execution_context = null;
-            self.scope_root = null;
-            self.manual_state_attempt = null;
-            self.block_hash_source = options.block_hash_source;
-            self.precompile_runtime = options.precompile_runtime;
-            self.prepared_code_backend = options.prepared_code_backend;
+            self.block_hash_source = services.block_hash_source;
+            self.precompile_runtime = services.precompile_runtime;
+            self.prepared_code_backend = services.prepared_code_backend;
             self.clearLastOutput();
         }
 
@@ -662,7 +623,7 @@ pub fn ExecutorType(
             self.endPreparedCodeExecution();
         }
 
-        pub fn reserveAcceptedAccessHint(self: *Self, hint: StateModel.AccessHint) !void {
+        pub fn reserveAcceptedAccessHint(self: *Self, hint: State.AccessHint) !void {
             try self.state.reserveAcceptedAccessHint(hint);
         }
 
@@ -847,7 +808,7 @@ pub fn ExecutorType(
             try self.state.setCode(address, code);
         }
 
-        pub fn logView(self: *const Self) StateModel.LogView {
+        pub fn logView(self: *const Self) State.LogView {
             return self.state.logView();
         }
 
@@ -894,7 +855,7 @@ pub fn ExecutorType(
             return self.active_block_execution_generation != null;
         }
 
-        pub fn acceptedView(self: *const Self) StateModel.AcceptedView {
+        pub fn acceptedView(self: *const Self) State.AcceptedView {
             return self.state.acceptedView();
         }
 
@@ -1019,7 +980,7 @@ pub fn ExecutorType(
         }
 
         /// Borrow the cumulative accepted changes relative to the state reader.
-        pub fn acceptedChanges(self: *const Self) StateModel.ChangesView {
+        pub fn acceptedChanges(self: *const Self) State.ChangesView {
             std.debug.assert(self.transaction_runtime_state == null);
             return self.acceptedView().changes();
         }

@@ -345,16 +345,15 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             executor_options: Engine.Executor.Services,
         ) !void {
             if (self.claim_executor) |*executor|
-                executor.resetOwned(
+                executor.replaceState(
                     Engine.BlockState.initState(self.allocator, reader),
                     executor_options,
                 )
             else
-                self.claim_executor = Engine.Executor.initOwned(
-                    self.allocator,
-                    Engine.BlockState.initState(self.allocator, reader),
-                    executor_options,
-                );
+                self.claim_executor = Engine.Executor.init(self.allocator, .{
+                    .state = .{ .reader = reader },
+                    .services = executor_options,
+                });
 
             const progress = self.accumulator.progress;
             var runtime = Engine.init(&self.claim_executor.?);

@@ -58,7 +58,7 @@ const usage =
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    var executor = Executor.init(allocator, .{});
+    var executor = Executor.init(allocator, .{ .state = .{} });
     defer executor.deinit();
 
     var out_buffer: [4096]u8 = undefined;

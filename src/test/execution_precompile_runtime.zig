@@ -147,7 +147,8 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .state = .{},
+        .services = .{ .precompile_runtime = runtime.service() },
     });
     defer executor.deinit();
 
@@ -183,12 +184,13 @@ test "family precompile runtime can use host state and keeps EVM rollback semant
     );
 }
 
-test "Executor reset preserves and replaces the precompile runtime" {
+test "executor construction selects the precompile runtime" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = first_runtime.service(),
+        .state = .{},
+        .services = .{ .precompile_runtime = first_runtime.service() },
     });
     defer executor.deinit();
 
@@ -199,8 +201,10 @@ test "Executor reset preserves and replaces the precompile runtime" {
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
-    try executor.reset(.{
-        .precompile_runtime = second_runtime.service(),
+    executor.deinit();
+    executor = StatefulVm.Executor.init(std.testing.allocator, .{
+        .state = .{},
+        .services = .{ .precompile_runtime = second_runtime.service() },
     });
     const second = (try executor.executeStandalone(
         request(sender, StatefulPrecompile.target, &.{}),
@@ -214,7 +218,8 @@ test "runtime precompile output survives synchronous host reentry" {
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .state = .{},
+        .services = .{ .precompile_runtime = runtime.service() },
     });
     defer executor.deinit();
 
@@ -261,7 +266,8 @@ test "reentrant precompile call preserves parent stack across arena growth" {
 
     var runtime = ReentrantRuntime{ .child = child };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .state = .{},
+        .services = .{ .precompile_runtime = runtime.service() },
     });
     defer executor.deinit();
 
