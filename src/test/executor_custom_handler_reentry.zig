@@ -103,7 +103,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
 
     try capture.begin();
     errdefer capture.abort() catch {};
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture).execute(
         .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -113,7 +113,6 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
             .recipient = parent,
         } },
         .legacy(100_000),
-        &capture,
     )).expectCall();
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;

@@ -6,6 +6,7 @@ const system_prepared_code = @import("../eth/system_prepared_code.zig");
 const Address = evmz.Address;
 const ExecutionContext = evmz.execution.ExecutionContext;
 const Interpreter = evmz.interpreter;
+const InstrumentationMode = @import("instrumentation.zig").Mode;
 
 const IgnorePending = struct {
     pub fn observe(_: IgnorePending, _: anytype) !void {}
@@ -15,12 +16,6 @@ pub const BeforeBlockContext = block_program.BeforeBlockContext;
 pub const BeforeTransactionContext = block_program.BeforeTransactionContext;
 pub const AfterTransactionContext = block_program.AfterTransactionContext;
 pub const FinalizeBlockContext = block_program.FinalizeBlockContext;
-
-const SystemCallMode = union(enum) {
-    normal,
-    observed,
-    captured: *evmz.executor.CaptureContext,
-};
 
 /// Applies before-block system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
@@ -127,7 +122,7 @@ fn applyFinalizeBlockMode(
     execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
     context: FinalizeBlockContext,
-    mode: SystemCallMode,
+    mode: InstrumentationMode,
     observer: anytype,
 ) ![]const []const u8 {
     const calls = @TypeOf(executor.*).specification.block.finalizeBlock(context);
@@ -178,7 +173,7 @@ fn applySystemCalls(
     executor: anytype,
     execution_context: ExecutionContext,
     calls: *const block_program.BlockSystemCalls,
-    mode: SystemCallMode,
+    mode: InstrumentationMode,
     observer: anytype,
 ) !void {
     if (calls.slice().len == 0) return;
@@ -215,7 +210,7 @@ fn callSystemContract(
     gas: u64,
     state_gas: u64,
     require_code: bool,
-    mode: SystemCallMode,
+    mode: InstrumentationMode,
     observer: anytype,
 ) !void {
     const has_code = try executor.accountHasCode(recipient);
@@ -228,7 +223,7 @@ fn callSystemContract(
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
-        .observed => try executor.executeSystemCallObserved(
+        .observed => try executor.observe().executeSystemCall(
             execution_context,
             sender,
             recipient,
@@ -236,13 +231,12 @@ fn callSystemContract(
             .{ .regular_left = gas, .reservoir = state_gas },
             observer,
         ),
-        .captured => |capture| try executor.executeSystemCallCaptured(
+        .captured => |capture| try executor.capture(capture).executeSystemCall(
             execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
-            capture,
             observer,
         ),
     };
@@ -288,7 +282,7 @@ fn callRequestSystemContract(
     state_gas: u64,
     request_type: u8,
     require_code: bool,
-    mode: SystemCallMode,
+    mode: InstrumentationMode,
     observer: anytype,
 ) !?[]const u8 {
     const has_code = try executor.accountHasCode(recipient);
@@ -301,7 +295,7 @@ fn callRequestSystemContract(
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
         ),
-        .observed => try executor.executeSystemCallObserved(
+        .observed => try executor.observe().executeSystemCall(
             execution_context,
             sender,
             recipient,
@@ -309,13 +303,12 @@ fn callRequestSystemContract(
             .{ .regular_left = gas, .reservoir = state_gas },
             observer,
         ),
-        .captured => |capture| try executor.executeSystemCallCaptured(
+        .captured => |capture| try executor.capture(capture).executeSystemCall(
             execution_context,
             sender,
             recipient,
             input,
             .{ .regular_left = gas, .reservoir = state_gas },
-            capture,
             observer,
         ),
     };

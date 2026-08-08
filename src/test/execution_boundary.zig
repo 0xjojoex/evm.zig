@@ -189,7 +189,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     var observations = Observer{ .contract = contract };
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.beginObservedTransaction(
+    try executor.observe().beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
@@ -218,9 +218,9 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.isAccountWarm(additional));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     _ = try host.getExecutionContext();
-    try executor.retainStateTransitionObserved(&observations);
+    try executor.observe().retainStateTransition(&observations);
     try std.testing.expect(observations.found);
 }
 
@@ -299,7 +299,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     var observations = Observer{ .contract = contract };
     var executor = AmsterdamExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.beginObservedTransaction(
+    try executor.observe().beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
@@ -310,7 +310,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(contract, 8, 1);
     try checkpoint.restore();
-    try executor.retainStateTransitionObserved(&observations);
+    try executor.observe().retainStateTransition(&observations);
     try std.testing.expect(observations.found);
 }
 
@@ -392,11 +392,10 @@ test "bounded trace capture failure rolls back the standalone operation" {
     const request_value = request(sender, contract);
     try std.testing.expectError(
         error.TraceCapacityExceeded,
-        executor.executeCaptured(
+        executor.capture(&capture).execute(
             request_value.context,
             request_value.message,
             request_value.gas,
-            &capture,
         ),
     );
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
@@ -435,11 +434,10 @@ test "captured CALL publishes return data and parent memory output after resume"
     try capture.begin();
     errdefer capture.abort() catch {};
     const request_value = request(sender, contract);
-    const result = try executor.executeCaptured(
+    const result = try executor.capture(&capture).execute(
         request_value.context,
         request_value.message,
         request_value.gas,
-        &capture,
     );
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;

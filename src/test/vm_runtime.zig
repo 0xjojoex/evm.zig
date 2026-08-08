@@ -111,10 +111,10 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         .code_hash = code_hash,
     };
     const prepared = try prepared_pool.getOrPrepare(code_hash, &code);
-    try executor.beginObservedStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
+    try executor.observe().beginStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
     const view = try executor.getCode(contract);
-    try executor.retainStateTransitionObserved(&observations);
+    try executor.observe().retainStateTransition(&observations);
 
     try std.testing.expect(view.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view);
@@ -280,7 +280,7 @@ test "executed transaction discards without allocating" {
     failing_allocator.fail_index = std.math.maxInt(usize);
 
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
 }
 
@@ -634,7 +634,7 @@ test "Executor exposes borrowed logs after transaction retention" {
         },
     }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    const logs = executor.logs();
+    const logs = executor.logView();
     try std.testing.expectEqual(@as(usize, 1), logs.len());
     try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &logs.get(0).address);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, logs.get(0).topics[0]);
@@ -663,7 +663,7 @@ test "rejected transaction clears the Executor log surface" {
         },
     }));
     try std.testing.expectEqual(TxStatus.success, accepted.status);
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
 
     const rejected = try transact(Default, &executor, .{
         .env = .{ .gas_limit = 1_000_000 },
@@ -676,7 +676,7 @@ test "rejected transaction clears the Executor log surface" {
         },
     });
     try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
 }
 
 test "transaction STF uses comptime transaction gas policy" {

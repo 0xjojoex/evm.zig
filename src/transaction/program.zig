@@ -11,6 +11,7 @@ const block_program = @import("../block_program.zig");
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
 const CaptureContext = @import("../executor/capture_context.zig").Context;
+const InstrumentationMode = @import("../executor/instrumentation.zig").Mode;
 const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
 const state = @import("../state.zig");
@@ -34,51 +35,23 @@ pub fn TransactOutcome(comptime Executed: type, comptime Rejection: type) type {
 pub fn transactInBlock(
     transaction_program: anytype,
     input: anytype,
-) @TypeOf(transaction_program.transactOwned(input, true, null, .normal)) {
-    return transaction_program.transactOwned(input, true, null, .normal);
-}
-
-pub fn transactObservedInBlock(
-    transaction_program: anytype,
-    input: anytype,
-) @TypeOf(transaction_program.transactOwned(input, true, null, .observed)) {
-    return transaction_program.transactOwned(input, true, null, .observed);
+    mode: InstrumentationMode,
+) @TypeOf(transaction_program.transactOwned(input, true, null, mode)) {
+    return transaction_program.transactOwned(input, true, null, mode);
 }
 
 pub fn transactInBlockWithPrelude(
     transaction_program: anytype,
     input: anytype,
     prelude: anytype,
-) @TypeOf(transaction_program.transactOwned(input, true, prelude, .normal)) {
-    return transaction_program.transactOwned(input, true, prelude, .normal);
-}
-
-pub fn transactObservedInBlockWithPrelude(
-    transaction_program: anytype,
-    input: anytype,
-    prelude: anytype,
-) @TypeOf(transaction_program.transactOwned(input, true, prelude, .observed)) {
-    return transaction_program.transactOwned(input, true, prelude, .observed);
-}
-
-pub fn transactCapturedInBlockWithPrelude(
-    transaction_program: anytype,
-    input: anytype,
-    prelude: anytype,
-    capture: *CaptureContext,
-) @TypeOf(transaction_program.transactOwned(input, true, prelude, .{ .captured = capture })) {
-    return transaction_program.transactOwned(input, true, prelude, .{ .captured = capture });
+    mode: InstrumentationMode,
+) @TypeOf(transaction_program.transactOwned(input, true, prelude, mode)) {
+    return transaction_program.transactOwned(input, true, prelude, mode);
 }
 
 /// Internal transport caught by the binder and replaced with the concrete
 /// block-prelude error before it reaches a program caller.
 const ContractError = error{TransactionPreludeFailed};
-
-const TransactionMode = union(enum) {
-    normal,
-    observed,
-    captured: *CaptureContext,
-};
 
 /// Bind transaction semantics using flat engine-family and program carriers.
 /// Concrete VM types expose this through `VM.Program(...)`.
@@ -151,7 +124,7 @@ fn RuntimeState(
 
         executor: *ExecutorType,
         input_value: *const InputType,
-        mode: TransactionMode,
+        mode: InstrumentationMode,
         prelude: PreludeState = .none,
 
         fn discardIfActive(self: *Self) void {
@@ -491,6 +464,8 @@ fn BoundTransaction(
     const OutcomeType = TransactOutcome(ExecutedType, RejectionType);
 
     return struct {
+        const Self = @This();
+
         pub const Executor = ExecutorType;
         pub const specification = ExecutorType.specification;
         pub const Context = ContextType;
@@ -505,6 +480,28 @@ fn BoundTransaction(
         pub const PreludeContext = PreludeContextType;
         pub const Outcome = OutcomeType;
         pub const Error = ProgramError;
+
+        pub const Observed = struct {
+            program: *Self,
+
+            pub fn transact(self: Observed, input_value: TransactInputType) Error!Outcome {
+                return self.program.transactOwned(input_value, false, null, .observed);
+            }
+        };
+
+        pub const Captured = struct {
+            program: *Self,
+            context: *CaptureContext,
+
+            pub fn transact(self: Captured, input_value: TransactInputType) Error!Outcome {
+                return self.program.transactOwned(
+                    input_value,
+                    false,
+                    null,
+                    .{ .captured = self.context },
+                );
+            }
+        };
 
         executor: *ExecutorType,
 
@@ -559,24 +556,14 @@ fn BoundTransaction(
             return self.transactOwned(input_value, false, null, .normal);
         }
 
-        /// Execute and retain transaction-scoped state observations.
-        ///
-        /// Observation views belong to the unresolved `Executed` result and
-        /// remain borrowed until that result is retained or discarded.
-        pub fn transactObserved(self: *@This(), input_value: TransactInputType) Error!Outcome {
-            return self.transactOwned(input_value, false, null, .observed);
+        /// Borrow a transaction facade that records state observations.
+        pub fn observe(self: *Self) Observed {
+            return .{ .program = self };
         }
 
-        /// Execute with caller-owned passive capture storage.
-        ///
-        /// `capture` must already be active and must outlive execution. The
-        /// returned `Executed` value still exclusively resolves state.
-        pub fn transactCaptured(
-            self: *@This(),
-            input_value: TransactInputType,
-            capture: *CaptureContext,
-        ) Error!Outcome {
-            return self.transactOwned(input_value, false, null, .{ .captured = capture });
+        /// Borrow a transaction facade bound to caller-owned capture storage.
+        pub fn capture(self: *Self, context: *CaptureContext) Captured {
+            return .{ .program = self, .context = context };
         }
 
         fn transactOwned(
@@ -584,7 +571,7 @@ fn BoundTransaction(
             input_value: TransactInputType,
             block_claimed: bool,
             prelude: ?PreludeType,
-            mode: TransactionMode,
+            mode: InstrumentationMode,
         ) Error!OutcomeType {
             const executor = self.executor;
             if (!block_claimed)

@@ -87,6 +87,23 @@ pub const CallResult = struct {
     state_gas_spent: i64 = 0,
     state_gas_from_gas_left: i64 = 0,
 
+    pub fn fromExecution(
+        result: execution.ExecutionResult,
+        checkpoint_reverted: bool,
+    ) CallResult {
+        return .{
+            .outcome = result.outcome,
+            .frame_halt = result.frame_halt,
+            .checkpoint_reverted = checkpoint_reverted,
+            .output_data = result.output_data,
+            .gas_left = result.gas_left,
+            .gas_refund = result.gas_refund,
+            .gas_reservoir = result.gas_reservoir,
+            .state_gas_spent = result.state_gas_spent,
+            .state_gas_from_gas_left = result.state_gas_from_gas_left,
+        };
+    }
+
     pub fn status(self: CallResult) Status {
         return self.outcome.status;
     }
@@ -212,6 +229,25 @@ pub const Result = union(enum) {
         return switch (self) {
             .call => |result| result.state_gas_from_gas_left,
             .create => |result| result.state_gas_from_gas_left,
+        };
+    }
+
+    /// Convert a resolved host result into the engine result boundary. The
+    /// caller supplies Executor-owned output because Host output may borrow a
+    /// frame or scratch arena that is about to be released.
+    pub fn executionResult(self: Result, output_data: []u8) execution.ExecutionResult {
+        return .{
+            .outcome = .{ .status = self.status(), .cause = self.terminalCause() },
+            .frame_halt = switch (self) {
+                .call => |result| result.frame_halt,
+                .create => |result| result.frame_halt,
+            },
+            .gas_left = self.gasLeft(),
+            .gas_refund = self.gasRefund(),
+            .gas_reservoir = self.gasReservoir(),
+            .state_gas_spent = self.stateGasSpent(),
+            .state_gas_from_gas_left = self.stateGasFromGasLeft(),
+            .output_data = output_data,
         };
     }
 

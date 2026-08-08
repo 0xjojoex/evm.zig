@@ -7,15 +7,10 @@
 const std = @import("std");
 
 const CaptureContext = @import("./executor/capture_context.zig").Context;
+const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const Address = @import("./address.zig").Address;
 const execution = @import("./execution.zig");
 const transaction_program = @import("./transaction/program.zig");
-
-const AttemptMode = union(enum) {
-    normal,
-    observed,
-    captured: *CaptureContext,
-};
 
 pub const BeforeBlockContext = struct {
     number: u64,
@@ -241,6 +236,57 @@ fn BoundBlockProgram(
         state: ImplementationType.State,
         finished: bool = false,
 
+        fn Instrumented(comptime Observer: type) type {
+            return struct {
+                block: *Self,
+                mode: InstrumentationMode,
+                observer: Observer,
+
+                pub fn transact(
+                    self: @This(),
+                    transaction_value: Transaction,
+                ) anyerror!Outcome {
+                    return self.block.transactOwned(
+                        transaction_value,
+                        null,
+                        self.mode,
+                        self.observer,
+                    );
+                }
+
+                pub fn transactWithPrelude(
+                    self: @This(),
+                    transaction_value: Transaction,
+                    prelude: Prelude,
+                ) anyerror!Outcome {
+                    return self.block.transactOwned(
+                        transaction_value,
+                        prelude,
+                        self.mode,
+                        self.observer,
+                    );
+                }
+            };
+        }
+
+        /// Borrow a block facade that records and consumes pending observations.
+        pub fn observe(self: *Self, observer: anytype) Instrumented(@TypeOf(observer)) {
+            return .{ .block = self, .mode = .observed, .observer = observer };
+        }
+
+        /// Borrow a block facade bound to passive capture and an observation consumer.
+        pub fn capture(
+            self: *Self,
+            context: *CaptureContext,
+            observer: anytype,
+        ) Instrumented(@TypeOf(observer)) {
+            return .{
+                .block = self,
+                .mode = .{ .captured = context },
+                .observer = observer,
+            };
+        }
+
         /// Claim one Executor branch for an ordered block fold.
         ///
         /// The Executor must have no unresolved transaction or accepted
@@ -289,42 +335,11 @@ fn BoundBlockProgram(
             ) catch |err| return @errorCast(err);
         }
 
-        /// Inspect one included transaction while its state is sealed but still
-        /// pending. The observer must copy or consume borrowed views before
-        /// returning; successful observation is followed by retain.
-        pub fn transactWithPreludeObserved(
-            self: *Self,
-            transaction_value: Transaction,
-            prelude: Prelude,
-            observer: anytype,
-        ) anyerror!Outcome {
-            return self.transactOwned(transaction_value, prelude, .observed, observer);
-        }
-
-        /// Capture root execution events and inspect the sealed included state.
-        ///
-        /// Captured events are written into `capture`; borrowed observer views
-        /// remain valid only for the duration of `observer.observe`.
-        pub fn transactWithPreludeCaptured(
-            self: *Self,
-            transaction_value: Transaction,
-            prelude: Prelude,
-            capture: *CaptureContext,
-            observer: anytype,
-        ) anyerror!Outcome {
-            return self.transactOwned(
-                transaction_value,
-                prelude,
-                .{ .captured = capture },
-                observer,
-            );
-        }
-
         fn transactOwned(
             self: *Self,
             transaction_value: Transaction,
             prelude: ?Prelude,
-            mode: AttemptMode,
+            mode: InstrumentationMode,
             observer: anytype,
         ) anyerror!Outcome {
             requireActive(self);
@@ -333,28 +348,19 @@ fn BoundBlockProgram(
                 &self.state,
                 &transaction_value,
             );
-            const outcome = if (prelude) |value| switch (mode) {
-                .normal => try transaction_program.transactInBlockWithPrelude(
+            const outcome = if (prelude) |value|
+                try transaction_program.transactInBlockWithPrelude(
                     &self.transaction_runtime,
                     input,
                     value,
-                ),
-                .observed => try transaction_program.transactObservedInBlockWithPrelude(
+                    mode,
+                )
+            else
+                try transaction_program.transactInBlock(
                     &self.transaction_runtime,
                     input,
-                    value,
-                ),
-                .captured => |capture| try transaction_program.transactCapturedInBlockWithPrelude(
-                    &self.transaction_runtime,
-                    input,
-                    value,
-                    capture,
-                ),
-            } else switch (mode) {
-                .normal => try transaction_program.transactInBlock(&self.transaction_runtime, input),
-                .observed => try transaction_program.transactObservedInBlock(&self.transaction_runtime, input),
-                .captured => unreachable,
-            };
+                    mode,
+                );
             return switch (outcome) {
                 .rejected => |reason| .{ .rejected = reason },
                 .executed => |executed_value| blk: {

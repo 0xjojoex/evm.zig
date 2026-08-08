@@ -45,7 +45,7 @@ fn runStandaloneObserved(
     gas: execution_values.ExecutionGas,
     observer: anytype,
 ) !Host.Result {
-    return executor.executeStandaloneObserved(
+    return executor.observe().executeStandalone(
         .{ .context = context, .message = message, .gas = gas },
         .{},
         observer,
@@ -142,9 +142,9 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     defer dense.deinit();
 
     const context = testExecutionContext(target, 100_000);
-    try tracked.beginObservedStateTransition(context);
+    try tracked.observe().beginStateTransition(context);
     defer tracked.discardStateTransition();
-    try dense.beginObservedStateTransition(context);
+    try dense.observe().beginStateTransition(context);
     defer dense.discardStateTransition();
 
     const undeclared = evmz.addr(2);
@@ -191,8 +191,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
 
     tracked.discardStateTransition();
     dense.discardStateTransition();
-    try tracked.beginObservedStateTransition(context);
-    try dense.beginObservedStateTransition(context);
+    try tracked.observe().beginStateTransition(context);
+    try dense.observe().beginStateTransition(context);
     try std.testing.expectEqual(@as(u256, 10), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try tracked.getStorage(target, 7));
@@ -213,8 +213,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
 
     var tracked_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
     var dense_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
-    try tracked.retainStateTransitionObserved(&tracked_observer);
-    try dense.retainStateTransitionObserved(&dense_observer);
+    try tracked.observe().retainStateTransition(&tracked_observer);
+    try dense.observe().retainStateTransition(&dense_observer);
     try std.testing.expectEqualDeep(tracked_observer.summary, dense_observer.summary);
     try std.testing.expectEqual(@as(usize, 1), dense.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
@@ -390,11 +390,10 @@ test "trace replay runs after prepared code leaves the live frame" {
         if (capture_open) capture.abort() catch {};
     }
 
-    try executor.beginCapturedTransaction(
+    try executor.capture(&capture).beginTransaction(
         testExecutionContext(sender, 100_000),
         sender,
         contract,
-        &capture,
     );
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     executor.retainStateTransition();
@@ -1551,7 +1550,7 @@ test "captured runtime records nested call and create frames without generic ste
 
     try capture.begin();
     errdefer capture.abort() catch {};
-    try executor.beginCapturedTransaction(execution_context, sender, contract, &capture);
+    try executor.capture(&capture).beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -2033,8 +2032,8 @@ test "Amsterdam value transaction emits transfer log" {
     }, 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), sender, recipient, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), sender, recipient, 7);
 }
 
 test "Osaka value transaction does not emit transfer log" {
@@ -2050,7 +2049,7 @@ test "Osaka value transaction does not emit transfer log" {
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .legacy(50_000), 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
 }
 
 test "Amsterdam nested CALL transfer log rolls back on revert" {
@@ -2079,7 +2078,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
     })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status());
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
 }
 
@@ -2106,8 +2105,8 @@ test "Amsterdam CREATE endowment emits transfer log" {
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), contract, create_address, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), contract, create_address, 7);
 }
 
 test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
@@ -2131,8 +2130,8 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), contract, beneficiary, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), contract, beneficiary, 7);
 }
 
 fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
@@ -2955,10 +2954,10 @@ test "sealed observations expose storage state without a trace tape" {
             0x00, // STOP
         },
     });
-    try executor.beginObservedTransaction(execution_context, sender, contract);
+    try executor.observe().beginTransaction(execution_context, sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    try executor.retainStateTransitionObserved(&observations);
+    try executor.observe().retainStateTransition(&observations);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), observations.calls);

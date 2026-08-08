@@ -6,14 +6,9 @@
 
 const std = @import("std");
 
-const CaptureContext = @import("../executor/capture_context.zig").Context;
 const execution = @import("../execution.zig");
 
-pub const Mode = union(enum) {
-    normal,
-    observed,
-    captured: *CaptureContext,
-};
+pub const Mode = @import("../executor/instrumentation.zig").Mode;
 
 pub fn hasActive(executor: anytype) bool {
     const state = executor.transaction_runtime_state orelse return false;

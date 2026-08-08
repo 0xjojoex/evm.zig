@@ -9,8 +9,9 @@
 //!
 //! 1. `Vm.transact` for complete family transaction semantics. Completion
 //!    returns one `Executed` owner that must be retained or discarded.
-//! 2. `executeStandalone*` for a fully managed raw CALL/CREATE message. These
-//!    methods do not perform family validation, charging, or settlement.
+//! 2. `executeStandalone`, `observe()`, or `capture()` for a fully managed raw
+//!    CALL/CREATE message. These do not perform family validation, charging,
+//!    or settlement.
 //! 3. Manual scope methods for STF work and diagnostic harnesses that must place
 //!    checkpoints themselves. A successful manual transition must be committed
 //!    or explicitly retained; failure cleanup must discard it.
@@ -57,6 +58,7 @@ const call_scratch_storage = @import("./executor/call_scratch.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
 const FrameStore = @import("./executor/frame_store.zig");
 const host_callbacks = @import("./executor/host_callbacks.zig");
+const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 pub const state_io = @import("./executor/state_io.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
@@ -211,32 +213,15 @@ pub fn ExecutorType(
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        const ExecutionMode = union(enum) {
-            normal,
-            observed,
-            captured: *CaptureContext,
-
-            fn observesState(self: ExecutionMode) bool {
-                return self != .normal;
-            }
-
-            fn captureContext(self: ExecutionMode) ?*CaptureContext {
-                return switch (self) {
-                    .normal, .observed => null,
-                    .captured => |context| context,
-                };
-            }
-        };
-
         const ManualStateAttempt = struct {
             id: StateModel.AttemptId,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         };
 
         const TransactionRuntimeState = struct {
             state_attempt_id: StateModel.AttemptId,
             generation: u64,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             phase: enum { active, pending } = .active,
             nonce_advanced: bool = false,
             payload_started: bool = false,
@@ -346,6 +331,145 @@ pub fn ExecutorType(
             };
         }
 
+        pub const ObservedExecutor = struct {
+            executor: *Self,
+
+            pub fn beginTransaction(
+                self: @This(),
+                context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+            ) !void {
+                try self.executor.beginTransactionMode(context, sender, recipient, .observed);
+            }
+
+            pub fn beginMessageScope(
+                self: @This(),
+                request: execution_values.EvmExecutionRequest,
+                scope_init: execution_values.ExecutionScopeInit,
+            ) !void {
+                try self.executor.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
+            }
+
+            pub fn beginStateTransition(
+                self: @This(),
+                context: execution_values.ExecutionContext,
+            ) !void {
+                try self.executor.openTransactionScope(context, .observed);
+            }
+
+            pub fn commitTransaction(self: @This(), observer: anytype) !void {
+                try self.executor.commitTransactionWithObserver(observer);
+            }
+
+            pub fn retainStateTransition(self: @This(), observer: anytype) !void {
+                try self.executor.retainStateTransitionWithObserver(observer);
+            }
+
+            pub fn executeStandalone(
+                self: @This(),
+                request: execution_values.EvmExecutionRequest,
+                scope_init: execution_values.ExecutionScopeInit,
+                observer: anytype,
+            ) !Self.EvmResult {
+                return self.executor.runStandaloneContext(
+                    request.context,
+                    request.message,
+                    request.gas,
+                    scope_init,
+                    .observed,
+                    observer,
+                );
+            }
+
+            pub fn executeSystemCall(
+                self: @This(),
+                context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+                input: []const u8,
+                gas: execution_values.ExecutionGas,
+                observer: anytype,
+            ) !execution_values.ExecutionResult {
+                return self.executor.executeSystemCallMode(
+                    context,
+                    sender,
+                    recipient,
+                    input,
+                    gas,
+                    .observed,
+                    observer,
+                );
+            }
+        };
+
+        /// Borrow an observed execution view. The facade selects instrumentation
+        /// and a pending-state consumer; Executor keeps all lifecycle ownership.
+        pub fn observe(self: *Self) ObservedExecutor {
+            return .{ .executor = self };
+        }
+
+        pub const CapturedExecutor = struct {
+            executor: *Self,
+            context: *CaptureContext,
+
+            pub fn beginTransaction(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+            ) !void {
+                try self.executor.beginTransactionMode(
+                    execution_context,
+                    sender,
+                    recipient,
+                    .{ .captured = self.context },
+                );
+            }
+
+            pub fn execute(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                message: Self.Message,
+                gas: execution_values.ExecutionGas,
+            ) !Self.EvmResult {
+                return self.executor.runStandaloneContext(
+                    execution_context,
+                    message,
+                    gas,
+                    .{},
+                    .{ .captured = self.context },
+                    IgnorePending{},
+                );
+            }
+
+            pub fn executeSystemCall(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+                input: []const u8,
+                gas: execution_values.ExecutionGas,
+                observer: anytype,
+            ) !execution_values.ExecutionResult {
+                return self.executor.executeSystemCallMode(
+                    execution_context,
+                    sender,
+                    recipient,
+                    input,
+                    gas,
+                    .{ .captured = self.context },
+                    observer,
+                );
+            }
+        };
+
+        /// Borrow a captured execution view. The facade owns no transaction or
+        /// capture lifetime; both remain with the Executor and caller context.
+        pub fn capture(self: *Self, context: *CaptureContext) CapturedExecutor {
+            return .{ .executor = self, .context = context };
+        }
+
         pub fn transactionAccountSummary(self: *Self, account_address: Address) !?AccountState {
             transaction_runtime.requireActive(self);
             return self.getAccountOrLoad(account_address);
@@ -450,7 +574,7 @@ pub fn ExecutorType(
             return null;
         }
 
-        fn assertExecutionMode(mode: ExecutionMode) void {
+        fn assertExecutionMode(mode: InstrumentationMode) void {
             const context = mode.captureContext() orelse return;
             std.debug.assert(context.isActive());
         }
@@ -570,7 +694,7 @@ pub fn ExecutorType(
         fn openTransactionScope(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             std.debug.assert(self.execution_context == null);
             std.debug.assert(self.checkpoint_top == 0);
@@ -611,38 +735,17 @@ pub fn ExecutorType(
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
         pub fn beginTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address, recipient: Address) !void {
-            try self.openTransactionScope(context, .normal);
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, recipient);
+            try self.beginTransactionMode(context, sender, recipient, .normal);
         }
 
-        /// Open an observed manual call transaction scope.
-        ///
-        /// This has the same ownership contract as `beginTransaction`; the
-        /// observed mode is carried into any root message execution.
-        pub fn beginObservedTransaction(
+        fn beginTransactionMode(
             self: *Self,
             context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
+            mode: InstrumentationMode,
         ) !void {
-            try self.openTransactionScope(context, .observed);
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, recipient);
-        }
-
-        /// Open a captured manual call transaction scope.
-        ///
-        /// This has the same ownership contract as `beginTransaction`; captured
-        /// call events are written into `capture`.
-        pub fn beginCapturedTransaction(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            capture: *CaptureContext,
-        ) !void {
-            try self.openTransactionScope(context, .{ .captured = capture });
+            try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, recipient);
         }
@@ -672,21 +775,12 @@ pub fn ExecutorType(
             try self.beginMessageScopeContext(request.context, request.message, scope_init, .normal);
         }
 
-        /// Open the observed counterpart to `beginMessageScope`.
-        pub fn beginObservedMessageScope(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-        ) !void {
-            try self.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
-        }
-
         fn beginMessageScopeContext(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
@@ -697,7 +791,7 @@ pub fn ExecutorType(
         fn beginSystemCall(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             try self.openTransactionScope(context, mode);
         }
@@ -706,11 +800,6 @@ pub fn ExecutorType(
         /// root EVM message. Retain or discard it explicitly.
         pub fn beginStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
             try self.openTransactionScope(context, .normal);
-        }
-
-        /// Open an observed state transition without a root EVM message.
-        pub fn beginObservedStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
-            try self.openTransactionScope(context, .observed);
         }
 
         /// Mark an account warm in the current transaction scope.
@@ -766,10 +855,6 @@ pub fn ExecutorType(
             return self.state.logView();
         }
 
-        pub fn logs(self: *const Self) StateModel.LogView {
-            return self.logView();
-        }
-
         pub fn clearLogs(self: *Self) void {
             self.state.clearLogs();
         }
@@ -819,12 +904,10 @@ pub fn ExecutorType(
 
         /// Run protocol finalization, retain the transition, and close its scope.
         pub fn commitTransaction(self: *Self) !void {
-            try self.commitTransactionObserved(IgnorePending{});
+            try self.commitTransactionWithObserver(IgnorePending{});
         }
 
-        /// Finalize and expose the sealed pending view before retaining it.
-        /// Observer failure discards the complete transition.
-        pub fn commitTransactionObserved(self: *Self, observer: anytype) !void {
+        fn commitTransactionWithObserver(self: *Self, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.transaction_runtime_state == null);
             try self.finalizeTransactionState();
@@ -857,14 +940,10 @@ pub fn ExecutorType(
         /// deliberately owns finalization. Failure cleanup must use
         /// `discardStateTransition`.
         pub fn retainStateTransition(self: *Self) void {
-            self.retainStateTransitionObserved(IgnorePending{}) catch unreachable;
+            self.retainStateTransitionWithObserver(IgnorePending{}) catch unreachable;
         }
 
-        /// Expose and retain the current manual transition without finalizing it.
-        ///
-        /// Borrowed pending views are valid only during `observer.observe`.
-        /// Observer failure discards the transition.
-        pub fn retainStateTransitionObserved(self: *Self, observer: anytype) !void {
+        fn retainStateTransitionWithObserver(self: *Self, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.transaction_runtime_state == null);
             if (self.execution_context == null) return;
@@ -1030,59 +1109,6 @@ pub fn ExecutorType(
             return result;
         }
 
-        fn runStandalone(self: *Self, context: execution_values.ExecutionContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .normal,
-                IgnorePending{},
-            );
-        }
-
-        /// Run one direct message and consume its sealed observations before
-        /// the transition is retained.
-        fn runStandaloneObserved(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            message: Self.Message,
-            gas: execution_values.ExecutionGas,
-            observer: anytype,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .observed,
-                observer,
-            );
-        }
-
-        /// Execute one raw message with a managed scope and passive capture.
-        ///
-        /// `capture` must already be active and outlive this call. Captured
-        /// artifacts do not own or resolve transaction state. This uses the
-        /// default initial warm set; family validation, charging, settlement,
-        /// and receipts remain outside this API.
-        pub fn executeCaptured(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            message: Self.Message,
-            gas: execution_values.ExecutionGas,
-            capture: *CaptureContext,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .{ .captured = capture },
-                IgnorePending{},
-            );
-        }
-
         /// Execute one normalized raw message with a fully managed lifecycle.
         ///
         /// This opens and resolves the state transition internally. EVM
@@ -1105,33 +1131,13 @@ pub fn ExecutorType(
             );
         }
 
-        /// Execute a managed raw message and expose its sealed state before retain.
-        ///
-        /// `observer` may only borrow the pending view during `observe`; an
-        /// observer error discards the complete transition.
-        pub fn executeStandaloneObserved(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-            observer: anytype,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                request.context,
-                request.message,
-                request.gas,
-                scope_init,
-                .observed,
-                observer,
-            );
-        }
-
         fn runStandaloneContext(
             self: *Self,
             context: execution_values.ExecutionContext,
             message: Self.Message,
             gas: execution_values.ExecutionGas,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             observer: anytype,
         ) !Self.EvmResult {
             try self.beginMessageScopeContext(context, message, scope_init, mode);
@@ -1143,11 +1149,11 @@ pub fn ExecutorType(
             const result = try self.executeMessage(message, gas);
             if (executionRolledBack(result.status())) {
                 try pre_execution.restore();
-                try self.retainStateTransitionObserved(observer);
+                try self.retainStateTransitionWithObserver(observer);
             } else {
                 try self.finalizeTransactionState();
                 try pre_execution.commit();
-                try self.retainStateTransitionObserved(observer);
+                try self.retainStateTransitionWithObserver(observer);
             }
             return result;
         }
@@ -1224,49 +1230,6 @@ pub fn ExecutorType(
             );
         }
 
-        /// Execute one system call and expose its checkpoint-resolved pending
-        /// state before the transition is retained.
-        pub fn executeSystemCallObserved(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            input: []const u8,
-            gas: execution_values.ExecutionGas,
-            observer: anytype,
-        ) !execution_values.ExecutionResult {
-            return self.executeSystemCallMode(
-                context,
-                sender,
-                recipient,
-                input,
-                gas,
-                .observed,
-                observer,
-            );
-        }
-
-        pub fn executeSystemCallCaptured(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            input: []const u8,
-            gas: execution_values.ExecutionGas,
-            capture: *CaptureContext,
-            observer: anytype,
-        ) !execution_values.ExecutionResult {
-            return self.executeSystemCallMode(
-                context,
-                sender,
-                recipient,
-                input,
-                gas,
-                .{ .captured = capture },
-                observer,
-            );
-        }
-
         fn executeSystemCallMode(
             self: *Self,
             context: execution_values.ExecutionContext,
@@ -1274,7 +1237,7 @@ pub fn ExecutorType(
             recipient: Address,
             input: []const u8,
             gas: execution_values.ExecutionGas,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             observer: anytype,
         ) !execution_values.ExecutionResult {
             self.beginPreparedCodeExecution();
@@ -1284,11 +1247,8 @@ pub fn ExecutorType(
             errdefer self.discardStateTransition();
 
             self.clearLastOutput();
-            const checkpoint_state = self.state.checkpoint();
-            var checkpoint_open = true;
-            errdefer {
-                if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state);
-            }
+            var execution_checkpoint = try self.checkpoint();
+            defer execution_checkpoint.deinit();
 
             const resolved = try runtime.resolveCode(self, recipient);
             const resolved_view = try runtime.resolvedCodeView(self, resolved);
@@ -1306,41 +1266,21 @@ pub fn ExecutorType(
                 .code_address = recipient,
             };
 
-            const call_result = (try switch (mode) {
+            const host_result = try switch (mode) {
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
-            }).expectCall();
-            const result = execution_values.ExecutionResult{
-                .outcome = call_result.outcome,
-                .frame_halt = call_result.frame_halt,
-                .gas_left = call_result.gas_left,
-                .gas_refund = call_result.gas_refund,
-                .gas_reservoir = call_result.gas_reservoir,
-                .state_gas_spent = call_result.state_gas_spent,
-                .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
-                .output_data = self.lastOutputData(),
             };
+            _ = host_result.expectCall();
 
-            if (executionRolledBack(result.outcome.status)) {
-                self.state.revertToCheckpoint(checkpoint_state);
-                checkpoint_open = false;
-                try self.retainStateTransitionObserved(observer);
+            if (executionRolledBack(host_result.status())) {
+                try execution_checkpoint.restore();
+                try self.retainStateTransitionWithObserver(observer);
             } else {
-                self.state.commitCheckpoint(checkpoint_state);
-                checkpoint_open = false;
-                try self.commitTransactionObserved(observer);
+                try execution_checkpoint.commit();
+                try self.commitTransactionWithObserver(observer);
             }
 
-            return .{
-                .outcome = result.outcome,
-                .frame_halt = result.frame_halt,
-                .gas_left = result.gas_left,
-                .gas_refund = result.gas_refund,
-                .gas_reservoir = result.gas_reservoir,
-                .state_gas_spent = result.state_gas_spent,
-                .state_gas_from_gas_left = result.state_gas_from_gas_left,
-                .output_data = self.lastOutputData(),
-            };
+            return host_result.executionResult(self.lastOutputData());
         }
 
         /// Transfer value between accounts, returning false on insufficient balance.

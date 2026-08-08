@@ -331,11 +331,11 @@ test "Sequential empty before-transaction prelude stays in one observed transiti
 
     var block = try beginBlock(EmptyBeforeTransactionVm, &executor, .{ .gas_limit = 1_000_000 });
     defer block.discardIfUnfinished();
-    _ = switch (try block.transactObserved(.{
+    _ = switch (try block.observe(&observations).transact(.{
         .sender = sender,
         .to = evmz.addr(0xbbbb),
         .gas_limit = 300_000,
-    }, &observations)) {
+    })) {
         .included => |included| included,
         .rejected => return error.UnexpectedRejection,
     };
@@ -386,11 +386,11 @@ test "Sequential before-transaction prelude shares one journal lifetime with pay
         .gas_limit = 1_000_000,
     });
     defer block.discardIfUnfinished();
-    _ = switch (try block.transactObserved(.{
+    _ = switch (try block.observe(&observations).transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
-    }, &observations)) {
+    })) {
         .included => |included| included,
         .rejected => return error.UnexpectedRejection,
     };
@@ -505,12 +505,12 @@ test "Sequential restores a system call when outer commit observation fails" {
     input[31] = 5;
     try std.testing.expectError(
         error.TestObservationFailure,
-        block.systemCallObserved(.{
+        block.observe(&failing).systemCall(.{
             .sender = evmz.eth.system_address,
             .recipient = recipient,
             .input = &input,
             .gas = 100_000,
-        }, &failing),
+        }),
     );
     try std.testing.expectEqual(@as(usize, 1), failing.calls);
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(recipient, 0));
@@ -541,11 +541,11 @@ test "Sequential restores included transaction progress when outer observation f
         .gas_limit = 1_000_000,
     });
     defer block.discardIfUnfinished();
-    try std.testing.expectError(error.TestObservationFailure, block.transactObserved(.{
+    try std.testing.expectError(error.TestObservationFailure, block.observe(&failing).transact(.{
         .sender = sender,
         .to = recipient,
         .gas_limit = 300_000,
-    }, &failing));
+    }));
     try std.testing.expectEqual(@as(usize, 1), failing.calls);
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(LifecycleBlock.before_transaction_address, 0));
     try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);

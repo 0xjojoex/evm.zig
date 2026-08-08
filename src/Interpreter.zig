@@ -98,8 +98,6 @@ pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
     bytecode: Bytecode.View,
-    memory_allocator: ?std.mem.Allocator = null,
-    memory_retain_capacity: bool = false,
     io: ?*frame_io.Slot = null,
 };
 
@@ -267,11 +265,7 @@ pub const CallFrame = struct {
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
         self.stack = stack;
-        const memory_allocator = options.memory_allocator orelse allocator;
-        self.memory = if (options.memory_retain_capacity)
-            Memory.initRetainingCapacity(memory_storage, memory_allocator)
-        else
-            Memory.init(memory_storage, memory_allocator);
+        self.memory = Memory.init(memory_storage, allocator);
         self.pc = 0;
         self.code = code;
         self.gas_left = options.msg.gas;
@@ -289,12 +283,6 @@ pub const CallFrame = struct {
 
     pub fn deinit(self: *CallFrame) void {
         self.memory.deinit();
-        self.deinitOwnedFields();
-        self.* = undefined;
-    }
-
-    pub fn deinitRetainingMemoryCapacity(self: *CallFrame) void {
-        self.memory.deinitRetainingCapacity();
         self.deinitOwnedFields();
         self.* = undefined;
     }
@@ -855,20 +843,16 @@ test "captured tail memory exhaustion remains a resource error" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    try Memory.reserveCapacity(&memory_storage, std.testing.allocator, 32);
-    defer memory_storage.deinit(std.testing.allocator);
     var io_storage = frame_io.Slot.init(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
-    try frame.init(std.testing.allocator, .{
+    try frame.init(no_growth_allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = bytecode.view(),
         .io = &io_storage,
-        .memory_allocator = no_growth_allocator,
-        .memory_retain_capacity = true,
     }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
-    defer frame.deinitRetainingMemoryCapacity();
+    defer frame.deinit();
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
@@ -1220,8 +1204,6 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             host: *Host,
             msg: *const Host.Message,
             source: Source = .{ .code = &.{} },
-            memory_allocator: ?std.mem.Allocator = null,
-            memory_retain_capacity: bool = false,
         };
 
         allocator: std.mem.Allocator,
@@ -1248,8 +1230,6 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
                 .host = options.host,
                 .msg = options.msg,
                 .bytecode = bytecode,
-                .memory_allocator = options.memory_allocator,
-                .memory_retain_capacity = options.memory_retain_capacity,
             });
             return .{
                 .allocator = allocator,

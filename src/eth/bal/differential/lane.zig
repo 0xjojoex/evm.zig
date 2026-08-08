@@ -215,7 +215,7 @@ pub fn Lane(comptime Engine: type) type {
             defer execution.deinit();
 
             var runtime = Engine.init(&execution.executor);
-            const outcome = try runtime.transactObserved(.{
+            const outcome = try runtime.observe().transact(.{
                 .env = context.env,
                 .tx = included.transaction,
                 .progress = .{

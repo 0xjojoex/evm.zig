@@ -1619,16 +1619,13 @@ fn transactPayload(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
         ),
-        .observations => block.transactWithPreludeObserved(
+        .observations => block.observe(observer).transactWithPrelude(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
-            observer,
         ),
-        .steps => |context| block.transactWithPreludeCaptured(
+        .steps => |context| block.capture(context, observer).transactWithPrelude(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
-            context,
-            observer,
         ),
     };
 }
@@ -1867,7 +1864,8 @@ fn applyWithdrawals(
     observer: anytype,
 ) !void {
     if (withdrawals.len == 0) return;
-    try executor.beginObservedStateTransition(execution_context);
+    const observed = executor.observe();
+    try observed.beginStateTransition(execution_context);
     errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
         try executor.observeAccountAccess(withdrawal.address);
@@ -1877,7 +1875,7 @@ fn applyWithdrawals(
             else => return err,
         };
     }
-    try executor.commitTransactionObserved(observer);
+    try observed.commitTransaction(observer);
 }
 
 fn applyWithdrawalsNormal(

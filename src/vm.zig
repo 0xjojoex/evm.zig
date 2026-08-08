@@ -13,6 +13,7 @@ const ethereum_block_program = @import("./block_program/ethereum.zig");
 const ethereum_transition = @import("./transaction/transition.zig");
 const transaction_validation = @import("./transaction/validation.zig");
 const executor_module = @import("./executor.zig");
+const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter_module = @import("./Interpreter.zig");
@@ -235,6 +236,23 @@ fn VmCore(
 
         transaction_runtime: TransactionRuntime,
 
+        pub const Observed = struct {
+            vm: *Self,
+
+            pub fn transact(self: Observed, input: TransactInput) Error!Outcome {
+                return self.vm.transaction_runtime.observe().transact(input);
+            }
+        };
+
+        pub const Captured = struct {
+            vm: *Self,
+            context: *executor_module.CaptureContext,
+
+            pub fn transact(self: Captured, input: TransactInput) Error!Outcome {
+                return self.vm.transaction_runtime.capture(self.context).transact(input);
+            }
+        };
+
         /// Bind this exact VM family to one caller-owned Executor.
         ///
         /// The VM borrows the Executor and owns no independent lifecycle state.
@@ -251,23 +269,14 @@ fn VmCore(
             return self.transaction_runtime.transact(input);
         }
 
-        /// Execute while retaining transaction-scoped state observations.
-        ///
-        /// Observations remain borrowed from the unresolved `Executed` result.
-        pub fn transactObserved(self: *Self, input: TransactInput) Error!Outcome {
-            return self.transaction_runtime.transactObserved(input);
+        /// Borrow a VM facade that records state observations.
+        pub fn observe(self: *Self) Observed {
+            return .{ .vm = self };
         }
 
-        /// Execute with caller-owned passive capture storage.
-        ///
-        /// Capture does not resolve state; the returned `Executed` value remains
-        /// the exclusive retain/discard authority.
-        pub fn transactCaptured(
-            self: *Self,
-            input: TransactInput,
-            capture: *executor_module.CaptureContext,
-        ) Error!Outcome {
-            return self.transaction_runtime.transactCaptured(input, capture);
+        /// Borrow a VM facade bound to caller-owned passive capture storage.
+        pub fn capture(self: *Self, context: *executor_module.CaptureContext) Captured {
+            return .{ .vm = self, .context = context };
         }
 
         /// Define the narrow family-authoring context for a custom input type.
@@ -305,6 +314,8 @@ fn VmCore(
 
         /// One-worker Ethereum block lifecycle over the exact VM.
         pub const Sequential = struct {
+            const SequentialSelf = @This();
+
             const Phase = enum {
                 transactions,
                 post_transactions,
@@ -324,6 +335,38 @@ fn VmCore(
             block: BlockExecution,
             phase: Phase = .transactions,
             retained_for_after_hook: ?RetainedTransaction = null,
+
+            fn InstrumentedSession(comptime Observer: type) type {
+                return struct {
+                    session: *SequentialSelf,
+                    mode: InstrumentationMode,
+                    observer: Observer,
+
+                    pub fn transact(self: @This(), tx: Transaction) !BlockExecution.Outcome {
+                        return self.session.transactMode(tx, self.mode, self.observer);
+                    }
+
+                    pub fn systemCall(self: @This(), call: SystemCall) !EvmResult {
+                        return self.session.systemCallMode(call, self.mode, self.observer);
+                    }
+                };
+            }
+
+            pub fn observe(self: *SequentialSelf, observer: anytype) InstrumentedSession(@TypeOf(observer)) {
+                return .{ .session = self, .mode = .observed, .observer = observer };
+            }
+
+            pub fn capture(
+                self: *SequentialSelf,
+                context: *executor_module.CaptureContext,
+                observer: anytype,
+            ) InstrumentedSession(@TypeOf(observer)) {
+                return .{
+                    .session = self,
+                    .mode = .{ .captured = context },
+                    .observer = observer,
+                };
+            }
 
             pub fn init(executor: *Executor, options: InitOptions) !@This() {
                 return .{ .block = try BlockExecution.init(executor, options.env) };
@@ -355,33 +398,10 @@ fn VmCore(
                 return self.transactMode(tx, .normal, IgnorePending{});
             }
 
-            pub fn transactObserved(
-                self: *@This(),
-                tx: Transaction,
-                observer: anytype,
-            ) !BlockExecution.Outcome {
-                return self.transactMode(tx, .observed, observer);
-            }
-
-            pub fn transactCaptured(
-                self: *@This(),
-                tx: Transaction,
-                capture: *executor_module.CaptureContext,
-                observer: anytype,
-            ) !BlockExecution.Outcome {
-                return self.transactMode(tx, .{ .captured = capture }, observer);
-            }
-
-            const TransactionMode = union(enum) {
-                normal,
-                observed,
-                captured: *executor_module.CaptureContext,
-            };
-
             fn transactMode(
                 self: *@This(),
                 tx: Transaction,
-                mode: TransactionMode,
+                mode: InstrumentationMode,
                 observer: anytype,
             ) !BlockExecution.Outcome {
                 self.requireActive();
@@ -397,16 +417,13 @@ fn VmCore(
                         tx,
                         TransactionRuntime.Prelude.init(&prelude),
                     ),
-                    .observed => try self.block.transactWithPreludeObserved(
+                    .observed => try self.block.observe(observer).transactWithPrelude(
                         tx,
                         TransactionRuntime.Prelude.init(&prelude),
-                        observer,
                     ),
-                    .captured => |capture| try self.block.transactWithPreludeCaptured(
+                    .captured => |context| try self.block.capture(context, observer).transactWithPrelude(
                         tx,
                         TransactionRuntime.Prelude.init(&prelude),
-                        capture,
-                        observer,
                     ),
                 };
                 switch (outcome) {
@@ -478,12 +495,13 @@ fn VmCore(
 
             /// Execute non-transaction block work and account its regular gas.
             pub fn systemCall(self: *@This(), call: SystemCall) !EvmResult {
-                return self.systemCallObserved(call, IgnorePending{});
+                return self.systemCallMode(call, .normal, IgnorePending{});
             }
 
-            pub fn systemCallObserved(
+            fn systemCallMode(
                 self: *@This(),
                 call: SystemCall,
+                mode: InstrumentationMode,
                 observer: anytype,
             ) !EvmResult {
                 self.requireActive();
@@ -494,10 +512,11 @@ fn VmCore(
                 var pre_call = try executor.branchCheckpoint();
                 defer pre_call.deinit();
 
-                const result = executeSystemCallWithExecutorObserved(
+                const result = executeSystemCallWithExecutor(
                     executor,
                     self.block.environment,
                     call,
+                    mode,
                     observer,
                 ) catch |err| {
                     executor.restoreBranch(&pre_call);
@@ -542,21 +561,39 @@ fn VmCore(
             }
         };
 
-        fn executeSystemCallWithExecutorObserved(
+        fn executeSystemCallWithExecutor(
             executor: *Executor,
             env: Env,
             call: SystemCall,
+            mode: InstrumentationMode,
             observer: anytype,
         ) !EvmResult {
             if (env.gas_limit != 0 and call.gas > env.gas_limit) return error.GasAllowanceExceeded;
-            const result = try executor.executeSystemCallObserved(
-                env.executionContext(.{ .origin = call.sender }),
-                call.sender,
-                call.recipient,
-                call.input,
-                .legacy(call.gas),
-                observer,
-            );
+            const result = switch (mode) {
+                .normal => try executor.executeSystemCall(
+                    env.executionContext(.{ .origin = call.sender }),
+                    call.sender,
+                    call.recipient,
+                    call.input,
+                    .legacy(call.gas),
+                ),
+                .observed => try executor.observe().executeSystemCall(
+                    env.executionContext(.{ .origin = call.sender }),
+                    call.sender,
+                    call.recipient,
+                    call.input,
+                    .legacy(call.gas),
+                    observer,
+                ),
+                .captured => |context| try executor.capture(context).executeSystemCall(
+                    env.executionContext(.{ .origin = call.sender }),
+                    call.sender,
+                    call.recipient,
+                    call.input,
+                    .legacy(call.gas),
+                    observer,
+                ),
+            };
             return Host.Result.fromCall(.{
                 .outcome = result.outcome,
                 .frame_halt = result.frame_halt,
