@@ -344,7 +344,7 @@ pub fn bind(comptime Executor: type) type {
             pub fn resumeSuspended(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
                 const frame = self.frames.frame(frame_index);
                 const action = frame.suspendedAction() orelse return error.FrameNotSuspended;
-                const call_continuation: ?Interpreter.CallResume = switch (action.*) {
+                const call_continuation: ?Interpreter.Action.CallResume = switch (action.*) {
                     .call => |call_action| call_action.continuation,
                     .create => null,
                 };
@@ -370,7 +370,7 @@ pub fn bind(comptime Executor: type) type {
             fn captureCallOutput(
                 self: *CallRuntime,
                 frame_index: usize,
-                continuation: Interpreter.CallResume,
+                continuation: Interpreter.Action.CallResume,
                 output_len: usize,
             ) void {
                 const context = self.stepCaptureContext() orelse return;
