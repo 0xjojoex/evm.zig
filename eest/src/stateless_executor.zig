@@ -124,7 +124,7 @@ pub const Executor = struct {
 
 fn executeNative(io: std.Io, allocator: std.mem.Allocator, input: []const u8) !Outcome {
     const start = monotonicNanos(io);
-    const output = try evmz.stateless.wire.validateStatelessBytes(allocator, input);
+    const output = try evmz.stateless.wire.validateStatelessBytesReusable(allocator, input);
     return .{ .completed = .{
         .output = output,
         .cycles = 0,
@@ -373,7 +373,7 @@ test "a guest public region shorter than the expected result is a crash" {
 test "native execution returns the validator's own result bytes" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
-    const expected = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
+    const expected = try evmz.stateless.wire.validateStatelessBytesReusable(std.testing.allocator, input);
     defer std.testing.allocator.free(expected);
 
     var executor = try Executor.init(std.testing.io, .{ .target = .native });

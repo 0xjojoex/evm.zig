@@ -15,7 +15,7 @@ test "stateless wire v1 smoke validates and returns SSZ output" {
     const native_result = try wire.validateStatelessResultBytes(std.testing.allocator, input_bytes);
     try std.testing.expectEqual(block_stf.Status.valid, native_result.status);
 
-    const output_bytes = try wire.validateStatelessBytes(std.testing.allocator, input_bytes);
+    const output_bytes = try wire.validateStatelessBytesReusable(std.testing.allocator, input_bytes);
     defer std.testing.allocator.free(output_bytes);
 
     const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
@@ -129,7 +129,7 @@ test "stateless wire v1 validates chain configuration after decoding" {
         wire.normalize(std.testing.allocator, decoded),
     );
 
-    const output = try wire.validateStatelessBytes(std.testing.allocator, encoded);
+    const output = try wire.validateStatelessBytesReusable(std.testing.allocator, encoded);
     defer std.testing.allocator.free(output);
     const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output);
     const request_root = try input.new_payload_request.hashTreeRoot(std.testing.allocator);
@@ -322,7 +322,7 @@ test "stateless wire v1 returns failure result for malformed guest input" {
     };
 
     for (malformed_inputs) |input_bytes| {
-        const output_bytes = try wire.validateStatelessBytes(std.testing.allocator, input_bytes);
+        const output_bytes = try wire.validateStatelessBytesReusable(std.testing.allocator, input_bytes);
         defer std.testing.allocator.free(output_bytes);
 
         const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);

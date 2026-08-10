@@ -537,7 +537,7 @@ fn reportOutputMismatch(
 test "stateless zkevm runner compares canonical SSZ bytes" {
     const input = try evmz.stateless.wire.smokeInputBytes(std.testing.allocator);
     defer std.testing.allocator.free(input);
-    const output = try evmz.stateless.wire.validateStatelessBytes(std.testing.allocator, input);
+    const output = try evmz.stateless.wire.validateStatelessBytesReusable(std.testing.allocator, input);
     defer std.testing.allocator.free(output);
 
     const input_hex = try hexAlloc(std.testing.allocator, input);

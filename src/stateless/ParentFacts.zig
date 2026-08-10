@@ -13,6 +13,7 @@ const mpt = @import("mpt");
 
 const Allocator = std.mem.Allocator;
 const ParentFacts = @This();
+const TrieKey = [mpt.fixed_key.key_bytes]u8;
 
 pub const AccountParent = union(enum) {
     absent: mpt.fixed_key.Absence,
@@ -58,11 +59,15 @@ pub fn authenticate(
     const storage = try allocator.alloc(StorageFact, plan.storage.len);
     errdefer allocator.free(storage);
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    const account_keys = try scratch.alloc([mpt.fixed_key.key_bytes]u8, plan.accounts.len);
-    const account_results = try scratch.alloc(mpt.fixed_key.Lookup, plan.accounts.len);
+    // Account and storage lookups are serial, so they reuse the same typed
+    // scratch slices and capacity is their maximum.
+    const scratch_capacity = @max(plan.accounts.len, plan.storage.len);
+    const keys = try allocator.alloc(TrieKey, scratch_capacity);
+    defer allocator.free(keys);
+    const results = try allocator.alloc(mpt.fixed_key.Lookup, scratch_capacity);
+    defer allocator.free(results);
+    const account_keys = keys[0..plan.accounts.len];
+    const account_results = results[0..plan.accounts.len];
     for (plan.account_trie_order, 0..) |id, index| {
         account_keys[index] = plan.accounts[@intFromEnum(id)].trie_key;
     }
@@ -90,8 +95,8 @@ pub fn authenticate(
     }
 
     @memset(storage, .{ .value = 0 });
-    const storage_keys = try scratch.alloc([mpt.fixed_key.key_bytes]u8, plan.storage.len);
-    const storage_results = try scratch.alloc(mpt.fixed_key.Lookup, plan.storage.len);
+    const storage_keys = keys[0..plan.storage.len];
+    const storage_results = results[0..plan.storage.len];
     for (accounts, 0..) |account, account_index| {
         const id: claim_plan.AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
         const order = plan.storageTrieOrder(id);
@@ -131,8 +136,8 @@ pub fn authenticate(
 }
 
 pub fn deinit(self: *ParentFacts, allocator: Allocator) void {
-    allocator.free(self.accounts);
     allocator.free(self.storage);
+    allocator.free(self.accounts);
     self.* = undefined;
 }
 
@@ -195,6 +200,25 @@ test "catalog records inherit absence without resolving storage" {
 
     try std.testing.expect(records.accounts[0].parent == .absent);
     try std.testing.expectEqual(@as(u256, 0), records.storage[0].value);
+}
+
+test "authentication workspace is transient and facts reclaim in LIFO order" {
+    const address = @import("../address.zig");
+    const bal = @import("../eth/bal/model.zig");
+    const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
+    var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    defer plan.deinit(std.testing.allocator);
+    var indexed = try trie.indexNodes(std.testing.allocator, &.{});
+    defer indexed.deinit();
+    var catalog = try trie.buildWitnessCatalog(std.testing.allocator, trie.empty_root_hash, indexed);
+    defer catalog.deinit();
+    var backing: [1024]u8 align(16) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+
+    var records = try authenticate(fixed.allocator(), plan, &catalog);
+    try std.testing.expectEqual(records.allocationBytes(), fixed.end_index);
+    records.deinit(fixed.allocator());
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "catalog records clean every allocation failure position" {

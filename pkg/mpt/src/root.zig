@@ -94,6 +94,26 @@ pub fn workspaceSize(entries: []const Entry, include_sort: bool) Error!usize {
     return workspaceSizeFor(entries.len, try requirements(entries), include_sort);
 }
 
+/// Derive workspace bytes without first materializing `Entry` descriptors.
+/// The caller supplies exact maxima from its own typed input representation.
+pub fn workspaceSizeForLimits(
+    entry_count: usize,
+    max_key_bytes: usize,
+    max_value_bytes: usize,
+    include_sort: bool,
+) Error!usize {
+    if (entry_count == 0) return 0;
+    const node_capacity = std.math.mul(usize, entry_count, 3) catch
+        return error.ResourceLimitExceeded;
+    return workspaceSizeFor(entry_count, .{
+        .key_bytes = max_key_bytes,
+        .node_capacity = node_capacity,
+        .node_rlp_bytes = try nodeRlpUpperBound(max_key_bytes, max_value_bytes),
+        .step_capacity = std.math.mul(usize, node_capacity, 2) catch
+            return error.ResourceLimitExceeded,
+    }, include_sort);
+}
+
 pub fn workspaceSizeFor(entry_count: usize, needed: Requirements, include_sort: bool) Error!usize {
     if (entry_count == 0) return 0;
     const possible_nodes = std.math.mul(usize, entry_count, 3) catch

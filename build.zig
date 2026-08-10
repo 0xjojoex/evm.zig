@@ -10,6 +10,7 @@ const PackageModules = struct {
     ssz: *std.Build.Module,
     rlp: *std.Build.Module,
     mpt: *std.Build.Module,
+    rewindable_region: *std.Build.Module,
 };
 
 const EvmzModuleConfig = struct {
@@ -433,7 +434,7 @@ pub fn build(b: *std.Build) void {
         "ZisK guest RAM envelope in bytes",
     ) orelse 536674304;
 
-    const guest_payload_steps = addGuestPayloadTests(b, target, optimize, native_evmz_mod, guest_heap_bytes);
+    const guest_payload_steps = addGuestPayloadTests(b, target, optimize, evmz_mod, guest_heap_bytes);
     ci_step.dependOn(guest_payload_steps.tests);
     ci_step.dependOn(guest_payload_steps.abi);
     const ziskos_staticlib_path = b.option(
@@ -588,11 +589,24 @@ fn createPackageModules(
         .optimize = optimize,
         .omit_frame_pointer = omit_frame_pointer,
     };
+    const region_options = std.Build.Module.CreateOptions{
+        .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
+        .target = target,
+        .optimize = optimize,
+        .omit_frame_pointer = omit_frame_pointer,
+    };
     const ssz = if (exported) b.addModule("ssz", ssz_options) else b.createModule(ssz_options);
     const rlp = if (exported) b.addModule("rlp", rlp_options) else b.createModule(rlp_options);
     const mpt = if (exported) b.addModule("mpt", mpt_options) else b.createModule(mpt_options);
+    const rewindable_region = b.createModule(region_options);
     mpt.addImport("rlp", rlp);
-    return .{ .ssz = ssz, .rlp = rlp, .mpt = mpt };
+    mpt.addImport("rewindable_region", rewindable_region);
+    return .{
+        .ssz = ssz,
+        .rlp = rlp,
+        .mpt = mpt,
+        .rewindable_region = rewindable_region,
+    };
 }
 
 fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
@@ -617,6 +631,7 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
     module.addImport("ssz", config.packages.ssz);
     module.addImport("rlp", config.packages.rlp);
     module.addImport("mpt", config.packages.mpt);
+    module.addImport("rewindable_region", config.packages.rewindable_region);
     module.addIncludePath(b.path("include"));
     if (config.native_precompiles) |deps| addPrecompileNative(b, module, deps);
     addNativeKeccak(module, config.xkcp);
@@ -780,10 +795,20 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .filters = test_filters,
         .test_runner = test_runner,
     });
-    const packages_step = b.step("test-packages", "Run SSZ, RLP, and MPT tests");
+    const region_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
+            .target = config.target,
+            .optimize = config.optimize,
+        }),
+        .filters = test_filters,
+        .test_runner = test_runner,
+    });
+    const packages_step = b.step("test-packages", "Run SSZ, RLP, MPT, and region tests");
     packages_step.dependOn(runTests(b, ssz_tests));
     packages_step.dependOn(runTests(b, rlp_tests));
     packages_step.dependOn(runTests(b, mpt_tests));
+    packages_step.dependOn(runTests(b, region_tests));
 
     const selected_step = b.step("test", "Run unit tests for the selected profile");
     selected_step.dependOn(if (config.selected_profile == .native) native_step else zkvm_step);
@@ -821,8 +846,7 @@ const GuestBackend = enum {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
-                // TODO: remove `+a` once std.heap.ArenaAllocator is fixed
-                .target_features = "generic_rv64+m+a+zicclsm+relax",
+                .target_features = "generic_rv64+m+zicclsm+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",
@@ -911,7 +935,8 @@ fn addGuestPayloadTests(
     evmz_mod: *std.Build.Module,
     heap_bytes: u64,
 ) GuestPayloadSteps {
-    const guest_options = guestOptions(b, .native, false, heap_bytes);
+    const abi_backend: GuestBackend = if (target.result.os.tag == .freestanding) .zisk else .native;
+    const guest_options = guestOptions(b, abi_backend, false, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -1111,13 +1136,6 @@ fn addGuest(
     );
     root_mod.addAssemblyFile(memory_symbols);
     root_mod.addObjectFile(.{ .cwd_relative = provider_path });
-    if (backend == .sp1) {
-        const atomics_mod = policy.module(b, "guest/runtime/sp1/atomics.zig", &.{});
-        root_mod.addObject(b.addObject(.{
-            .name = "evmz-sp1-atomics",
-            .root_module = atomics_mod,
-        }));
-    }
 
     const guest = b.addExecutable(.{
         .name = config.artifact_name,

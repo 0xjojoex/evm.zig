@@ -43,7 +43,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const input = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, .limited(512 * 1024 * 1024));
     defer allocator.free(input);
 
-    const public = try evmz.stateless.wire.validateStatelessBytes(allocator, input);
+    const public = try evmz.stateless.wire.validateStatelessBytesReusable(allocator, input);
     defer allocator.free(public);
     const output = try ere_io.outputBytes(allocator, public, options.public_format);
     defer allocator.free(output);

@@ -53,15 +53,15 @@ fn storageTrie(allocator: Allocator) StorageTrie {
 /// Internal hashed-key seam for the dense commit module. Keeping the
 /// structural trie context here avoids instantiating a second Keccak-backed
 /// MPT implementation merely because commit lives in its own source file.
-pub inline fn updateStatelessCatalogHashed(
-    workspace: *mpt.StatelessWorkspace,
+pub inline fn updateCatalogHashed(
+    workspace: *mpt.CatalogWorkspace,
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
     root_ref: mpt.catalog.RootRef,
-    updates: []const mpt.StatelessUpdate,
+    updates: []const mpt.CatalogUpdate,
 ) UpdateError![32]u8 {
-    return structuralTrie(allocator).updateStatelessCatalog(
+    return structuralTrie(allocator).updateCatalog(
         workspace,
         root_hash,
         &catalog.topology,
@@ -79,6 +79,129 @@ pub const UpdateError = Allocator.Error || ProofLookupError || Error;
 pub const empty_root_hash = mpt.empty_root;
 
 pub const Pair = mpt.Entry;
+
+const IndexKey = [1 + @sizeOf(usize)]u8;
+
+/// One parent allocation carved into typed regions. Callers sum every region
+/// with `reserve`, allocate once, then `take` them back in the same order.
+const ExactSlab = struct {
+    backing: []u8,
+    fixed: std.heap.FixedBufferAllocator,
+
+    /// Bytes needed for `count` values of `T` placed after `offset`, including
+    /// worst-case alignment padding. `take` performs the real alignment.
+    fn reserve(comptime T: type, offset: usize, count: usize) Error!usize {
+        if (count == 0) return offset;
+        const padded = std.math.add(usize, offset, @alignOf(T) - 1) catch
+            return error.ResourceLimitExceeded;
+        const bytes = std.math.mul(usize, @sizeOf(T), count) catch
+            return error.ResourceLimitExceeded;
+        return std.math.add(usize, padded, bytes) catch
+            error.ResourceLimitExceeded;
+    }
+
+    fn init(allocator: Allocator, len: usize) Allocator.Error!ExactSlab {
+        const backing = try allocator.alloc(u8, len);
+        return .{ .backing = backing, .fixed = .init(backing) };
+    }
+
+    /// Carve a region already accounted for by `reserve`, which is why the
+    /// backing buffer cannot run out.
+    fn take(self: *ExactSlab, comptime T: type, count: usize) []T {
+        return self.fixed.allocator().alloc(T, count) catch unreachable;
+    }
+
+    fn deinit(self: *ExactSlab, allocator: Allocator) void {
+        allocator.free(self.backing);
+        self.* = undefined;
+    }
+};
+
+/// Exact scratch for one ordered-trie root. Index keys and entry descriptors
+/// stay live while the MPT builder uses its separately sized flat workspace.
+const OrderedTrieWorkspace = struct {
+    slab: ExactSlab,
+    pairs: []Pair,
+    root_buffer: []u8,
+
+    fn init(
+        allocator: Allocator,
+        encoded_values: []const []const u8,
+    ) Error!OrderedTrieWorkspace {
+        std.debug.assert(encoded_values.len > 0);
+        var max_value_bytes: usize = 0;
+        for (encoded_values) |value| max_value_bytes = @max(max_value_bytes, value.len);
+        const max_key_bytes = fixedRlpEncodedLen(usize, encoded_values.len - 1);
+        const root_buffer_len = try mpt.rootWorkspaceSizeForLimits(
+            encoded_values.len,
+            max_key_bytes,
+            max_value_bytes,
+            true,
+        );
+        var slab_len: usize = 0;
+        slab_len = try ExactSlab.reserve(Pair, slab_len, encoded_values.len);
+        slab_len = try ExactSlab.reserve(IndexKey, slab_len, encoded_values.len);
+        slab_len = try ExactSlab.reserve(u8, slab_len, root_buffer_len);
+
+        var slab = try ExactSlab.init(allocator, slab_len);
+        const pairs = slab.take(Pair, encoded_values.len);
+        const keys = slab.take(IndexKey, encoded_values.len);
+        for (pairs, keys, encoded_values, 0..) |*pair, *key, value, index| {
+            pair.* = .{
+                .key = indexKeyInto(key, index),
+                .value = value,
+            };
+        }
+        const root_buffer = slab.take(u8, root_buffer_len);
+        return .{ .slab = slab, .pairs = pairs, .root_buffer = root_buffer };
+    }
+
+    fn deinit(self: *OrderedTrieWorkspace, allocator: Allocator) void {
+        self.slab.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// Withdrawal encodings have to coexist with ordered-root construction, so
+/// they own a distinct exact outer workspace rather than borrowing root scratch.
+const WithdrawalWorkspace = struct {
+    slab: ExactSlab,
+    values: [][]const u8,
+
+    fn init(allocator: Allocator, withdrawals: []const Withdrawal) Error!WithdrawalWorkspace {
+        var encoded_len: usize = 0;
+        for (withdrawals) |withdrawal| {
+            encoded_len = std.math.add(
+                usize,
+                encoded_len,
+                fixedRlpEncodedLen(Withdrawal, withdrawal),
+            ) catch return error.ResourceLimitExceeded;
+        }
+        var slab_len: usize = 0;
+        slab_len = try ExactSlab.reserve([]const u8, slab_len, withdrawals.len);
+        slab_len = try ExactSlab.reserve(u8, slab_len, encoded_len);
+
+        var slab = try ExactSlab.init(allocator, slab_len);
+        const values = slab.take([]const u8, withdrawals.len);
+        const encoded = slab.take(u8, encoded_len);
+        var offset: usize = 0;
+        for (values, withdrawals) |*value, withdrawal| {
+            const len = fixedRlpEncodedLen(Withdrawal, withdrawal);
+            value.* = encodeFixedRlpInto(
+                Withdrawal,
+                encoded[offset..][0..len],
+                withdrawal,
+            );
+            offset += len;
+        }
+        return .{ .slab = slab, .values = values };
+    }
+
+    fn deinit(self: *WithdrawalWorkspace, allocator: Allocator) void {
+        self.slab.deinit(allocator);
+        self.* = undefined;
+    }
+};
 
 pub const Account = struct {
     nonce: u64 = 0,
@@ -100,6 +223,16 @@ pub const Account = struct {
             std.mem.eql(u8, &self.code_hash, &crypto.keccak256_empty);
     }
 };
+
+const max_rlp_account: Account = .{
+    .nonce = std.math.maxInt(u64),
+    .balance = std.math.maxInt(u256),
+    .storage_root = [_]u8{0xff} ** 32,
+    .code_hash = [_]u8{0xff} ** 32,
+};
+
+pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
+pub const AccountValueBuffer = [fixedRlpEncodedLen(Account, max_rlp_account)]u8;
 
 pub const AccountFacts = SparseHashMap(address.Address, ?Account);
 
@@ -343,18 +476,10 @@ pub fn cachedProof(root_hash: [32]u8, indexed: *const IndexedNodes, cache: *Proo
 pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8) Error![32]u8 {
     if (encoded_values.len == 0) return empty_root_hash;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const pairs = try scratch.alloc(Pair, encoded_values.len);
-    for (pairs, encoded_values, 0..) |*pair, value, index| {
-        pair.* = .{
-            .key = try indexKey(scratch, index),
-            .value = value,
-        };
-    }
-    return try root(allocator, pairs);
+    var scratch = try OrderedTrieWorkspace.init(allocator, encoded_values);
+    defer scratch.deinit(allocator);
+    var root_workspace = mpt.Workspace.init(scratch.root_buffer);
+    return structuralTrie(allocator).rootWithWorkspace(&root_workspace, scratch.pairs);
 }
 
 pub fn transactionRoot(allocator: Allocator, encoded_transactions: []const []const u8) Error![32]u8 {
@@ -368,15 +493,9 @@ pub fn receiptRoot(allocator: Allocator, encoded_receipts: []const []const u8) E
 pub fn withdrawalsRoot(allocator: Allocator, withdrawals: []const Withdrawal) Error![32]u8 {
     if (withdrawals.len == 0) return empty_root_hash;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const values = try scratch.alloc([]const u8, withdrawals.len);
-    for (values, withdrawals) |*value, withdrawal| {
-        value.* = try withdrawalValue(scratch, withdrawal);
-    }
-    return orderedTrieRoot(allocator, values);
+    var scratch = try WithdrawalWorkspace.init(allocator, withdrawals);
+    defer scratch.deinit(allocator);
+    return orderedTrieRoot(allocator, scratch.values);
 }
 
 pub fn updateRoot(allocator: Allocator, root_hash: [32]u8, nodes: []const []const u8, updates: []const Update) UpdateError![32]u8 {
@@ -430,7 +549,7 @@ fn storageRootAfterChangesIndexed(
 }
 
 fn storageRootAfterChangesCatalog(
-    workspace: *mpt.StatelessWorkspace,
+    workspace: *mpt.CatalogWorkspace,
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
@@ -458,7 +577,7 @@ fn storageRootAfterChangesCatalog(
         .empty
     else
         try catalog.storageCatalogRoot(root_hash);
-    return storageTrie(allocator).updateStatelessCatalog(
+    return storageTrie(allocator).updateCatalog(
         workspace,
         base_root,
         &catalog.topology,
@@ -467,12 +586,40 @@ fn storageRootAfterChangesCatalog(
     );
 }
 
+/// Comptime contract for generic state-change views consumed by the
+/// `stateRootAfterChanges*` lanes. A conforming view exposes three ordered
+/// lists, each an indexed accessor pair `len() u32` + `at(u32)`:
+/// `accounts` (post-state account values or deletes), `storage_writes`
+/// (slot writes tagged by account address), and `storage_wipes` (accounts
+/// whose entire storage clears before writes apply). Canonical
+/// implementations: `ChangesView` in `stateless/views.zig` and
+/// `state/TrackedState.zig`.
+pub fn assertChangesView(comptime View: type) void {
+    for ([_][]const u8{ "accounts", "storage_writes", "storage_wipes" }) |list_name| {
+        if (!@hasField(View, list_name)) @compileError(
+            "changes view " ++ @typeName(View) ++ " is missing list '" ++ list_name ++ "'",
+        );
+    }
+    for ([_]type{
+        @FieldType(View, "accounts"),
+        @FieldType(View, "storage_writes"),
+        @FieldType(View, "storage_wipes"),
+    }) |List| {
+        for ([_][]const u8{ "len", "at" }) |method| {
+            if (!std.meta.hasMethod(List, method)) @compileError(
+                "changes list " ++ @typeName(List) ++ " is missing '" ++ method ++ "'",
+            );
+        }
+    }
+}
+
 pub fn stateRootAfterChanges(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
     changes: anytype,
 ) UpdateError![32]u8 {
+    comptime assertChangesView(@TypeOf(changes));
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -488,6 +635,7 @@ pub fn stateRootAfterChangesIndexed(
     authenticated_accounts: ?*const AccountFacts,
     changes: anytype,
 ) UpdateError![32]u8 {
+    comptime assertChangesView(@TypeOf(changes));
     const scratch = allocator;
 
     var addresses: std.ArrayList(address.Address) = .empty;
@@ -572,7 +720,8 @@ pub fn stateRootAfterChangesCatalog(
     authenticated_accounts: *const AccountFacts,
     changes: anytype,
 ) UpdateError![32]u8 {
-    var workspace = mpt.StatelessWorkspace.init(allocator);
+    comptime assertChangesView(@TypeOf(changes));
+    var workspace = mpt.CatalogWorkspace.init(allocator);
     defer workspace.deinit();
 
     var addresses: std.ArrayList(address.Address) = .empty;
@@ -638,7 +787,7 @@ pub fn stateRootAfterChangesCatalog(
         try updates.append(allocator, .{ .key = change.address, .value = null });
     }
 
-    return accountTrie(allocator).updateStatelessCatalog(
+    return accountTrie(allocator).updateCatalog(
         &workspace,
         root_hash,
         &catalog.topology,
@@ -662,6 +811,10 @@ pub fn storageValue(allocator: Allocator, value: u256) Allocator.Error![]u8 {
     return try writerOwned(&out);
 }
 
+pub fn storageValueInto(out: *StorageValueBuffer, value: u256) []const u8 {
+    return encodeFixedRlpInto(u256, out, value);
+}
+
 pub fn accountValue(
     allocator: Allocator,
     nonce: u64,
@@ -679,6 +832,10 @@ pub fn accountValue(
 
 pub fn accountValueFrom(allocator: Allocator, account: Account) Allocator.Error![]u8 {
     return encodeFixedRlp(Account, allocator, account);
+}
+
+pub fn accountValueInto(out: *AccountValueBuffer, account: Account) []const u8 {
+    return encodeFixedRlpInto(Account, out, account);
 }
 
 pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
@@ -730,11 +887,8 @@ pub fn withdrawalValue(allocator: Allocator, withdrawal: Withdrawal) Allocator.E
     return encodeFixedRlp(Withdrawal, allocator, withdrawal);
 }
 
-fn indexKey(allocator: Allocator, index: usize) Allocator.Error![]u8 {
-    var out = rlp.Writer.alloc(allocator);
-    errdefer out.deinit();
-    try writerInt(&out, usize, index);
-    return try writerOwned(&out);
+fn indexKeyInto(out: *IndexKey, index: usize) []const u8 {
+    return rlp.encode(usize, out, index) catch unreachable;
 }
 
 fn loadAccountOrEmpty(
@@ -980,6 +1134,14 @@ fn encodeFixedRlp(
     };
 }
 
+fn fixedRlpEncodedLen(comptime T: type, value: anytype) usize {
+    return rlp.encodedLen(T, value) catch unreachable;
+}
+
+fn encodeFixedRlpInto(comptime T: type, out: []u8, value: anytype) []const u8 {
+    return rlp.encode(T, out, value) catch unreachable;
+}
+
 fn writerBytes(writer: *rlp.Writer, value: []const u8) Allocator.Error!void {
     writer.bytes(value) catch |err| switch (err) {
         error.NoSpaceLeft => unreachable,
@@ -1072,6 +1234,28 @@ test "MPT account value uses typed RLP with one allocation" {
     try std.testing.expectEqualDeep(input, try decodeAccountValue(encoded));
 }
 
+test "bounded trie value buffers match allocating encoders" {
+    const storage_values = [_]u256{ 1, 0x7f, 0x80, std.math.maxInt(u256) };
+    for (storage_values) |value| {
+        const allocated = try storageValue(std.testing.allocator, value);
+        defer std.testing.allocator.free(allocated);
+        var buffer: StorageValueBuffer = undefined;
+        try std.testing.expectEqualSlices(u8, allocated, storageValueInto(&buffer, value));
+    }
+
+    const accounts = [_]Account{
+        .{},
+        .{ .nonce = 1, .balance = 0x80 },
+        max_rlp_account,
+    };
+    for (accounts) |account| {
+        const allocated = try accountValueFrom(std.testing.allocator, account);
+        defer std.testing.allocator.free(allocated);
+        var buffer: AccountValueBuffer = undefined;
+        try std.testing.expectEqualSlices(u8, allocated, accountValueInto(&buffer, account));
+    }
+}
+
 test "MPT withdrawals root encodes ordered withdrawals" {
     const withdrawals = [_]Withdrawal{
         .{
@@ -1100,6 +1284,23 @@ test "MPT withdrawals root encodes ordered withdrawals" {
     try t.expectHex(value0, "d8010294000000000000000000000000000000000000100003");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &withdrawals)), "ba94e67f1ff34df6be897a534b805005dc84403f69a89614daa2283fa8b1862f");
     try t.expectHex(&(try withdrawalsRoot(std.testing.allocator, &.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+}
+
+test "ordered trie exact workspaces reclaim fixed backing" {
+    const values = [_][]const u8{ "cat", "dog" };
+    const withdrawals = [_]Withdrawal{.{
+        .index = 1,
+        .validator_index = 2,
+        .address = address.addr(0x1000),
+        .amount = 3,
+    }};
+    var backing: [64 * 1024]u8 align(16) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+
+    _ = try orderedTrieRoot(fixed.allocator(), &values);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+    _ = try withdrawalsRoot(fixed.allocator(), &withdrawals);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "MPT root rejects duplicate keys" {

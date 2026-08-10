@@ -3,7 +3,7 @@ zig-out
 zig-pkg/
 .DS_Store
 __pycache__/
-.eest/
+.eest
 bench/revm/target/
 output/
 .kraft/

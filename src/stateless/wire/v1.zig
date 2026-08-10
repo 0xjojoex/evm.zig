@@ -26,10 +26,6 @@ pub const revision: Revision = .amsterdam;
 const specification = eth_spec.specAt(revision);
 const AmsterdamValidator = stateless_validate.Validator(specification);
 const AmsterdamCaptureValidator = stateless_validate.TrackedValidator(specification);
-const AmsterdamOneShotValidator = stateless_validate.ValidatorWithOptions(
-    specification,
-    .{ .step_capture = false },
-);
 
 pub const ProtocolFork = schema.ProtocolFork;
 
@@ -1112,33 +1108,30 @@ fn failureResult(chain_config: ChainConfig, request_root: [32]u8) StatelessValid
     };
 }
 
+/// Validates one guest invocation. Scratch and output share the caller-owned
+/// invocation lifetime and are released together after the output is consumed.
 pub fn validateStatelessBytes(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    return validateStatelessBytesUsingScratch(false, arena.allocator(), allocator, bytes);
+    const result = try validateStatelessResultUsing(allocator, bytes);
+    return result.encode(allocator);
 }
 
-/// Validates one invocation whose scratch and result allocations share a
-/// caller-owned lifetime. Reusable callers must use `validateStatelessBytes`.
-pub fn validateStatelessBytesOneShot(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
-    return validateStatelessBytesUsingScratch(true, allocator, allocator, bytes);
+/// Releases validation scratch before returning output owned by `allocator`.
+/// Invocation-scoped callers should use `validateStatelessBytes` directly.
+pub fn validateStatelessBytesReusable(allocator: std.mem.Allocator, bytes: []const u8) Error![]u8 {
+    const result = result: {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        break :result try validateStatelessResultUsing(arena.allocator(), bytes);
+    };
+    return result.encode(allocator);
 }
 
-fn validateStatelessBytesUsingScratch(
-    comptime reuse_scratch: bool,
-    scratch: std.mem.Allocator,
-    result_allocator: std.mem.Allocator,
-    bytes: []const u8,
-) Error![]u8 {
+fn validateStatelessResultUsing(scratch: std.mem.Allocator, bytes: []const u8) Error!StatelessValidationResult {
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32).encode(result_allocator),
+        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32),
     };
-    const result = if (comptime reuse_scratch)
-        try validateStatelessUsing(AmsterdamOneShotValidator, true, scratch, input)
-    else
-        try validateStatelessUsing(AmsterdamValidator, false, scratch, input);
-    return result.encode(result_allocator);
+    return validateStatelessUsing(AmsterdamValidator, scratch, input);
 }
 
 pub fn validateStatelessStatusBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!block_stf.Status {
@@ -1177,12 +1170,11 @@ pub fn validateStatelessResultBytesWithCapture(
 }
 
 pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Error!StatelessValidationResult {
-    return validateStatelessUsing(AmsterdamValidator, false, allocator, input);
+    return validateStatelessUsing(AmsterdamValidator, allocator, input);
 }
 
 fn validateStatelessUsing(
     comptime Validator: type,
-    comptime reuse_scratch: bool,
     allocator: std.mem.Allocator,
     input: StatelessInput,
 ) Error!StatelessValidationResult {
@@ -1194,10 +1186,7 @@ fn validateStatelessUsing(
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_config, request_root),
     };
-    const native_result = (if (comptime reuse_scratch)
-        Validator.validateOneShot(allocator, normalized)
-    else
-        Validator.validate(allocator, normalized)) catch |err| switch (err) {
+    const native_result = Validator.validate(allocator, normalized) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
@@ -1216,7 +1205,7 @@ fn validateStatelessUsing(
 /// Recovery also authenticates the sender used by the decoded transaction, so
 /// execution reuses that prepared value instead of recovering a second time.
 /// Returned slices borrow decoded input or storage owned by `allocator`; guest
-/// callers should use one block-lifetime arena.
+/// callers should give it their invocation-lifetime allocator.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
     try validateChainConfig(input.chain_config, input.new_payload_request);
     const payload = input.new_payload_request.payloadView();

@@ -69,6 +69,7 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
         pub const compile_options = ExactBlockStf.compile_options;
         pub const BlockStf = ExactBlockStf;
 
+        /// Uses the caller-owned invocation lifetime for all validation memory.
         pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
             return validateWithOptions(allocator, input, .{});
         }
@@ -95,36 +96,11 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
             capture: ?block_stf.ExecutionCapture,
             validation_options: Options,
         ) Error!block_stf.Result {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            return validateWithScratchExact(
-                ExactBlockStf,
-                arena.allocator(),
-                input,
-                capture,
-                validation_options,
-            );
-        }
-
-        /// Reuses a caller-owned one-shot scratch lifetime instead of nesting
-        /// another arena. The caller releases all allocations together.
-        pub fn validateOneShot(
-            allocator: std.mem.Allocator,
-            input: input_mod.Input,
-        ) Error!block_stf.Result {
-            return validateOneShotWithOptions(allocator, input, .{});
-        }
-
-        pub fn validateOneShotWithOptions(
-            allocator: std.mem.Allocator,
-            input: input_mod.Input,
-            validation_options: Options,
-        ) Error!block_stf.Result {
             return validateWithScratchExact(
                 ExactBlockStf,
                 allocator,
                 input,
-                null,
+                capture,
                 validation_options,
             );
         }

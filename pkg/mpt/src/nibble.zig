@@ -4,6 +4,8 @@
 //! `Path` views a window of a key; `CompactPath` decodes the hex-prefix form
 //! stored in leaf and extension nodes.
 
+const std = @import("std");
+
 const errors = @import("error.zig");
 
 /// A window of `len` nibbles into `key`, beginning at nibble `start`.
@@ -59,6 +61,19 @@ pub const CompactPath = struct {
         return if (absolute % 2 == 0) byte >> 4 else byte & 0x0f;
     }
 };
+
+/// Length of the shared prefix of two nibble sequences.
+pub fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {
+    const limit = @min(lhs.len, rhs.len);
+    var len: usize = 0;
+    while (len < limit and lhs[len] == rhs[len]) : (len += 1) {}
+    return len;
+}
+
+/// Whether nibble sequence `key` begins with `prefix`.
+pub fn startsWith(key: []const u8, prefix: []const u8) bool {
+    return key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix);
+}
 
 /// Number of nibbles in `key` (two per byte).
 pub fn keyNibbleLen(key: []const u8) usize {
