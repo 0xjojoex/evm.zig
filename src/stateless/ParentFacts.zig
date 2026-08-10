@@ -15,26 +15,6 @@ const Allocator = std.mem.Allocator;
 const ParentFacts = @This();
 const TrieKey = [mpt.fixed_key.key_bytes]u8;
 
-/// Exact scratch for one authentication phase. Account and storage lookups are
-/// serial, so they reuse the same typed slices and capacity is their maximum.
-const AuthenticationWorkspace = struct {
-    keys: []TrieKey,
-    results: []mpt.fixed_key.Lookup,
-
-    fn init(allocator: Allocator, capacity: usize) Allocator.Error!AuthenticationWorkspace {
-        const keys = try allocator.alloc(TrieKey, capacity);
-        errdefer allocator.free(keys);
-        const results = try allocator.alloc(mpt.fixed_key.Lookup, capacity);
-        return .{ .keys = keys, .results = results };
-    }
-
-    fn deinit(self: *AuthenticationWorkspace, allocator: Allocator) void {
-        allocator.free(self.results);
-        allocator.free(self.keys);
-        self.* = undefined;
-    }
-};
-
 pub const AccountParent = union(enum) {
     absent: mpt.fixed_key.Absence,
     present: trie.Account,
@@ -79,13 +59,15 @@ pub fn authenticate(
     const storage = try allocator.alloc(StorageFact, plan.storage.len);
     errdefer allocator.free(storage);
 
-    var authentication = try AuthenticationWorkspace.init(
-        allocator,
-        @max(plan.accounts.len, plan.storage.len),
-    );
-    defer authentication.deinit(allocator);
-    const account_keys = authentication.keys[0..plan.accounts.len];
-    const account_results = authentication.results[0..plan.accounts.len];
+    // Account and storage lookups are serial, so they reuse the same typed
+    // scratch slices and capacity is their maximum.
+    const scratch_capacity = @max(plan.accounts.len, plan.storage.len);
+    const keys = try allocator.alloc(TrieKey, scratch_capacity);
+    defer allocator.free(keys);
+    const results = try allocator.alloc(mpt.fixed_key.Lookup, scratch_capacity);
+    defer allocator.free(results);
+    const account_keys = keys[0..plan.accounts.len];
+    const account_results = results[0..plan.accounts.len];
     for (plan.account_trie_order, 0..) |id, index| {
         account_keys[index] = plan.accounts[@intFromEnum(id)].trie_key;
     }
@@ -113,8 +95,8 @@ pub fn authenticate(
     }
 
     @memset(storage, .{ .value = 0 });
-    const storage_keys = authentication.keys[0..plan.storage.len];
-    const storage_results = authentication.results[0..plan.storage.len];
+    const storage_keys = keys[0..plan.storage.len];
+    const storage_results = results[0..plan.storage.len];
     for (accounts, 0..) |account, account_index| {
         const id: claim_plan.AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
         const order = plan.storageTrieOrder(id);

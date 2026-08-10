@@ -82,18 +82,53 @@ pub const Pair = mpt.Entry;
 
 const IndexKey = [1 + @sizeOf(usize)]u8;
 
+/// One parent allocation carved into typed regions. Callers sum every region
+/// with `reserve`, allocate once, then `take` them back in the same order.
+const ExactSlab = struct {
+    backing: []u8,
+    fixed: std.heap.FixedBufferAllocator,
+
+    /// Bytes needed for `count` values of `T` placed after `offset`, including
+    /// worst-case alignment padding. `take` performs the real alignment.
+    fn reserve(comptime T: type, offset: usize, count: usize) Error!usize {
+        if (count == 0) return offset;
+        const padded = std.math.add(usize, offset, @alignOf(T) - 1) catch
+            return error.ResourceLimitExceeded;
+        const bytes = std.math.mul(usize, @sizeOf(T), count) catch
+            return error.ResourceLimitExceeded;
+        return std.math.add(usize, padded, bytes) catch
+            error.ResourceLimitExceeded;
+    }
+
+    fn init(allocator: Allocator, len: usize) Allocator.Error!ExactSlab {
+        const backing = try allocator.alloc(u8, len);
+        return .{ .backing = backing, .fixed = .init(backing) };
+    }
+
+    /// Carve a region already accounted for by `reserve`, which is why the
+    /// backing buffer cannot run out.
+    fn take(self: *ExactSlab, comptime T: type, count: usize) []T {
+        return self.fixed.allocator().alloc(T, count) catch unreachable;
+    }
+
+    fn deinit(self: *ExactSlab, allocator: Allocator) void {
+        allocator.free(self.backing);
+        self.* = undefined;
+    }
+};
+
 /// Exact scratch for one ordered-trie root. Index keys and entry descriptors
 /// stay live while the MPT builder uses its separately sized flat workspace.
 const OrderedTrieWorkspace = struct {
-    backing: []u8,
+    slab: ExactSlab,
     pairs: []Pair,
-    keys: []IndexKey,
     root_buffer: []u8,
 
     fn init(
         allocator: Allocator,
         encoded_values: []const []const u8,
     ) Error!OrderedTrieWorkspace {
+        std.debug.assert(encoded_values.len > 0);
         var max_value_bytes: usize = 0;
         for (encoded_values) |value| max_value_bytes = @max(max_value_bytes, value.len);
         const max_key_bytes = fixedRlpEncodedLen(usize, encoded_values.len - 1);
@@ -103,32 +138,26 @@ const OrderedTrieWorkspace = struct {
             max_value_bytes,
             true,
         );
-        var backing_len: usize = 0;
-        backing_len = try addWorkspaceRegion(Pair, backing_len, encoded_values.len);
-        backing_len = try addWorkspaceRegion(IndexKey, backing_len, encoded_values.len);
-        backing_len = try addWorkspaceRegion(u8, backing_len, root_buffer_len);
-        const backing = try allocator.alloc(u8, backing_len);
-        errdefer allocator.free(backing);
-        var fixed = std.heap.FixedBufferAllocator.init(backing);
-        const pairs = fixed.allocator().alloc(Pair, encoded_values.len) catch unreachable;
-        const keys = fixed.allocator().alloc(IndexKey, encoded_values.len) catch unreachable;
+        var slab_len: usize = 0;
+        slab_len = try ExactSlab.reserve(Pair, slab_len, encoded_values.len);
+        slab_len = try ExactSlab.reserve(IndexKey, slab_len, encoded_values.len);
+        slab_len = try ExactSlab.reserve(u8, slab_len, root_buffer_len);
+
+        var slab = try ExactSlab.init(allocator, slab_len);
+        const pairs = slab.take(Pair, encoded_values.len);
+        const keys = slab.take(IndexKey, encoded_values.len);
         for (pairs, keys, encoded_values, 0..) |*pair, *key, value, index| {
             pair.* = .{
                 .key = indexKeyInto(key, index),
                 .value = value,
             };
         }
-        const root_buffer = fixed.allocator().alloc(u8, root_buffer_len) catch unreachable;
-        return .{
-            .backing = backing,
-            .pairs = pairs,
-            .keys = keys,
-            .root_buffer = root_buffer,
-        };
+        const root_buffer = slab.take(u8, root_buffer_len);
+        return .{ .slab = slab, .pairs = pairs, .root_buffer = root_buffer };
     }
 
     fn deinit(self: *OrderedTrieWorkspace, allocator: Allocator) void {
-        allocator.free(self.backing);
+        self.slab.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -136,9 +165,8 @@ const OrderedTrieWorkspace = struct {
 /// Withdrawal encodings have to coexist with ordered-root construction, so
 /// they own a distinct exact outer workspace rather than borrowing root scratch.
 const WithdrawalWorkspace = struct {
-    backing: []u8,
+    slab: ExactSlab,
     values: [][]const u8,
-    encoded: []u8,
 
     fn init(allocator: Allocator, withdrawals: []const Withdrawal) Error!WithdrawalWorkspace {
         var encoded_len: usize = 0;
@@ -149,29 +177,28 @@ const WithdrawalWorkspace = struct {
                 fixedRlpEncodedLen(Withdrawal, withdrawal),
             ) catch return error.ResourceLimitExceeded;
         }
-        var backing_len: usize = 0;
-        backing_len = try addWorkspaceRegion([]const u8, backing_len, withdrawals.len);
-        backing_len = try addWorkspaceRegion(u8, backing_len, encoded_len);
-        const backing = try allocator.alloc(u8, backing_len);
-        errdefer allocator.free(backing);
-        var fixed = std.heap.FixedBufferAllocator.init(backing);
-        const values = fixed.allocator().alloc([]const u8, withdrawals.len) catch unreachable;
-        const encoded = fixed.allocator().alloc(u8, encoded_len) catch unreachable;
+        var slab_len: usize = 0;
+        slab_len = try ExactSlab.reserve([]const u8, slab_len, withdrawals.len);
+        slab_len = try ExactSlab.reserve(u8, slab_len, encoded_len);
+
+        var slab = try ExactSlab.init(allocator, slab_len);
+        const values = slab.take([]const u8, withdrawals.len);
+        const encoded = slab.take(u8, encoded_len);
         var offset: usize = 0;
         for (values, withdrawals) |*value, withdrawal| {
             const len = fixedRlpEncodedLen(Withdrawal, withdrawal);
             value.* = encodeFixedRlpInto(
                 Withdrawal,
-                encoded[offset .. offset + len],
+                encoded[offset..][0..len],
                 withdrawal,
             );
             offset += len;
         }
-        return .{ .backing = backing, .values = values, .encoded = encoded };
+        return .{ .slab = slab, .values = values };
     }
 
     fn deinit(self: *WithdrawalWorkspace, allocator: Allocator) void {
-        allocator.free(self.backing);
+        self.slab.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -197,15 +224,15 @@ pub const Account = struct {
     }
 };
 
+const max_rlp_account: Account = .{
+    .nonce = std.math.maxInt(u64),
+    .balance = std.math.maxInt(u256),
+    .storage_root = [_]u8{0xff} ** 32,
+    .code_hash = [_]u8{0xff} ** 32,
+};
+
 pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
-pub const AccountValueBuffer = [
-    fixedRlpEncodedLen(Account, Account{
-        .nonce = std.math.maxInt(u64),
-        .balance = std.math.maxInt(u256),
-        .storage_root = [_]u8{0xff} ** 32,
-        .code_hash = [_]u8{0xff} ** 32,
-    })
-]u8;
+pub const AccountValueBuffer = [fixedRlpEncodedLen(Account, max_rlp_account)]u8;
 
 pub const AccountFacts = SparseHashMap(address.Address, ?Account);
 
@@ -777,7 +804,7 @@ pub fn accountValueFrom(allocator: Allocator, account: Account) Allocator.Error!
     return encodeFixedRlp(Account, allocator, account);
 }
 
-pub fn accountValueFromInto(out: *AccountValueBuffer, account: Account) []const u8 {
+pub fn accountValueInto(out: *AccountValueBuffer, account: Account) []const u8 {
     return encodeFixedRlpInto(Account, out, account);
 }
 
@@ -1085,16 +1112,6 @@ fn encodeFixedRlpInto(comptime T: type, out: []u8, value: anytype) []const u8 {
     return rlp.encode(T, out, value) catch unreachable;
 }
 
-fn addWorkspaceRegion(comptime T: type, offset: usize, count: usize) Error!usize {
-    if (count == 0) return offset;
-    const aligned = std.math.add(usize, offset, @alignOf(T) - 1) catch
-        return error.ResourceLimitExceeded;
-    const bytes = std.math.mul(usize, @sizeOf(T), count) catch
-        return error.ResourceLimitExceeded;
-    return std.math.add(usize, aligned, bytes) catch
-        error.ResourceLimitExceeded;
-}
-
 fn writerBytes(writer: *rlp.Writer, value: []const u8) Allocator.Error!void {
     writer.bytes(value) catch |err| switch (err) {
         error.NoSpaceLeft => unreachable,
@@ -1199,18 +1216,13 @@ test "bounded trie value buffers match allocating encoders" {
     const accounts = [_]Account{
         .{},
         .{ .nonce = 1, .balance = 0x80 },
-        .{
-            .nonce = std.math.maxInt(u64),
-            .balance = std.math.maxInt(u256),
-            .storage_root = [_]u8{0xff} ** 32,
-            .code_hash = [_]u8{0xff} ** 32,
-        },
+        max_rlp_account,
     };
     for (accounts) |account| {
         const allocated = try accountValueFrom(std.testing.allocator, account);
         defer std.testing.allocator.free(allocated);
         var buffer: AccountValueBuffer = undefined;
-        try std.testing.expectEqualSlices(u8, allocated, accountValueFromInto(&buffer, account));
+        try std.testing.expectEqualSlices(u8, allocated, accountValueInto(&buffer, account));
     }
 }
 

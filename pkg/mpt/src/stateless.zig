@@ -23,32 +23,7 @@ pub const Update = struct {
     value: ?[]const u8,
 };
 
-pub const Workspace = struct {
-    region: RewindableRegion,
-
-    pub const Mark = RewindableRegion.Mark;
-
-    pub fn init(parent_allocator: Allocator) Workspace {
-        return .{ .region = RewindableRegion.init(parent_allocator) };
-    }
-
-    pub fn deinit(self: *Workspace) void {
-        self.region.deinit();
-        self.* = undefined;
-    }
-
-    pub fn allocator(self: *Workspace) Allocator {
-        return self.region.allocator();
-    }
-
-    pub fn mark(self: *Workspace) Mark {
-        return self.region.mark();
-    }
-
-    pub fn rewind(self: *Workspace, target: Mark) void {
-        self.region.rewind(target);
-    }
-};
+pub const Workspace = RewindableRegion;
 
 const OccurrenceId = enum(u32) { _ };
 

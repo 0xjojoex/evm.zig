@@ -14,9 +14,7 @@ parent: Allocator,
 first: ?*Chunk = null,
 last: ?*Chunk = null,
 current: ?*Chunk = null,
-active_mark_id: u64 = 0,
-active_mark_chunk: ?*Chunk = null,
-active_mark_end_index: usize = 0,
+active: ScopeState = .{},
 next_mark_id: u64 = 1,
 
 const Chunk = struct {
@@ -37,14 +35,18 @@ const Chunk = struct {
     }
 };
 
+/// One mark's identity and region position. Also the region's innermost
+/// active scope; `id` 0 means no mark is active.
+const ScopeState = struct {
+    id: u64 = 0,
+    chunk: ?*Chunk = null,
+    end_index: usize = 0,
+};
+
 pub const Mark = struct {
     owner: *RewindableRegion,
-    chunk: ?*anyopaque,
-    end_index: usize,
-    id: u64,
-    previous_id: u64,
-    previous_chunk: ?*anyopaque,
-    previous_end_index: usize,
+    position: ScopeState,
+    previous: ScopeState,
 };
 
 pub fn init(parent: Allocator) RewindableRegion {
@@ -52,7 +54,7 @@ pub fn init(parent: Allocator) RewindableRegion {
 }
 
 pub fn deinit(self: *RewindableRegion) void {
-    std.debug.assert(self.active_mark_id == 0);
+    std.debug.assert(self.active.id == 0);
     var current = self.last;
     while (current) |chunk| {
         const previous = chunk.previous;
@@ -66,39 +68,27 @@ pub fn mark(self: *RewindableRegion) Mark {
     const id = self.next_mark_id;
     std.debug.assert(id != 0);
     self.next_mark_id +%= 1;
-    const current = self.current;
-    const result = Mark{
-        .owner = self,
-        .chunk = if (current) |chunk| @ptrCast(chunk) else null,
-        .end_index = if (current) |chunk| chunk.end_index else 0,
+    const position = ScopeState{
         .id = id,
-        .previous_id = self.active_mark_id,
-        .previous_chunk = if (self.active_mark_chunk) |chunk| @ptrCast(chunk) else null,
-        .previous_end_index = self.active_mark_end_index,
+        .chunk = self.current,
+        .end_index = if (self.current) |chunk| chunk.end_index else 0,
     };
-    self.active_mark_id = id;
-    self.active_mark_chunk = current;
-    self.active_mark_end_index = result.end_index;
+    const result = Mark{ .owner = self, .position = position, .previous = self.active };
+    self.active = position;
     return result;
 }
 
 /// Invalidate every allocation made after `mark`, retaining chunks for reuse.
 pub fn rewind(self: *RewindableRegion, target: Mark) void {
     std.debug.assert(target.owner == self);
-    std.debug.assert(target.id == self.active_mark_id);
-    self.active_mark_id = target.previous_id;
-    self.active_mark_chunk = if (target.previous_chunk) |pointer|
-        @ptrCast(@alignCast(pointer))
-    else
-        null;
-    self.active_mark_end_index = target.previous_end_index;
-    const chunk: ?*Chunk = if (target.chunk) |pointer| @ptrCast(@alignCast(pointer)) else null;
-    self.rewindTo(chunk, target.end_index);
+    std.debug.assert(target.position.id == self.active.id);
+    self.active = target.previous;
+    self.rewindTo(target.position.chunk, target.position.end_index);
 }
 
 /// Invalidate every outstanding allocation while keeping all chunks.
 pub fn resetRetainingCapacity(self: *RewindableRegion) void {
-    std.debug.assert(self.active_mark_id == 0);
+    std.debug.assert(self.active.id == 0);
     self.rewindTo(null, 0);
 }
 
@@ -216,15 +206,15 @@ fn free(
 /// Whether an allocation belongs to the innermost active scope. Allocations
 /// below its mark floor must retain both their address and extent until rewind.
 fn allocationInsideActiveMark(self: *const RewindableRegion, memory: []u8) bool {
-    if (self.active_mark_id == 0) return true;
-    const floor = self.active_mark_chunk orelse return true;
+    if (self.active.id == 0) return true;
+    const floor = self.active.chunk orelse return true;
     const address = @intFromPtr(memory.ptr);
     var chunk: ?*Chunk = floor;
     while (chunk) |candidate| : (chunk = candidate.next) {
         const buffer = candidate.buffer();
         const start = @intFromPtr(buffer.ptr);
         if (address < start or address >= start + buffer.len) continue;
-        return candidate != floor or address >= start + self.active_mark_end_index;
+        return candidate != floor or address >= start + self.active.end_index;
     }
     return false;
 }

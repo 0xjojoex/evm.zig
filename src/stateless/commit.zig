@@ -29,18 +29,11 @@ pub fn stateRootAfterCatalog(
     for (commit.accountTrieOrder()) |account_id| {
         if (commit.accountDirty(account_id)) dirty_account_count += 1;
     }
-    var no_account_updates: [0]mpt.StatelessUpdate = .{};
-    const account_updates = if (dirty_account_count == 0)
-        no_account_updates[0..]
-    else
-        try commit_allocator.alloc(mpt.StatelessUpdate, dirty_account_count);
-    var no_account_values: [0]trie.AccountValueBuffer = .{};
-    const account_values = if (dirty_account_count == 0)
-        no_account_values[0..]
-    else
-        try commit_allocator.alloc(trie.AccountValueBuffer, dirty_account_count);
+    var account_updates: std.ArrayList(mpt.StatelessUpdate) =
+        try .initCapacity(commit_allocator, dirty_account_count);
+    var account_values: std.ArrayList(trie.AccountValueBuffer) =
+        try .initCapacity(commit_allocator, dirty_account_count);
 
-    var update_index: usize = 0;
     for (commit.accountTrieOrder()) |account_id| {
         if (!commit.accountDirty(account_id)) continue;
         const claim = commit.accountClaim(account_id);
@@ -76,25 +69,24 @@ pub fn stateRootAfterCatalog(
             break :value if (account.hasNoState())
                 null
             else
-                trie.accountValueFromInto(&account_values[update_index], account);
+                trie.accountValueInto(account_values.addOneAssumeCapacity(), account);
         };
-        account_updates[update_index] = .{
+        account_updates.appendAssumeCapacity(.{
             .key = claim.trie_key,
             .value = value,
-        };
-        update_index += 1;
+        });
     }
-    std.debug.assert(update_index == account_updates.len);
+    std.debug.assert(account_updates.items.len == dirty_account_count);
 
     var scope = workspace.beginScope();
     defer scope.deinit();
     return trie.updateStatelessCatalogHashed(
-        workspace.mptWorkspace(),
+        &workspace.mpt_workspace,
         scope.allocator(),
         root_hash,
         catalog,
         catalog.stateCatalogRoot(),
-        account_updates,
+        account_updates.items,
     );
 }
 
@@ -117,24 +109,24 @@ fn storageRootAfterCatalog(
         if (commit.storageDirty(storage_id)) dirty_storage_count += 1;
     }
     if (dirty_storage_count == 0) return base_root;
-    const updates = try allocator.alloc(mpt.StatelessUpdate, dirty_storage_count);
-    const values = try allocator.alloc(trie.StorageValueBuffer, dirty_storage_count);
+    var updates: std.ArrayList(mpt.StatelessUpdate) =
+        try .initCapacity(allocator, dirty_storage_count);
+    var values: std.ArrayList(trie.StorageValueBuffer) =
+        try .initCapacity(allocator, dirty_storage_count);
 
-    var update_index: usize = 0;
     for (commit.storageTrieOrder(account_id)) |storage_id| {
         if (!commit.storageDirty(storage_id)) continue;
         const claim = commit.storageClaim(storage_id);
         const current = commit.storageValue(storage_id);
-        updates[update_index] = .{
+        updates.appendAssumeCapacity(.{
             .key = claim.trie_key,
             .value = if (current == 0)
                 null
             else
-                trie.storageValueInto(&values[update_index], current),
-        };
-        update_index += 1;
+                trie.storageValueInto(values.addOneAssumeCapacity(), current),
+        });
     }
-    std.debug.assert(update_index == updates.len);
+    std.debug.assert(updates.items.len == dirty_storage_count);
 
     const root_ref: mpt.catalog.RootRef = if (wiped or
         std.mem.eql(u8, &parent_root, &trie.empty_root_hash))
@@ -142,12 +134,12 @@ fn storageRootAfterCatalog(
     else
         try catalog.storageCatalogRoot(parent_root);
     return trie.updateStatelessCatalogHashed(
-        workspace.mptWorkspace(),
+        &workspace.mpt_workspace,
         allocator,
         base_root,
         catalog,
         root_ref,
-        updates,
+        updates.items,
     );
 }
 
@@ -185,9 +177,5 @@ const DenseCommitWorkspace = struct {
 
     fn beginScope(self: *DenseCommitWorkspace) Scope {
         return .{ .workspace = self, .mark = self.mpt_workspace.mark() };
-    }
-
-    fn mptWorkspace(self: *DenseCommitWorkspace) *mpt.StatelessWorkspace {
-        return &self.mpt_workspace;
     }
 };
