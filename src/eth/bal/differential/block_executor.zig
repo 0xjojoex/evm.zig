@@ -247,18 +247,14 @@ pub fn Executor(comptime revision: Revision, comptime Engine: type) type {
                 self.parallelExecution(input),
             );
             defer observer.deinit();
-            var no_produced_bal: ?[]u8 = null;
-            const result = try block_stf.serialFold(
+            return block_stf.executeBlock(
                 revision,
                 Engine,
                 self.allocator,
-                input,
-                .compare,
-                &no_produced_bal,
+                block_stf.executionInput(input),
+                .{ .validate = block_stf.validationClaims(input) },
                 &observer,
             );
-            std.debug.assert(no_produced_bal == null);
-            return result;
         }
 
         fn parallelExecution(

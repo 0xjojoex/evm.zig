@@ -14,7 +14,9 @@ const uint256 = @import("../uint256.zig");
 const Backend = @import("../backend.zig").Backend;
 const Revision = @import("revision.zig").Revision;
 
-const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
+const Claims = block_stf.Claims;
+const ExecutionInput = block_stf.ExecutionInput;
+const HeaderClaims = block_stf.HeaderClaims;
 const HeaderHashClaim = block_stf.HeaderHashClaim;
 const ParentHeaderContext = block_stf.ParentHeaderContext;
 const Result = block_stf.Result;
@@ -25,39 +27,47 @@ const Status = block_stf.Status;
 pub fn blockBodyValid(
     comptime revision: Revision,
     comptime block_access_list: bool,
-    input: AssumeDecodedBlockInput,
+    input: ExecutionInput,
+    claims: ?Claims,
 ) bool {
     // TODO: spec-icfy after moving block_stf out of eth
+    const header_claims: HeaderClaims = if (claims) |claim_set| claim_set.header else .{};
     if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
-    if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
+    if (!revision.isImpl(.shanghai)) {
+        if (claims) |claim_set| {
+            if (claim_set.root_checks.reconstructed_header.withdrawals != null) return false;
+        }
+    }
     if (!revision.isImpl(.cancun)) {
         if (input.parent_blob_gas != null or
-            input.header_claims.blob_gas_used != null or
-            input.header_claims.excess_blob_gas != null)
+            header_claims.blob_gas_used != null or
+            header_claims.excess_blob_gas != null)
         {
             return false;
         }
         if (input.block_header) |header| {
             if (header.parent_beacon_block_root != null) return false;
         }
-        if (input.header_hash_claim) |claim| {
-            if (claim.parent_beacon_block_root != null) return false;
+        if (claims) |claim_set| {
+            if (claim_set.header_hash) |claim| {
+                if (claim.parent_beacon_block_root != null) return false;
+            }
         }
     }
-    if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
+    if (!revision.isImpl(.prague) and header_claims.requests_hash != null) return false;
     // Only payload and header fields decide validity. `bal_differential` is a
     // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
     // every block and reads `.not_run` back on the forks that have no list.
     if (!block_access_list and
         (input.block_access_list != null or
-            input.header_claims.block_access_list_hash != null))
+            header_claims.block_access_list_hash != null))
     {
         return false;
     }
     return true;
 }
 
-pub fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
+pub fn parentHeaderStatus(comptime revision: Revision, input: ExecutionInput) ?Status {
     if (!revision.isImpl(.merge) or input.env.number == 0) return null;
 
     const parent = input.parent_header orelse return .parent_header_mismatch;
@@ -109,7 +119,7 @@ fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
     return parent.base_fee_per_gas - base_fee_delta;
 }
 
-pub fn blockContextValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
+pub fn blockContextValid(comptime revision: Revision, input: ExecutionInput) bool {
     if (input.block_header) |header| {
         if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
     }
@@ -129,7 +139,7 @@ pub fn blockContextValid(comptime revision: Revision, input: AssumeDecodedBlockI
 pub fn reconstructHeaderHash(
     comptime revision: Revision,
     allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
+    input: ExecutionInput,
     result: Result,
     claim: HeaderHashClaim,
 ) ![32]u8 {
@@ -243,7 +253,7 @@ fn derivedRootValue(field: RootField, result: Result) [32]u8 {
 
 test "BlockSTF validates parent-derived header rules before execution" {
     const parent_hash = [_]u8{0x11} ** 32;
-    var input = AssumeDecodedBlockInput{
+    var input = ExecutionInput{
         .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
         .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
         .parent_header = .{
@@ -256,15 +266,6 @@ test "BlockSTF validates parent-derived header rules before execution" {
         },
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
-        .root_checks = .{
-            .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
-            },
-            .reconstructed_header = .{
-                .transactions = .fromHash(trie.empty_root_hash),
-            },
-        },
     };
     try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(.merge, input));
 

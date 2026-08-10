@@ -284,6 +284,81 @@ pub fn resetBalReport(input: AssumeDecodedBlockInput) void {
     if (input.bal_differential) |report| report.reset();
 }
 
+/// Claim-free execution input: everything needed to run one block, nothing
+/// needed to judge it. The encoded BAL claim stays here because it
+/// participates in state admission, not only in post-execution comparison.
+pub const ExecutionInput = struct {
+    env: Env = .{},
+    block_hash_source: ?BlockHashSource = null,
+    block_header: ?BlockHeader = null,
+    state_backend: Backend,
+    /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+    prepared_code_backend: ?prepared_code.Backend = null,
+    /// Optional caller-owned service for the validated BAL-derived resource
+    /// plan. Failure falls back to authoritative lazy reads and has no
+    /// consensus meaning.
+    execution_resource_preparer: ?execution_resources.Preparer = null,
+    transactions: []const TransactionInput,
+    withdrawals: []const Withdrawal = &.{},
+    parent_header: ?ParentHeaderContext = null,
+    parent_blob_gas: ?ParentBlobGas = null,
+    block_access_list: ?[]const u8 = null,
+    capture: ?ExecutionCapture = null,
+    /// Optional diagnostic lane. It never supplies canonical block state.
+    bal_differential: ?*BalDifferentialReport = null,
+    /// Synchronously prove every BAL-declared account/storage path is readable.
+    /// This is independent from resource preparation and never changes
+    /// transaction warm/cold gas semantics.
+    precheck_block_access_list_state: bool = false,
+};
+
+/// Everything validation judges a completed execution against. Production
+/// never constructs this type; that impossibility replaces the old fold-mode
+/// asserts.
+pub const Claims = struct {
+    root_checks: RootChecks,
+    header: HeaderClaims = .{},
+    header_hash: ?HeaderHashClaim = null,
+};
+
+/// What to do with a completed execution: judge it against claims and commit
+/// iff every comparison passes (validation), or commit and surrender the
+/// encoded BAL (production).
+pub const Disposition = union(enum) {
+    validate: Claims,
+    /// Receives the canonical encoded BAL on success; untouched on rejection.
+    produce: *?[]u8,
+};
+
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn executionInput(input: AssumeDecodedBlockInput) ExecutionInput {
+    return .{
+        .env = input.env,
+        .block_hash_source = input.block_hash_source,
+        .block_header = input.block_header,
+        .state_backend = input.state_backend,
+        .prepared_code_backend = input.prepared_code_backend,
+        .execution_resource_preparer = input.execution_resource_preparer,
+        .transactions = input.transactions,
+        .withdrawals = input.withdrawals,
+        .parent_header = input.parent_header,
+        .parent_blob_gas = input.parent_blob_gas,
+        .block_access_list = input.block_access_list,
+        .capture = input.capture,
+        .bal_differential = input.bal_differential,
+        .precheck_block_access_list_state = input.precheck_block_access_list_state,
+    };
+}
+
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn validationClaims(input: AssumeDecodedBlockInput) Claims {
+    return .{
+        .root_checks = input.root_checks,
+        .header = input.header_claims,
+        .header_hash = input.header_hash_claim,
+    };
+}
+
 fn ProduceInputType(comptime Transactions: type) type {
     return struct {
         env: Env = .{},
@@ -604,7 +679,7 @@ fn applyAssumeDecodedExact(
     input: AssumeDecodedBlockInput,
 ) !Result {
     resetBalReport(input);
-    var no_produced_bal: ?[]u8 = null;
+    const disposition: Disposition = .{ .validate = validationClaims(input) };
     const result = (if (comptime Engine.BlockState.external_observation_capture) blk: {
         if (input.bal_differential) |report| {
             var observer = differential_executor.Observer(revision, Engine).init(
@@ -617,19 +692,18 @@ fn applyAssumeDecodedExact(
                 null,
             );
             defer observer.deinit();
-            break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+            break :blk executeBlock(revision, Engine, allocator, executionInput(input), disposition, &observer);
         }
         var observer = NoBlockObserver{};
-        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        break :blk executeBlock(revision, Engine, allocator, executionInput(input), disposition, &observer);
     } else blk: {
         std.debug.assert(input.bal_differential == null);
         var observer = NoBlockObserver{};
-        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        break :blk executeBlock(revision, Engine, allocator, executionInput(input), disposition, &observer);
     }) catch |err| switch (Executor.errors.normalize(err)) {
         error.StateReaderStrategyFailure => Result{ .status = .block_access_list_mismatch },
         else => return err,
     };
-    std.debug.assert(no_produced_bal == null);
     return result;
 }
 
@@ -677,11 +751,18 @@ fn produceAssumeDecodedExact(
     allocator: std.mem.Allocator,
     input: AssumeDecodedProduceInput,
 ) !ProduceOutcome {
+    // Production without a BAL commitment has no defined artifact.
+    if (comptime !Engine.specification.block.block_access_list) {
+        var state_backend = input.state_backend;
+        state_backend.deinit();
+        return .{ .rejected = .{ .status = .invalid_block_body } };
+    }
+
     var encoded_block_access_list: ?[]u8 = null;
     errdefer if (encoded_block_access_list) |encoded| allocator.free(encoded);
 
     var observer = NoBlockObserver{};
-    const result = try serialFold(revision, Engine, allocator, .{
+    const result = try executeBlock(revision, Engine, allocator, .{
         .env = input.env,
         .block_hash_source = input.block_hash_source,
         .block_header = input.block_header,
@@ -691,16 +772,8 @@ fn produceAssumeDecodedExact(
         .withdrawals = input.withdrawals,
         .parent_header = input.parent_header,
         .parent_blob_gas = input.parent_blob_gas,
-        // `.produce` never reads comparison claims; `BlockInput` keeps them
-        // compile-time mandatory for the public validation surface.
-        .root_checks = .{
-            .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
-            },
-        },
         .capture = input.capture,
-    }, .produce, &encoded_block_access_list, &observer);
+    }, .{ .produce = &encoded_block_access_list }, &observer);
 
     if (result.status != .valid) {
         std.debug.assert(encoded_block_access_list == null);
@@ -711,8 +784,6 @@ fn produceAssumeDecodedExact(
         .encoded_block_access_list = encoded_block_access_list.?,
     } };
 }
-
-const FoldMode = enum { compare, produce };
 
 fn ObservationCollector(comptime BlockState: type) type {
     return struct {
@@ -741,13 +812,12 @@ fn ObservationCollector(comptime BlockState: type) type {
 
 /// Shared authoritative serial fold for validation and block production.
 /// Internal to `eth/`: pub only for the differential block executor.
-pub fn serialFold(
+pub fn executeBlock(
     comptime revision: Revision,
     comptime Engine: type,
     allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
-    comptime mode: FoldMode,
-    produced_bal: *?[]u8,
+    input: ExecutionInput,
+    disposition: Disposition,
     observer: anytype,
 ) !Result {
     // One spec fact gates the header field, observation recording, claim
@@ -757,16 +827,16 @@ pub fn serialFold(
     var state_backend = input.state_backend;
     defer state_backend.deinit();
 
-    std.debug.assert(produced_bal.* == null);
-    if (mode == .produce) {
-        std.debug.assert(input.block_access_list == null);
-        std.debug.assert(std.meta.eql(input.header_claims, HeaderClaims{}));
-        std.debug.assert(input.header_hash_claim == null);
-        std.debug.assert(input.bal_differential == null);
-        comptime std.debug.assert(@TypeOf(observer) == *NoBlockObserver);
-        if (!record_block_access_list) return .{ .status = .invalid_block_body };
-    }
-    if (!block_rules.blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
+    const claims: ?Claims = switch (disposition) {
+        .validate => |claims| claims,
+        .produce => |out| blk: {
+            std.debug.assert(out.* == null);
+            std.debug.assert(record_block_access_list);
+            std.debug.assert(input.bal_differential == null);
+            break :blk null;
+        },
+    };
+    if (!block_rules.blockBodyValid(revision, record_block_access_list, input, claims)) return .{ .status = .invalid_block_body };
     if (block_rules.parentHeaderStatus(revision, input)) |status| return .{ .status = status };
     if (!block_rules.blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
@@ -1224,39 +1294,38 @@ pub fn serialFold(
         .transaction_count = input.transactions.len,
     });
 
-    var block_hash_mismatch = false;
-    if (input.header_hash_claim) |claim| {
-        result.block_hash = block_rules.reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
-            error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidHeaderReconstruction => return .{ .status = .header_surface_mismatch },
-            else => return err,
-        };
-        block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
-    }
-
-    if (mode == .compare) {
-        block_rules.applyConsensusRootComparisons(&result, input.root_checks);
-        if (result.status == .valid and input.header_claims.gas_used != null and result.gas_used != input.header_claims.gas_used.?) result.status = .gas_used_mismatch;
-        if (result.status == .valid and input.header_claims.block_gas_used != null and result.block_gas_used != input.header_claims.block_gas_used.?) result.status = .block_gas_used_mismatch;
-        if (result.status == .valid and input.header_claims.block_state_gas_used != null and result.block_state_gas_used != input.header_claims.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
+    if (claims) |claim_set| {
+        var block_hash_mismatch = false;
+        if (claim_set.header_hash) |claim| {
+            result.block_hash = block_rules.reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
+                error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidHeaderReconstruction => return .{ .status = .header_surface_mismatch },
+                else => return err,
+            };
+            block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
+        }
+        block_rules.applyConsensusRootComparisons(&result, claim_set.root_checks);
+        if (result.status == .valid and claim_set.header.gas_used != null and result.gas_used != claim_set.header.gas_used.?) result.status = .gas_used_mismatch;
+        if (result.status == .valid and claim_set.header.block_gas_used != null and result.block_gas_used != claim_set.header.block_gas_used.?) result.status = .block_gas_used_mismatch;
+        if (result.status == .valid and claim_set.header.block_state_gas_used != null and result.block_state_gas_used != claim_set.header.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
         if (result.status == .valid) {
-            if (input.header_claims.logs_bloom) |expected_bloom| {
+            if (claim_set.header.logs_bloom) |expected_bloom| {
                 if (!std.mem.eql(u8, &result.logs_bloom, &expected_bloom)) result.status = .logs_bloom_mismatch;
             }
         }
-        if (result.status == .valid and input.header_claims.blob_gas_used != null and result.blob_gas_used != input.header_claims.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
+        if (result.status == .valid and claim_set.header.blob_gas_used != null and result.blob_gas_used != claim_set.header.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
         if (result.status == .valid) {
-            if (input.header_claims.excess_blob_gas) |expected_excess_blob_gas| {
+            if (claim_set.header.excess_blob_gas) |expected_excess_blob_gas| {
                 if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected_excess_blob_gas) result.status = .excess_blob_gas_mismatch;
             }
         }
         if (result.status == .valid) {
-            if (input.header_claims.requests_hash) |expected_requests_hash| {
+            if (claim_set.header.requests_hash) |expected_requests_hash| {
                 if (!std.mem.eql(u8, &result.requests_hash, &expected_requests_hash)) result.status = .requests_hash_mismatch;
             }
         }
         if (result.status == .valid and block_access_list_mismatch) result.status = .block_access_list_mismatch;
         if (result.status == .valid) {
-            if (input.header_claims.block_access_list_hash) |expected_block_access_list_hash| {
+            if (claim_set.header.block_access_list_hash) |expected_block_access_list_hash| {
                 if (!std.mem.eql(u8, &result.block_access_list_hash, &expected_block_access_list_hash)) result.status = .block_access_list_hash_mismatch;
             }
         }
@@ -1264,9 +1333,12 @@ pub fn serialFold(
     }
     if (result.status == .valid) {
         try Engine.BlockState.commit(&state_backend, accepted_state);
-        if (mode == .produce) {
-            produced_bal.* = observed_block_access_list_encoded.?;
-            observed_block_access_list_encoded = null;
+        switch (disposition) {
+            .validate => {},
+            .produce => |out| {
+                out.* = observed_block_access_list_encoded.?;
+                observed_block_access_list_encoded = null;
+            },
         }
     }
     return result;
