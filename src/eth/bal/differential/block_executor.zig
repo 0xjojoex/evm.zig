@@ -247,12 +247,12 @@ pub fn Executor(comptime revision: Revision, comptime Engine: type) type {
                 self.parallelExecution(input),
             );
             defer observer.deinit();
-            return block_stf.executeBlock(
+            return block_stf.applyExecution(
                 revision,
                 Engine,
                 self.allocator,
-                block_stf.executionInput(input),
-                .{ .validate = block_stf.validationClaims(input) },
+                input,
+                block_stf.validationClaims(input),
                 &observer,
             );
         }

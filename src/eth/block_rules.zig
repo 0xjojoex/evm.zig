@@ -15,7 +15,6 @@ const Backend = @import("../backend.zig").Backend;
 const Revision = @import("revision.zig").Revision;
 
 const Claims = block_stf.Claims;
-const ExecutionInput = block_stf.ExecutionInput;
 const HeaderClaims = block_stf.HeaderClaims;
 const HeaderHashClaim = block_stf.HeaderHashClaim;
 const ParentHeaderContext = block_stf.ParentHeaderContext;
@@ -26,11 +25,15 @@ const Status = block_stf.Status;
 pub fn blockBodyValid(
     comptime revision: Revision,
     comptime block_access_list: bool,
-    input: ExecutionInput,
+    input: anytype,
     claims: ?Claims,
 ) bool {
     // TODO: spec-icfy after moving block_stf out of eth
     const header_claims: HeaderClaims = if (claims) |claim_set| claim_set.header else .{};
+    const claimed_block_access_list = if (comptime @hasField(@TypeOf(input), "block_access_list"))
+        input.block_access_list
+    else
+        null;
     if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
     if (!revision.isImpl(.shanghai)) {
         if (claims) |claim_set| {
@@ -58,7 +61,7 @@ pub fn blockBodyValid(
     // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
     // every block and reads `.not_run` back on the forks that have no list.
     if (!block_access_list and
-        (input.block_access_list != null or
+        (claimed_block_access_list != null or
             header_claims.block_access_list_hash != null))
     {
         return false;
@@ -66,7 +69,7 @@ pub fn blockBodyValid(
     return true;
 }
 
-pub fn parentHeaderStatus(comptime revision: Revision, input: ExecutionInput) ?Status {
+pub fn parentHeaderStatus(comptime revision: Revision, input: anytype) ?Status {
     if (!revision.isImpl(.merge) or input.env.number == 0) return null;
 
     const parent = input.parent_header orelse return .parent_header_mismatch;
@@ -118,7 +121,7 @@ fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
     return parent.base_fee_per_gas - base_fee_delta;
 }
 
-pub fn blockContextValid(comptime revision: Revision, input: ExecutionInput) bool {
+pub fn blockContextValid(comptime revision: Revision, input: anytype) bool {
     if (input.block_header) |header| {
         if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
     }
@@ -138,7 +141,7 @@ pub fn blockContextValid(comptime revision: Revision, input: ExecutionInput) boo
 pub fn reconstructHeaderHash(
     comptime revision: Revision,
     allocator: std.mem.Allocator,
-    input: ExecutionInput,
+    input: anytype,
     result: Result,
     claim: HeaderHashClaim,
 ) ![32]u8 {
@@ -252,7 +255,7 @@ fn hashEqual(lhs: [32]u8, rhs: [32]u8) bool {
 
 test "BlockSTF validates parent-derived header rules before execution" {
     const parent_hash = [_]u8{0x11} ** 32;
-    var input = ExecutionInput{
+    var input = block_stf.AssumeDecodedProduceInput{
         .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
         .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
         .parent_header = .{
