@@ -1,11 +1,11 @@
 const std = @import("std");
-const ResettableRegion = @import("resettable_region");
+const RewindableRegion = @import("rewindable_region");
 
 pub const Slot = struct {
-    region: ResettableRegion,
+    region: RewindableRegion,
 
     pub fn init(parent_allocator: std.mem.Allocator) Slot {
-        return .{ .region = ResettableRegion.init(parent_allocator) };
+        return .{ .region = RewindableRegion.init(parent_allocator) };
     }
 
     pub fn deinit(self: *Slot) void {

@@ -21,12 +21,26 @@ pub fn stateRootAfterCatalog(
     catalog: *const trie.WitnessCatalog,
     commit: anytype,
 ) trie.UpdateError![32]u8 {
-    var workspace = mpt.StatelessWorkspace.init(allocator);
+    var workspace = DenseCommitWorkspace.init(allocator);
     defer workspace.deinit();
+    const commit_allocator = workspace.retainedAllocator();
 
-    var account_updates: std.ArrayList(mpt.StatelessUpdate) = .empty;
-    defer account_updates.deinit(allocator);
+    var dirty_account_count: usize = 0;
+    for (commit.accountTrieOrder()) |account_id| {
+        if (commit.accountDirty(account_id)) dirty_account_count += 1;
+    }
+    var no_account_updates: [0]mpt.StatelessUpdate = .{};
+    const account_updates = if (dirty_account_count == 0)
+        no_account_updates[0..]
+    else
+        try commit_allocator.alloc(mpt.StatelessUpdate, dirty_account_count);
+    var no_account_values: [0]trie.AccountValueBuffer = .{};
+    const account_values = if (dirty_account_count == 0)
+        no_account_values[0..]
+    else
+        try commit_allocator.alloc(trie.AccountValueBuffer, dirty_account_count);
 
+    var update_index: usize = 0;
     for (commit.accountTrieOrder()) |account_id| {
         if (!commit.accountDirty(account_id)) continue;
         const claim = commit.accountClaim(account_id);
@@ -51,7 +65,6 @@ pub fn stateRootAfterCatalog(
             };
             account.storage_root = try storageRootAfterCatalog(
                 &workspace,
-                allocator,
                 catalog,
                 commit,
                 account_id,
@@ -63,48 +76,65 @@ pub fn stateRootAfterCatalog(
             break :value if (account.hasNoState())
                 null
             else
-                try trie.accountValueFrom(allocator, account);
+                trie.accountValueFromInto(&account_values[update_index], account);
         };
-        try account_updates.append(allocator, .{
+        account_updates[update_index] = .{
             .key = claim.trie_key,
             .value = value,
-        });
+        };
+        update_index += 1;
     }
+    std.debug.assert(update_index == account_updates.len);
 
+    var scope = workspace.beginScope();
+    defer scope.deinit();
     return trie.updateStatelessCatalogHashed(
-        &workspace,
-        allocator,
+        workspace.mptWorkspace(),
+        scope.allocator(),
         root_hash,
         catalog,
         catalog.stateCatalogRoot(),
-        account_updates.items,
+        account_updates,
     );
 }
 
 fn storageRootAfterCatalog(
-    workspace: *mpt.StatelessWorkspace,
-    allocator: Allocator,
+    workspace: *DenseCommitWorkspace,
     catalog: *const trie.WitnessCatalog,
     commit: anytype,
     account_id: anytype,
     parent_root: [32]u8,
 ) trie.UpdateError![32]u8 {
     if (!commit.accountStorageDirty(account_id)) return parent_root;
+    var scope = workspace.beginScope();
+    defer scope.deinit();
+    const allocator = scope.allocator();
     const wiped = commit.storageWiped(account_id);
     const base_root = if (wiped) trie.empty_root_hash else parent_root;
-    var updates: std.ArrayList(mpt.StatelessUpdate) = .empty;
-    defer updates.deinit(allocator);
 
+    var dirty_storage_count: usize = 0;
+    for (commit.storageTrieOrder(account_id)) |storage_id| {
+        if (commit.storageDirty(storage_id)) dirty_storage_count += 1;
+    }
+    if (dirty_storage_count == 0) return base_root;
+    const updates = try allocator.alloc(mpt.StatelessUpdate, dirty_storage_count);
+    const values = try allocator.alloc(trie.StorageValueBuffer, dirty_storage_count);
+
+    var update_index: usize = 0;
     for (commit.storageTrieOrder(account_id)) |storage_id| {
         if (!commit.storageDirty(storage_id)) continue;
         const claim = commit.storageClaim(storage_id);
         const current = commit.storageValue(storage_id);
-        try updates.append(allocator, .{
+        updates[update_index] = .{
             .key = claim.trie_key,
-            .value = if (current == 0) null else try trie.storageValue(allocator, current),
-        });
+            .value = if (current == 0)
+                null
+            else
+                trie.storageValueInto(&values[update_index], current),
+        };
+        update_index += 1;
     }
-    if (updates.items.len == 0) return base_root;
+    std.debug.assert(update_index == updates.len);
 
     const root_ref: mpt.catalog.RootRef = if (wiped or
         std.mem.eql(u8, &parent_root, &trie.empty_root_hash))
@@ -112,11 +142,52 @@ fn storageRootAfterCatalog(
     else
         try catalog.storageCatalogRoot(parent_root);
     return trie.updateStatelessCatalogHashed(
-        workspace,
+        workspace.mptWorkspace(),
         allocator,
         base_root,
         catalog,
         root_ref,
-        updates.items,
+        updates,
     );
 }
+
+/// Owns the serial dense-commit lifetime tree. Retained account material lives
+/// at the root; each storage calculation and MPT update gets a nested scope.
+const DenseCommitWorkspace = struct {
+    mpt_workspace: mpt.StatelessWorkspace,
+
+    const Scope = struct {
+        workspace: *DenseCommitWorkspace,
+        mark: mpt.StatelessWorkspace.Mark,
+
+        fn allocator(self: *Scope) Allocator {
+            return self.workspace.mpt_workspace.allocator();
+        }
+
+        fn deinit(self: *Scope) void {
+            self.workspace.mpt_workspace.rewind(self.mark);
+            self.* = undefined;
+        }
+    };
+
+    fn init(parent_allocator: Allocator) DenseCommitWorkspace {
+        return .{ .mpt_workspace = mpt.StatelessWorkspace.init(parent_allocator) };
+    }
+
+    fn deinit(self: *DenseCommitWorkspace) void {
+        self.mpt_workspace.deinit();
+        self.* = undefined;
+    }
+
+    fn retainedAllocator(self: *DenseCommitWorkspace) Allocator {
+        return self.mpt_workspace.allocator();
+    }
+
+    fn beginScope(self: *DenseCommitWorkspace) Scope {
+        return .{ .workspace = self, .mark = self.mpt_workspace.mark() };
+    }
+
+    fn mptWorkspace(self: *DenseCommitWorkspace) *mpt.StatelessWorkspace {
+        return &self.mpt_workspace;
+    }
+};

@@ -1,6 +1,6 @@
 //! `StateReader` adapter over a Merkle Patricia Trie witness nodes.
 const std = @import("std");
-const ResettableRegion = @import("resettable_region");
+const RewindableRegion = @import("rewindable_region");
 
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
@@ -146,7 +146,7 @@ pub fn Reader(comptime mode: Mode) type {
             allocator: std.mem.Allocator,
             changes: anytype,
         ) RootError![32]u8 {
-            var seal_region = ResettableRegion.init(allocator);
+            var seal_region = RewindableRegion.init(allocator);
             defer seal_region.deinit();
             const scratch = seal_region.allocator();
             return narrowRoot(self.rootAfterChanges(scratch, changes));
@@ -160,10 +160,7 @@ pub fn Reader(comptime mode: Mode) type {
             commit_view: anytype,
         ) RootError![32]u8 {
             comptime std.debug.assert(mode == .catalog);
-            var seal_region = ResettableRegion.init(allocator);
-            defer seal_region.deinit();
-            const scratch = seal_region.allocator();
-            return narrowRoot(StatelessCommit.stateRootAfterCatalog(scratch, self.state_root, &self.catalog, commit_view));
+            return narrowRoot(StatelessCommit.stateRootAfterCatalog(allocator, self.state_root, &self.catalog, commit_view));
         }
 
         fn rootAfterChanges(

@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const rlp_dep = b.dependency("rlp", .{ .target = target, .optimize = optimize });
     const region_mod = b.createModule(.{
-        .root_source_file = b.path("src/ResettableRegion.zig"),
+        .root_source_file = b.path("src/RewindableRegion.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     mpt_mod.addImport("rlp", rlp_dep.module("rlp"));
-    mpt_mod.addImport("resettable_region", region_mod);
+    mpt_mod.addImport("rewindable_region", region_mod);
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("test.zig"),
@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     });
     const region_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ResettableRegion.zig"),
+            .root_source_file = b.path("src/RewindableRegion.zig"),
             .target = target,
             .optimize = optimize,
         }),

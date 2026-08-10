@@ -197,6 +197,16 @@ pub const Account = struct {
     }
 };
 
+pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
+pub const AccountValueBuffer = [
+    fixedRlpEncodedLen(Account, Account{
+        .nonce = std.math.maxInt(u64),
+        .balance = std.math.maxInt(u256),
+        .storage_root = [_]u8{0xff} ** 32,
+        .code_hash = [_]u8{0xff} ** 32,
+    })
+]u8;
+
 pub const AccountFacts = SparseHashMap(address.Address, ?Account);
 
 pub const Update = mpt.Update;
@@ -744,6 +754,10 @@ pub fn storageValue(allocator: Allocator, value: u256) Allocator.Error![]u8 {
     return try writerOwned(&out);
 }
 
+pub fn storageValueInto(out: *StorageValueBuffer, value: u256) []const u8 {
+    return encodeFixedRlpInto(u256, out, value);
+}
+
 pub fn accountValue(
     allocator: Allocator,
     nonce: u64,
@@ -761,6 +775,10 @@ pub fn accountValue(
 
 pub fn accountValueFrom(allocator: Allocator, account: Account) Allocator.Error![]u8 {
     return encodeFixedRlp(Account, allocator, account);
+}
+
+pub fn accountValueFromInto(out: *AccountValueBuffer, account: Account) []const u8 {
+    return encodeFixedRlpInto(Account, out, account);
 }
 
 pub fn decodeAccountValue(encoded: []const u8) ProofLookupError!Account {
@@ -1167,6 +1185,33 @@ test "MPT account value uses typed RLP with one allocation" {
     try std.testing.expectEqual(before + 1, counted.alloc_index);
     try std.testing.expectEqualSlices(u8, direct, encoded);
     try std.testing.expectEqualDeep(input, try decodeAccountValue(encoded));
+}
+
+test "bounded trie value buffers match allocating encoders" {
+    const storage_values = [_]u256{ 1, 0x7f, 0x80, std.math.maxInt(u256) };
+    for (storage_values) |value| {
+        const allocated = try storageValue(std.testing.allocator, value);
+        defer std.testing.allocator.free(allocated);
+        var buffer: StorageValueBuffer = undefined;
+        try std.testing.expectEqualSlices(u8, allocated, storageValueInto(&buffer, value));
+    }
+
+    const accounts = [_]Account{
+        .{},
+        .{ .nonce = 1, .balance = 0x80 },
+        .{
+            .nonce = std.math.maxInt(u64),
+            .balance = std.math.maxInt(u256),
+            .storage_root = [_]u8{0xff} ** 32,
+            .code_hash = [_]u8{0xff} ** 32,
+        },
+    };
+    for (accounts) |account| {
+        const allocated = try accountValueFrom(std.testing.allocator, account);
+        defer std.testing.allocator.free(allocated);
+        var buffer: AccountValueBuffer = undefined;
+        try std.testing.expectEqualSlices(u8, allocated, accountValueFromInto(&buffer, account));
+    }
 }
 
 test "MPT withdrawals root encodes ordered withdrawals" {

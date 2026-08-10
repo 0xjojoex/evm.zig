@@ -451,6 +451,79 @@ test "dense commit projection matches generic catalog commit across account life
     }) |case| try expectDenseCommitMatches(case);
 }
 
+test "dense commit reclaims independent storage roots and error scopes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const targets = [_]address.Address{ address.addr(1), address.addr(2) };
+    const slots = [_]u256{ 7, 11 };
+    const claims = [_]bal.AccountChanges{
+        .{ .address = targets[0], .storage_reads = &.{slots[0]} },
+        .{ .address = targets[1], .storage_reads = &.{slots[1]} },
+    };
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
+    const account_ids = [_]StatelessBlockState.AccountId{
+        plan.accountId(targets[0]).?,
+        plan.accountId(targets[1]).?,
+    };
+    const storage_ids = [_]StatelessBlockState.StorageId{
+        plan.storageId(account_ids[0], slots[0]).?,
+        plan.storageId(account_ids[1], slots[1]).?,
+    };
+
+    var indexed = try trie.indexNodes(allocator, &.{});
+    defer indexed.deinit();
+    var catalog = try trie.buildWitnessCatalog(allocator, trie.empty_root_hash, indexed);
+    defer catalog.deinit();
+    const authenticated = try records.authenticate(allocator, plan, &catalog);
+    var state = try StatelessBlockState.init(allocator, plan, authenticated);
+    defer state.deinit();
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try state.setBalance(targets[0], 10);
+    try state.writeStorage(storage_ids[0], 3);
+    try state.setBalance(targets[1], 20);
+    try state.writeStorage(storage_ids[1], 5);
+    state.closeScope();
+    state.seal(attempt);
+    state.retain(attempt);
+
+    var account_facts = trie.AccountFacts.init(allocator);
+    defer account_facts.deinit();
+    const accepted = state.acceptedView();
+    const generic = try trie.stateRootAfterChangesCatalog(
+        allocator,
+        trie.empty_root_hash,
+        &catalog,
+        &account_facts,
+        accepted.changes(),
+    );
+
+    var commit_buffer: [128 * 1024]u8 = undefined;
+    var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
+    const wrong_root = [_]u8{0x42} ** 32;
+    try std.testing.expectError(
+        error.InvalidNodeReference,
+        StatelessCommit.stateRootAfterCatalog(
+            commit_fixed.allocator(),
+            wrong_root,
+            &catalog,
+            accepted.commit(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
+
+    const dense = try StatelessCommit.stateRootAfterCatalog(
+        commit_fixed.allocator(),
+        trie.empty_root_hash,
+        &catalog,
+        accepted.commit(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
+    try std.testing.expectEqualSlices(u8, &generic, &dense);
+}
+
 const DenseCommitCase = enum {
     update,
     delete,
@@ -524,12 +597,15 @@ fn expectDenseCommitMatches(case: DenseCommitCase) !void {
         &account_facts,
         accepted.changes(),
     );
+    var commit_buffer: [64 * 1024]u8 = undefined;
+    var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
     const dense = try StatelessCommit.stateRootAfterCatalog(
-        allocator,
+        commit_fixed.allocator(),
         state_root,
         &catalog,
         accepted.commit(),
     );
+    try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
     try std.testing.expectEqualSlices(u8, &generic, &dense);
 }
 

@@ -10,7 +10,7 @@ const PackageModules = struct {
     ssz: *std.Build.Module,
     rlp: *std.Build.Module,
     mpt: *std.Build.Module,
-    resettable_region: *std.Build.Module,
+    rewindable_region: *std.Build.Module,
 };
 
 const EvmzModuleConfig = struct {
@@ -590,7 +590,7 @@ fn createPackageModules(
         .omit_frame_pointer = omit_frame_pointer,
     };
     const region_options = std.Build.Module.CreateOptions{
-        .root_source_file = b.path("pkg/mpt/src/ResettableRegion.zig"),
+        .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
         .target = target,
         .optimize = optimize,
         .omit_frame_pointer = omit_frame_pointer,
@@ -598,14 +598,14 @@ fn createPackageModules(
     const ssz = if (exported) b.addModule("ssz", ssz_options) else b.createModule(ssz_options);
     const rlp = if (exported) b.addModule("rlp", rlp_options) else b.createModule(rlp_options);
     const mpt = if (exported) b.addModule("mpt", mpt_options) else b.createModule(mpt_options);
-    const resettable_region = b.createModule(region_options);
+    const rewindable_region = b.createModule(region_options);
     mpt.addImport("rlp", rlp);
-    mpt.addImport("resettable_region", resettable_region);
+    mpt.addImport("rewindable_region", rewindable_region);
     return .{
         .ssz = ssz,
         .rlp = rlp,
         .mpt = mpt,
-        .resettable_region = resettable_region,
+        .rewindable_region = rewindable_region,
     };
 }
 
@@ -631,7 +631,7 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
     module.addImport("ssz", config.packages.ssz);
     module.addImport("rlp", config.packages.rlp);
     module.addImport("mpt", config.packages.mpt);
-    module.addImport("resettable_region", config.packages.resettable_region);
+    module.addImport("rewindable_region", config.packages.rewindable_region);
     module.addIncludePath(b.path("include"));
     if (config.native_precompiles) |deps| addPrecompileNative(b, module, deps);
     addNativeKeccak(module, config.xkcp);
@@ -797,7 +797,7 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
     });
     const region_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("pkg/mpt/src/ResettableRegion.zig"),
+            .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
             .target = config.target,
             .optimize = config.optimize,
         }),

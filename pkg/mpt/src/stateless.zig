@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const rlp = @import("rlp");
-const ResettableRegion = @import("resettable_region");
+const RewindableRegion = @import("rewindable_region");
 
 const catalog = @import("catalog.zig");
 const errors = @import("error.zig");
@@ -24,10 +24,12 @@ pub const Update = struct {
 };
 
 pub const Workspace = struct {
-    region: ResettableRegion,
+    region: RewindableRegion,
 
-    pub fn init(allocator: Allocator) Workspace {
-        return .{ .region = ResettableRegion.init(allocator) };
+    pub const Mark = RewindableRegion.Mark;
+
+    pub fn init(parent_allocator: Allocator) Workspace {
+        return .{ .region = RewindableRegion.init(parent_allocator) };
     }
 
     pub fn deinit(self: *Workspace) void {
@@ -35,9 +37,16 @@ pub const Workspace = struct {
         self.* = undefined;
     }
 
-    fn reset(self: *Workspace) Allocator {
-        self.region.resetRetainingCapacity();
+    pub fn allocator(self: *Workspace) Allocator {
         return self.region.allocator();
+    }
+
+    pub fn mark(self: *Workspace) Mark {
+        return self.region.mark();
+    }
+
+    pub fn rewind(self: *Workspace, target: Mark) void {
+        self.region.rewind(target);
     }
 };
 
@@ -214,7 +223,9 @@ pub fn updateSorted(
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const allocator = workspace.reset();
+    const mark = workspace.mark();
+    defer workspace.rewind(mark);
+    const allocator = workspace.allocator();
     var context: Context(@TypeOf(keccak_context)) = .{
         .allocator = allocator,
         .keccak_context = keccak_context,
