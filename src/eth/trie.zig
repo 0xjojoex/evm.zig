@@ -277,21 +277,18 @@ pub const WitnessCatalog = struct {
             .present => |present| present,
             .absent => return null,
         };
-        const target = @intFromEnum(bound.node);
-        var low: usize = 0;
-        var high = self.accounts.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            const current = @intFromEnum(self.accounts.items[mid].node);
-            if (current < target) {
-                low = mid + 1;
-            } else if (current > target) {
-                high = mid;
-            } else {
-                return self.accounts.items[mid].decoded;
+        const S = struct {
+            fn compareAccountNode(target: mpt.catalog.NodeId, item: CatalogAccount) std.math.Order {
+                return std.math.order(@intFromEnum(target), @intFromEnum(item.node));
             }
-        }
-        return error.InvalidNode;
+        };
+        const index = std.sort.binarySearch(
+            CatalogAccount,
+            self.accounts.items,
+            bound.node,
+            S.compareAccountNode,
+        ) orelse return error.InvalidNode;
+        return self.accounts.items[index].decoded;
     }
 
     pub fn storage(
@@ -325,17 +322,18 @@ pub const WitnessCatalog = struct {
     }
 
     fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.catalog.RootRef {
-        var low: usize = 0;
-        var high = self.storage_roots.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            switch (std.mem.order(u8, &self.storage_roots.items[mid].hash, &digest)) {
-                .lt => low = mid + 1,
-                .gt => high = mid,
-                .eq => return self.storage_roots.items[mid].root,
+        const S = struct {
+            fn compareStorageRootHash(context: [32]u8, item: StorageCatalogRoot) std.math.Order {
+                return std.mem.order(u8, &context, &item.hash);
             }
-        }
-        return null;
+        };
+        const index = std.sort.binarySearch(
+            StorageCatalogRoot,
+            self.storage_roots.items,
+            digest,
+            S.compareStorageRootHash,
+        ) orelse return null;
+        return self.storage_roots.items[index].root;
     }
 };
 

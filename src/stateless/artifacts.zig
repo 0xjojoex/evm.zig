@@ -19,6 +19,10 @@ pub const ParentCode = struct {
     fn hashLessThan(_: void, lhs: ParentCode, rhs: ParentCode) bool {
         return std.mem.lessThan(u8, &lhs.hash, &rhs.hash);
     }
+
+    fn hashOrder(target: Hash, item: ParentCode) std.math.Order {
+        return std.mem.order(u8, &target, &item.hash);
+    }
 };
 
 pub const CodeView = struct {
@@ -201,17 +205,7 @@ pub const CodeStore = struct {
     }
 
     fn parentIndex(self: *const CodeStore, hash: Hash) ?usize {
-        var low: usize = 0;
-        var high = self.parent.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            switch (std.mem.order(u8, &self.parent.items[mid].hash, &hash)) {
-                .lt => low = mid + 1,
-                .gt => high = mid,
-                .eq => return mid,
-            }
-        }
-        return null;
+        return std.sort.binarySearch(Entry, self.parent.items, hash, Entry.hashOrder);
     }
 };
 
