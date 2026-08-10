@@ -53,15 +53,15 @@ fn storageTrie(allocator: Allocator) StorageTrie {
 /// Internal hashed-key seam for the dense commit module. Keeping the
 /// structural trie context here avoids instantiating a second Keccak-backed
 /// MPT implementation merely because commit lives in its own source file.
-pub inline fn updateStatelessCatalogHashed(
-    workspace: *mpt.StatelessWorkspace,
+pub inline fn updateCatalogHashed(
+    workspace: *mpt.CatalogWorkspace,
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
     root_ref: mpt.catalog.RootRef,
-    updates: []const mpt.StatelessUpdate,
+    updates: []const mpt.CatalogUpdate,
 ) UpdateError![32]u8 {
-    return structuralTrie(allocator).updateStatelessCatalog(
+    return structuralTrie(allocator).updateCatalog(
         workspace,
         root_hash,
         &catalog.topology,
@@ -549,7 +549,7 @@ fn storageRootAfterChangesIndexed(
 }
 
 fn storageRootAfterChangesCatalog(
-    workspace: *mpt.StatelessWorkspace,
+    workspace: *mpt.CatalogWorkspace,
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
@@ -577,7 +577,7 @@ fn storageRootAfterChangesCatalog(
         .empty
     else
         try catalog.storageCatalogRoot(root_hash);
-    return storageTrie(allocator).updateStatelessCatalog(
+    return storageTrie(allocator).updateCatalog(
         workspace,
         base_root,
         &catalog.topology,
@@ -586,12 +586,40 @@ fn storageRootAfterChangesCatalog(
     );
 }
 
+/// Comptime contract for generic state-change views consumed by the
+/// `stateRootAfterChanges*` lanes. A conforming view exposes three ordered
+/// lists, each an indexed accessor pair `len() u32` + `at(u32)`:
+/// `accounts` (post-state account values or deletes), `storage_writes`
+/// (slot writes tagged by account address), and `storage_wipes` (accounts
+/// whose entire storage clears before writes apply). Canonical
+/// implementations: `ChangesView` in `stateless/views.zig` and
+/// `state/TrackedState.zig`.
+pub fn assertChangesView(comptime View: type) void {
+    for ([_][]const u8{ "accounts", "storage_writes", "storage_wipes" }) |list_name| {
+        if (!@hasField(View, list_name)) @compileError(
+            "changes view " ++ @typeName(View) ++ " is missing list '" ++ list_name ++ "'",
+        );
+    }
+    for ([_]type{
+        @FieldType(View, "accounts"),
+        @FieldType(View, "storage_writes"),
+        @FieldType(View, "storage_wipes"),
+    }) |List| {
+        for ([_][]const u8{ "len", "at" }) |method| {
+            if (!std.meta.hasMethod(List, method)) @compileError(
+                "changes list " ++ @typeName(List) ++ " is missing '" ++ method ++ "'",
+            );
+        }
+    }
+}
+
 pub fn stateRootAfterChanges(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
     changes: anytype,
 ) UpdateError![32]u8 {
+    comptime assertChangesView(@TypeOf(changes));
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -607,6 +635,7 @@ pub fn stateRootAfterChangesIndexed(
     authenticated_accounts: ?*const AccountFacts,
     changes: anytype,
 ) UpdateError![32]u8 {
+    comptime assertChangesView(@TypeOf(changes));
     const scratch = allocator;
 
     var addresses: std.ArrayList(address.Address) = .empty;
@@ -691,7 +720,8 @@ pub fn stateRootAfterChangesCatalog(
     authenticated_accounts: *const AccountFacts,
     changes: anytype,
 ) UpdateError![32]u8 {
-    var workspace = mpt.StatelessWorkspace.init(allocator);
+    comptime assertChangesView(@TypeOf(changes));
+    var workspace = mpt.CatalogWorkspace.init(allocator);
     defer workspace.deinit();
 
     var addresses: std.ArrayList(address.Address) = .empty;
@@ -757,7 +787,7 @@ pub fn stateRootAfterChangesCatalog(
         try updates.append(allocator, .{ .key = change.address, .value = null });
     }
 
-    return accountTrie(allocator).updateStatelessCatalog(
+    return accountTrie(allocator).updateCatalog(
         &workspace,
         root_hash,
         &catalog.topology,

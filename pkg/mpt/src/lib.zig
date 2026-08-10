@@ -7,14 +7,25 @@
 //! The trie is generic over a Keccak execution context so native and zkVM
 //! backends can implement the same fixed structural commitment rule.
 //!
-//! This is a stateless root/proof/update engine, not a persistent trie database.
+//! This is a stateless root/proof/update engine, not a persistent trie
+//! database. One engine per capability:
+//!
+//! | capability            | module         | entry points                    |
+//! |-----------------------|----------------|---------------------------------|
+//! | construct from scratch| `root.zig`     | `rootSorted`/`root`, exact flat workspace |
+//! | authenticated reads   | `proof.zig`    | `lookup`, allocation-free       |
+//! | mutate via hash index | `sparse.zig`   | `updateSorted` — no catalog; serves lanes that discover keys during execution |
+//! | mutate via catalog    | `occurrence.zig` | `updateCatalog` — authenticated topology, fixed 32-byte keys, dirty-only re-encode |
+//!
+//! The two mutation engines implement the same MPT algebra over different node
+//! representations on purpose; `fuzz.zig` holds the cross-engine differential.
 
 const std = @import("std");
 const hash = @import("hash.zig");
 const root_mod = @import("root.zig");
 const proof = @import("proof.zig");
 const sparse = @import("sparse.zig");
-const stateless = @import("stateless.zig");
+const occurrence = @import("occurrence.zig");
 
 pub const catalog = @import("catalog.zig");
 pub const fixed_key = @import("fixed_key.zig");
@@ -37,9 +48,8 @@ pub const Lookup = proof.Lookup;
 pub const LookupCache = proof.LookupCache;
 pub const NodeIndex = proof.NodeIndex;
 pub const Catalog = catalog.Catalog;
-pub const CatalogUpdateWorkspace = sparse.CatalogUpdateWorkspace;
-pub const StatelessWorkspace = stateless.Workspace;
-pub const StatelessUpdate = stateless.Update;
+pub const CatalogWorkspace = occurrence.Workspace;
+pub const CatalogUpdate = occurrence.Update;
 pub const Update = sparse.Update;
 
 const empty_index_storage: proof.IndexStorage = .{};
@@ -234,85 +244,18 @@ pub fn Trie(comptime KeccakContext: type) type {
             );
         }
 
-        /// Apply sorted updates through an authenticated catalog root. This
-        /// avoids witness hash lookup and node decoding during sparse commit.
-        pub fn updateSortedCatalog(
-            self: Self,
-            root_hash: Root,
-            topology: *const Catalog,
-            root_ref: catalog.RootRef,
-            updates: []const Update,
-        ) AllocUpdateError!Root {
-            try sparse.validateCatalogRoot(root_hash, root_ref);
-            if (updates.len == 0) return root_hash;
-            try sparse.validateUpdates(updates, true);
-            return sparse.updateSortedCatalog(
-                self.keccak_context,
-                self.allocator,
-                root_hash,
-                topology,
-                root_ref,
-                updates,
-            );
-        }
-
-        /// Apply sorted catalog updates through reusable transient workspace.
-        pub fn updateSortedCatalogWithWorkspace(
-            self: Self,
-            workspace: *CatalogUpdateWorkspace,
-            root_hash: Root,
-            topology: *const Catalog,
-            root_ref: catalog.RootRef,
-            updates: []const Update,
-        ) AllocUpdateError!Root {
-            try sparse.validateCatalogRoot(root_hash, root_ref);
-            if (updates.len == 0) return root_hash;
-            try sparse.validateUpdates(updates, true);
-            return sparse.updateSortedCatalogWithWorkspace(
-                self.keccak_context,
-                workspace,
-                root_hash,
-                topology,
-                root_ref,
-                updates,
-            );
-        }
-
         /// Apply sorted fixed-key updates through an authenticated catalog.
-        pub fn updateStatelessCatalog(
+        pub fn updateCatalog(
             self: Self,
-            workspace: *StatelessWorkspace,
+            workspace: *CatalogWorkspace,
             root_hash: Root,
             topology: *const Catalog,
             root_ref: catalog.RootRef,
-            updates: []const StatelessUpdate,
+            updates: []const CatalogUpdate,
         ) AllocUpdateError!Root {
-            return stateless.updateSorted(
+            return occurrence.updateSorted(
                 self.keccak_context,
                 workspace,
-                root_hash,
-                topology,
-                root_ref,
-                updates,
-            );
-        }
-
-        /// Apply sorted updates through an authenticated catalog while
-        /// descending shared branch prefixes once. The sequential catalog
-        /// updater remains available as the differential baseline.
-        pub fn updateSortedCatalogBatch(
-            self: Self,
-            root_hash: Root,
-            topology: *const Catalog,
-            root_ref: catalog.RootRef,
-            updates: []const Update,
-        ) AllocUpdateError!Root {
-            try sparse.validateCatalogRoot(root_hash, root_ref);
-            if (updates.len == 0) return root_hash;
-            try sparse.validateUpdates(updates, true);
-            return sparse.updateSortedCatalogBatch(
-                self.keccak_context,
-                self.allocator,
                 root_hash,
                 topology,
                 root_ref,
@@ -430,80 +373,16 @@ pub fn Trie(comptime KeccakContext: type) type {
                     return self.structural.updateSorted(root_hash, index, structural_updates);
                 }
 
-                /// Project and sort a typed batch before catalog-backed sparse
-                /// update. The catalog root must authenticate `root_hash`.
                 pub fn updateCatalog(
                     self: KeyedSelf,
+                    workspace: *CatalogWorkspace,
                     root_hash: Root,
                     topology: *const Catalog,
                     root_ref: catalog.RootRef,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, updates.len);
-                    defer allocator.free(projected_keys);
-                    const structural_updates = try allocator.alloc(sparse.Update, updates.len);
-                    defer allocator.free(structural_updates);
-
-                    for (updates, 0..) |item, projected_index| {
-                        projected_keys[projected_index] = self.key_context.trieKey(item.key);
-                        structural_updates[projected_index] = .{
-                            .key = &projected_keys[projected_index],
-                            .value = item.value,
-                        };
-                    }
-                    std.mem.sort(sparse.Update, structural_updates, {}, updateLessThan);
-                    return self.structural.updateSortedCatalog(
-                        root_hash,
-                        topology,
-                        root_ref,
-                        structural_updates,
-                    );
-                }
-
-                /// Project and sort a typed batch before reusable-workspace
-                /// catalog update.
-                pub fn updateCatalogWithWorkspace(
-                    self: KeyedSelf,
-                    workspace: *CatalogUpdateWorkspace,
-                    root_hash: Root,
-                    topology: *const Catalog,
-                    root_ref: catalog.RootRef,
-                    updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, updates.len);
-                    defer allocator.free(projected_keys);
-                    const structural_updates = try allocator.alloc(sparse.Update, updates.len);
-                    defer allocator.free(structural_updates);
-
-                    for (updates, 0..) |item, projected_index| {
-                        projected_keys[projected_index] = self.key_context.trieKey(item.key);
-                        structural_updates[projected_index] = .{
-                            .key = &projected_keys[projected_index],
-                            .value = item.value,
-                        };
-                    }
-                    std.mem.sort(sparse.Update, structural_updates, {}, updateLessThan);
-                    return self.structural.updateSortedCatalogWithWorkspace(
-                        workspace,
-                        root_hash,
-                        topology,
-                        root_ref,
-                        structural_updates,
-                    );
-                }
-
-                pub fn updateStatelessCatalog(
-                    self: KeyedSelf,
-                    workspace: *StatelessWorkspace,
-                    root_hash: Root,
-                    topology: *const Catalog,
-                    root_ref: catalog.RootRef,
-                    updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
-                    const structural_updates = try allocator.alloc(stateless.Update, updates.len);
+                    const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
                     defer allocator.free(structural_updates);
 
                     for (updates, structural_updates) |item, *projected| {
@@ -512,40 +391,9 @@ pub fn Trie(comptime KeccakContext: type) type {
                             .value = item.value,
                         };
                     }
-                    std.mem.sort(stateless.Update, structural_updates, {}, statelessUpdateLessThan);
-                    return self.structural.updateStatelessCatalog(
+                    std.mem.sort(occurrence.Update, structural_updates, {}, catalogUpdateLessThan);
+                    return self.structural.updateCatalog(
                         workspace,
-                        root_hash,
-                        topology,
-                        root_ref,
-                        structural_updates,
-                    );
-                }
-
-                /// Project and sort a typed batch before merged catalog-backed
-                /// sparse update.
-                pub fn updateCatalogBatch(
-                    self: KeyedSelf,
-                    root_hash: Root,
-                    topology: *const Catalog,
-                    root_ref: catalog.RootRef,
-                    updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, updates.len);
-                    defer allocator.free(projected_keys);
-                    const structural_updates = try allocator.alloc(sparse.Update, updates.len);
-                    defer allocator.free(structural_updates);
-
-                    for (updates, 0..) |item, projected_index| {
-                        projected_keys[projected_index] = self.key_context.trieKey(item.key);
-                        structural_updates[projected_index] = .{
-                            .key = &projected_keys[projected_index],
-                            .value = item.value,
-                        };
-                    }
-                    std.mem.sort(sparse.Update, structural_updates, {}, updateLessThan);
-                    return self.structural.updateSortedCatalogBatch(
                         root_hash,
                         topology,
                         root_ref,
@@ -557,7 +405,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                     return std.mem.order(u8, lhs.key, rhs.key) == .lt;
                 }
 
-                fn statelessUpdateLessThan(_: void, lhs: stateless.Update, rhs: stateless.Update) bool {
+                fn catalogUpdateLessThan(_: void, lhs: occurrence.Update, rhs: occurrence.Update) bool {
                     return std.mem.order(u8, &lhs.key, &rhs.key) == .lt;
                 }
             };

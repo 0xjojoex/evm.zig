@@ -88,6 +88,7 @@ const Properties = struct {
         try checkLeafProof(trie, entries[0]);
         try checkEmbeddedBranchUpdates(trie);
         try checkHashedBranchUpdateDifferential(trie, smith);
+        try checkFixedKeyEngineDifferential(trie, smith);
         try checkArbitraryProofDeterminism(trie, smith);
     }
 };
@@ -108,21 +109,12 @@ fn checkEmbeddedBranchUpdates(trie: mpt.DefaultTrie) !void {
     const encoded_nodes = [_][]const u8{&encoded};
     var indexed = try trie.indexNodes(&encoded_nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
-    defer builder.deinit();
-    const root_ref = try builder.authenticateRoot(root);
-    var catalog = try builder.finish();
-    defer catalog.deinit();
 
     const updates = [_]mpt.Update{
         .{ .key = &key0, .value = &[_]u8{0x03} },
         .{ .key = &key1, .value = null },
     };
     const updated = try trie.updateSorted(root, indexed.index(), &updates);
-    try expectRootEqual(
-        updated,
-        try trie.updateSortedCatalogBatch(root, &catalog, root_ref, &updates),
-    );
     const expected = try trie.rootSorted(&.{.{
         .key = &key0,
         .value = &[_]u8{0x03},
@@ -134,10 +126,6 @@ fn checkEmbeddedBranchUpdates(trie: mpt.DefaultTrie) !void {
         .{ .key = &key1, .value = null },
     };
     const emptied = try trie.updateSorted(root, indexed.index(), &deletions);
-    try expectRootEqual(
-        emptied,
-        try trie.updateSortedCatalogBatch(root, &catalog, root_ref, &deletions),
-    );
     try expectRootEqual(mpt.empty_root, emptied);
 }
 
@@ -183,20 +171,11 @@ fn checkHashedBranchUpdateDifferential(trie: mpt.DefaultTrie, smith: *std.testin
     var indexed = try trie.indexNodes(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
-    var builder = try trie.catalogBuilder(indexed.index());
-    defer builder.deinit();
-    const root_ref = try builder.authenticateRoot(root_hash);
-    var catalog = try builder.finish();
-    defer catalog.deinit();
     const update = [_]mpt.Update{.{
         .key = &keys[selected],
         .value = if (delete_selected) null else &replacement,
     }};
     const actual = try trie.updateSorted(root_hash, indexed.index(), &update);
-    try expectRootEqual(
-        actual,
-        try trie.updateSortedCatalogBatch(root_hash, &catalog, root_ref, &update),
-    );
 
     var expected_entries: [child_count]mpt.Entry = undefined;
     var expected_len: usize = 0;
@@ -247,11 +226,6 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
     const encoded_nodes = [_][]const u8{encoded};
     var indexed = try trie.indexNodes(&encoded_nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
-    defer builder.deinit();
-    const root_ref = try builder.authenticateRoot(encoded_root);
-    var catalog = try builder.finish();
-    defer catalog.deinit();
     switch (try trie.lookup(encoded_root, indexed.index(), entry.key)) {
         .present => |value| try std.testing.expectEqualSlices(u8, entry.value, value),
         .absent => return error.ExpectedPresent,
@@ -263,10 +237,6 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
         .value = &replacement_value,
     }};
     const replaced = try trie.updateSorted(encoded_root, indexed.index(), &replacement);
-    try expectRootEqual(
-        replaced,
-        try trie.updateSortedCatalogBatch(encoded_root, &catalog, root_ref, &replacement),
-    );
     const expected_replaced = try trie.rootSorted(&.{.{
         .key = entry.key,
         .value = &replacement_value,
@@ -275,11 +245,66 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
 
     const deletion = [_]mpt.Update{.{ .key = entry.key, .value = null }};
     const deleted = try trie.updateSorted(encoded_root, indexed.index(), &deletion);
-    try expectRootEqual(
-        deleted,
-        try trie.updateSortedCatalogBatch(encoded_root, &catalog, root_ref, &deletion),
-    );
     try expectRootEqual(mpt.empty_root, deleted);
+}
+
+const differential_entry_count = 4;
+
+/// Cross-engine differential: the same fixed-key batch applied from the empty
+/// root through the index-backed sparse engine and the catalog-backed
+/// occurrence engine must agree with full construction.
+fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Smith) !void {
+    var seeds: [differential_entry_count][8]u8 = undefined;
+    smith.bytes(std.mem.asBytes(&seeds));
+    var values: [differential_entry_count][12]u8 = undefined;
+    smith.bytes(std.mem.asBytes(&values));
+
+    var keys: [differential_entry_count]mpt.Root = undefined;
+    for (&keys, &seeds) |*key, *seed| {
+        key.* = mpt.StdKeccak256Context.keccak256(.{}, seed);
+    }
+    var order: [differential_entry_count]usize = .{ 0, 1, 2, 3 };
+    std.mem.sort(usize, &order, &keys, keyOrderLessThan);
+
+    var unique: usize = 0;
+    var sorted_keys: [differential_entry_count]mpt.Root = undefined;
+    var hashed_updates: [differential_entry_count]mpt.CatalogUpdate = undefined;
+    var index_updates: [differential_entry_count]mpt.Update = undefined;
+    var entries: [differential_entry_count]mpt.Entry = undefined;
+    for (order) |key_index| {
+        const key = keys[key_index];
+        if (unique > 0 and std.mem.eql(u8, &sorted_keys[unique - 1], &key)) continue;
+        sorted_keys[unique] = key;
+        const value = &values[key_index];
+        hashed_updates[unique] = .{ .key = key, .value = value };
+        index_updates[unique] = .{ .key = &sorted_keys[unique], .value = value };
+        entries[unique] = .{ .key = &sorted_keys[unique], .value = value };
+        unique += 1;
+    }
+
+    const expected = try trie.rootSorted(entries[0..unique]);
+    const via_index = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, index_updates[0..unique]);
+    try expectRootEqual(expected, via_index);
+
+    var builder = try trie.catalogBuilder(mpt.empty_node_index);
+    defer builder.deinit();
+    const root_ref = try builder.authenticateRoot(mpt.empty_root);
+    var catalog = try builder.finish();
+    defer catalog.deinit();
+    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    const via_occurrence = try trie.updateCatalog(
+        &workspace,
+        mpt.empty_root,
+        &catalog,
+        root_ref,
+        hashed_updates[0..unique],
+    );
+    try expectRootEqual(expected, via_occurrence);
+}
+
+fn keyOrderLessThan(keys: *const [differential_entry_count]mpt.Root, lhs: usize, rhs: usize) bool {
+    return std.mem.order(u8, &keys[lhs], &keys[rhs]) == .lt;
 }
 
 fn checkArbitraryProofDeterminism(trie: mpt.DefaultTrie, smith: *std.testing.Smith) !void {
