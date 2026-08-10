@@ -1021,8 +1021,10 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
             }
             accumulated.blob_gas_used = next_blob_gas_used;
             const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
-            errdefer allocator.free(encoded_receipt);
-            try accumulated.encoded_receipts.append(allocator, encoded_receipt);
+            accumulated.encoded_receipts.append(allocator, encoded_receipt) catch |err| {
+                allocator.free(encoded_receipt);
+                return err;
+            };
             const after_context: Executor.system_contracts.AfterTransactionContext = .{
                 .number = self.input.env.number,
                 .timestamp = self.input.env.timestamp,
