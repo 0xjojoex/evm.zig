@@ -146,12 +146,12 @@ fn parentBlobGas() evmz.eth.bal.ParentBlobGas {
 fn rootChecks(output: evmz.eth.bal.DerivedBlockOutput) evmz.eth.bal.RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(output.state_root),
-            .receipts = .fromHash(output.receipts_root),
+            .state = output.state_root,
+            .receipts = output.receipts_root,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(output.transactions_root),
-            .withdrawals = .fromHash(output.withdrawals_root),
+            .transactions = output.transactions_root,
+            .withdrawals = output.withdrawals_root,
         },
     };
 }

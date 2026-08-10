@@ -195,8 +195,8 @@ fn validateExact(
         .block_access_list = if (revision.isImpl(.amsterdam)) block.block_access_list else null,
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(block.state_root),
-                .receipts = .fromHash(block.receipts_root),
+                .state = block.state_root,
+                .receipts = block.receipts_root,
             },
         },
         .header_claims = .{

@@ -46,11 +46,11 @@ const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(header_state),
-            .receipts = .fromHash(header_receipts),
+            .state = header_state,
+            .receipts = header_receipts,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(local_transactions),
+            .transactions = local_transactions,
         },
     };
 }
@@ -58,12 +58,12 @@ fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_recei
 fn testRootChecksWithWithdrawals(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8, local_withdrawals: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(header_state),
-            .receipts = .fromHash(header_receipts),
+            .state = header_state,
+            .receipts = header_receipts,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(local_transactions),
-            .withdrawals = .fromHash(local_withdrawals),
+            .transactions = local_transactions,
+            .withdrawals = local_withdrawals,
         },
     };
 }

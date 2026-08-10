@@ -21,7 +21,6 @@ const HeaderHashClaim = block_stf.HeaderHashClaim;
 const ParentHeaderContext = block_stf.ParentHeaderContext;
 const Result = block_stf.Result;
 const RootChecks = block_stf.RootChecks;
-const RootSource = block_stf.RootSource;
 const Status = block_stf.Status;
 
 pub fn blockBodyValid(
@@ -191,64 +190,64 @@ fn optionalHashEqual(lhs: ?[32]u8, rhs: ?[32]u8) bool {
     return std.mem.eql(u8, &lhs.?, &rhs.?);
 }
 
-const RootField = enum {
-    state,
-    transactions,
-    receipts,
-    withdrawals,
-};
-
-const ConsensusRootComparison = struct {
-    field: RootField,
-    status: Status,
-    derived_source: RootSource = .execution_derived,
-    claim_source: RootSource,
-};
-
-const consensus_root_comparisons = [_]ConsensusRootComparison{
-    .{ .field = .state, .status = .state_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .transactions, .status = .transactions_root_mismatch, .claim_source = .reconstructed_header_claim },
-    .{ .field = .receipts, .status = .receipts_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .withdrawals, .status = .withdrawals_root_mismatch, .claim_source = .reconstructed_header_claim },
-};
-
-comptime {
-    for (consensus_root_comparisons) |comparison| {
-        if (comparison.status == .valid) @compileError("consensus root comparison must map to a mismatch status");
-        const has_execution_derived = comparison.derived_source == .execution_derived;
-        const claim_is_execution_derived = comparison.claim_source == .execution_derived;
-        if (has_execution_derived == claim_is_execution_derived) {
-            @compileError("consensus root comparison must have exactly one execution-derived operand");
-        }
+/// Comparison order defines rejection precedence. Every check pairs one
+/// execution-derived root with one claim; the provenance is visible in the
+/// claim path (`payload_header` vs `reconstructed_header`).
+fn compareRoots(result: Result, checks: RootChecks) ?Status {
+    if (!hashEqual(result.state_root, checks.payload_header.state)) return .state_root_mismatch;
+    if (checks.reconstructed_header.transactions) |expected| {
+        if (!hashEqual(result.transactions_root, expected)) return .transactions_root_mismatch;
     }
-}
-
-pub fn applyConsensusRootComparisons(result: *Result, checks: RootChecks) void {
-    inline for (consensus_root_comparisons) |comparison| {
-        if (result.status != .valid) return;
-        if (rootClaimValue(comparison, checks)) |expected| {
-            const derived = derivedRootValue(comparison.field, result.*);
-            if (!std.mem.eql(u8, &derived, &expected)) result.status = comparison.status;
-        }
+    if (!hashEqual(result.receipts_root, checks.payload_header.receipts)) return .receipts_root_mismatch;
+    if (checks.reconstructed_header.withdrawals) |expected| {
+        if (!hashEqual(result.withdrawals_root, expected)) return .withdrawals_root_mismatch;
     }
+    return null;
 }
 
-fn rootClaimValue(comptime comparison: ConsensusRootComparison, checks: RootChecks) ?[32]u8 {
-    return switch (comparison.field) {
-        .state => checks.payload_header.state.value,
-        .transactions => if (checks.reconstructed_header.transactions) |claim| claim.value else null,
-        .receipts => checks.payload_header.receipts.value,
-        .withdrawals => if (checks.reconstructed_header.withdrawals) |claim| claim.value else null,
-    };
+/// Judge one completed execution against the full claim set. Sequential on
+/// purpose: comparison order defines which mismatch a multiply-wrong block
+/// reports.
+pub fn compareBlock(
+    result: Result,
+    claims: Claims,
+    block_access_list_mismatch: bool,
+    block_hash_mismatch: bool,
+) Status {
+    std.debug.assert(result.status == .valid);
+    if (compareRoots(result, claims.root_checks)) |status| return status;
+    const header = claims.header;
+    if (header.gas_used) |expected| {
+        if (result.gas_used != expected) return .gas_used_mismatch;
+    }
+    if (header.block_gas_used) |expected| {
+        if (result.block_gas_used != expected) return .block_gas_used_mismatch;
+    }
+    if (header.block_state_gas_used) |expected| {
+        if (result.block_state_gas_used != expected) return .block_state_gas_used_mismatch;
+    }
+    if (header.logs_bloom) |expected| {
+        if (!std.mem.eql(u8, &result.logs_bloom, &expected)) return .logs_bloom_mismatch;
+    }
+    if (header.blob_gas_used) |expected| {
+        if (result.blob_gas_used != expected) return .blob_gas_used_mismatch;
+    }
+    if (header.excess_blob_gas) |expected| {
+        if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected) return .excess_blob_gas_mismatch;
+    }
+    if (header.requests_hash) |expected| {
+        if (!hashEqual(result.requests_hash, expected)) return .requests_hash_mismatch;
+    }
+    if (block_access_list_mismatch) return .block_access_list_mismatch;
+    if (header.block_access_list_hash) |expected| {
+        if (!hashEqual(result.block_access_list_hash, expected)) return .block_access_list_hash_mismatch;
+    }
+    if (block_hash_mismatch) return .block_hash_mismatch;
+    return .valid;
 }
 
-fn derivedRootValue(field: RootField, result: Result) [32]u8 {
-    return switch (field) {
-        .state => result.state_root,
-        .transactions => result.transactions_root,
-        .receipts => result.receipts_root,
-        .withdrawals => result.withdrawals_root,
-    };
+fn hashEqual(lhs: [32]u8, rhs: [32]u8) bool {
+    return std.mem.eql(u8, &lhs, &rhs);
 }
 
 test "BlockSTF validates parent-derived header rules before execution" {

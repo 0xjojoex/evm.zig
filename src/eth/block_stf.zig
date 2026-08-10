@@ -128,48 +128,20 @@ pub const ObservationTarget = struct {
     }
 };
 
-/// Compile-time provenance for one side of a consensus-root comparison.
-///
-/// The tag makes the comparison table auditable: exactly one operand must be
-/// produced by execution and the other must come from an independent payload
-/// or reconstructed-header claim. It labels provenance; it does not
-/// authenticate the wrapped hash.
-pub const RootSource = enum {
-    execution_derived,
-    payload_header_claim,
-    reconstructed_header_claim,
-};
-
-pub fn SourcedRoot(comptime source: RootSource) type {
-    return struct {
-        pub const root_source = source;
-        value: [32]u8,
-
-        pub fn fromHash(hash: [32]u8) SourcedRoot(source) {
-            return .{ .value = hash };
-        }
-    };
-}
-
-pub const PayloadHeaderRoot = SourcedRoot(.payload_header_claim);
-pub const ReconstructedHeaderRoot = SourcedRoot(.reconstructed_header_claim);
-
-/// Roots carried directly by execution-payload/header fields.
-pub const PayloadHeaderRootClaims = struct {
-    state: PayloadHeaderRoot,
-    receipts: PayloadHeaderRoot,
-};
-
-/// Roots only available after reconstructing or otherwise independently reading
-/// the current execution header. These are consensus claims.
-pub const ReconstructedHeaderRootClaims = struct {
-    transactions: ?ReconstructedHeaderRoot = null,
-    withdrawals: ?ReconstructedHeaderRoot = null,
-};
-
+/// Consensus root claims, grouped structurally by provenance so every
+/// comparison visibly pairs one execution-derived root with one independent
+/// claim. `payload_header` roots are carried directly by execution-payload or
+/// header fields; `reconstructed_header` roots only exist after independently
+/// reconstructing or reading the current execution header.
 pub const RootChecks = struct {
-    payload_header: PayloadHeaderRootClaims,
-    reconstructed_header: ReconstructedHeaderRootClaims = .{},
+    payload_header: struct {
+        state: [32]u8,
+        receipts: [32]u8,
+    },
+    reconstructed_header: struct {
+        transactions: ?[32]u8 = null,
+        withdrawals: ?[32]u8 = null,
+    } = .{},
 };
 
 /// Header scalar/commitment claims compared against execution-derived outputs.
@@ -1402,33 +1374,7 @@ pub fn executeBlock(
             };
             block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
         }
-        block_rules.applyConsensusRootComparisons(&result, claim_set.root_checks);
-        if (result.status == .valid and claim_set.header.gas_used != null and result.gas_used != claim_set.header.gas_used.?) result.status = .gas_used_mismatch;
-        if (result.status == .valid and claim_set.header.block_gas_used != null and result.block_gas_used != claim_set.header.block_gas_used.?) result.status = .block_gas_used_mismatch;
-        if (result.status == .valid and claim_set.header.block_state_gas_used != null and result.block_state_gas_used != claim_set.header.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
-        if (result.status == .valid) {
-            if (claim_set.header.logs_bloom) |expected_bloom| {
-                if (!std.mem.eql(u8, &result.logs_bloom, &expected_bloom)) result.status = .logs_bloom_mismatch;
-            }
-        }
-        if (result.status == .valid and claim_set.header.blob_gas_used != null and result.blob_gas_used != claim_set.header.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
-        if (result.status == .valid) {
-            if (claim_set.header.excess_blob_gas) |expected_excess_blob_gas| {
-                if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected_excess_blob_gas) result.status = .excess_blob_gas_mismatch;
-            }
-        }
-        if (result.status == .valid) {
-            if (claim_set.header.requests_hash) |expected_requests_hash| {
-                if (!std.mem.eql(u8, &result.requests_hash, &expected_requests_hash)) result.status = .requests_hash_mismatch;
-            }
-        }
-        if (result.status == .valid and block_access_list_mismatch) result.status = .block_access_list_mismatch;
-        if (result.status == .valid) {
-            if (claim_set.header.block_access_list_hash) |expected_block_access_list_hash| {
-                if (!std.mem.eql(u8, &result.block_access_list_hash, &expected_block_access_list_hash)) result.status = .block_access_list_hash_mismatch;
-            }
-        }
-        if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
+        result.status = block_rules.compareBlock(result, claim_set, block_access_list_mismatch, block_hash_mismatch);
     }
     if (result.status == .valid) {
         try Engine.BlockState.commit(&state_backend, accepted_state);

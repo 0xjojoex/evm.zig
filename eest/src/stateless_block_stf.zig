@@ -399,13 +399,13 @@ fn runBlockExact(
         .block_access_list = encoded_bal,
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(try hashField(&block_header, "stateRoot")),
-                .receipts = .fromHash(try hashField(&block_header, "receiptTrie")),
+                .state = try hashField(&block_header, "stateRoot"),
+                .receipts = try hashField(&block_header, "receiptTrie"),
             },
             .reconstructed_header = .{
-                .transactions = .fromHash(try hashField(&block_header, "transactionsTrie")),
+                .transactions = try hashField(&block_header, "transactionsTrie"),
                 .withdrawals = if (revision.isImpl(.shanghai))
-                    .fromHash(try hashField(&block_header, "withdrawalsRoot"))
+                    try hashField(&block_header, "withdrawalsRoot")
                 else
                     null,
             },

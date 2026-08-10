@@ -451,8 +451,8 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
 
 test "BlockSTF parallel raw API owns decode failure cleanup" {
     const empty_roots: block_stf.RootChecks = .{ .payload_header = .{
-        .state = .fromHash(evmz.eth.trie.empty_root_hash),
-        .receipts = .fromHash(evmz.eth.trie.empty_root_hash),
+        .state = evmz.eth.trie.empty_root_hash,
+        .receipts = evmz.eth.trie.empty_root_hash,
     } };
     var report = bal.Report{};
     const invalid_raw = [_][]const u8{"not an RLP transaction"};
@@ -951,12 +951,12 @@ fn parentBlobGas() block_stf.ParentBlobGas {
 fn rootChecks(output: block_stf.DerivedBlockOutput) block_stf.RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(output.state_root),
-            .receipts = .fromHash(output.receipts_root),
+            .state = output.state_root,
+            .receipts = output.receipts_root,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(output.transactions_root),
-            .withdrawals = .fromHash(output.withdrawals_root),
+            .transactions = output.transactions_root,
+            .withdrawals = output.withdrawals_root,
         },
     };
 }

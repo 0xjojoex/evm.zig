@@ -467,11 +467,11 @@ fn blockInput(
 fn roots(state_root: [32]u8, transactions_root: [32]u8, receipts_root: [32]u8) block_stf.RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(state_root),
-            .receipts = .fromHash(receipts_root),
+            .state = state_root,
+            .receipts = receipts_root,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(transactions_root),
+            .transactions = transactions_root,
         },
     };
 }

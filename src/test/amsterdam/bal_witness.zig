@@ -39,8 +39,8 @@ test "BlockSTF BAL state precheck without a claim is a no-op" {
         .precheck_block_access_list_state = true,
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
+                .state = trie.empty_root_hash,
+                .receipts = trie.empty_root_hash,
             },
         },
     });
@@ -71,8 +71,8 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
         },
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
+                .state = trie.empty_root_hash,
+                .receipts = trie.empty_root_hash,
             },
         },
     });
@@ -108,8 +108,8 @@ test "BlockSTF forwards the validated BAL resource plan to a successful preparer
         },
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
+                .state = trie.empty_root_hash,
+                .receipts = trie.empty_root_hash,
             },
         },
     });
@@ -141,8 +141,8 @@ test "BlockSTF resource preparation failure falls back to lazy execution" {
         },
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
+                .state = trie.empty_root_hash,
+                .receipts = trie.empty_root_hash,
             },
         },
     });
