@@ -785,6 +785,124 @@ fn produceAssumeDecodedExact(
     } };
 }
 
+/// Accepted BAL claim state. One named lifetime spanning state admission,
+/// execution capacity hints, and the final claim-vs-observed comparison.
+const BalClaim = struct {
+    decoded: ?eth_bal.Decoded = null,
+    counts: ?eth_bal.Counts = null,
+
+    const DecodeError = error{ OutOfMemory, BlockAccessListTooLarge, InvalidBlockAccessList };
+
+    fn decode(
+        allocator: std.mem.Allocator,
+        encoded_claim: ?[]const u8,
+        transaction_count: eth_bal.BlockAccessIndex,
+        gas_limit: u64,
+    ) DecodeError!BalClaim {
+        const encoded = encoded_claim orelse return .{};
+        var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
+            encoded.len,
+            transaction_count,
+            gas_limit,
+        ));
+        var decoded = eth_bal.decodeWithBudget(allocator, encoded, &bal_budget) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.DecodeAllocationLimitExceeded,
+            error.DecodeItemLimitExceeded,
+            => return error.BlockAccessListTooLarge,
+            else => return error.InvalidBlockAccessList,
+        };
+        errdefer decoded.deinit(allocator);
+        const counts = validateBlockAccessList(decoded.accounts, transaction_count, gas_limit) catch |err| switch (err) {
+            error.BlockAccessListGasLimitExceeded => return error.BlockAccessListTooLarge,
+            else => return error.InvalidBlockAccessList,
+        };
+        return .{ .decoded = decoded, .counts = counts };
+    }
+
+    /// Best-effort resource-plan hook. This is an optimization: a caller that
+    /// requires eager availability can invoke the preparer before `apply` and
+    /// choose its own retry/error policy. It never changes block validity.
+    fn prepareResources(
+        self: *const BalClaim,
+        allocator: std.mem.Allocator,
+        preparer: ?execution_resources.Preparer,
+    ) !void {
+        const service = preparer orelse return;
+        const claimed_accounts = self.accounts() orelse return;
+        var plan = try bal_witness.planAllocAssumeValidated(allocator, claimed_accounts);
+        defer plan.deinit(allocator);
+        service.prepare(plan.resources) catch {};
+    }
+
+    fn accounts(self: *const BalClaim) ?eth_bal.BlockAccessList {
+        const decoded = self.decoded orelse return null;
+        return decoded.accounts;
+    }
+
+    fn deinit(self: *BalClaim, allocator: std.mem.Allocator) void {
+        if (self.decoded) |*decoded| decoded.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// Block-execution accumulation state: lives from before transaction 0 until
+/// block finalization consumes it into commitments.
+const BlockAccumulator = struct {
+    allocator: std.mem.Allocator,
+    encoded_receipts: std.ArrayList([]const u8) = .empty,
+    deposit_request_data: std.ArrayList(u8) = .empty,
+    logs_bloom: [256]u8 = empty_logs_bloom,
+    blob_gas_used: u64 = 0,
+    blob_gas_limit: u64,
+
+    fn deinit(self: *BlockAccumulator) void {
+        for (self.encoded_receipts.items) |encoded_receipt| self.allocator.free(encoded_receipt);
+        self.encoded_receipts.deinit(self.allocator);
+        self.deposit_request_data.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
+/// One per-transaction step-capture span over the caller-owned tape. `finish`
+/// completes delivery; `abort` in a defer cleans up every early exit.
+const StepSpan = struct {
+    context: *Executor.CaptureContext,
+    open: bool,
+
+    fn begin(context: *Executor.CaptureContext, steps: ExecutionCapture.StepCapture) !StepSpan {
+        try context.beginTrace(.{ .tape = steps.tape, .profile = steps.profile });
+        return .{ .context = context, .open = true };
+    }
+
+    fn finish(self: *StepSpan, steps: ExecutionCapture.StepCapture) !void {
+        const span = try self.context.finishTrace();
+        self.open = false;
+        var span_outstanding = true;
+        defer if (span_outstanding) steps.tape.resolve(span) catch {};
+        try steps.target.consume(span);
+        try steps.tape.resolve(span);
+        span_outstanding = false;
+        try steps.tape.reset();
+    }
+
+    fn abort(self: *StepSpan) void {
+        if (self.open) self.context.abortTrace() catch {};
+    }
+};
+
+/// Terminal mid-fold Result carrying the block progress at the stop point.
+fn foldedResult(status: Status, tx_index: usize, progress: vm.BlockResult, requests_hash: [32]u8) Result {
+    return .{
+        .status = status,
+        .tx_index = tx_index,
+        .gas_used = progress.gas_used,
+        .block_gas_used = progress.block_gas.total,
+        .block_state_gas_used = progress.block_gas.state,
+        .requests_hash = requests_hash,
+    };
+}
+
 fn ObservationCollector(comptime BlockState: type) type {
     return struct {
         builder: ?*tracked_state_projector.BlockBuilder,
@@ -806,6 +924,170 @@ fn ObservationCollector(comptime BlockState: type) type {
                     observations,
                 );
             }
+        }
+    };
+}
+
+/// Loop-invariant borrows for the per-transaction fold. Everything here is
+/// pinned in `executeBlock`'s frame and outlives every transaction.
+fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        input: ExecutionInput,
+        block: *Engine.BlockExecution,
+        executor: *Engine.Executor,
+        collector: *ObservationCollector(Engine.BlockState),
+        capture_context: *Executor.CaptureContext,
+        observe_state: bool,
+        capture_steps: bool,
+
+        /// One payload transaction in invariant order: step-trace begin, blob
+        /// budget, execution, diagnostics, accumulation, after-transaction
+        /// system calls, step-trace finish. Returns the terminal Result when
+        /// the block must stop at this transaction, null to continue.
+        fn executePayloadTransaction(
+            self: @This(),
+            entry: TransactionInput,
+            tx_index: usize,
+            accumulated: *BlockAccumulator,
+            requests_hash: [32]u8,
+            observer: anytype,
+        ) !?Result {
+            const allocator = self.allocator;
+            var step_span: ?StepSpan = if (self.capture_steps)
+                try StepSpan.begin(self.capture_context, self.input.capture.?.steps.?)
+            else
+                null;
+            defer if (step_span) |*span| span.abort();
+
+            self.collector.block_access_index =
+                try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index));
+            const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
+            const next_blob_gas_used = std.math.add(u64, accumulated.blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
+            if (next_blob_gas_used > accumulated.blob_gas_limit) {
+                const progress = self.block.progress();
+                if (observer.isActive()) {
+                    try observer.rejected(.{
+                        .kind = .blob_gas,
+                        .transaction = entry.tx,
+                        .tx_index = tx_index,
+                        .progress_before = progress,
+                        .blob_gas_used_before = accumulated.blob_gas_used,
+                    });
+                }
+                var result = foldedResult(.blob_gas_limit_exceeded, tx_index, progress, requests_hash);
+                result.blob_gas_used = accumulated.blob_gas_used;
+                return result;
+            }
+            const progress_before = self.block.progress();
+            const tx_result = transactPayload(
+                Engine,
+                self.block,
+                self.input.env,
+                entry.tx,
+                if (self.capture_steps)
+                    .{ .steps = self.capture_context }
+                else if (self.observe_state)
+                    .observations
+                else
+                    .normal,
+                self.collector,
+            ) catch |err| switch (err) {
+                error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
+                error.BlockGasExceeded => {
+                    const progress = self.block.progress();
+                    if (observer.isActive()) {
+                        try observer.rejected(.{
+                            .kind = .block_gas,
+                            .transaction = entry.tx,
+                            .tx_index = tx_index,
+                            .progress_before = progress_before,
+                            .blob_gas_used_before = accumulated.blob_gas_used,
+                        });
+                    }
+                    return foldedResult(.block_gas_exceeded, tx_index, progress, requests_hash);
+                },
+                else => return err,
+            };
+            const included = switch (tx_result) {
+                .included => |value| value,
+                .rejected => {
+                    const progress = self.block.progress();
+                    if (observer.isActive()) {
+                        try observer.rejected(.{
+                            .kind = .transaction,
+                            .transaction = entry.tx,
+                            .tx_index = tx_index,
+                            .progress_before = progress_before,
+                            .blob_gas_used_before = accumulated.blob_gas_used,
+                        });
+                    }
+                    return foldedResult(.transaction_rejected, tx_index, progress, requests_hash);
+                },
+            };
+            const receipt = included.receipt;
+            const progress_after = self.block.progress();
+            if (observer.isActive()) {
+                try observer.included(.{
+                    .transaction = entry.tx,
+                    .tx_index = tx_index,
+                    .progress_before = progress_before,
+                    .progress_after = progress_after,
+                    .result = &included.result,
+                    .logs = receipt.logs,
+                    .blob_gas_used_after = next_blob_gas_used,
+                });
+            }
+            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, eth_receipt.logsBloom(receipt.logs));
+            if (revision.isImpl(.prague)) {
+                eip6110.appendRequestDataFromLogs(allocator, &accumulated.deposit_request_data, receipt.logs) catch |err| switch (err) {
+                    error.InvalidRequest => return foldedResult(.invalid_requests, tx_index, self.block.progress(), requests_hash),
+                    else => return err,
+                };
+            }
+            accumulated.blob_gas_used = next_blob_gas_used;
+            const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
+            errdefer allocator.free(encoded_receipt);
+            try accumulated.encoded_receipts.append(allocator, encoded_receipt);
+            const after_context: Executor.system_contracts.AfterTransactionContext = .{
+                .number = self.input.env.number,
+                .timestamp = self.input.env.timestamp,
+                .transaction_index = progress_after.tx_count - 1,
+                .status = receipt.status,
+                .gas_used = receipt.gas_used,
+                .cumulative_gas_used = progress_after.gas_used,
+                .cumulative_block_gas = progress_after.block_gas.total,
+                .cumulative_state_gas = progress_after.block_gas.state,
+            };
+            const after_result = if (self.capture_steps)
+                Executor.system_contracts.applyAfterTransactionCaptured(
+                    self.executor,
+                    lifecycleExecutionContext(self.input.env),
+                    after_context,
+                    self.capture_context,
+                    self.collector,
+                )
+            else if (self.observe_state)
+                Executor.system_contracts.applyAfterTransactionObserved(
+                    self.executor,
+                    lifecycleExecutionContext(self.input.env),
+                    after_context,
+                    self.collector,
+                )
+            else
+                Executor.system_contracts.applyAfterTransaction(
+                    self.executor,
+                    lifecycleExecutionContext(self.input.env),
+                    after_context,
+                );
+            after_result catch |err| switch (err) {
+                error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
+                error.SystemCallFailed => return Result{ .status = .system_contract_failed, .tx_index = tx_index },
+                else => return err,
+            };
+
+            if (step_span) |*span| try span.finish(self.input.capture.?.steps.?);
+            return null;
         }
     };
 }
@@ -845,41 +1127,20 @@ pub fn executeBlock(
     var block_access_list_mismatch = false;
     const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
 
-    var claimed_block_access_list: ?eth_bal.Decoded = null;
-    var claimed_block_access_counts: ?eth_bal.Counts = null;
-    defer if (claimed_block_access_list) |*decoded| decoded.deinit(allocator);
-    if (input.block_access_list) |encoded_claim| {
-        var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
-            encoded_claim.len,
-            block_access_transaction_count,
-            input.env.gas_limit,
-        ));
-        claimed_block_access_list = eth_bal.decodeWithBudget(allocator, encoded_claim, &bal_budget) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.DecodeAllocationLimitExceeded,
-            error.DecodeItemLimitExceeded,
-            => return .{ .status = .block_access_list_too_large },
-            else => return .{ .status = .invalid_block_access_list },
-        };
-        claimed_block_access_counts = validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
-            error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
-            else => return .{ .status = .invalid_block_access_list },
-        };
-        if (input.execution_resource_preparer) |preparer| {
-            var plan = try bal_witness.planAllocAssumeValidated(
-                allocator,
-                claimed_block_access_list.?.accounts,
-            );
-            defer plan.deinit(allocator);
+    var bal_claim = BalClaim.decode(
+        allocator,
+        input.block_access_list,
+        block_access_transaction_count,
+        input.env.gas_limit,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.BlockAccessListTooLarge => return .{ .status = .block_access_list_too_large },
+        error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
+    };
+    defer bal_claim.deinit(allocator);
+    try bal_claim.prepareResources(allocator, input.execution_resource_preparer);
 
-            // This BlockSTF hook is an optimization. A caller that requires
-            // eager availability can invoke the preparer before `apply` and
-            // choose its own retry/error policy.
-            preparer.prepare(plan.resources) catch {};
-        }
-    }
-
-    if (claimed_block_access_list) |*claim| observer.claimDecoded(claim.accounts, state_backend.reader());
+    if (bal_claim.accounts()) |claimed_accounts| observer.claimDecoded(claimed_accounts, state_backend.reader());
 
     var observed_block_access_list: ?eth_bal.Decoded = null;
     defer if (observed_block_access_list) |*decoded| decoded.deinit(allocator);
@@ -888,7 +1149,7 @@ pub fn executeBlock(
 
     const executor_state = Engine.BlockState.admit(allocator, .{
         .backend = &state_backend,
-        .validated_claim = if (claimed_block_access_list) |*claim| claim.accounts else null,
+        .validated_claim = bal_claim.accounts(),
         .precheck_claim_state = input.precheck_block_access_list_state,
     }) catch |err| switch (err) {
         error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
@@ -903,7 +1164,7 @@ pub fn executeBlock(
         },
     });
     defer executor.deinit();
-    if (claimed_block_access_counts) |counts| {
+    if (bal_claim.counts) |counts| {
         // Capacity is advisory; it must not change block validity on allocation failure.
         executor.reserveAcceptedAccessHint(.{
             .accounts = counts.accounts,
@@ -966,192 +1227,30 @@ pub fn executeBlock(
     }
     observer.beforeBlock(input.block_header);
 
-    var encoded_receipts: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (encoded_receipts.items) |encoded_receipt| allocator.free(encoded_receipt);
-        encoded_receipts.deinit(allocator);
-    }
-    var deposit_request_data: std.ArrayList(u8) = .empty;
-    defer deposit_request_data.deinit(allocator);
-    var block_logs_bloom = empty_logs_bloom;
-    var blob_gas_used: u64 = 0;
-    const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_params);
+    var accumulated = BlockAccumulator{
+        .allocator = allocator,
+        .blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_params),
+    };
+    defer accumulated.deinit();
 
+    const fold = PayloadFold(revision, Engine){
+        .allocator = allocator,
+        .input = input,
+        .block = &block,
+        .executor = &executor,
+        .collector = &observation_collector,
+        .capture_context = &capture_context,
+        .observe_state = observe_state,
+        .capture_steps = capture_steps,
+    };
     for (input.transactions, 0..) |entry, tx_index| {
-        if (capture_steps) try capture_context.beginTrace(.{
-            .tape = input.capture.?.steps.?.tape,
-            .profile = input.capture.?.steps.?.profile,
-        });
-        var step_capture_open = capture_steps;
-        defer if (step_capture_open) capture_context.abortTrace() catch {};
-
-        observation_collector.block_access_index =
-            try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index));
-        const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
-        const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
-        if (next_blob_gas_used > blob_gas_limit) {
-            const progress = block.progress();
-            if (observer.isActive()) {
-                try observer.rejected(.{
-                    .kind = .blob_gas,
-                    .transaction = entry.tx,
-                    .tx_index = tx_index,
-                    .progress_before = progress,
-                    .blob_gas_used_before = blob_gas_used,
-                });
-            }
-            return .{
-                .status = .blob_gas_limit_exceeded,
-                .tx_index = tx_index,
-                .gas_used = progress.gas_used,
-                .block_gas_used = progress.block_gas.total,
-                .block_state_gas_used = progress.block_gas.state,
-                .blob_gas_used = blob_gas_used,
-                .requests_hash = computed_requests_hash,
-            };
-        }
-        const progress_before = block.progress();
-        const tx_result = transactPayload(
-            Engine,
-            &block,
-            input.env,
-            entry.tx,
-            if (capture_steps)
-                .{ .steps = &capture_context }
-            else if (observe_state)
-                .observations
-            else
-                .normal,
-            &observation_collector,
-        ) catch |err| switch (err) {
-            error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
-            error.BlockGasExceeded => {
-                const progress = block.progress();
-                if (observer.isActive()) {
-                    try observer.rejected(.{
-                        .kind = .block_gas,
-                        .transaction = entry.tx,
-                        .tx_index = tx_index,
-                        .progress_before = progress_before,
-                        .blob_gas_used_before = blob_gas_used,
-                    });
-                }
-                return .{
-                    .status = .block_gas_exceeded,
-                    .tx_index = tx_index,
-                    .gas_used = progress.gas_used,
-                    .block_gas_used = progress.block_gas.total,
-                    .block_state_gas_used = progress.block_gas.state,
-                    .requests_hash = computed_requests_hash,
-                };
-            },
-            else => return err,
-        };
-        const included = switch (tx_result) {
-            .included => |value| value,
-            .rejected => {
-                const progress = block.progress();
-                if (observer.isActive()) {
-                    try observer.rejected(.{
-                        .kind = .transaction,
-                        .transaction = entry.tx,
-                        .tx_index = tx_index,
-                        .progress_before = progress_before,
-                        .blob_gas_used_before = blob_gas_used,
-                    });
-                }
-                return .{
-                    .status = .transaction_rejected,
-                    .tx_index = tx_index,
-                    .gas_used = progress.gas_used,
-                    .block_gas_used = progress.block_gas.total,
-                    .block_state_gas_used = progress.block_gas.state,
-                    .requests_hash = computed_requests_hash,
-                };
-            },
-        };
-        const receipt = included.receipt;
-        const progress_after = block.progress();
-        if (observer.isActive()) {
-            try observer.included(.{
-                .transaction = entry.tx,
-                .tx_index = tx_index,
-                .progress_before = progress_before,
-                .progress_after = progress_after,
-                .result = &included.result,
-                .logs = receipt.logs,
-                .blob_gas_used_after = next_blob_gas_used,
-            });
-        }
-        eth_receipt.mergeLogsBloom(&block_logs_bloom, eth_receipt.logsBloom(receipt.logs));
-        if (revision.isImpl(.prague)) {
-            eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
-                error.InvalidRequest => {
-                    const progress = block.progress();
-                    return .{
-                        .status = .invalid_requests,
-                        .tx_index = tx_index,
-                        .gas_used = progress.gas_used,
-                        .block_gas_used = progress.block_gas.total,
-                        .block_state_gas_used = progress.block_gas.state,
-                        .requests_hash = computed_requests_hash,
-                    };
-                },
-                else => return err,
-            };
-        }
-        blob_gas_used = next_blob_gas_used;
-        const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
-        errdefer allocator.free(encoded_receipt);
-        try encoded_receipts.append(allocator, encoded_receipt);
-        const after_context: Executor.system_contracts.AfterTransactionContext = .{
-            .number = input.env.number,
-            .timestamp = input.env.timestamp,
-            .transaction_index = progress_after.tx_count - 1,
-            .status = receipt.status,
-            .gas_used = receipt.gas_used,
-            .cumulative_gas_used = progress_after.gas_used,
-            .cumulative_block_gas = progress_after.block_gas.total,
-            .cumulative_state_gas = progress_after.block_gas.state,
-        };
-        const after_result = if (capture_steps)
-            Executor.system_contracts.applyAfterTransactionCaptured(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-                &capture_context,
-                &observation_collector,
-            )
-        else if (observe_state)
-            Executor.system_contracts.applyAfterTransactionObserved(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-                &observation_collector,
-            )
-        else
-            Executor.system_contracts.applyAfterTransaction(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-            );
-        after_result catch |err| switch (err) {
-            error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
-            error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
-            else => return err,
-        };
-
-        if (capture_steps) {
-            const span = try capture_context.finishTrace();
-            step_capture_open = false;
-            const steps = input.capture.?.steps.?;
-            var span_outstanding = true;
-            defer if (span_outstanding) steps.tape.resolve(span) catch {};
-            try steps.target.consume(span);
-            try steps.tape.resolve(span);
-            span_outstanding = false;
-            try steps.tape.reset();
-        }
+        if (try fold.executePayloadTransaction(
+            entry,
+            tx_index,
+            &accumulated,
+            computed_requests_hash,
+            observer,
+        )) |terminal| return terminal;
     }
     try observer.finish();
 
@@ -1200,7 +1299,7 @@ pub fn executeBlock(
         &executor,
         input.env,
         block.progress(),
-        deposit_request_data.items,
+        accumulated.deposit_request_data.items,
         observe_state,
         &observation_collector,
     );
@@ -1241,7 +1340,7 @@ pub fn executeBlock(
                 if (input.bal_differential) |report| {
                     if (report.mismatch_writer) |writer| {
                         writer.print("{f}", .{bal_diff.Diff{
-                            .expected = claimed_block_access_list.?.accounts,
+                            .expected = bal_claim.accounts().?,
                             .actual = observed_block_access_list.?.accounts,
                         }}) catch {
                             report.mismatch_write_failed = true;
@@ -1270,10 +1369,10 @@ pub fn executeBlock(
             else => return err,
         },
         .transactions_root = try transactionRoot(allocator, input.transactions),
-        .receipts_root = try trie.receiptRoot(allocator, encoded_receipts.items),
+        .receipts_root = try trie.receiptRoot(allocator, accumulated.encoded_receipts.items),
         .withdrawals_root = try trie.withdrawalsRoot(allocator, input.withdrawals),
-        .logs_bloom = block_logs_bloom,
-        .blob_gas_used = blob_gas_used,
+        .logs_bloom = accumulated.logs_bloom,
+        .blob_gas_used = accumulated.blob_gas_used,
         .excess_blob_gas = excess_blob_gas,
         .requests_hash = computed_requests_hash,
         .block_access_list_hash = computed_block_access_list_hash,
@@ -1287,7 +1386,7 @@ pub fn executeBlock(
         .receipts_root = result.receipts_root,
         .logs_bloom = result.logs_bloom,
         .requests_hash = result.requests_hash,
-        .encoded_receipts = encoded_receipts.items,
+        .encoded_receipts = accumulated.encoded_receipts.items,
         .requests = derived_requests,
         .encoded_block_access_list = observed_block_access_list_encoded orelse &.{},
         .block_access_list_matched = !block_access_list_mismatch,
