@@ -147,11 +147,11 @@ pub const ClaimPlan = struct {
         std.debug.assert(storage_index == storage.len);
 
         const S = struct {
-            fn accountTrieLessThan(accounts: []const AccountClaim, lhs: AccountId, rhs: AccountId) bool {
+            fn accountTrieLessThan(claims: []const AccountClaim, lhs: AccountId, rhs: AccountId) bool {
                 return std.mem.lessThan(
                     u8,
-                    &accounts[@intFromEnum(lhs)].trie_key,
-                    &accounts[@intFromEnum(rhs)].trie_key,
+                    &claims[@intFromEnum(lhs)].trie_key,
+                    &claims[@intFromEnum(rhs)].trie_key,
                 );
             }
         };
@@ -209,11 +209,11 @@ pub const ClaimPlan = struct {
     pub fn storageId(self: ClaimPlan, account: AccountId, slot: u256) ?StorageId {
         const range = self.accounts[@intFromEnum(account)].storage;
         const window = self.storage[range.start..range.end()];
-        const S = struct = {
-            fn compareStorageSlot(slot: u256, item: StorageClaim) std.math.Order {
-                return std.math.order(slot, item.slot);
+        const S = struct {
+            fn compareStorageSlot(target: u256, item: StorageClaim) std.math.Order {
+                return std.math.order(target, item.slot);
             }
-        }
+        };
         const offset = std.sort.binarySearch(StorageClaim, window, slot, S.compareStorageSlot) orelse
             return null;
         return @enumFromInt(@as(u32, @intCast(range.start + offset)));
