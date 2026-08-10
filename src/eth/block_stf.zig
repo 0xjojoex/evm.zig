@@ -1016,6 +1016,7 @@ fn executeBlock(
         input.block_access_list
     else
         null;
+    const validates_block_access_list = @hasField(@TypeOf(input), "block_access_list");
     const resource_preparer = if (comptime @hasField(@TypeOf(input), "execution_resource_preparer"))
         input.execution_resource_preparer
     else
@@ -1228,27 +1229,53 @@ fn executeBlock(
 
     try step_capture.finishBlock();
     if (block_access_list_enabled) {
-        observed_block_access_list = consensus_bal.finish() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return err,
-        };
-        // BlockBuilder emits canonical structure; only its consensus item budget remains.
-        block_admission.validateCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
-            error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
-            else => return err,
-        };
+        const claim_verified_without_artifact = if (comptime validates_block_access_list and
+            @TypeOf(observer) == void)
+        blk: {
+            const expected = bal_claim.accounts() orelse break :blk false;
+            if (!try consensus_bal.matchesClaim(expected)) break :blk false;
+            computed_block_access_list_hash = crypto.keccak256(block_access_list.?);
+            break :blk true;
+        } else false;
 
-        observed_block_access_list_encoded = try eth_bal.encodeAlloc(allocator, observed_block_access_list.?.accounts);
-        computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
-        if (block_access_list) |encoded_claim| {
-            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) {
-                block_access_list_mismatch = true;
-                if (comptime @TypeOf(observer) != void) {
-                    observer.blockAccessListMismatch(
-                        bal_claim.accounts().?,
-                        observed_block_access_list.?.accounts,
-                    );
+        if (claim_verified_without_artifact) {
+            // The admitted canonical claim is the observed BAL; validation
+            // needs its commitment but owns no produced artifact.
+        } else {
+            observed_block_access_list = consensus_bal.finish() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return err,
+            };
+            // BlockBuilder emits canonical structure; only its consensus item budget remains.
+            block_admission.validateCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
+                error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
+                else => return err,
+            };
+
+            var needs_encoded_block_access_list = !validates_block_access_list or
+                @TypeOf(observer) != void;
+            if (block_access_list) |encoded_claim| {
+                if (!eth_bal.eql(bal_claim.accounts().?, observed_block_access_list.?.accounts)) {
+                    block_access_list_mismatch = true;
+                    needs_encoded_block_access_list = true;
+                    if (comptime @TypeOf(observer) != void) {
+                        observer.blockAccessListMismatch(
+                            bal_claim.accounts().?,
+                            observed_block_access_list.?.accounts,
+                        );
+                    }
+                } else if (!needs_encoded_block_access_list) {
+                    computed_block_access_list_hash = crypto.keccak256(encoded_claim);
                 }
+            } else {
+                needs_encoded_block_access_list = true;
+            }
+            if (needs_encoded_block_access_list) {
+                observed_block_access_list_encoded = try eth_bal.encodeAlloc(
+                    allocator,
+                    observed_block_access_list.?.accounts,
+                );
+                computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
             }
         }
     }
@@ -1298,8 +1325,10 @@ fn executeBlock(
     }
 
     run.block_access_list_mismatch = block_access_list_mismatch;
-    run.encoded_block_access_list = observed_block_access_list_encoded;
-    observed_block_access_list_encoded = null;
+    if (comptime !validates_block_access_list) {
+        run.encoded_block_access_list = observed_block_access_list_encoded;
+        observed_block_access_list_encoded = null;
+    }
     run.candidate_ready = true;
     return result;
 }

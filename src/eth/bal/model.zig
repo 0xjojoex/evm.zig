@@ -162,6 +162,55 @@ pub fn validate(block_access_list: BlockAccessList, options: ValidationOptions) 
     }
 }
 
+pub fn eql(expected: BlockAccessList, actual: BlockAccessList) bool {
+    if (expected.len != actual.len) return false;
+    for (expected, actual) |expected_account, actual_account| {
+        if (!accountEql(expected_account, actual_account)) return false;
+    }
+    return true;
+}
+
+pub fn accountEql(expected: AccountChanges, actual: AccountChanges) bool {
+    return std.mem.eql(u8, &expected.address, &actual.address) and
+        storageChangesEql(expected.storage_changes, actual.storage_changes) and
+        std.mem.eql(u256, expected.storage_reads, actual.storage_reads) and
+        changesEql(BalanceChange, expected.balance_changes, actual.balance_changes) and
+        changesEql(NonceChange, expected.nonce_changes, actual.nonce_changes) and
+        codeChangesEql(expected.code_changes, actual.code_changes);
+}
+
+fn storageChangesEql(expected: []const SlotChanges, actual: []const SlotChanges) bool {
+    if (expected.len != actual.len) return false;
+    for (expected, actual) |expected_slot, actual_slot| {
+        if (expected_slot.slot != actual_slot.slot or
+            !changesEql(StorageChange, expected_slot.changes, actual_slot.changes))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn changesEql(comptime T: type, expected: []const T, actual: []const T) bool {
+    if (expected.len != actual.len) return false;
+    for (expected, actual) |expected_change, actual_change| {
+        if (!std.meta.eql(expected_change, actual_change)) return false;
+    }
+    return true;
+}
+
+pub fn codeChangesEql(expected: []const CodeChange, actual: []const CodeChange) bool {
+    if (expected.len != actual.len) return false;
+    for (expected, actual) |expected_change, actual_change| {
+        if (expected_change.block_access_index != actual_change.block_access_index or
+            !std.mem.eql(u8, expected_change.new_code, actual_change.new_code))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 pub fn validateGasLimit(block_access_list: BlockAccessList, block_gas_limit: u64) ValidationError!void {
     const max_items = block_gas_limit / item_cost;
     const item_count = count(block_access_list).blockAccessItems();

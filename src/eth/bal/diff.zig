@@ -24,7 +24,7 @@ pub const Diff = struct {
 
             switch (order) {
                 .eq => {
-                    if (!accountEqual(expected_account.?.*, actual_account.?.*)) {
+                    if (!bal.accountEql(expected_account.?.*, actual_account.?.*)) {
                         try writeAccountDiff(writer, expected_account, actual_account);
                     }
                     expected_index += 1;
@@ -130,47 +130,6 @@ fn writeWords(writer: *std.Io.Writer, words: []const u256) std.Io.Writer.Error!v
         try writer.print("0x{x}", .{word});
     }
     try writer.writeByte(']');
-}
-
-fn accountEqual(expected: bal.AccountChanges, actual: bal.AccountChanges) bool {
-    return std.mem.eql(u8, &expected.address, &actual.address) and
-        storageChangesEqual(expected.storage_changes, actual.storage_changes) and
-        std.mem.eql(u256, expected.storage_reads, actual.storage_reads) and
-        slicesEqual(bal.BalanceChange, expected.balance_changes, actual.balance_changes) and
-        slicesEqual(bal.NonceChange, expected.nonce_changes, actual.nonce_changes) and
-        codeChangesEqual(expected.code_changes, actual.code_changes);
-}
-
-fn storageChangesEqual(expected: []const bal.SlotChanges, actual: []const bal.SlotChanges) bool {
-    if (expected.len != actual.len) return false;
-    for (expected, actual) |expected_slot, actual_slot| {
-        if (expected_slot.slot != actual_slot.slot or
-            !slicesEqual(bal.StorageChange, expected_slot.changes, actual_slot.changes))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn slicesEqual(comptime T: type, expected: []const T, actual: []const T) bool {
-    if (expected.len != actual.len) return false;
-    for (expected, actual) |expected_change, actual_change| {
-        if (!std.meta.eql(expected_change, actual_change)) return false;
-    }
-    return true;
-}
-
-fn codeChangesEqual(expected: []const bal.CodeChange, actual: []const bal.CodeChange) bool {
-    if (expected.len != actual.len) return false;
-    for (expected, actual) |expected_change, actual_change| {
-        if (expected_change.block_access_index != actual_change.block_access_index or
-            !std.mem.eql(u8, expected_change.new_code, actual_change.new_code))
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 test "BAL diff reports only changed accounts" {

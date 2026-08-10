@@ -39,6 +39,7 @@ pub const SkipReason = enum(u8) {
     unsupported_transaction_type,
     unsupported_checkpoint_trace,
     unsupported_fork,
+    stateless_rejection_not_reproduced,
 };
 
 pub const FailReason = enum(u8) {
@@ -174,6 +175,13 @@ fn runFixture(
             continue;
         }
         const expected_label = if (expected_exception) |value| jsonString(value) orelse "<non-string>" else null;
+        const expects_valid = if (expected_label == null)
+            expectedValidationSuccess(allocator, &block) catch {
+                summary.countFail(.malformed_fixture);
+                continue;
+            }
+        else
+            false;
         var decoded_block: ?JsonObject = null;
         if (expected_label != null) {
             if (block.get("rlp_decoded")) |value| {
@@ -275,9 +283,25 @@ fn runFixture(
             if (options.verbose) std.debug.print("  expected {s} block={} status={s} label={s}\n", .{ test_name, block_index, @tagName(result.status), label });
             continue;
         }
-        if (result.status != .valid) {
+        if (!expects_valid and result.status == .valid) {
             if (options.verbose) {
-                std.debug.print("  {s} block={} status={s}\n", .{ test_name, block_index, @tagName(result.status) });
+                std.debug.print("  skip {s} block={} stateless wire rejection not reproduced by BlockSTF\n", .{
+                    test_name,
+                    block_index,
+                });
+            }
+            summary.fixtures -= 1;
+            summary.countSkip(.stateless_rejection_not_reproduced);
+            continue;
+        }
+        if ((result.status == .valid) != expects_valid) {
+            if (options.verbose) {
+                std.debug.print("  {s} block={} expected_valid={} status={s}\n", .{
+                    test_name,
+                    block_index,
+                    expects_valid,
+                    @tagName(result.status),
+                });
                 std.debug.print("    state={x} receipts={x} requests={x} bal={x}\n", .{
                     result.state_root,
                     result.receipts_root,
@@ -297,6 +321,16 @@ fn runFixture(
         _ = path;
         summary.passed += 1;
     }
+}
+
+fn expectedValidationSuccess(allocator: std.mem.Allocator, block: *const JsonObject) !bool {
+    const value = block.get("statelessOutputBytes") orelse return true;
+    const encoded = try parseBytesFromValue(allocator, value);
+    defer allocator.free(encoded);
+    return (try evmz.stateless.wire.StatelessValidationResult.decode(
+        allocator,
+        encoded,
+    )).successful_validation;
 }
 
 fn runBlock(
@@ -831,6 +865,50 @@ test "stateless BlockSTF EEST runner validates a witness-backed empty Cancun blo
     try std.testing.expectEqual(@as(usize, 1), rejected.expected.rejected);
     try std.testing.expectEqual(@as(usize, 1), rejected.expected.rejected_statuses[@intFromEnum(ExpectedStatus.timestamp_mismatch)]);
     try std.testing.expectEqual(@as(usize, 0), rejected.failed);
+
+    const invalid_fixture = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        fixture,
+        "\"timestamp\": \"0x01\"",
+        "\"timestamp\": \"0x00\"",
+    );
+    defer std.testing.allocator.free(invalid_fixture);
+    const unsuccessful_output_field =
+        "\"statelessOutputBytes\": \"0x" ++
+        "36bf02569d0c0a7806f23f6eb474c4d90c3e8abcba7db4aaae6f3157f0395e28" ++
+        "002500000001000000000000000c0000000400000008000000080000000000000000000000" ++
+        "\", \"executionWitness\":";
+    const expected_invalid_fixture = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        invalid_fixture,
+        "\"executionWitness\":",
+        unsuccessful_output_field,
+    );
+    defer std.testing.allocator.free(expected_invalid_fixture);
+
+    const expected_invalid = try runSlice(std.testing.allocator, expected_invalid_fixture, .{}, "expected-invalid-smoke.json");
+    try std.testing.expectEqual(@as(usize, 1), expected_invalid.fixtures);
+    try std.testing.expectEqual(@as(usize, 1), expected_invalid.passed);
+    try std.testing.expectEqual(@as(usize, 0), expected_invalid.failed);
+
+    const wire_rejected_fixture = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        fixture,
+        "\"executionWitness\":",
+        unsuccessful_output_field,
+    );
+    defer std.testing.allocator.free(wire_rejected_fixture);
+    const wire_rejected = try runSlice(std.testing.allocator, wire_rejected_fixture, .{}, "wire-rejected.json");
+    try std.testing.expectEqual(@as(usize, 0), wire_rejected.fixtures);
+    try std.testing.expectEqual(@as(usize, 1), wire_rejected.skipped);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        wire_rejected.skip_reasons[@intFromEnum(SkipReason.stateless_rejection_not_reproduced)],
+    );
+    try std.testing.expectEqual(@as(usize, 0), wire_rejected.failed);
 }
 
 test "stateless BlockSTF EEST runner requires the genesis child" {

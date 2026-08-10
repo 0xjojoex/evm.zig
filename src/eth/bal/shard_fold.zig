@@ -96,31 +96,92 @@ pub const ShardFold = struct {
         return result;
     }
 
-    fn finishFallible(self: *ShardFold) Error!bal.Decoded {
-        const account_order = try self.allocator.alloc(usize, self.accounts.count());
-        defer self.allocator.free(account_order);
-        for (account_order, 0..) |*index, value| index.* = value;
-        std.sort.pdq(usize, account_order, self.accounts.keys(), accountIndexLessThan);
+    /// Compare the canonical fold directly with an admitted claim. This keeps
+    /// the fold live so a mismatch can still be materialized for diagnostics.
+    pub fn matchesClaim(self: *ShardFold, expected: bal.BlockAccessList) Error!bool {
+        switch (self.lifecycle) {
+            .building => {},
+            .failed => return error.FoldFailed,
+            .finished => return error.FoldAlreadyFinished,
+        }
+        return self.matchesClaimFallible(expected) catch |err| {
+            self.lifecycle = .failed;
+            return err;
+        };
+    }
 
-        var accounts: std.ArrayList(bal.AccountChanges) = .empty;
-        errdefer {
-            for (accounts.items) |*account| deinitAccount(self.allocator, account);
-            accounts.deinit(self.allocator);
-        }
-        try accounts.ensureTotalCapacity(self.allocator, self.accounts.count());
-        for (account_order) |account_index| {
-            const account = &self.accounts.values()[account_index];
-            var owned = try account.toOwnedAccount(self.allocator, self.accounts.keys()[account_index]);
-            errdefer deinitAccount(self.allocator, &owned);
-            accounts.appendAssumeCapacity(owned);
-        }
-        return .{ .accounts = try accounts.toOwnedSlice(self.allocator) };
+    fn finishFallible(self: *ShardFold) Error!bal.Decoded {
+        var canonical = try Canonical.init(self);
+        defer canonical.deinit();
+        return canonical.toOwnedDecoded();
+    }
+
+    fn matchesClaimFallible(self: *ShardFold, expected: bal.BlockAccessList) Error!bool {
+        var canonical = try Canonical.init(self);
+        defer canonical.deinit();
+        return canonical.matchesClaim(expected);
     }
 
     fn accountFor(self: *ShardFold, target: bal.Address) Error!*FoldAccount {
         const result = try self.accounts.getOrPut(self.allocator, target);
         if (!result.found_existing) result.value_ptr.* = .{};
         return result.value_ptr;
+    }
+};
+
+/// One validated canonical ordering of a live fold. Materialization and claim
+/// comparison intentionally share this authority; they differ only in what
+/// they do with the ordered values.
+const Canonical = struct {
+    allocator: Allocator,
+    fold: *ShardFold,
+    account_order: []usize,
+
+    fn init(fold: *ShardFold) ShardFold.Error!Canonical {
+        const account_order = try fold.allocator.alloc(usize, fold.accounts.count());
+        for (account_order, 0..) |*index, value| index.* = value;
+        std.sort.pdq(usize, account_order, fold.accounts.keys(), accountIndexLessThan);
+        return .{ .allocator = fold.allocator, .fold = fold, .account_order = account_order };
+    }
+
+    fn deinit(self: *Canonical) void {
+        self.allocator.free(self.account_order);
+        self.* = undefined;
+    }
+
+    fn matchesClaim(self: *const Canonical, expected: bal.BlockAccessList) ShardFold.Error!bool {
+        if (self.account_order.len != expected.len) return false;
+        for (self.account_order, expected) |account_index, expected_account| {
+            var actual = try self.account(account_index);
+            defer actual.deinit(self.allocator);
+            if (!actual.matchesClaim(expected_account)) return false;
+        }
+        return true;
+    }
+
+    fn toOwnedDecoded(self: *Canonical) ShardFold.Error!bal.Decoded {
+        var accounts: std.ArrayList(bal.AccountChanges) = .empty;
+        errdefer {
+            for (accounts.items) |*owned| deinitAccount(self.allocator, owned);
+            accounts.deinit(self.allocator);
+        }
+        try accounts.ensureTotalCapacity(self.allocator, self.account_order.len);
+        for (self.account_order) |account_index| {
+            var canonical = try self.account(account_index);
+            defer canonical.deinit(self.allocator);
+            var owned = try canonical.toOwnedAccount(self.allocator);
+            errdefer deinitAccount(self.allocator, &owned);
+            accounts.appendAssumeCapacity(owned);
+        }
+        return .{ .accounts = try accounts.toOwnedSlice(self.allocator) };
+    }
+
+    fn account(self: *const Canonical, index: usize) ShardFold.Error!CanonicalAccount {
+        return CanonicalAccount.init(
+            self.allocator,
+            self.fold.accounts.keys()[index],
+            &self.fold.accounts.values()[index],
+        );
     }
 };
 
@@ -224,43 +285,95 @@ const FoldAccount = struct {
             });
         };
     }
+};
 
-    fn toOwnedAccount(
-        self: *FoldAccount,
+const CanonicalAccount = struct {
+    address: bal.Address,
+    fold: *FoldAccount,
+    storage_order: []usize,
+
+    fn init(
         allocator: Allocator,
-        target: bal.Address,
-    ) ShardFold.Error!bal.AccountChanges {
-        var result = bal.AccountChanges{ .address = target };
+        address: bal.Address,
+        fold: *FoldAccount,
+    ) ShardFold.Error!CanonicalAccount {
+        const storage_order = try allocator.alloc(usize, fold.storage_changes.items.len);
+        errdefer allocator.free(storage_order);
+        for (storage_order, 0..) |*entry, index| entry.* = index;
+        std.sort.pdq(usize, storage_order, fold.storage_changes.items, storageChangeIndexLessThan);
+        try rejectDuplicateStorageIndices(fold.storage_changes.items, storage_order);
+
+        std.mem.sort(u256, fold.storage_reads.items, {}, u256LessThan);
+        std.mem.sort(bal.BalanceChange, fold.balance_changes.items, {}, balanceChangeLessThan);
+        try rejectDuplicateBalanceIndices(fold.balance_changes.items);
+        std.mem.sort(bal.NonceChange, fold.nonce_changes.items, {}, nonceChangeLessThan);
+        try rejectDuplicateNonceIndices(fold.nonce_changes.items);
+        std.mem.sort(bal.CodeChange, fold.code_changes.items, {}, codeChangeLessThan);
+        try rejectDuplicateCodeIndices(fold.code_changes.items);
+        return .{ .address = address, .fold = fold, .storage_order = storage_order };
+    }
+
+    fn deinit(self: *CanonicalAccount, allocator: Allocator) void {
+        allocator.free(self.storage_order);
+        self.* = undefined;
+    }
+
+    fn matchesClaim(self: *const CanonicalAccount, expected: bal.AccountChanges) bool {
+        if (!std.mem.eql(u8, &self.address, &expected.address) or
+            !self.storageChangesMatch(expected.storage_changes) or
+            !self.storageReadsMatch(expected.storage_reads) or
+            !bal.changesEql(bal.BalanceChange, expected.balance_changes, self.fold.balance_changes.items) or
+            !bal.changesEql(bal.NonceChange, expected.nonce_changes, self.fold.nonce_changes.items) or
+            !bal.codeChangesEql(expected.code_changes, self.fold.code_changes.items))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    fn storageChangesMatch(self: *const CanonicalAccount, expected: []const bal.SlotChanges) bool {
+        var actual_index: usize = 0;
+        for (expected) |expected_slot| {
+            if (actual_index == self.storage_order.len) return false;
+            const slot = self.storageChange(actual_index).slot;
+            if (slot != expected_slot.slot) return false;
+
+            var change_index: usize = 0;
+            while (actual_index < self.storage_order.len and self.storageChange(actual_index).slot == slot) {
+                if (change_index == expected_slot.changes.len) return false;
+                const expected_change = expected_slot.changes[change_index];
+                const actual = self.storageChange(actual_index);
+                if (expected_change.block_access_index != actual.block_access_index or
+                    expected_change.new_value != actual.new_value)
+                {
+                    return false;
+                }
+                change_index += 1;
+                actual_index += 1;
+            }
+            if (change_index != expected_slot.changes.len) return false;
+        }
+        return actual_index == self.storage_order.len;
+    }
+
+    fn storageReadsMatch(self: *const CanonicalAccount, expected: []const u256) bool {
+        var reads = CanonicalStorageReads.init(self);
+        for (expected) |slot| if (reads.next() != slot) return false;
+        return reads.next() == null;
+    }
+
+    fn toOwnedAccount(self: *CanonicalAccount, allocator: Allocator) ShardFold.Error!bal.AccountChanges {
+        var result = bal.AccountChanges{ .address = self.address };
         errdefer deinitAccount(allocator, &result);
-
         result.storage_changes = try self.toOwnedStorageChanges(allocator);
-        result.storage_reads = try self.toOwnedStorageReads(allocator, result.storage_changes);
-
-        std.mem.sort(bal.BalanceChange, self.balance_changes.items, {}, balanceChangeLessThan);
-        try rejectDuplicateBalanceIndices(self.balance_changes.items);
-        result.balance_changes = try self.balance_changes.toOwnedSlice(allocator);
-
-        std.mem.sort(bal.NonceChange, self.nonce_changes.items, {}, nonceChangeLessThan);
-        try rejectDuplicateNonceIndices(self.nonce_changes.items);
-        result.nonce_changes = try self.nonce_changes.toOwnedSlice(allocator);
-
-        std.mem.sort(bal.CodeChange, self.code_changes.items, {}, codeChangeLessThan);
-        try rejectDuplicateCodeIndices(self.code_changes.items);
-        result.code_changes = try self.code_changes.toOwnedSlice(allocator);
+        result.storage_reads = try self.toOwnedStorageReads(allocator);
+        result.balance_changes = try self.fold.balance_changes.toOwnedSlice(allocator);
+        result.nonce_changes = try self.fold.nonce_changes.toOwnedSlice(allocator);
+        result.code_changes = try self.fold.code_changes.toOwnedSlice(allocator);
         return result;
     }
 
-    fn toOwnedStorageChanges(self: *FoldAccount, allocator: Allocator) ShardFold.Error![]const bal.SlotChanges {
-        const storage_order = try allocator.alloc(usize, self.storage_changes.items.len);
-        defer allocator.free(storage_order);
-        for (storage_order, 0..) |*entry, index| entry.* = index;
-        std.sort.pdq(
-            usize,
-            storage_order,
-            self.storage_changes.items,
-            storageChangeIndexLessThan,
-        );
-
+    fn toOwnedStorageChanges(self: *const CanonicalAccount, allocator: Allocator) Allocator.Error![]const bal.SlotChanges {
         var slots: std.ArrayList(bal.SlotChanges) = .empty;
         errdefer {
             for (slots.items) |slot| allocator.free(@constCast(slot.changes));
@@ -268,52 +381,85 @@ const FoldAccount = struct {
         }
 
         var index: usize = 0;
-        while (index < storage_order.len) {
-            const slot = self.storage_changes.items[storage_order[index]].slot;
+        while (index < self.storage_order.len) {
+            const slot = self.storageChange(index).slot;
             var changes: std.ArrayList(bal.StorageChange) = .empty;
             errdefer changes.deinit(allocator);
-            while (index < storage_order.len and
-                self.storage_changes.items[storage_order[index]].slot == slot)
-            {
-                const change = self.storage_changes.items[storage_order[index]];
-                if (changes.getLastOrNull()) |previous| {
-                    if (previous.block_access_index == change.block_access_index)
-                        return error.DuplicateStorageChangeIndex;
-                }
+            while (index < self.storage_order.len and self.storageChange(index).slot == slot) {
+                const change = self.storageChange(index);
                 try changes.append(allocator, .{
                     .block_access_index = change.block_access_index,
                     .new_value = change.new_value,
                 });
                 index += 1;
             }
-            const owned_slot_changes = try changes.toOwnedSlice(allocator);
-            errdefer allocator.free(owned_slot_changes);
-            try slots.append(allocator, .{ .slot = slot, .changes = owned_slot_changes });
+            const owned_changes = try changes.toOwnedSlice(allocator);
+            errdefer allocator.free(owned_changes);
+            try slots.append(allocator, .{ .slot = slot, .changes = owned_changes });
         }
-        return try slots.toOwnedSlice(allocator);
+        return slots.toOwnedSlice(allocator);
     }
 
-    fn toOwnedStorageReads(
-        self: *FoldAccount,
-        allocator: Allocator,
-        storage_changes: []const bal.SlotChanges,
-    ) Allocator.Error![]const u256 {
-        std.mem.sort(u256, self.storage_reads.items, {}, u256LessThan);
-        var reads: std.ArrayList(u256) = .empty;
-        errdefer reads.deinit(allocator);
+    fn toOwnedStorageReads(self: *const CanonicalAccount, allocator: Allocator) Allocator.Error![]const u256 {
+        var result: std.ArrayList(u256) = .empty;
+        errdefer result.deinit(allocator);
+        var reads = CanonicalStorageReads.init(self);
+        while (reads.next()) |slot| try result.append(allocator, slot);
+        return result.toOwnedSlice(allocator);
+    }
 
-        var previous: ?u256 = null;
-        var change_index: usize = 0;
-        for (self.storage_reads.items) |slot| {
-            if (previous != null and previous.? == slot) continue;
-            previous = slot;
-            while (change_index < storage_changes.len and storage_changes[change_index].slot < slot) change_index += 1;
-            if (change_index < storage_changes.len and storage_changes[change_index].slot == slot) continue;
-            try reads.append(allocator, slot);
-        }
-        return try reads.toOwnedSlice(allocator);
+    fn storageChange(self: *const CanonicalAccount, index: usize) FoldStorageChange {
+        return self.fold.storage_changes.items[self.storage_order[index]];
     }
 };
+
+const CanonicalStorageReads = struct {
+    account: *const CanonicalAccount,
+    read_index: usize = 0,
+    change_index: usize = 0,
+    previous: ?u256 = null,
+
+    fn init(account: *const CanonicalAccount) CanonicalStorageReads {
+        return .{ .account = account };
+    }
+
+    fn next(self: *CanonicalStorageReads) ?u256 {
+        while (self.read_index < self.account.fold.storage_reads.items.len) {
+            const slot = self.account.fold.storage_reads.items[self.read_index];
+            self.read_index += 1;
+            if (self.previous != null and self.previous.? == slot) continue;
+            self.previous = slot;
+            while (self.change_index < self.account.storage_order.len and
+                self.account.storageChange(self.change_index).slot < slot)
+            {
+                self.change_index += 1;
+            }
+            if (self.change_index < self.account.storage_order.len and
+                self.account.storageChange(self.change_index).slot == slot)
+            {
+                continue;
+            }
+            return slot;
+        }
+        return null;
+    }
+};
+
+fn rejectDuplicateStorageIndices(
+    changes: []const FoldStorageChange,
+    order: []const usize,
+) ShardFold.Error!void {
+    if (order.len < 2) return;
+    for (order[1..], order[0 .. order.len - 1]) |current_index, previous_index| {
+        const current = changes[current_index];
+        const previous = changes[previous_index];
+        if (current.slot == previous.slot and
+            current.block_access_index == previous.block_access_index)
+        {
+            return error.DuplicateStorageChangeIndex;
+        }
+    }
+}
 
 fn rejectDuplicateBalanceIndices(changes: []const bal.BalanceChange) ShardFold.Error!void {
     if (changes.len < 2) return;
@@ -471,4 +617,51 @@ test "large storage fold canonicalizes through indirect order" {
         try std.testing.expectEqual(@as(usize, 2), slot.changes.len);
         try std.testing.expect(slot.changes[0].block_access_index < slot.changes[1].block_access_index);
     }
+}
+
+test "claim comparison preserves mismatch materialization" {
+    const allocator = std.testing.allocator;
+    const target: bal.Address = @splat(1);
+    var storage = [_]observation.StorageObservation{
+        .{ .slot = 2, .original = 0, .current = 3 },
+        .{ .slot = 1, .original = 4, .current = 4 },
+    };
+    var fold = ShardFold.init(allocator);
+    defer fold.deinit();
+    try fold.appendObservation(.{
+        .address = target,
+        .storage = &storage,
+        .balance = .{ .original = 0, .current = 7 },
+    }, 1);
+
+    const storage_changes = [_]bal.StorageChange{.{
+        .block_access_index = 1,
+        .new_value = 3,
+    }};
+    const slots = [_]bal.SlotChanges{.{
+        .slot = 2,
+        .changes = &storage_changes,
+    }};
+    const reads = [_]u256{1};
+    const balances = [_]bal.BalanceChange{.{
+        .block_access_index = 1,
+        .post_balance = 7,
+    }};
+    const expected = [_]bal.AccountChanges{.{
+        .address = target,
+        .storage_changes = &slots,
+        .storage_reads = &reads,
+        .balance_changes = &balances,
+    }};
+    try std.testing.expect(try fold.matchesClaim(&expected));
+
+    var wrong_balances = balances;
+    wrong_balances[0].post_balance = 8;
+    var wrong = expected;
+    wrong[0].balance_changes = &wrong_balances;
+    try std.testing.expect(!try fold.matchesClaim(&wrong));
+
+    var materialized = try fold.finish();
+    defer materialized.deinit(allocator);
+    try std.testing.expect(bal.eql(&expected, materialized.accounts));
 }
