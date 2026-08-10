@@ -917,8 +917,10 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
         /// budget, execution, diagnostics, accumulation, after-transaction
         /// system calls, step-trace finish. Returns the terminal Result when
         /// the block must stop at this transaction, null to continue.
-        fn executePayloadTransaction(
-            self: @This(),
+        /// Inline: this is the fold's hot loop body; an outlined call plus
+        /// context copy costs measurable guest steps per transaction.
+        inline fn executePayloadTransaction(
+            self: *const @This(),
             entry: TransactionInput,
             tx_index: usize,
             accumulated: *BlockAccumulator,
@@ -1254,10 +1256,11 @@ pub fn executeBlock(
             &observation_collector,
         )
     else
-        applyWithdrawalsNormal(
+        applyWithdrawals(
             &executor,
             lifecycleExecutionContext(input.env),
             input.withdrawals,
+            {},
         );
     withdrawals_result catch |err| {
         return switch (Executor.errors.normalize(err)) {
@@ -1266,15 +1269,24 @@ pub fn executeBlock(
         };
     };
 
-    const derived_requests_result = deriveRequestsMode(
-        allocator,
-        &executor,
-        input.env,
-        block.progress(),
-        accumulated.deposit_request_data.items,
-        observe_state,
-        &observation_collector,
-    );
+    const derived_requests_result = if (observe_state)
+        deriveRequests(
+            allocator,
+            &executor,
+            input.env,
+            block.progress(),
+            accumulated.deposit_request_data.items,
+            &observation_collector,
+        )
+    else
+        deriveRequests(
+            allocator,
+            &executor,
+            input.env,
+            block.progress(),
+            accumulated.deposit_request_data.items,
+            {},
+        );
     const derived_requests = derived_requests_result catch |err| {
         return switch (Executor.errors.normalize(err)) {
             error.InvalidWitness => .{ .status = .invalid_witness },
@@ -1487,7 +1499,9 @@ pub fn decodeRawTransactions(
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-/// Internal to `eth/`: shared with the BAL candidate lane.
+/// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
+/// the instrumentation at comptime: a state-observation collector, or `{}`
+/// for unobserved execution.
 pub fn applyWithdrawals(
     executor: anytype,
     execution_context: execution.ExecutionContext,
@@ -1495,29 +1509,12 @@ pub fn applyWithdrawals(
     observer: anytype,
 ) !void {
     if (withdrawals.len == 0) return;
-    const observed = executor.observe(observer);
-    try observed.beginStateTransition(execution_context);
+    const observed = comptime @TypeOf(observer) != void;
+    const scope = if (comptime observed) executor.observe(observer) else executor;
+    try scope.beginStateTransition(execution_context);
     errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
-        try executor.observeAccountAccess(withdrawal.address);
-        const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
-        executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
-            error.BalanceOverflow => return error.WithdrawalBalanceOverflow,
-            else => return err,
-        };
-    }
-    try observed.commitTransaction();
-}
-
-fn applyWithdrawalsNormal(
-    executor: anytype,
-    execution_context: execution.ExecutionContext,
-    withdrawals: []const Withdrawal,
-) !void {
-    if (withdrawals.len == 0) return;
-    try executor.beginStateTransition(execution_context);
-    errdefer executor.discardStateTransition();
-    for (withdrawals) |withdrawal| {
+        if (comptime observed) try executor.observeAccountAccess(withdrawal.address);
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch
             return error.WithdrawalBalanceOverflow;
         executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
@@ -1525,36 +1522,18 @@ fn applyWithdrawalsNormal(
             else => return err,
         };
     }
-    try executor.commitTransaction();
+    try scope.commitTransaction();
 }
 
-/// Internal to `eth/`: shared with the BAL candidate lane.
+/// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
+/// the instrumentation at comptime: a state-observation collector, or `{}`
+/// for unobserved execution.
 pub fn deriveRequests(
     allocator: std.mem.Allocator,
     executor: anytype,
     env: Env,
     progress: vm.BlockResult,
     deposit_request_data: []const u8,
-    observer: anytype,
-) ![]const []const u8 {
-    return deriveRequestsMode(
-        allocator,
-        executor,
-        env,
-        progress,
-        deposit_request_data,
-        true,
-        observer,
-    );
-}
-
-fn deriveRequestsMode(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-    deposit_request_data: []const u8,
-    observe: bool,
     observer: anytype,
 ) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
@@ -1571,20 +1550,28 @@ fn deriveRequestsMode(
         deposit_request_owned = false;
     }
 
-    const block_end_requests = if (observe)
-        try deriveFinalizeRequests(
-            allocator,
+    const finalize_context: FinalizeBlockContext = .{
+        .number = env.number,
+        .timestamp = env.timestamp,
+        .transaction_count = progress.tx_count,
+        .gas_used = progress.gas_used,
+        .block_gas = progress.block_gas.total,
+        .state_gas = progress.block_gas.state,
+    };
+    const block_end_requests = if (comptime @TypeOf(observer) != void)
+        try Executor.system_contracts.applyFinalizeBlockObserved(
             executor,
-            env,
-            progress,
+            lifecycleExecutionContext(env),
+            allocator,
+            finalize_context,
             observer,
         )
     else
-        try deriveFinalizeRequestsNormal(
-            allocator,
+        try Executor.system_contracts.applyFinalizeBlock(
             executor,
-            env,
-            progress,
+            lifecycleExecutionContext(env),
+            allocator,
+            finalize_context,
         );
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
@@ -1593,50 +1580,6 @@ fn deriveRequestsMode(
     allocator.free(block_end_requests);
 
     return try requests.toOwnedSlice(allocator);
-}
-
-fn deriveFinalizeRequests(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-    observer: anytype,
-) ![]const []const u8 {
-    return Executor.system_contracts.applyFinalizeBlockObserved(
-        executor,
-        lifecycleExecutionContext(env),
-        allocator,
-        .{
-            .number = env.number,
-            .timestamp = env.timestamp,
-            .transaction_count = progress.tx_count,
-            .gas_used = progress.gas_used,
-            .block_gas = progress.block_gas.total,
-            .state_gas = progress.block_gas.state,
-        },
-        observer,
-    );
-}
-
-fn deriveFinalizeRequestsNormal(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-) ![]const []const u8 {
-    return Executor.system_contracts.applyFinalizeBlock(
-        executor,
-        lifecycleExecutionContext(env),
-        allocator,
-        .{
-            .number = env.number,
-            .timestamp = env.timestamp,
-            .transaction_count = progress.tx_count,
-            .gas_used = progress.gas_used,
-            .block_gas = progress.block_gas.total,
-            .state_gas = progress.block_gas.state,
-        },
-    );
 }
 
 /// Internal to `eth/`: shared with the BAL candidate lane.
