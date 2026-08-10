@@ -101,7 +101,7 @@ const ExecutorServices = struct {
     /// synchronization, and capacity policy are outside executor bounds.
     prepared_code_backend: ?prepared_code.Backend = null,
     block_hash_source: ?BlockHashSource = null,
-    precompile_runtime: ?execution_values.PrecompileRuntime = null,
+    reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
 };
 
 /// A top-level call whose bytecode has already been prepared by the caller.
@@ -188,7 +188,7 @@ pub fn ExecutorType(
         checkpoint_top: usize = 0,
         next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
-        precompile_runtime: ?execution_values.PrecompileRuntime = null,
+        reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
@@ -545,7 +545,7 @@ pub fn ExecutorType(
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
                 .block_hash_source = services.block_hash_source,
-                .precompile_runtime = services.precompile_runtime,
+                .reentrant_native_contract_runtime = services.reentrant_native_contract_runtime,
                 .prepared_code_backend = services.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
             };

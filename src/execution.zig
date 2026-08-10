@@ -10,12 +10,12 @@ const std = @import("std");
 const Address = @import("./address.zig").Address;
 const execution_context = @import("./execution/context.zig");
 
-const precompile_runtime = @import("./execution/precompile_runtime.zig");
+const reentrant_native_contract = @import("./execution/reentrant_native_contract.zig");
 
 pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
-pub const PrecompileCall = precompile_runtime.PrecompileCall;
-pub const PrecompileOutcome = precompile_runtime.PrecompileOutcome;
-pub const PrecompileRuntime = precompile_runtime.PrecompileRuntime;
+pub const ReentrantNativeContractCall = reentrant_native_contract.Call;
+pub const ReentrantNativeContractRuntime = reentrant_native_contract.Runtime;
+pub const NoReentrantNativeContracts = reentrant_native_contract.None;
 pub const resources = @import("./execution/resources.zig");
 
 pub const Status = enum(u8) {
@@ -74,7 +74,7 @@ pub const TopFrameValueTransferInput = struct {
 };
 
 pub const TopLevelDelegatedAccountAccessInput = struct {
-    target_is_precompile: bool,
+    target_is_native_contract: bool,
     already_warm: bool,
 };
 

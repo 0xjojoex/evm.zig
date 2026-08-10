@@ -2362,8 +2362,8 @@ test "exact spec drives precompile warm access" {
 
         pub fn execute(
             entry: Entry,
-            call: evmz.execution.PrecompileCall,
-        ) evmz.precompile.Error!evmz.execution.PrecompileOutcome {
+            call: evmz.precompile.Call,
+        ) evmz.precompile.Error!evmz.precompile.Result {
             _ = entry;
             _ = call;
             return error.NotImplemented;
@@ -2407,14 +2407,14 @@ test "exact spec drives precompile execution" {
 
             pub fn execute(
                 entry: Entry,
-                call: evmz.execution.PrecompileCall,
-            ) evmz.precompile.Error!evmz.execution.PrecompileOutcome {
+                call: evmz.precompile.Call,
+            ) evmz.precompile.Error!evmz.precompile.Result {
                 _ = entry;
-                return .{ .result = .{
+                return .{
                     .status = .success,
                     .output_data = try call.allocator.dupe(u8, &.{0xaa}),
-                    .gas_left = call.message.gas - 7,
-                } };
+                    .gas_left = call.gas - 7,
+                };
             }
         };
     };
@@ -2437,6 +2437,7 @@ test "exact spec drives precompile execution" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 993), result.gas_left);
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.maxRowCount());
 }
 
 test "exact spec drives selfdestruct host policy" {

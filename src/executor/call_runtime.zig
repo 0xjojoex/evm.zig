@@ -746,8 +746,8 @@ pub fn bind(comptime Executor: type) type {
             }
 
             const resolved = try resolveCode(self, recipient);
-            if (!resolved.delegated and spec.precompile.active(recipient)) {
-                var result = try runPrecompileCallTransaction(self, sender, recipient, input, execution_gas, value);
+            if (!resolved.delegated and nativeContractActive(recipient)) {
+                var result = try runNativeCallTransaction(self, sender, recipient, input, execution_gas, value);
                 finishTopFrameStateGas(&result, top_frame_state_gas);
                 return .{ .stage = .payload, .result = result };
             }
@@ -789,7 +789,7 @@ pub fn bind(comptime Executor: type) type {
         fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.execution.DelegatedAccountAccess {
             const already_warm = self.state.isAccountWarm(target);
             const access = spec.call.topLevelDelegatedAccountAccess(.{
-                .target_is_precompile = spec.precompile.active(target),
+                .target_is_native_contract = nativeContractActive(target),
                 .already_warm = already_warm,
             }) orelse return null;
             if (access.status == .cold and !already_warm) {
@@ -881,7 +881,7 @@ pub fn bind(comptime Executor: type) type {
             }
         }
 
-        fn runPrecompileCallTransaction(
+        fn runNativeCallTransaction(
             self: *Executor,
             sender: Address,
             recipient: Address,
@@ -912,7 +912,7 @@ pub fn bind(comptime Executor: type) type {
                 .value = value,
                 .code_address = recipient,
             };
-            const call_result = (try runPrecompileCall(self, &message)) orelse unreachable;
+            const call_result = (try runNativeCall(self, &message)) orelse unreachable;
             return Host.Result.fromCall(call_result).executionResult(self.lastOutputData());
         }
 
@@ -1210,8 +1210,8 @@ pub fn bind(comptime Executor: type) type {
                 }
             }
 
-            if (!resolved.delegated and spec.precompile.active(msg.code_address)) {
-                if (try runPrecompileCall(self, &msg)) |result_value| {
+            if (!resolved.delegated and nativeContractActive(msg.code_address)) {
+                if (try runNativeCall(self, &msg)) |result_value| {
                     var result = result_value;
                     if (result.status() == .success) {
                         try touchEmptyCallRecipient(self, msg);
@@ -1242,7 +1242,7 @@ pub fn bind(comptime Executor: type) type {
             } };
         }
 
-        fn runPrecompileCall(
+        fn runNativeCall(
             self: *Executor,
             msg: *const Host.Message,
         ) !?Host.CallResult {
@@ -1250,32 +1250,34 @@ pub fn bind(comptime Executor: type) type {
             var scratch = try callScratch(self, msg.depth);
             defer scratch.deinit();
 
-            const output_buffer = null;
-            var host_iface = self.host();
-            const precompile = spec.precompile.resolve(msg.code_address) orelse return null;
-            const precompile_outcome = spec.precompile.execute(
-                precompile,
-                .{
+            const precompile = spec.precompile.resolve(msg.code_address);
+            const reentrant = spec.reentrant_native_contract.active(msg.code_address);
+            std.debug.assert(precompile == null or !reentrant);
+            const result = if (precompile) |entry|
+                spec.precompile.execute(entry, .{
+                    .allocator = scratch.allocator,
+                    .input_data = msg.input_data,
+                    .gas = msg.gas,
+                }) catch |err| switch (err) {
+                    error.NotImplemented => return .{
+                        .outcome = .{ .status = .invalid, .cause = .invalid },
+                        .output_data = &.{},
+                        .gas_left = 0,
+                        .gas_refund = 0,
+                        .gas_reservoir = msg.gas_reservoir,
+                    },
+                    else => return err,
+                }
+            else if (reentrant) blk: {
+                const runtime = self.reentrant_native_contract_runtime orelse
+                    return error.MissingReentrantNativeContractRuntime;
+                var host_iface = self.host();
+                break :blk try runtime.execute(.{
                     .allocator = scratch.allocator,
                     .host = &host_iface,
                     .message = msg,
-                    .output_buffer = output_buffer,
-                    .runtime = self.precompile_runtime,
-                },
-            ) catch |err| switch (err) {
-                error.NotImplemented => return .{
-                    .outcome = .{ .status = .invalid, .cause = .invalid },
-                    .output_data = &.{},
-                    .gas_left = 0,
-                    .gas_refund = 0,
-                    .gas_reservoir = msg.gas_reservoir,
-                },
-                else => return err,
-            };
-            const result = switch (precompile_outcome) {
-                .result => |result| result,
-                .service_error => |err| return err,
-            };
+                });
+            } else return null;
 
             defer if (result.output_owned) scratch.allocator.free(result.output_data);
             const output = if (result.output_owned) output: {
@@ -1283,7 +1285,7 @@ pub fn bind(comptime Executor: type) type {
             } else if (result.output_data.len == 0) output: {
                 break :output &.{};
             } else {
-                return error.InvalidPrecompileOutput;
+                return error.InvalidNativeContractOutput;
             };
             const status: execution_values.Status = switch (result.status) {
                 .success => .success,
@@ -1595,7 +1597,7 @@ pub fn bind(comptime Executor: type) type {
         }
 
         fn createCollision(self: *Executor, address: Address) !bool {
-            if (spec.precompile.active(address)) return true;
+            if (nativeContractActive(address)) return true;
             if (try self.state.getAccountOrLoad(address)) |account| {
                 if (account.nonce != 0) return true;
             }
@@ -1606,6 +1608,11 @@ pub fn bind(comptime Executor: type) type {
             // its leaf and creating over it would strand the storage.
             return (try self.state.accountHasCode(address)) or
                 (try self.state.accountHasStorage(address));
+        }
+
+        inline fn nativeContractActive(address: Address) bool {
+            return spec.precompile.active(address) or
+                spec.reentrant_native_contract.active(address);
         }
     };
 }

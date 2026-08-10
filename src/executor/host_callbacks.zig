@@ -45,7 +45,7 @@ pub fn bind(comptime Executor: type) type {
 
                 fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
-                    if (spec.precompile.active(address)) return .warm;
+                    if (nativeContractActive(address)) return .warm;
                     if (self.state.isAccountWarm(address)) return .warm;
                     try self.state.warmAccount(address);
                     return .cold;
@@ -54,7 +54,7 @@ pub fn bind(comptime Executor: type) type {
                 fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     const target = eip7702.delegationTarget(try self.getCode(address)) orelse return null;
-                    if (spec.precompile.active(target)) return .warm;
+                    if (nativeContractActive(target)) return .warm;
                     if (self.state.isAccountWarm(target)) return .warm;
                     try self.state.warmAccount(target);
                     return .cold;
@@ -100,6 +100,11 @@ pub fn bind(comptime Executor: type) type {
                     return should_refund;
                 }
             };
+        }
+
+        inline fn nativeContractActive(address: Address) bool {
+            return spec.precompile.active(address) or
+                spec.reentrant_native_contract.active(address);
         }
 
         fn accountExists(ptr: *anyopaque, address: Address) !bool {

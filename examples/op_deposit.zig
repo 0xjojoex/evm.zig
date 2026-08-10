@@ -914,27 +914,16 @@ test "Fjord activates RIP-7212 P256VERIFY at 3450 gas" {
     try std.testing.expect(!Ecotone.Evm.specification.precompile.active(p256_address));
     try std.testing.expect(Fjord.Evm.specification.precompile.active(p256_address));
 
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const message: evmz.Host.Message = .{
-        .depth = 0,
-        .kind = .call,
-        .gas = fjord_precompile_config.gas.get(.p256verify) + 1,
-        .sender = address.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    const gas = fjord_precompile_config.gas.get(.p256verify) + 1;
     const precompile = Fjord.Evm.specification.precompile.resolve(p256_address).?;
-    const outcome = try Fjord.Evm.specification.precompile.execute(precompile, .{
+    const result = try Fjord.Evm.specification.precompile.execute(precompile, .{
         .allocator = std.testing.allocator,
-        .host = &host,
-        .message = &message,
+        .input_data = &.{},
+        .gas = gas,
     });
-    const result = outcome.result;
 
     try std.testing.expectEqual(evmz.precompile.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 1), result.gas_left);
+    try std.testing.expectEqual(gas - fjord_precompile_config.gas.get(.p256verify), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
 }
 
