@@ -521,14 +521,10 @@ fn optionalF64(value: ?[]const u8) !?f64 {
 fn medianMs(allocator: std.mem.Allocator, values: []const f64) !f64 {
     const sorted = try allocator.dupe(f64, values);
     defer allocator.free(sorted);
-    std.mem.sort(f64, sorted, {}, lessThanF64);
+    std.mem.sort(f64, sorted, {}, std.sort.asc(f64));
     const mid = sorted.len / 2;
     if (sorted.len % 2 == 1) return sorted[mid];
     return (sorted[mid - 1] + sorted[mid]) / 2.0;
-}
-
-fn lessThanF64(_: void, lhs: f64, rhs: f64) bool {
-    return lhs < rhs;
 }
 
 fn meanMs(values: []const f64) f64 {

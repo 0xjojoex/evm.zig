@@ -15,6 +15,10 @@ const IntroducedCodeMap = SparseHashMap(Hash, []const u8);
 pub const ParentCode = struct {
     hash: Hash,
     bytes: []const u8,
+
+    fn hashLessThan(_: void, lhs: ParentCode, rhs: ParentCode) bool {
+        return std.mem.lessThan(u8, &lhs.hash, &rhs.hash);
+    }
 };
 
 pub const CodeView = struct {
@@ -79,7 +83,7 @@ pub const CodeStore = struct {
         errdefer result.deinit(allocator);
         try result.parent.ensureTotalCapacity(allocator, codes.len);
         result.parent.appendSliceAssumeCapacity(codes);
-        std.mem.sort(Entry, result.parent.items, {}, entryLessThan);
+        std.mem.sort(Entry, result.parent.items, {}, Entry.hashLessThan);
         if (result.parent.items.len > 1) {
             for (result.parent.items[1..], result.parent.items[0 .. result.parent.items.len - 1]) |current, previous| {
                 if (!std.mem.eql(u8, &current.hash, &previous.hash)) continue;
@@ -208,10 +212,6 @@ pub const CodeStore = struct {
             }
         }
         return null;
-    }
-
-    fn entryLessThan(_: void, lhs: Entry, rhs: Entry) bool {
-        return std.mem.order(u8, &lhs.hash, &rhs.hash) == .lt;
     }
 };
 
