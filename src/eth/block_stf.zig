@@ -14,12 +14,13 @@ const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_diff = @import("bal/diff.zig");
 const bal_differential = @import("bal/differential.zig");
-const bal_observer = @import("bal/differential/observer.zig");
+const differential_executor = @import("bal/differential/block_executor.zig");
 const tracked_state_projector = @import("bal/tracked_state_projector.zig");
 const bal_witness = @import("bal/witness.zig");
+const block_rules = @import("block_rules.zig");
+const eth_receipt = @import("receipt.zig");
 const execution = @import("../execution.zig");
 const execution_resources = @import("../execution/resources.zig");
-const eth_header = @import("header.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7685 = @import("eip/7685.zig");
 const eth_spec = @import("spec.zig");
@@ -31,93 +32,8 @@ const Revision = @import("revision.zig").Revision;
 const state = @import("../state.zig");
 const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
-const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
 const Backend = @import("../backend.zig").Backend;
-
-fn BalDifferentialOperations(
-    comptime revision: Revision,
-    comptime Engine: type,
-) type {
-    return struct {
-        pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
-        pub const Withdrawal = @import("Withdrawal.zig");
-
-        pub fn appendCandidateDepositRequestData(
-            allocator: std.mem.Allocator,
-            output: *std.ArrayList(u8),
-            logs: state.LogBuffer.View,
-        ) !void {
-            if (revision.isImpl(.prague))
-                try eip6110.appendRequestDataFromLogs(allocator, output, logs);
-        }
-
-        pub fn encodeCandidateReceipt(
-            allocator: std.mem.Allocator,
-            kind: transaction.TxKind,
-            receipt: vm.TxReceiptView,
-        ) ![]u8 {
-            return encodeReceipt(allocator, kind, receipt);
-        }
-
-        pub fn candidateLogsBloom(logs: state.LogBuffer.View) [256]u8 {
-            return logsBloom(logs);
-        }
-
-        pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
-            mergeLogsBloom(target, source);
-        }
-
-        pub fn applyCandidateWithdrawals(
-            executor: *Engine.Executor,
-            execution_context: execution.ExecutionContext,
-            withdrawals: []const @import("Withdrawal.zig"),
-            observer: anytype,
-        ) !void {
-            try applyWithdrawals(executor, execution_context, withdrawals, observer);
-        }
-
-        pub fn deriveCandidateRequests(
-            allocator: std.mem.Allocator,
-            executor: *Engine.Executor,
-            env: vm.Env,
-            progress: vm.BlockResult,
-            deposit_request_data: []const u8,
-            observer: anytype,
-        ) ![]const []const u8 {
-            return deriveRequests(
-                allocator,
-                executor,
-                env,
-                progress,
-                deposit_request_data,
-                observer,
-            );
-        }
-
-        pub fn freeCandidateRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
-            freeRequests(allocator, requests);
-        }
-
-        pub fn candidateRequestsHash(allocator: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
-            return requestsHash(allocator, requests);
-        }
-
-        pub fn candidateReceiptsRoot(allocator: std.mem.Allocator, receipts: []const []const u8) ![32]u8 {
-            return trie.receiptRoot(allocator, receipts);
-        }
-
-        pub fn candidateTransactionBlobGasUsed(tx: transaction.Transaction) !u64 {
-            return transactionBlobGasUsed(revision, Engine, tx);
-        }
-
-        pub fn candidateBlockBlobGasLimit(
-            blob_params: ?transaction.BlobParams,
-        ) !u64 {
-            return blockBlobGasLimit(revision, Engine, blob_params);
-        }
-    };
-}
 
 /// Serial block execution reports its boundaries here. Doing nothing is the
 /// default, and the BAL candidate lane is the only real implementation - it
@@ -136,13 +52,6 @@ const NoBlockObserver = struct {
     pub fn compareBlock(_: *NoBlockObserver, _: anytype) void {}
 };
 
-fn BalDifferentialObserver(comptime revision: Revision, comptime Engine: type) type {
-    return bal_observer.Observer(
-        Engine,
-        BalDifferentialOperations(revision, Engine),
-    );
-}
-
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
 pub const ParentBlobGas = transaction.ExcessBlobGasInput;
@@ -155,193 +64,8 @@ const TxReceiptView = vm.TxReceiptView;
 const Log = vm.Log;
 const TxStatus = vm.TxStatus;
 
-pub const ParallelStrategy = struct {
-    /// Maximum candidate transactions retained and submitted in one batch.
-    /// `1` exercises identical ownership and ordering without overlap.
-    max_in_flight: usize,
-    submission: Submission = .async,
-
-    pub const Submission = bal_differential.ParallelSubmission;
-
-    pub fn assertRequest(self: ParallelStrategy, report: ?*BalDifferentialReport) void {
-        std.debug.assert(self.max_in_flight > 0);
-        std.debug.assert(report != null);
-    }
-};
-
-pub const ParallelResources = struct {
-    /// Backing allocator for isolated growable task arenas. It must support
-    /// overlapping allocation calls made by the supplied `std.Io` runtime.
-    lane_allocator: std.mem.Allocator,
-    /// Frozen concurrent view of the canonical authenticated pre-state. Null
-    /// explicitly falls back to authoritative serial execution.
-    state_reader: ?state.ConcurrentReader = null,
-    /// Frozen concurrent BLOCKHASH source when the canonical input has one.
-    block_hash_source: ?BlockHashSource.Concurrent = null,
-};
-
-/// Single-use BAL parallel block executor bound to caller-owned runtime
-/// capabilities.
-///
-/// `io` and all borrowed input slices must remain valid through `run`. The
-/// executor takes ownership of `input.state_backend`: `run` releases it on
-/// every result, while `deinit` releases it when execution never starts.
-/// Scheduling the whole `run` call through another task is valid, but the
-/// caller must join or cancel that task before calling `deinit`.
-fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
-    if (!Engine.specification.block.block_access_list) {
-        @compileError("BalExecutor requires a fork that commits to an EIP-7928 block access list; " ++
-            @tagName(revision) ++ " does not");
-    }
-    return struct {
-        const Self = @This();
-
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        input: Input,
-        strategy: ParallelStrategy,
-        resources: ParallelResources,
-        lifecycle: Lifecycle = .ready,
-
-        const Input = union(enum) {
-            checked: BlockInput,
-            assume_decoded: AssumeDecodedBlockInput,
-        };
-
-        const Lifecycle = enum {
-            ready,
-            running,
-            finished,
-        };
-
-        /// Bind checked raw transaction input to the caller's I/O runtime.
-        pub fn init(
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            input: BlockInput,
-            strategy: ParallelStrategy,
-            resources: ParallelResources,
-        ) Self {
-            strategy.assertRequest(input.bal_differential);
-            return .{
-                .io = io,
-                .allocator = allocator,
-                .input = .{ .checked = input },
-                .strategy = strategy,
-                .resources = resources,
-            };
-        }
-
-        /// Bind values decoded by a trusted adapter to the caller's I/O runtime.
-        pub fn initAssumeDecoded(
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            input: AssumeDecodedBlockInput,
-            strategy: ParallelStrategy,
-            resources: ParallelResources,
-        ) Self {
-            strategy.assertRequest(input.bal_differential);
-            return .{
-                .io = io,
-                .allocator = allocator,
-                .input = .{ .assume_decoded = input },
-                .strategy = strategy,
-                .resources = resources,
-            };
-        }
-
-        /// Execute and join all private candidate work before returning.
-        pub fn run(self: *Self) !Result {
-            std.debug.assert(self.lifecycle == .ready);
-            self.lifecycle = .running;
-            defer self.lifecycle = .finished;
-
-            return switch (self.input) {
-                .checked => |input| self.runChecked(input),
-                .assume_decoded => |input| self.runAssumeDecoded(input),
-            };
-        }
-
-        fn runChecked(self: *const Self, input: BlockInput) !Result {
-            var state_backend = input.state_backend;
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
-                state_backend.deinit();
-                return err;
-            };
-            return self.runAssumeDecoded(assumeDecodedBlockInput(
-                input,
-                state_backend,
-                transactions,
-            ));
-        }
-
-        fn runAssumeDecoded(self: *const Self, input: AssumeDecodedBlockInput) !Result {
-            resetBalReport(input);
-            var observer = BalDifferentialObserver(revision, Engine).init(
-                self.allocator,
-                input.env,
-                lifecycleExecutionContext(input.env),
-                input.prepared_code_backend,
-                input.block_hash_source,
-                input.bal_differential.?,
-                self.parallelExecution(input),
-            );
-            defer observer.deinit();
-            var no_produced_bal: ?[]u8 = null;
-            const result = try serialFold(
-                revision,
-                Engine,
-                self.allocator,
-                input,
-                .compare,
-                &no_produced_bal,
-                &observer,
-            );
-            std.debug.assert(no_produced_bal == null);
-            return result;
-        }
-
-        fn parallelExecution(
-            self: *const Self,
-            input: AssumeDecodedBlockInput,
-        ) ?bal_differential.ParallelExecution {
-            const report = input.bal_differential.?;
-            const concurrent_reader = self.resources.state_reader orelse {
-                report.parallel_fallback = .concurrent_state_reader_unavailable;
-                return null;
-            };
-            if (input.block_hash_source != null and self.resources.block_hash_source == null) {
-                report.parallel_fallback = .concurrent_block_hash_source_unavailable;
-                return null;
-            }
-            return .{
-                .io = self.io,
-                .submission = self.strategy.submission,
-                .max_in_flight = self.strategy.max_in_flight,
-                .lane_allocator = self.resources.lane_allocator,
-                .state_reader = concurrent_reader.reader(),
-                .block_hash_source = if (input.block_hash_source != null)
-                    self.resources.block_hash_source.?.source()
-                else
-                    null,
-            };
-        }
-
-        /// Release a transferred backend when `run` was never called.
-        pub fn deinit(self: *Self) void {
-            std.debug.assert(self.lifecycle != .running);
-            if (self.lifecycle == .ready) {
-                switch (self.input) {
-                    .checked => self.input.checked.state_backend.deinit(),
-                    .assume_decoded => self.input.assume_decoded.state_backend.deinit(),
-                }
-            }
-            self.* = undefined;
-        }
-    };
-}
+pub const ParallelStrategy = differential_executor.Strategy;
+pub const ParallelResources = differential_executor.Resources;
 
 pub const TransactionInput = struct {
     tx: transaction.Transaction,
@@ -528,7 +252,8 @@ pub const BlockInput = BlockInputType([]const []const u8);
 /// encoded envelope; `applyAssumeDecoded` deliberately does not prove this.
 pub const AssumeDecodedBlockInput = BlockInputType([]const TransactionInput);
 
-fn assumeDecodedBlockInput(
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn assumeDecodedBlockInput(
     input: BlockInput,
     state_backend: Backend,
     transactions: []const TransactionInput,
@@ -554,7 +279,8 @@ fn assumeDecodedBlockInput(
     };
 }
 
-fn resetBalReport(input: AssumeDecodedBlockInput) void {
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn resetBalReport(input: AssumeDecodedBlockInput) void {
     if (input.bal_differential) |report| report.reset();
 }
 
@@ -697,44 +423,13 @@ pub const ProduceOutcome = union(enum) {
     }
 };
 
-pub const empty_logs_bloom = [_]u8{0} ** 256;
+pub const empty_logs_bloom = eth_receipt.empty_logs_bloom;
 pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
 
-fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
     return env.executionContext(.{ .origin = address.addr(0) });
-}
-
-const RootField = enum {
-    state,
-    transactions,
-    receipts,
-    withdrawals,
-};
-
-const ConsensusRootComparison = struct {
-    field: RootField,
-    status: Status,
-    derived_source: RootSource = .execution_derived,
-    claim_source: RootSource,
-};
-
-const consensus_root_comparisons = [_]ConsensusRootComparison{
-    .{ .field = .state, .status = .state_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .transactions, .status = .transactions_root_mismatch, .claim_source = .reconstructed_header_claim },
-    .{ .field = .receipts, .status = .receipts_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .withdrawals, .status = .withdrawals_root_mismatch, .claim_source = .reconstructed_header_claim },
-};
-
-comptime {
-    for (consensus_root_comparisons) |comparison| {
-        if (comparison.status == .valid) @compileError("consensus root comparison must map to a mismatch status");
-        const has_execution_derived = comparison.derived_source == .execution_derived;
-        const claim_is_execution_derived = comparison.claim_source == .execution_derived;
-        if (has_execution_derived == claim_is_execution_derived) {
-            @compileError("consensus root comparison must have exactly one execution-derived operand");
-        }
-    }
 }
 
 /// Exact Ethereum block-STF namespace for one named fork.
@@ -789,7 +484,7 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         /// Dense state is already bound to the accepted claim and therefore
         /// cannot run the tracked-state differential lane.
         pub const BalExecutor = if (ExactVm.BlockState.external_observation_capture)
-            BalExecutorType(revision, ExactVm)
+            differential_executor.Executor(revision, ExactVm)
         else
             struct {};
         /// Block production derives the BAL from tracked observations. Dense
@@ -912,7 +607,7 @@ fn applyAssumeDecodedExact(
     var no_produced_bal: ?[]u8 = null;
     const result = (if (comptime Engine.BlockState.external_observation_capture) blk: {
         if (input.bal_differential) |report| {
-            var observer = BalDifferentialObserver(revision, Engine).init(
+            var observer = differential_executor.Observer(revision, Engine).init(
                 allocator,
                 input.env,
                 lifecycleExecutionContext(input.env),
@@ -1045,7 +740,8 @@ fn ObservationCollector(comptime BlockState: type) type {
 }
 
 /// Shared authoritative serial fold for validation and block production.
-fn serialFold(
+/// Internal to `eth/`: pub only for the differential block executor.
+pub fn serialFold(
     comptime revision: Revision,
     comptime Engine: type,
     allocator: std.mem.Allocator,
@@ -1070,9 +766,9 @@ fn serialFold(
         comptime std.debug.assert(@TypeOf(observer) == *NoBlockObserver);
         if (!record_block_access_list) return .{ .status = .invalid_block_body };
     }
-    if (!blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
-    if (parentHeaderStatus(revision, input)) |status| return .{ .status = status };
-    if (!blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
+    if (!block_rules.blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
+    if (block_rules.parentHeaderStatus(revision, input)) |status| return .{ .status = status };
+    if (!block_rules.blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
@@ -1317,7 +1013,7 @@ fn serialFold(
                 .blob_gas_used_after = next_blob_gas_used,
             });
         }
-        mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
+        eth_receipt.mergeLogsBloom(&block_logs_bloom, eth_receipt.logsBloom(receipt.logs));
         if (revision.isImpl(.prague)) {
             eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
                 error.InvalidRequest => {
@@ -1335,7 +1031,7 @@ fn serialFold(
             };
         }
         blob_gas_used = next_blob_gas_used;
-        const encoded_receipt = try encodeReceiptView(allocator, entry.tx.kind, receipt);
+        const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
         errdefer allocator.free(encoded_receipt);
         try encoded_receipts.append(allocator, encoded_receipt);
         const after_context: Executor.system_contracts.AfterTransactionContext = .{
@@ -1530,7 +1226,7 @@ fn serialFold(
 
     var block_hash_mismatch = false;
     if (input.header_hash_claim) |claim| {
-        result.block_hash = reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
+        result.block_hash = block_rules.reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
             error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidHeaderReconstruction => return .{ .status = .header_surface_mismatch },
             else => return err,
         };
@@ -1538,7 +1234,7 @@ fn serialFold(
     }
 
     if (mode == .compare) {
-        applyConsensusRootComparisons(&result, input.root_checks);
+        block_rules.applyConsensusRootComparisons(&result, input.root_checks);
         if (result.status == .valid and input.header_claims.gas_used != null and result.gas_used != input.header_claims.gas_used.?) result.status = .gas_used_mismatch;
         if (result.status == .valid and input.header_claims.block_gas_used != null and result.block_gas_used != input.header_claims.block_gas_used.?) result.status = .block_gas_used_mismatch;
         if (result.status == .valid and input.header_claims.block_state_gas_used != null and result.block_state_gas_used != input.header_claims.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
@@ -1633,124 +1329,6 @@ fn transactPayload(
     };
 }
 
-fn blockBodyValid(
-    comptime revision: Revision,
-    comptime block_access_list: bool,
-    input: AssumeDecodedBlockInput,
-) bool {
-    // TODO: spec-icfy after moving block_stf out of eth
-    if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
-    if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
-    if (!revision.isImpl(.cancun)) {
-        if (input.parent_blob_gas != null or
-            input.header_claims.blob_gas_used != null or
-            input.header_claims.excess_blob_gas != null)
-        {
-            return false;
-        }
-        if (input.block_header) |header| {
-            if (header.parent_beacon_block_root != null) return false;
-        }
-        if (input.header_hash_claim) |claim| {
-            if (claim.parent_beacon_block_root != null) return false;
-        }
-    }
-    if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
-    // Only payload and header fields decide validity. `bal_differential` is a
-    // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
-    // every block and reads `.not_run` back on the forks that have no list.
-    if (!block_access_list and
-        (input.block_access_list != null or
-            input.header_claims.block_access_list_hash != null))
-    {
-        return false;
-    }
-    return true;
-}
-
-fn reconstructHeaderHash(
-    comptime revision: Revision,
-    allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
-    result: Result,
-    claim: HeaderHashClaim,
-) ![32]u8 {
-    if (!revision.isImpl(.merge)) return error.InvalidHeaderReconstruction;
-    if (input.block_header) |block_header| {
-        if (block_header.number != input.env.number or block_header.timestamp != input.env.timestamp) {
-            return error.InvalidHeaderReconstruction;
-        }
-        if (block_header.parent_hash) |parent_hash| {
-            if (!std.mem.eql(u8, &parent_hash, &claim.parent_hash)) return error.InvalidHeaderReconstruction;
-        }
-        if (!optionalHashEqual(block_header.parent_beacon_block_root, claim.parent_beacon_block_root)) {
-            return error.InvalidHeaderReconstruction;
-        }
-    }
-
-    const excess_blob_gas: ?u64 = if (revision.isImpl(.cancun))
-        std.math.cast(u64, result.excess_blob_gas orelse return error.InvalidHeaderReconstruction) orelse
-            return error.InvalidHeaderReconstruction
-    else
-        null;
-    const header = eth_header.ExecutionHeader{
-        .parent_hash = claim.parent_hash,
-        .coinbase = input.env.coinbase,
-        .state_root = result.state_root,
-        .transactions_root = result.transactions_root,
-        .receipts_root = result.receipts_root,
-        .logs_bloom = result.logs_bloom,
-        .number = input.env.number,
-        .gas_limit = input.env.gas_limit,
-        .gas_used = result.block_gas_used,
-        .timestamp = input.env.timestamp,
-        .extra_data = claim.extra_data,
-        .prev_randao = uint256.toBytes32(input.env.prev_randao),
-        .base_fee_per_gas = if (revision.isImpl(.london)) input.env.base_fee else null,
-        .withdrawals_root = if (revision.isImpl(.shanghai)) result.withdrawals_root else null,
-        .blob_gas_used = if (revision.isImpl(.cancun)) result.blob_gas_used else null,
-        .excess_blob_gas = excess_blob_gas,
-        .parent_beacon_block_root = if (revision.isImpl(.cancun)) claim.parent_beacon_block_root else null,
-        .requests_hash = if (revision.isImpl(.prague)) result.requests_hash else null,
-        .block_access_list_hash = if (revision.isImpl(.amsterdam)) result.block_access_list_hash else null,
-        .slot_number = if (revision.isImpl(.amsterdam)) input.env.slot_number else null,
-    };
-    return try header.hash(allocator, revision);
-}
-
-fn optionalHashEqual(lhs: ?[32]u8, rhs: ?[32]u8) bool {
-    if (lhs == null or rhs == null) return lhs == null and rhs == null;
-    return std.mem.eql(u8, &lhs.?, &rhs.?);
-}
-
-fn applyConsensusRootComparisons(result: *Result, checks: RootChecks) void {
-    inline for (consensus_root_comparisons) |comparison| {
-        if (result.status != .valid) return;
-        if (rootClaimValue(comparison, checks)) |expected| {
-            const derived = derivedRootValue(comparison.field, result.*);
-            if (!std.mem.eql(u8, &derived, &expected)) result.status = comparison.status;
-        }
-    }
-}
-
-fn rootClaimValue(comptime comparison: ConsensusRootComparison, checks: RootChecks) ?[32]u8 {
-    return switch (comparison.field) {
-        .state => checks.payload_header.state.value,
-        .transactions => if (checks.reconstructed_header.transactions) |claim| claim.value else null,
-        .receipts => checks.payload_header.receipts.value,
-        .withdrawals => if (checks.reconstructed_header.withdrawals) |claim| claim.value else null,
-    };
-}
-
-fn derivedRootValue(field: RootField, result: Result) [32]u8 {
-    return switch (field) {
-        .state => result.state_root,
-        .transactions => result.transactions_root,
-        .receipts => result.receipts_root,
-        .withdrawals => result.withdrawals_root,
-    };
-}
-
 fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessIndex {
     return std.math.cast(eth_bal.BlockAccessIndex, transaction_count) orelse error.BlockAccessIndexOverflow;
 }
@@ -1767,75 +1345,6 @@ fn validateBlockAccessCounts(counts: eth_bal.Counts, gas_limit: u64) eth_bal.Val
         return error.BlockAccessListGasLimitExceeded;
 }
 
-fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
-    if (!revision.isImpl(.merge) or input.env.number == 0) return null;
-
-    const parent = input.parent_header orelse return .parent_header_mismatch;
-    const current = input.block_header orelse return .parent_header_mismatch;
-    const current_parent_hash = current.parent_hash orelse return .parent_hash_mismatch;
-    if (!std.mem.eql(u8, &current_parent_hash, &parent.hash)) return .parent_hash_mismatch;
-    if (current.number != input.env.number) return .block_number_mismatch;
-    const expected_number = std.math.add(u64, parent.number, 1) catch return .block_number_mismatch;
-    if (input.env.number != expected_number) return .block_number_mismatch;
-    if (current.timestamp != input.env.timestamp) return .timestamp_mismatch;
-    if (input.env.timestamp <= parent.timestamp) return .timestamp_mismatch;
-    if (!gasLimitValid(input.env.gas_limit, parent.gas_limit)) return .gas_limit_mismatch;
-    const expected_base_fee = expectedBaseFee(parent) orelse return .base_fee_mismatch;
-    if (input.env.base_fee != expected_base_fee) return .base_fee_mismatch;
-    return null;
-}
-
-const gas_limit_adjustment_factor: u64 = 1024;
-const gas_limit_minimum: u64 = 5000;
-const elasticity_multiplier: u64 = 2;
-const base_fee_max_change_denominator: u256 = 8;
-
-fn gasLimitValid(gas_limit: u64, parent_gas_limit: u64) bool {
-    if (gas_limit < gas_limit_minimum) return false;
-    const adjustment = parent_gas_limit / gas_limit_adjustment_factor;
-    const upper: u128 = @as(u128, parent_gas_limit) + adjustment;
-    const lower = parent_gas_limit - adjustment;
-    return @as(u128, gas_limit) < upper and gas_limit > lower;
-}
-
-fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
-    const target = parent.gas_limit / elasticity_multiplier;
-    if (target == 0) return null;
-    if (parent.gas_used == target) return parent.base_fee_per_gas;
-
-    const gas_delta = if (parent.gas_used > target)
-        parent.gas_used - target
-    else
-        target - parent.gas_used;
-    const fee_delta_product = uint256.checkedMul(parent.base_fee_per_gas, @as(u256, gas_delta)) orelse return null;
-    const target_fee_delta = @divFloor(fee_delta_product, @as(u256, target));
-    var base_fee_delta = @divFloor(target_fee_delta, base_fee_max_change_denominator);
-
-    if (parent.gas_used > target) {
-        base_fee_delta = @max(base_fee_delta, 1);
-        return uint256.checkedAdd(parent.base_fee_per_gas, base_fee_delta);
-    }
-    if (base_fee_delta > parent.base_fee_per_gas) return null;
-    return parent.base_fee_per_gas - base_fee_delta;
-}
-
-fn blockContextValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
-    if (input.block_header) |header| {
-        if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
-    }
-    if (input.env.number == 0) return true;
-
-    if (revision.isImpl(.cancun)) {
-        const header = input.block_header orelse return false;
-        if (header.parent_beacon_block_root == null) return false;
-    }
-    if (revision.isImpl(.prague)) {
-        const header = input.block_header orelse return false;
-        if (header.parent_hash == null) return false;
-    }
-    return true;
-}
-
 fn transactionRoot(allocator: std.mem.Allocator, transactions: []const TransactionInput) ![32]u8 {
     var encoded: std.ArrayList([]const u8) = .empty;
     defer encoded.deinit(allocator);
@@ -1844,7 +1353,8 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
     return try trie.transactionRoot(allocator, encoded.items);
 }
 
-fn decodeRawTransactions(
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn decodeRawTransactions(
     allocator: std.mem.Allocator,
     raw_transactions: []const []const u8,
 ) ![]const TransactionInput {
@@ -1860,7 +1370,8 @@ fn decodeRawTransactions(
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-fn applyWithdrawals(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn applyWithdrawals(
     executor: anytype,
     execution_context: execution.ExecutionContext,
     withdrawals: []const Withdrawal,
@@ -1900,7 +1411,8 @@ fn applyWithdrawalsNormal(
     try executor.commitTransaction();
 }
 
-fn deriveRequests(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn deriveRequests(
     allocator: std.mem.Allocator,
     executor: anytype,
     env: Env,
@@ -2010,12 +1522,14 @@ fn deriveFinalizeRequestsNormal(
     );
 }
 
-fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
     for (requests) |request| allocator.free(request);
     allocator.free(requests);
 }
 
-fn transactionBlobGasUsed(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn transactionBlobGasUsed(
     comptime revision: Revision,
     comptime Engine: type,
     tx: transaction.Transaction,
@@ -2027,7 +1541,8 @@ fn transactionBlobGasUsed(
     return std.math.mul(u64, blob_count, gas_per_blob) catch error.BlobGasOverflow;
 }
 
-fn blockBlobGasLimit(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn blockBlobGasLimit(
     comptime revision: Revision,
     comptime Engine: type,
     blob_params: ?transaction.BlobParams,
@@ -2052,193 +1567,13 @@ fn effectiveBlobScheduleOptional(comptime Engine: type, params: ?transaction.Blo
     return if (params) |value| schedule.withParams(value) else schedule;
 }
 
-const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
-    pub fn toWire(topic: u256) [32]u8 {
-        return uint256.toBytes32(topic);
-    }
-
-    pub fn fromWire(encoded: [32]u8) u256 {
-        return uint256.fromBytes32(&encoded);
-    }
-});
-
-const LogRlp = rlp.Struct(Log, .{
-    .topics = rlp.BoundedListOf(TopicRlp, 4),
-});
-
-/// Consensus receipt wire payload; `encodeReceipt` writes its typed RLP form.
-pub const ReceiptPayload = struct {
-    status: u8,
-    cumulative_gas_used: u64,
-    logs_bloom: [256]u8,
-    logs: []const Log,
-
-    pub const Rlp = rlp.Struct(@This(), .{
-        .logs = rlp.ListOf(LogRlp),
-    });
-};
-
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: TxReceiptView) ![]u8 {
-    return encodeReceiptView(allocator, kind, receipt);
-}
-
-fn encodeReceiptView(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: anytype) ![]u8 {
-    const logs = try allocator.alloc(Log, receipt.logs.len());
-    defer allocator.free(logs);
-    for (logs, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
-    const payload: ReceiptPayload = .{
-        .status = receiptStatus(receipt.status),
-        .cumulative_gas_used = receipt.cumulative_gas_used,
-        .logs_bloom = logsBloom(receipt.logs),
-        .logs = logs,
-    };
-    const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
-    const type_id = transactionType(kind);
-    const envelope_len: usize = if (type_id == null) 0 else 1;
-    const encoded_len = std.math.add(usize, envelope_len, payload_len) catch
-        return error.EncodedLengthOverflow;
-    const encoded = try allocator.alloc(u8, encoded_len);
-    errdefer allocator.free(encoded);
-
-    if (type_id) |id| encoded[0] = id;
-    const written = try rlp.encode(ReceiptPayload, encoded[envelope_len..], &payload);
-    std.debug.assert(written.len == payload_len);
-    return encoded;
-}
-
-fn receiptStatus(status: TxStatus) u8 {
-    return switch (status) {
-        .success => 1,
-        .revert, .invalid, .out_of_gas => 0,
-    };
-}
-
-fn transactionType(kind: transaction.TxKind) ?u8 {
-    return switch (kind) {
-        .legacy => null,
-        .access_list => 0x01,
-        .dynamic_fee => 0x02,
-        .blob => 0x03,
-        .set_code => 0x04,
-    };
-}
-
-pub fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
-    var bloom = [_]u8{0} ** 256;
-    for (0..logs.len()) |index| {
-        const event_log = logs.get(index);
-        addBloomEntry(&bloom, &event_log.address);
-        for (event_log.topics) |topic| {
-            const encoded_topic = uint256.toBytes32(topic);
-            addBloomEntry(&bloom, &encoded_topic);
-        }
-    }
-    return bloom;
-}
-
-fn mergeLogsBloom(target: *[256]u8, source: [256]u8) void {
-    const target_words = std.mem.bytesAsSlice(u64, target[0..]);
-    const source_words = std.mem.bytesAsSlice(u64, source[0..]);
-    for (target_words, source_words) |*target_word, source_word| target_word.* |= source_word;
-}
-
-test "word-wise logs bloom merge matches byte-wise oracle" {
-    var seed: u64 = 0x9e3779b97f4a7c15;
-    for (0..256) |_| {
-        var target: [256]u8 = undefined;
-        var source: [256]u8 = undefined;
-        var expected: [256]u8 = undefined;
-        for (&target, &source, &expected) |*target_byte, *source_byte, *expected_byte| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            target_byte.* = @truncate(seed);
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            source_byte.* = @truncate(seed);
-            expected_byte.* = target_byte.* | source_byte.*;
-        }
-        mergeLogsBloom(&target, source);
-        try std.testing.expectEqualSlices(u8, &expected, &target);
-    }
-}
-
-fn addBloomEntry(bloom: *[256]u8, entry: []const u8) void {
-    const hash = crypto.keccak256(entry);
-    inline for (.{ 0, 2, 4 }) |offset| {
-        const bit_to_set: usize = ((@as(usize, hash[offset]) & 0x07) << 8) | @as(usize, hash[offset + 1]);
-        const bit_index = 0x07ff - bit_to_set;
-        bloom[bit_index / 8] |= @as(u8, 1) << @intCast(7 - (bit_index % 8));
-    }
-}
-
-test "BlockSTF validates parent-derived header rules before execution" {
-    const parent_hash = [_]u8{0x11} ** 32;
-    var input = AssumeDecodedBlockInput{
-        .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
-        .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
-        .parent_header = .{
-            .hash = parent_hash,
-            .number = 7,
-            .timestamp = 10,
-            .gas_limit = 10_000_000,
-            .gas_used = 5_000_000,
-            .base_fee_per_gas = 7,
-        },
-        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
-        .transactions = &.{},
-        .root_checks = .{
-            .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
-            },
-            .reconstructed_header = .{
-                .transactions = .fromHash(trie.empty_root_hash),
-            },
-        },
-    };
-    try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(.merge, input));
-
-    input.block_header.?.parent_hash = [_]u8{0x22} ** 32;
-    try std.testing.expectEqual(Status.parent_hash_mismatch, parentHeaderStatus(.merge, input).?);
-    input.block_header.?.parent_hash = parent_hash;
-
-    input.env.number = 9;
-    input.block_header.?.number = 9;
-    try std.testing.expectEqual(Status.block_number_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.number = 8;
-    input.block_header.?.number = 8;
-
-    input.env.timestamp = 10;
-    input.block_header.?.timestamp = 10;
-    try std.testing.expectEqual(Status.timestamp_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.timestamp = 11;
-    input.block_header.?.timestamp = 11;
-
-    input.env.gas_limit = 10_000_000 + 10_000_000 / gas_limit_adjustment_factor;
-    try std.testing.expectEqual(Status.gas_limit_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.gas_limit = 10_000_000;
-
-    input.env.base_fee = 8;
-    try std.testing.expectEqual(Status.base_fee_mismatch, parentHeaderStatus(.merge, input).?);
-}
-test "BlockSTF derives EIP-1559 base fee from parent usage" {
-    const parent = ParentHeaderContext{
-        .hash = [_]u8{0} ** 32,
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 20_000_000,
-        .gas_used = 20_000_000,
-        .base_fee_per_gas = 1_000_000_000,
-    };
-    try std.testing.expectEqual(@as(u256, 1_125_000_000), expectedBaseFee(parent).?);
-
-    var below_target = parent;
-    below_target.gas_used = 0;
-    try std.testing.expectEqual(@as(u256, 875_000_000), expectedBaseFee(below_target).?);
-}
+pub const ReceiptPayload = eth_receipt.Payload;
+pub const encodeReceipt = eth_receipt.encode;
+pub const logsBloom = eth_receipt.logsBloom;
 
 test {
     _ = @import("./block_stf_test.zig");
+    _ = block_rules;
+    _ = eth_receipt;
+    _ = differential_executor;
 }
