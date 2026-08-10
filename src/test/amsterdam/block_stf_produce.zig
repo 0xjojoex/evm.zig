@@ -908,25 +908,12 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
     try std.testing.expect(memory.getAccount(recipient) == null);
 }
 
-test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
-    if (comptime !evmz.t.forkEnabled(.prague)) return error.SkipZigTest;
-    var outcome = try block_stf.Exact(.prague).produce(std.testing.allocator, .{
-        .state_backend = try Backend.fromWitness(
-            std.testing.allocator,
-            evmz.eth.trie.empty_root_hash,
-            &.{},
-            &.{},
-        ),
-        .transactions = &.{},
-    });
-    defer outcome.deinit(std.testing.allocator);
-
-    switch (outcome) {
-        .produced => return error.TestUnexpectedResult,
-        .rejected => |result| try std.testing.expectEqual(
-            block_stf.Status.invalid_block_body,
-            result.status,
-        ),
+test "pre-Amsterdam BlockSTF does not expose BAL-only capabilities" {
+    const Prague = evmz.t.BlockStf(.prague) orelse return error.SkipZigTest;
+    comptime {
+        std.debug.assert(@TypeOf(Prague.produce) == type);
+        std.debug.assert(@TypeOf(Prague.produceAssumeDecoded) == type);
+        std.debug.assert(!@hasDecl(Prague.BalExecutor, "init"));
     }
 }
 

@@ -40,8 +40,8 @@ pub fn Tracked(comptime spec: anytype) type {
         pub const ExecutorStateInit = struct {
             reader: ?Reader = null,
         };
-        pub const block_production = true;
-        pub const external_observation_capture = true;
+        pub const supports_block_production = true;
+        pub const supports_external_observation_capture = true;
 
         pub fn checkSpec(_: @TypeOf(spec)) void {}
 
@@ -104,8 +104,8 @@ pub fn Tracked(comptime spec: anytype) type {
 pub const BalStateless = struct {
     pub const State = BlockState;
     pub const ExecutorStateInit = State;
-    pub const block_production = false;
-    pub const external_observation_capture = false;
+    pub const supports_block_production = false;
+    pub const supports_external_observation_capture = false;
 
     pub fn checkSpec(comptime spec: anytype) void {
         if (!spec.block.block_access_list) {

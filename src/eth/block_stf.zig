@@ -383,6 +383,11 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
+    const block_access_list_enabled = ExactVm.specification.block.block_access_list;
+    const bal_production_enabled = block_access_list_enabled and
+        ExactVm.BlockState.supports_block_production;
+    const bal_differential_enabled = block_access_list_enabled and
+        ExactVm.BlockState.supports_external_observation_capture;
     const Producer = struct {
         fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
             try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
@@ -409,18 +414,17 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
         /// Dense state is already bound to the accepted claim and therefore
         /// cannot run the tracked-state differential lane.
-        pub const BalExecutor = if (ExactVm.BlockState.external_observation_capture)
+        pub const BalExecutor = if (bal_differential_enabled)
             differential_executor.Executor(revision, ExactVm)
         else
             struct {};
-        /// Block production derives the BAL from tracked observations. Dense
-        /// state requires that accepted claim before admission, so it cannot
-        /// expose either production entry point.
-        pub const produce = if (ExactVm.BlockState.block_production)
+        /// Current production returns a canonical BAL artifact, so both the
+        /// Ethereum spec and the selected state model must support that path.
+        pub const produce = if (bal_production_enabled)
             Producer.produce
         else
             struct {};
-        pub const produceAssumeDecoded = if (ExactVm.BlockState.block_production)
+        pub const produceAssumeDecoded = if (bal_production_enabled)
             Producer.produceAssumeDecoded
         else
             struct {};
@@ -456,7 +460,7 @@ fn requireCaptureSupport(
     capture: ?ExecutionCapture,
 ) !void {
     try requireStepCaptureSupport(options, capture);
-    if (!BlockState.external_observation_capture and
+    if (!BlockState.supports_external_observation_capture and
         capture != null and capture.?.observations != null)
     {
         return error.ObservationCaptureUnavailable;
@@ -467,7 +471,7 @@ fn requireDifferentialSupport(
     comptime BlockState: type,
     differential: ?*BalDifferentialReport,
 ) !void {
-    if (!BlockState.external_observation_capture and differential != null)
+    if (!BlockState.supports_external_observation_capture and differential != null)
         return error.BalDifferentialUnavailable;
 }
 
@@ -530,7 +534,9 @@ fn applyAssumeDecodedExact(
     input: AssumeDecodedBlockInput,
 ) !Result {
     resetBalReport(input);
-    const result = (if (comptime Engine.BlockState.external_observation_capture) blk: {
+    const result = (if (comptime Engine.specification.block.block_access_list and
+        Engine.BlockState.supports_external_observation_capture)
+    blk: {
         if (input.bal_differential) |report| {
             var observer = differential_executor.Observer(revision, Engine).init(
                 allocator,
@@ -561,7 +567,9 @@ fn applyAssumeDecodedExact(
             observer,
         );
     } else blk: {
-        std.debug.assert(input.bal_differential == null);
+        if (comptime Engine.specification.block.block_access_list) {
+            std.debug.assert(input.bal_differential == null);
+        }
         const observer = {};
         break :blk applyExecution(
             revision,
@@ -622,11 +630,9 @@ fn produceAssumeDecodedExact(
     allocator: std.mem.Allocator,
     input: AssumeDecodedProduceInput,
 ) !ProduceOutcome {
-    // Production without a BAL commitment has no defined artifact.
-    if (comptime !Engine.specification.block.block_access_list) {
-        var state_backend = input.state_backend;
-        state_backend.deinit();
-        return .{ .rejected = .{ .status = .invalid_block_body } };
+    comptime {
+        std.debug.assert(Engine.specification.block.block_access_list);
+        std.debug.assert(Engine.BlockState.supports_block_production);
     }
 
     const observer = {};
@@ -703,10 +709,10 @@ fn StateObservationSink(comptime BlockState: type) type {
 
 /// Loop-invariant borrows for the per-transaction fold. Everything here is
 /// pinned in `executeBlock`'s frame and outlives every transaction.
-fn PayloadFold(comptime revision: Revision, comptime Engine: type, comptime Input: type) type {
+fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
     return struct {
         allocator: std.mem.Allocator,
-        input: Input,
+        env: Env,
         block: *Engine.BlockExecution,
         executor: *Engine.Executor,
         collector: *StateObservationSink(Engine.BlockState),
@@ -754,7 +760,7 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type, comptime Inpu
             const tx_result = transactPayload(
                 Engine,
                 self.block,
-                self.input.env,
+                self.env,
                 entry.tx,
                 if (self.step_capture.active())
                     .{ .steps = self.step_capture.contextPtr() }
@@ -823,8 +829,8 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type, comptime Inpu
                 return err;
             };
             const after_context: Executor.system_contracts.AfterTransactionContext = .{
-                .number = self.input.env.number,
-                .timestamp = self.input.env.timestamp,
+                .number = self.env.number,
+                .timestamp = self.env.timestamp,
                 .transaction_index = progress_after.tx_count - 1,
                 .status = receipt.status,
                 .gas_used = receipt.gas_used,
@@ -835,7 +841,7 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type, comptime Inpu
             const after_result = if (self.step_capture.active())
                 Executor.system_contracts.applyAfterTransactionCaptured(
                     self.executor,
-                    lifecycleExecutionContext(self.input.env),
+                    lifecycleExecutionContext(self.env),
                     after_context,
                     self.step_capture.contextPtr(),
                     self.collector,
@@ -843,14 +849,14 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type, comptime Inpu
             else if (self.observe_state)
                 Executor.system_contracts.applyAfterTransactionObserved(
                     self.executor,
-                    lifecycleExecutionContext(self.input.env),
+                    lifecycleExecutionContext(self.env),
                     after_context,
                     self.collector,
                 )
             else
                 Executor.system_contracts.applyAfterTransaction(
                     self.executor,
-                    lifecycleExecutionContext(self.input.env),
+                    lifecycleExecutionContext(self.env),
                     after_context,
                 );
             after_result catch |err| switch (err) {
@@ -1005,7 +1011,7 @@ fn executeBlock(
 ) !Result {
     // One spec fact gates the header field, observation recording, claim
     // verification, and the candidate lane.
-    const record_block_access_list = Engine.specification.block.block_access_list;
+    const block_access_list_enabled = Engine.specification.block.block_access_list;
     const block_access_list = if (comptime @hasField(@TypeOf(input), "block_access_list"))
         input.block_access_list
     else
@@ -1078,10 +1084,10 @@ fn executeBlock(
     var consensus_bal = tracked_state_projector.BlockBuilder.init(allocator);
     defer consensus_bal.deinit();
     var observation_sink = StateObservationSink(Engine.BlockState){
-        .consensus_bal = if (record_block_access_list) &consensus_bal else null,
+        .consensus_bal = if (block_access_list_enabled) &consensus_bal else null,
         .external_target = if (input.capture) |capture| capture.observations else null,
     };
-    const observe_state = record_block_access_list or observation_sink.external_target != null;
+    const observe_state = block_access_list_enabled or observation_sink.external_target != null;
     var step_capture = block_capture.StepScope.init(allocator, input.capture);
     defer step_capture.deinit();
     try step_capture.beginBlock();
@@ -1127,9 +1133,9 @@ fn executeBlock(
     };
     defer accumulated.deinit();
 
-    const fold = PayloadFold(revision, Engine, @TypeOf(input)){
+    const fold = PayloadFold(revision, Engine){
         .allocator = allocator,
-        .input = input,
+        .env = input.env,
         .block = &block,
         .executor = executor,
         .collector = &observation_sink,
@@ -1221,7 +1227,7 @@ fn executeBlock(
     };
 
     try step_capture.finishBlock();
-    if (record_block_access_list) {
+    if (block_access_list_enabled) {
         observed_block_access_list = consensus_bal.finish() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return err,

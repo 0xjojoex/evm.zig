@@ -21,19 +21,23 @@ test "supported state domains analyze as complete engine products" {
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
 }
 
-test "dense BlockSTF does not expose callable block production" {
+test "Amsterdam BlockSTF combines spec and state capabilities" {
     const Tracked = evmz.Vm(evmz.eth.amsterdam);
     const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
     const TrackedBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Tracked);
     const DenseBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Dense);
 
     comptime {
-        std.debug.assert(Tracked.BlockState.block_production);
-        std.debug.assert(!Dense.BlockState.block_production);
+        std.debug.assert(Tracked.BlockState.supports_block_production);
+        std.debug.assert(!Dense.BlockState.supports_block_production);
+        std.debug.assert(Tracked.BlockState.supports_external_observation_capture);
+        std.debug.assert(!Dense.BlockState.supports_external_observation_capture);
         std.debug.assert(@TypeOf(TrackedBlockStf.produce) != type);
         std.debug.assert(@TypeOf(TrackedBlockStf.produceAssumeDecoded) != type);
         std.debug.assert(@TypeOf(DenseBlockStf.produce) == type);
         std.debug.assert(@TypeOf(DenseBlockStf.produceAssumeDecoded) == type);
+        std.debug.assert(@hasDecl(TrackedBlockStf.BalExecutor, "init"));
+        std.debug.assert(!@hasDecl(DenseBlockStf.BalExecutor, "init"));
     }
 }
 
