@@ -72,7 +72,7 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
 
         /// Uses the caller-owned invocation lifetime for all validation memory.
         pub fn validate(allocator: std.mem.Allocator, input: input_mod.Input) Error!block_stf.Result {
-            return validateWithOptions(allocator, input, .{});
+            return validateWithScratchExact(ExactBlockStf, allocator, &input, null, .{});
         }
 
         pub fn validateWithOptions(
@@ -80,7 +80,7 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
             input: input_mod.Input,
             validation_options: Options,
         ) Error!block_stf.Result {
-            return validateWithCaptureOptions(allocator, input, null, validation_options);
+            return validateWithScratchExact(ExactBlockStf, allocator, &input, null, validation_options);
         }
 
         pub fn validateWithCapture(
@@ -88,7 +88,7 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
             input: input_mod.Input,
             capture: ?block_stf.ExecutionCapture,
         ) Error!block_stf.Result {
-            return validateWithCaptureOptions(allocator, input, capture, .{});
+            return validateWithScratchExact(ExactBlockStf, allocator, &input, capture, .{});
         }
 
         pub fn validateWithCaptureOptions(
@@ -100,7 +100,7 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
             return validateWithScratchExact(
                 ExactBlockStf,
                 allocator,
-                input,
+                &input,
                 capture,
                 validation_options,
             );
@@ -111,11 +111,11 @@ fn ValidatorType(comptime ExactBlockStf: type) type {
 fn validateWithScratchExact(
     comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
-    input: input_mod.Input,
+    input: *const input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
     options: Options,
 ) Error!block_stf.Result {
-    const block = input.block;
+    const block = &input.block;
     if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     var header_chain = try HeaderChain.init(
         allocator,
@@ -140,14 +140,14 @@ fn validateWithScratchExact(
 fn validateExact(
     comptime ExactBlockStf: type,
     allocator: std.mem.Allocator,
-    input: input_mod.Input,
+    input: *const input_mod.Input,
     capture: ?block_stf.ExecutionCapture,
     options: Options,
     header_chain: *HeaderChain,
     parent_header: ParsedHeader,
 ) Error!block_stf.Result {
     const revision = ExactBlockStf.fork;
-    const block = input.block;
+    const block = &input.block;
     var prepared_code_pool: BlockPreparedCode = .init(allocator);
     return ExactBlockStf.applyAssumeDecoded(allocator, .{
         .env = .{
@@ -245,7 +245,7 @@ fn mapBlockError(err: anyerror) Error!block_stf.Result {
     };
 }
 
-fn blockShapeValid(revision: Revision, block: input_mod.Block) bool {
+fn blockShapeValid(revision: Revision, block: *const input_mod.Block) bool {
     if (!revision.isImpl(.shanghai) and block.withdrawals.len != 0) return false;
 
     const has_cancun = revision.isImpl(.cancun);
@@ -270,7 +270,7 @@ fn currentBlobBaseFeeExact(
     comptime revision: Revision,
     comptime spec: Spec,
     blob_params: ?transaction.BlobParams,
-    block: input_mod.Block,
+    block: *const input_mod.Block,
 ) Error!u256 {
     if (!revision.isImpl(.cancun)) return 0;
     const excess_blob_gas = block.excess_blob_gas orelse return error.InvalidHeaderWitness;
@@ -279,7 +279,7 @@ fn currentBlobBaseFeeExact(
     return schedule.blobBaseFeeForSchedule(excess_blob_gas) orelse error.InvalidHeaderWitness;
 }
 
-fn expectedExcessBlobGas(revision: Revision, block: input_mod.Block) Error!?u256 {
+fn expectedExcessBlobGas(revision: Revision, block: *const input_mod.Block) Error!?u256 {
     if (!revision.isImpl(.cancun)) return null;
     return block.excess_blob_gas orelse error.InvalidHeaderWitness;
 }
@@ -411,7 +411,7 @@ test "normalized stateless block shape uses actual fields" {
         .block_hash = [_]u8{0} ** 32,
     };
 
-    try std.testing.expect(blockShapeValid(.merge, base));
+    try std.testing.expect(blockShapeValid(.merge, &base));
 
     var inactive_withdrawals = base;
     inactive_withdrawals.withdrawals = &.{.{
@@ -420,25 +420,25 @@ test "normalized stateless block shape uses actual fields" {
         .address = address.Address.fromBytes([_]u8{0} ** 20),
         .amount = 0,
     }};
-    try std.testing.expect(!blockShapeValid(.merge, inactive_withdrawals));
+    try std.testing.expect(!blockShapeValid(.merge, &inactive_withdrawals));
 
     var premature_blob_field = base;
     premature_blob_field.blob_gas_used = 0;
-    try std.testing.expect(!blockShapeValid(.shanghai, premature_blob_field));
+    try std.testing.expect(!blockShapeValid(.shanghai, &premature_blob_field));
 
     var cancun = base;
     cancun.blob_gas_used = 0;
     cancun.excess_blob_gas = 0;
     cancun.parent_beacon_block_root = [_]u8{0} ** 32;
-    try std.testing.expect(blockShapeValid(.cancun, cancun));
+    try std.testing.expect(blockShapeValid(.cancun, &cancun));
 
     var incomplete_cancun = cancun;
     incomplete_cancun.excess_blob_gas = null;
-    try std.testing.expect(!blockShapeValid(.cancun, incomplete_cancun));
+    try std.testing.expect(!blockShapeValid(.cancun, &incomplete_cancun));
 
     var amsterdam = cancun;
     amsterdam.block_access_list = &.{};
-    try std.testing.expect(blockShapeValid(.amsterdam, amsterdam));
+    try std.testing.expect(blockShapeValid(.amsterdam, &amsterdam));
 }
 
 test "stateless validator is specialized by the complete spec" {
