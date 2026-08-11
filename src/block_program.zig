@@ -209,7 +209,7 @@ pub fn BlockProgramType(
                     transaction_value: Transaction,
                 ) anyerror!Outcome {
                     return self.block.transactOwned(
-                        transaction_value,
+                        &transaction_value,
                         null,
                         self.mode,
                         self.observer,
@@ -218,7 +218,7 @@ pub fn BlockProgramType(
 
                 pub fn transactWithPrelude(
                     self: @This(),
-                    transaction_value: Transaction,
+                    transaction_value: *const Transaction,
                     prelude: transaction_program.PreludeBinding,
                 ) anyerror!Outcome {
                     return self.block.transactOwned(
@@ -275,18 +275,19 @@ pub fn BlockProgramType(
         /// leaves both the Executor branch and block accumulator unchanged.
         pub fn transact(self: *Self, transaction_value: Transaction) Error!Outcome {
             return self.transactOwned(
-                transaction_value,
+                &transaction_value,
                 null,
                 .normal,
                 {},
             ) catch |err| return @errorCast(err);
         }
 
-        /// Fold one transaction whose family prelude shares the transaction
-        /// program's journaled retain/discard lifetime.
+        /// Fold one borrowed transaction whose family prelude shares the
+        /// transaction program's journaled retain/discard lifetime. The caller
+        /// pins `transaction_value` through synchronous inclusion.
         pub fn transactWithPrelude(
             self: *Self,
-            transaction_value: Transaction,
+            transaction_value: *const Transaction,
             prelude: transaction_program.PreludeBinding,
         ) Error!Outcome {
             return self.transactOwned(
@@ -299,7 +300,7 @@ pub fn BlockProgramType(
 
         fn transactOwned(
             self: *Self,
-            transaction_value: Transaction,
+            transaction_value: *const Transaction,
             prelude: ?transaction_program.PreludeBinding,
             mode: InstrumentationMode,
             observer: anytype,
@@ -308,7 +309,7 @@ pub fn BlockProgramType(
             const input = ImplementationType.transactInput(
                 &self.environment,
                 &self.state,
-                &transaction_value,
+                transaction_value,
             );
             const outcome = if (prelude) |value|
                 try transaction_program.transactInBlockWithPrelude(
@@ -332,12 +333,12 @@ pub fn BlockProgramType(
                     const plan = try ImplementationType.planInclude(
                         &self.environment,
                         &self.state,
-                        &transaction_value,
+                        transaction_value,
                         view.output,
                         view.logs,
                     );
                     const included = ImplementationType.included(
-                        &transaction_value,
+                        transaction_value,
                         view.output,
                         view.logs,
                         plan,

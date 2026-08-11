@@ -55,10 +55,10 @@ pub fn bind(comptime Executor: type) type {
 
         const ChildCreate = struct {
             checkpoint_state: State.Checkpoint,
-            address: Address,
-            kind: Host.CallKind,
-            msg: Host.Message,
-            init_code: []const u8,
+            /// Consumed synchronously while the originating CREATE action or
+            /// root message remains alive. Address, kind, and init code are
+            /// projections of this message and must not be duplicated here.
+            source_msg: *const Host.Message,
         };
 
         /// Owns one interior call/create checkpoint until it is resolved or
@@ -201,15 +201,29 @@ pub fn bind(comptime Executor: type) type {
             fn pushChildCreate(self: *CallRuntime, child: ChildCreate, call_capture: ?evmz.trace.CallToken) !void {
                 std.debug.assert(self.executor.prepared_code_execution != null);
                 const execution = &self.executor.prepared_code_execution.?;
-                const bytecode = try execution.prepareTransient(child.init_code);
+                const source_msg = child.source_msg;
+                const address = source_msg.recipient;
+                const msg: Host.Message = .{
+                    .depth = source_msg.depth,
+                    .kind = .call,
+                    .gas = source_msg.gas,
+                    .gas_reservoir = source_msg.gas_reservoir,
+                    .recipient = address,
+                    .sender = source_msg.sender,
+                    .input_data = &.{},
+                    .value = source_msg.value,
+                    .is_static = source_msg.is_static,
+                    .code_address = address,
+                };
+                const bytecode = try execution.prepareTransient(source_msg.input_data);
                 try self.pushFrame(
-                    &child.msg,
+                    &msg,
                     bytecode,
                     .{
                         .kind = .{ .create = .{
                             .checkpoint_state = child.checkpoint_state,
-                            .address = child.address,
-                            .kind = child.kind,
+                            .address = address,
+                            .kind = source_msg.kind,
                         } },
                         .call_capture = call_capture,
                     },
@@ -1473,25 +1487,10 @@ pub fn bind(comptime Executor: type) type {
             try self.state.clearCode(Executor.stateAddress(create_address));
             try self.state.markCreatedContract(Executor.stateAddress(create_address));
 
-            const child_msg = Host.Message{
-                .depth = msg.depth,
-                .kind = .call,
-                .gas = msg.gas,
-                .gas_reservoir = msg.gas_reservoir,
-                .recipient = create_address,
-                .sender = msg.sender,
-                .input_data = &.{},
-                .value = msg.value,
-                .is_static = msg.is_static,
-                .code_address = create_address,
-            };
             checkpoint.disarm();
             return .{ .child = .{
                 .checkpoint_state = checkpoint.checkpoint_state,
-                .address = create_address,
-                .kind = msg.kind,
-                .msg = child_msg,
-                .init_code = msg.input_data,
+                .source_msg = msg,
             } };
         }
 
