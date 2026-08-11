@@ -47,15 +47,13 @@ test "EIP-2200 official SSTORE gas/refund vectors" {
 test "EIP-2200 child frame refunds merge only from committed frames" {
     var frame = try testingFrame();
     defer frame.deinit();
-
-    const call_continuation = Interpreter.CallResume{
-        .gas_limit = 50,
-        .out_offset = 0,
-        .out_size = 0,
-    };
     frame.frame.suspendWith(.{ .call = .{
         .msg = frame.frame.msg.*,
-        .continuation = call_continuation,
+        .continuation = .{
+            .gas_limit = 50,
+            .out_offset = 0,
+            .out_size = 0,
+        },
     } });
     try frame.frame.resumeWithCall(.{
         .outcome = .{ .status = .success, .cause = .none },

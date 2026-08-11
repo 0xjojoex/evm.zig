@@ -131,7 +131,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn initState(store: *evmz.state.MemoryStore) !void {
-    (try store.getOrCreateAccount(sender)).balance = 1_000_000;
+    (try store.getOrCreateAccount(sender)).account.balance = 1_000_000;
     try (try store.getOrCreateAccount(target)).setCode(&target_code);
 }
 
@@ -146,12 +146,12 @@ fn parentBlobGas() evmz.eth.bal.ParentBlobGas {
 fn rootChecks(output: evmz.eth.bal.DerivedBlockOutput) evmz.eth.bal.RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(output.state_root),
-            .receipts = .fromHash(output.receipts_root),
+            .state = output.state_root,
+            .receipts = output.receipts_root,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(output.transactions_root),
-            .withdrawals = .fromHash(output.withdrawals_root),
+            .transactions = output.transactions_root,
+            .withdrawals = output.withdrawals_root,
         },
     };
 }

@@ -12,136 +12,26 @@ const Executor = @import("../executor.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
-const bal_diff = @import("bal/diff.zig");
 const bal_differential = @import("bal/differential.zig");
-const bal_observer = @import("bal/differential/observer.zig");
+const differential_executor = @import("bal/differential/block_executor.zig");
 const tracked_state_projector = @import("bal/tracked_state_projector.zig");
-const bal_witness = @import("bal/witness.zig");
+const block_admission = @import("block_admission.zig");
+const block_capture = @import("block_capture.zig");
+const block_rules = @import("block_rules.zig");
+const eth_receipt = @import("receipt.zig");
 const execution = @import("../execution.zig");
 const execution_resources = @import("../execution/resources.zig");
-const eth_header = @import("header.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7685 = @import("eip/7685.zig");
 const eth_spec = @import("spec.zig");
 const trie = @import("trie.zig");
 const prepared_code = @import("../prepared_code.zig");
 const Withdrawal = @import("Withdrawal.zig");
-const rlp = @import("rlp");
 const Revision = @import("revision.zig").Revision;
-const state = @import("../state.zig");
 const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
-const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
 const Backend = @import("../backend.zig").Backend;
-
-fn BalDifferentialOperations(
-    comptime revision: Revision,
-    comptime Engine: type,
-) type {
-    return struct {
-        pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
-        pub const Withdrawal = @import("Withdrawal.zig");
-
-        pub fn appendCandidateDepositRequestData(
-            allocator: std.mem.Allocator,
-            output: *std.ArrayList(u8),
-            logs: state.LogBuffer.View,
-        ) !void {
-            if (revision.isImpl(.prague))
-                try eip6110.appendRequestDataFromLogs(allocator, output, logs);
-        }
-
-        pub fn encodeCandidateReceipt(
-            allocator: std.mem.Allocator,
-            kind: transaction.TxKind,
-            receipt: vm.TxReceiptView,
-        ) ![]u8 {
-            return encodeReceipt(allocator, kind, receipt);
-        }
-
-        pub fn candidateLogsBloom(logs: state.LogBuffer.View) [256]u8 {
-            return logsBloom(logs);
-        }
-
-        pub fn mergeCandidateLogsBloom(target: *[256]u8, source: [256]u8) void {
-            mergeLogsBloom(target, source);
-        }
-
-        pub fn applyCandidateWithdrawals(
-            executor: *Engine.Executor,
-            execution_context: execution.ExecutionContext,
-            withdrawals: []const @import("Withdrawal.zig"),
-            observer: anytype,
-        ) !void {
-            try applyWithdrawals(executor, execution_context, withdrawals, observer);
-        }
-
-        pub fn deriveCandidateRequests(
-            allocator: std.mem.Allocator,
-            executor: *Engine.Executor,
-            env: vm.Env,
-            progress: vm.BlockResult,
-            deposit_request_data: []const u8,
-            observer: anytype,
-        ) ![]const []const u8 {
-            return deriveRequests(
-                allocator,
-                executor,
-                env,
-                progress,
-                deposit_request_data,
-                observer,
-            );
-        }
-
-        pub fn freeCandidateRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
-            freeRequests(allocator, requests);
-        }
-
-        pub fn candidateRequestsHash(allocator: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
-            return requestsHash(allocator, requests);
-        }
-
-        pub fn candidateReceiptsRoot(allocator: std.mem.Allocator, receipts: []const []const u8) ![32]u8 {
-            return trie.receiptRoot(allocator, receipts);
-        }
-
-        pub fn candidateTransactionBlobGasUsed(tx: transaction.Transaction) !u64 {
-            return transactionBlobGasUsed(revision, Engine, tx);
-        }
-
-        pub fn candidateBlockBlobGasLimit(
-            blob_params: ?transaction.BlobParams,
-        ) !u64 {
-            return blockBlobGasLimit(revision, Engine, blob_params);
-        }
-    };
-}
-
-/// Serial block execution reports its boundaries here. Doing nothing is the
-/// default, and the BAL candidate lane is the only real implementation - it
-/// lives outside this file so the serial fold carries no knowledge of
-/// positioned reads, lanes, or concurrency.
-const NoBlockObserver = struct {
-    pub fn claimDecoded(_: *NoBlockObserver, _: anytype, _: anytype) void {}
-    pub fn isActive(_: *const NoBlockObserver) bool {
-        return false;
-    }
-    pub fn beforeBlock(_: *NoBlockObserver, _: anytype) void {}
-    pub fn included(_: *NoBlockObserver, _: anytype) std.Io.Cancelable!void {}
-    pub fn rejected(_: *NoBlockObserver, _: anytype) std.Io.Cancelable!void {}
-    pub fn finish(_: *NoBlockObserver) std.Io.Cancelable!void {}
-    pub fn finishCandidate(_: *NoBlockObserver, _: anytype) void {}
-    pub fn compareBlock(_: *NoBlockObserver, _: anytype) void {}
-};
-
-fn BalDifferentialObserver(comptime revision: Revision, comptime Engine: type) type {
-    return bal_observer.Observer(
-        Engine,
-        BalDifferentialOperations(revision, Engine),
-    );
-}
 
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
@@ -155,193 +45,8 @@ const TxReceiptView = vm.TxReceiptView;
 const Log = vm.Log;
 const TxStatus = vm.TxStatus;
 
-pub const ParallelStrategy = struct {
-    /// Maximum candidate transactions retained and submitted in one batch.
-    /// `1` exercises identical ownership and ordering without overlap.
-    max_in_flight: usize,
-    submission: Submission = .async,
-
-    pub const Submission = bal_differential.ParallelSubmission;
-
-    pub fn assertRequest(self: ParallelStrategy, report: ?*BalDifferentialReport) void {
-        std.debug.assert(self.max_in_flight > 0);
-        std.debug.assert(report != null);
-    }
-};
-
-pub const ParallelResources = struct {
-    /// Backing allocator for isolated growable task arenas. It must support
-    /// overlapping allocation calls made by the supplied `std.Io` runtime.
-    lane_allocator: std.mem.Allocator,
-    /// Frozen concurrent view of the canonical authenticated pre-state. Null
-    /// explicitly falls back to authoritative serial execution.
-    state_reader: ?state.ConcurrentReader = null,
-    /// Frozen concurrent BLOCKHASH source when the canonical input has one.
-    block_hash_source: ?BlockHashSource.Concurrent = null,
-};
-
-/// Single-use BAL parallel block executor bound to caller-owned runtime
-/// capabilities.
-///
-/// `io` and all borrowed input slices must remain valid through `run`. The
-/// executor takes ownership of `input.state_backend`: `run` releases it on
-/// every result, while `deinit` releases it when execution never starts.
-/// Scheduling the whole `run` call through another task is valid, but the
-/// caller must join or cancel that task before calling `deinit`.
-fn BalExecutorType(comptime revision: Revision, comptime Engine: type) type {
-    if (!Engine.specification.block.block_access_list) {
-        @compileError("BalExecutor requires a fork that commits to an EIP-7928 block access list; " ++
-            @tagName(revision) ++ " does not");
-    }
-    return struct {
-        const Self = @This();
-
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        input: Input,
-        strategy: ParallelStrategy,
-        resources: ParallelResources,
-        lifecycle: Lifecycle = .ready,
-
-        const Input = union(enum) {
-            checked: BlockInput,
-            assume_decoded: AssumeDecodedBlockInput,
-        };
-
-        const Lifecycle = enum {
-            ready,
-            running,
-            finished,
-        };
-
-        /// Bind checked raw transaction input to the caller's I/O runtime.
-        pub fn init(
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            input: BlockInput,
-            strategy: ParallelStrategy,
-            resources: ParallelResources,
-        ) Self {
-            strategy.assertRequest(input.bal_differential);
-            return .{
-                .io = io,
-                .allocator = allocator,
-                .input = .{ .checked = input },
-                .strategy = strategy,
-                .resources = resources,
-            };
-        }
-
-        /// Bind values decoded by a trusted adapter to the caller's I/O runtime.
-        pub fn initAssumeDecoded(
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            input: AssumeDecodedBlockInput,
-            strategy: ParallelStrategy,
-            resources: ParallelResources,
-        ) Self {
-            strategy.assertRequest(input.bal_differential);
-            return .{
-                .io = io,
-                .allocator = allocator,
-                .input = .{ .assume_decoded = input },
-                .strategy = strategy,
-                .resources = resources,
-            };
-        }
-
-        /// Execute and join all private candidate work before returning.
-        pub fn run(self: *Self) !Result {
-            std.debug.assert(self.lifecycle == .ready);
-            self.lifecycle = .running;
-            defer self.lifecycle = .finished;
-
-            return switch (self.input) {
-                .checked => |input| self.runChecked(input),
-                .assume_decoded => |input| self.runAssumeDecoded(input),
-            };
-        }
-
-        fn runChecked(self: *const Self, input: BlockInput) !Result {
-            var state_backend = input.state_backend;
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
-                state_backend.deinit();
-                return err;
-            };
-            return self.runAssumeDecoded(assumeDecodedBlockInput(
-                input,
-                state_backend,
-                transactions,
-            ));
-        }
-
-        fn runAssumeDecoded(self: *const Self, input: AssumeDecodedBlockInput) !Result {
-            resetBalReport(input);
-            var observer = BalDifferentialObserver(revision, Engine).init(
-                self.allocator,
-                input.env,
-                lifecycleExecutionContext(input.env),
-                input.prepared_code_backend,
-                input.block_hash_source,
-                input.bal_differential.?,
-                self.parallelExecution(input),
-            );
-            defer observer.deinit();
-            var no_produced_bal: ?[]u8 = null;
-            const result = try serialFold(
-                revision,
-                Engine,
-                self.allocator,
-                input,
-                .compare,
-                &no_produced_bal,
-                &observer,
-            );
-            std.debug.assert(no_produced_bal == null);
-            return result;
-        }
-
-        fn parallelExecution(
-            self: *const Self,
-            input: AssumeDecodedBlockInput,
-        ) ?bal_differential.ParallelExecution {
-            const report = input.bal_differential.?;
-            const concurrent_reader = self.resources.state_reader orelse {
-                report.parallel_fallback = .concurrent_state_reader_unavailable;
-                return null;
-            };
-            if (input.block_hash_source != null and self.resources.block_hash_source == null) {
-                report.parallel_fallback = .concurrent_block_hash_source_unavailable;
-                return null;
-            }
-            return .{
-                .io = self.io,
-                .submission = self.strategy.submission,
-                .max_in_flight = self.strategy.max_in_flight,
-                .lane_allocator = self.resources.lane_allocator,
-                .state_reader = concurrent_reader.reader(),
-                .block_hash_source = if (input.block_hash_source != null)
-                    self.resources.block_hash_source.?.source()
-                else
-                    null,
-            };
-        }
-
-        /// Release a transferred backend when `run` was never called.
-        pub fn deinit(self: *Self) void {
-            std.debug.assert(self.lifecycle != .running);
-            if (self.lifecycle == .ready) {
-                switch (self.input) {
-                    .checked => self.input.checked.state_backend.deinit(),
-                    .assume_decoded => self.input.assume_decoded.state_backend.deinit(),
-                }
-            }
-            self.* = undefined;
-        }
-    };
-}
+pub const ParallelStrategy = differential_executor.Strategy;
+pub const ParallelResources = differential_executor.Resources;
 
 pub const TransactionInput = struct {
     tx: transaction.Transaction,
@@ -356,96 +61,23 @@ pub const TransactionInput = struct {
     }
 };
 
-/// Explicit diagnostic capture for authoritative serial execution.
-///
-/// Checkpoint-resolved observations are delivered synchronously after each
-/// sealed state transition and before it is retained.
-/// Step facts are first captured passively into the caller-owned tape, then
-/// delivered as one completed span per payload transaction. Candidate lanes
-/// never receive this caller-owned capture.
-pub const ExecutionCapture = struct {
-    observations: ?ObservationTarget = null,
-    steps: ?StepCapture = null,
+pub const ExecutionCapture = block_capture.Execution;
+pub const ObservationTarget = block_capture.ObservationTarget;
 
-    pub const StepCapture = struct {
-        tape: *trace.TraceTape,
-        profile: trace.CaptureProfile = .{},
-        target: trace.TraceSpanTarget,
-    };
-};
-
-/// Synchronous borrowed observation consumer. The callback must copy anything
-/// it retains beyond the call.
-pub const ObservationTarget = struct {
-    ptr: *anyopaque,
-    consume_fn: *const fn (
-        *anyopaque,
-        eth_bal.BlockAccessIndex,
-        state.TrackedState.ObservationsView,
-    ) anyerror!void,
-
-    pub fn init(
-        ptr: *anyopaque,
-        consume_fn: *const fn (
-            *anyopaque,
-            eth_bal.BlockAccessIndex,
-            state.TrackedState.ObservationsView,
-        ) anyerror!void,
-    ) ObservationTarget {
-        return .{ .ptr = ptr, .consume_fn = consume_fn };
-    }
-
-    pub fn consume(
-        self: ObservationTarget,
-        block_access_index: eth_bal.BlockAccessIndex,
-        view: state.TrackedState.ObservationsView,
-    ) !void {
-        try self.consume_fn(self.ptr, block_access_index, view);
-    }
-};
-
-/// Compile-time provenance for one side of a consensus-root comparison.
-///
-/// The tag makes the comparison table auditable: exactly one operand must be
-/// produced by execution and the other must come from an independent payload
-/// or reconstructed-header claim. It labels provenance; it does not
-/// authenticate the wrapped hash.
-pub const RootSource = enum {
-    execution_derived,
-    payload_header_claim,
-    reconstructed_header_claim,
-};
-
-pub fn SourcedRoot(comptime source: RootSource) type {
-    return struct {
-        pub const root_source = source;
-        value: [32]u8,
-
-        pub fn fromHash(hash: [32]u8) SourcedRoot(source) {
-            return .{ .value = hash };
-        }
-    };
-}
-
-pub const PayloadHeaderRoot = SourcedRoot(.payload_header_claim);
-pub const ReconstructedHeaderRoot = SourcedRoot(.reconstructed_header_claim);
-
-/// Roots carried directly by execution-payload/header fields.
-pub const PayloadHeaderRootClaims = struct {
-    state: PayloadHeaderRoot,
-    receipts: PayloadHeaderRoot,
-};
-
-/// Roots only available after reconstructing or otherwise independently reading
-/// the current execution header. These are consensus claims.
-pub const ReconstructedHeaderRootClaims = struct {
-    transactions: ?ReconstructedHeaderRoot = null,
-    withdrawals: ?ReconstructedHeaderRoot = null,
-};
-
+/// Consensus root claims, grouped structurally by provenance so every
+/// comparison visibly pairs one execution-derived root with one independent
+/// claim. `payload_header` roots are carried directly by execution-payload or
+/// header fields; `reconstructed_header` roots only exist after independently
+/// reconstructing or reading the current execution header.
 pub const RootChecks = struct {
-    payload_header: PayloadHeaderRootClaims,
-    reconstructed_header: ReconstructedHeaderRootClaims = .{},
+    payload_header: struct {
+        state: [32]u8,
+        receipts: [32]u8,
+    },
+    reconstructed_header: struct {
+        transactions: ?[32]u8 = null,
+        withdrawals: ?[32]u8 = null,
+    } = .{},
 };
 
 /// Header scalar/commitment claims compared against execution-derived outputs.
@@ -528,7 +160,8 @@ pub const BlockInput = BlockInputType([]const []const u8);
 /// encoded envelope; `applyAssumeDecoded` deliberately does not prove this.
 pub const AssumeDecodedBlockInput = BlockInputType([]const TransactionInput);
 
-fn assumeDecodedBlockInput(
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn assumeDecodedBlockInput(
     input: BlockInput,
     state_backend: Backend,
     transactions: []const TransactionInput,
@@ -554,8 +187,27 @@ fn assumeDecodedBlockInput(
     };
 }
 
-fn resetBalReport(input: AssumeDecodedBlockInput) void {
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn resetBalReport(input: AssumeDecodedBlockInput) void {
     if (input.bal_differential) |report| report.reset();
+}
+
+/// Everything validation judges a completed execution against. Production
+/// never constructs this type; that impossibility replaces the old fold-mode
+/// asserts.
+pub const Claims = struct {
+    root_checks: RootChecks,
+    header: HeaderClaims = .{},
+    header_hash: ?HeaderHashClaim = null,
+};
+
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn validationClaims(input: AssumeDecodedBlockInput) Claims {
+    return .{
+        .root_checks = input.root_checks,
+        .header = input.header_claims,
+        .header_hash = input.header_hash_claim,
+    };
 }
 
 fn ProduceInputType(comptime Transactions: type) type {
@@ -697,44 +349,13 @@ pub const ProduceOutcome = union(enum) {
     }
 };
 
-pub const empty_logs_bloom = [_]u8{0} ** 256;
+pub const empty_logs_bloom = eth_receipt.empty_logs_bloom;
 pub const empty_requests_hash = eip7685.empty_requests_hash;
 pub const requestsHash = eip7685.requestsHash;
 
-fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn lifecycleExecutionContext(env: Env) execution.ExecutionContext {
     return env.executionContext(.{ .origin = address.addr(0) });
-}
-
-const RootField = enum {
-    state,
-    transactions,
-    receipts,
-    withdrawals,
-};
-
-const ConsensusRootComparison = struct {
-    field: RootField,
-    status: Status,
-    derived_source: RootSource = .execution_derived,
-    claim_source: RootSource,
-};
-
-const consensus_root_comparisons = [_]ConsensusRootComparison{
-    .{ .field = .state, .status = .state_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .transactions, .status = .transactions_root_mismatch, .claim_source = .reconstructed_header_claim },
-    .{ .field = .receipts, .status = .receipts_root_mismatch, .claim_source = .payload_header_claim },
-    .{ .field = .withdrawals, .status = .withdrawals_root_mismatch, .claim_source = .reconstructed_header_claim },
-};
-
-comptime {
-    for (consensus_root_comparisons) |comparison| {
-        if (comparison.status == .valid) @compileError("consensus root comparison must map to a mismatch status");
-        const has_execution_derived = comparison.derived_source == .execution_derived;
-        const claim_is_execution_derived = comparison.claim_source == .execution_derived;
-        if (has_execution_derived == claim_is_execution_derived) {
-            @compileError("consensus root comparison must have exactly one execution-derived operand");
-        }
-    }
 }
 
 /// Exact Ethereum block-STF namespace for one named fork.
@@ -762,6 +383,11 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
+    const block_access_list_enabled = ExactVm.specification.block.block_access_list;
+    const bal_production_enabled = block_access_list_enabled and
+        ExactVm.BlockState.supports_block_production;
+    const bal_differential_enabled = block_access_list_enabled and
+        ExactVm.BlockState.supports_external_observation_capture;
     const Producer = struct {
         fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
             try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
@@ -788,18 +414,17 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
         /// Dense state is already bound to the accepted claim and therefore
         /// cannot run the tracked-state differential lane.
-        pub const BalExecutor = if (ExactVm.BlockState.external_observation_capture)
-            BalExecutorType(revision, ExactVm)
+        pub const BalExecutor = if (bal_differential_enabled)
+            differential_executor.Executor(revision, ExactVm)
         else
             struct {};
-        /// Block production derives the BAL from tracked observations. Dense
-        /// state requires that accepted claim before admission, so it cannot
-        /// expose either production entry point.
-        pub const produce = if (ExactVm.BlockState.block_production)
+        /// Current production returns a canonical BAL artifact, so both the
+        /// Ethereum spec and the selected state model must support that path.
+        pub const produce = if (bal_production_enabled)
             Producer.produce
         else
             struct {};
-        pub const produceAssumeDecoded = if (ExactVm.BlockState.block_production)
+        pub const produceAssumeDecoded = if (bal_production_enabled)
             Producer.produceAssumeDecoded
         else
             struct {};
@@ -835,7 +460,7 @@ fn requireCaptureSupport(
     capture: ?ExecutionCapture,
 ) !void {
     try requireStepCaptureSupport(options, capture);
-    if (!BlockState.external_observation_capture and
+    if (!BlockState.supports_external_observation_capture and
         capture != null and capture.?.observations != null)
     {
         return error.ObservationCaptureUnavailable;
@@ -846,7 +471,7 @@ fn requireDifferentialSupport(
     comptime BlockState: type,
     differential: ?*BalDifferentialReport,
 ) !void {
-    if (!BlockState.external_observation_capture and differential != null)
+    if (!BlockState.supports_external_observation_capture and differential != null)
         return error.BalDifferentialUnavailable;
 }
 
@@ -909,10 +534,11 @@ fn applyAssumeDecodedExact(
     input: AssumeDecodedBlockInput,
 ) !Result {
     resetBalReport(input);
-    var no_produced_bal: ?[]u8 = null;
-    const result = (if (comptime Engine.BlockState.external_observation_capture) blk: {
+    const result = (if (comptime Engine.specification.block.block_access_list and
+        Engine.BlockState.supports_external_observation_capture)
+    blk: {
         if (input.bal_differential) |report| {
-            var observer = BalDifferentialObserver(revision, Engine).init(
+            var observer = differential_executor.Observer(revision, Engine).init(
                 allocator,
                 input.env,
                 lifecycleExecutionContext(input.env),
@@ -922,19 +548,41 @@ fn applyAssumeDecodedExact(
                 null,
             );
             defer observer.deinit();
-            break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+            break :blk applyExecution(
+                revision,
+                Engine,
+                allocator,
+                input,
+                validationClaims(input),
+                &observer,
+            );
         }
-        var observer = NoBlockObserver{};
-        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        const observer = {};
+        break :blk applyExecution(
+            revision,
+            Engine,
+            allocator,
+            input,
+            validationClaims(input),
+            observer,
+        );
     } else blk: {
-        std.debug.assert(input.bal_differential == null);
-        var observer = NoBlockObserver{};
-        break :blk serialFold(revision, Engine, allocator, input, .compare, &no_produced_bal, &observer);
+        if (comptime Engine.specification.block.block_access_list) {
+            std.debug.assert(input.bal_differential == null);
+        }
+        const observer = {};
+        break :blk applyExecution(
+            revision,
+            Engine,
+            allocator,
+            input,
+            validationClaims(input),
+            observer,
+        );
     }) catch |err| switch (Executor.errors.normalize(err)) {
         error.StateReaderStrategyFailure => Result{ .status = .block_access_list_mismatch },
         else => return err,
     };
-    std.debug.assert(no_produced_bal == null);
     return result;
 }
 
@@ -982,11 +630,13 @@ fn produceAssumeDecodedExact(
     allocator: std.mem.Allocator,
     input: AssumeDecodedProduceInput,
 ) !ProduceOutcome {
-    var encoded_block_access_list: ?[]u8 = null;
-    errdefer if (encoded_block_access_list) |encoded| allocator.free(encoded);
+    comptime {
+        std.debug.assert(Engine.specification.block.block_access_list);
+        std.debug.assert(Engine.BlockState.supports_block_production);
+    }
 
-    var observer = NoBlockObserver{};
-    const result = try serialFold(revision, Engine, allocator, .{
+    const observer = {};
+    return produceExecution(revision, Engine, allocator, .{
         .env = input.env,
         .block_hash_source = input.block_hash_source,
         .block_header = input.block_header,
@@ -996,44 +646,57 @@ fn produceAssumeDecodedExact(
         .withdrawals = input.withdrawals,
         .parent_header = input.parent_header,
         .parent_blob_gas = input.parent_blob_gas,
-        // `.produce` never reads comparison claims; `BlockInput` keeps them
-        // compile-time mandatory for the public validation surface.
-        .root_checks = .{
-            .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
-            },
-        },
         .capture = input.capture,
-    }, .produce, &encoded_block_access_list, &observer);
-
-    if (result.status != .valid) {
-        std.debug.assert(encoded_block_access_list == null);
-        return .{ .rejected = result };
-    }
-    return .{ .produced = .{
-        .output = DerivedBlockOutput.fromResult(result),
-        .encoded_block_access_list = encoded_block_access_list.?,
-    } };
+    }, observer);
 }
 
-const FoldMode = enum { compare, produce };
+/// Block-execution accumulation state: lives from before transaction 0 until
+/// block finalization consumes it into commitments.
+const BlockAccumulator = struct {
+    allocator: std.mem.Allocator,
+    encoded_receipts: std.ArrayList([]const u8) = .empty,
+    deposit_request_data: std.ArrayList(u8) = .empty,
+    logs_bloom: [256]u8 = empty_logs_bloom,
+    blob_gas_used: u64 = 0,
+    blob_gas_limit: u64,
 
-fn ObservationCollector(comptime BlockState: type) type {
+    fn deinit(self: *BlockAccumulator) void {
+        for (self.encoded_receipts.items) |encoded_receipt| self.allocator.free(encoded_receipt);
+        self.encoded_receipts.deinit(self.allocator);
+        self.deposit_request_data.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
+/// Terminal mid-fold Result carrying the block progress at the stop point.
+fn foldedResult(status: Status, tx_index: usize, progress: vm.BlockResult, requests_hash: [32]u8) Result {
+    return .{
+        .status = status,
+        .tx_index = tx_index,
+        .gas_used = progress.gas_used,
+        .block_gas_used = progress.block_gas.total,
+        .block_state_gas_used = progress.block_gas.state,
+        .requests_hash = requests_hash,
+    };
+}
+
+/// Adapter required by BlockExecution's observation capability. Consensus BAL
+/// recording and optional external diagnostics remain separate authorities.
+fn StateObservationSink(comptime BlockState: type) type {
     return struct {
-        builder: ?*tracked_state_projector.BlockBuilder,
-        target: ?ObservationTarget,
+        consensus_bal: ?*tracked_state_projector.BlockBuilder,
+        external_target: ?ObservationTarget,
         block_access_index: eth_bal.BlockAccessIndex = 0,
 
         pub fn observe(
             self: *@This(),
-            pending: BlockState.State.PendingView,
+            observation: anytype,
         ) !void {
-            const observations = pending.observations();
-            if (self.builder) |builder| {
+            const observations = observation.observations();
+            if (self.consensus_bal) |builder| {
                 try builder.append(observations, self.block_access_index);
             }
-            if (self.target) |target| {
+            if (self.external_target) |target| {
                 try BlockState.consumeObservationTarget(
                     target,
                     self.block_access_index,
@@ -1044,97 +707,372 @@ fn ObservationCollector(comptime BlockState: type) type {
     };
 }
 
-/// Shared authoritative serial fold for validation and block production.
-fn serialFold(
+/// Loop-invariant borrows for the per-transaction fold. Everything here is
+/// pinned in `executeBlock`'s frame and outlives every transaction.
+fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        env: Env,
+        block: *Engine.BlockExecution,
+        executor: *Engine.Executor,
+        collector: *StateObservationSink(Engine.BlockState),
+        step_capture: *block_capture.StepScope,
+        observe_state: bool,
+
+        /// One payload transaction in invariant order: step-trace begin, blob
+        /// budget, execution, diagnostics, accumulation, after-transaction
+        /// system calls, step-trace finish. Returns the terminal Result when
+        /// the block must stop at this transaction, null to continue.
+        /// Inline: this is the fold's hot loop body; an outlined call plus
+        /// context copy costs measurable guest steps per transaction.
+        inline fn executePayloadTransaction(
+            self: *const @This(),
+            entry: TransactionInput,
+            tx_index: usize,
+            accumulated: *BlockAccumulator,
+            requests_hash: [32]u8,
+            observer: anytype,
+        ) !?Result {
+            const allocator = self.allocator;
+            var step_span = try self.step_capture.beginTransaction();
+            defer if (step_span) |*span| span.abort();
+
+            self.collector.block_access_index =
+                try eth_bal.transactionIndex(try block_admission.transactionCount(tx_index));
+            const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
+            const next_blob_gas_used = std.math.add(u64, accumulated.blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
+            if (next_blob_gas_used > accumulated.blob_gas_limit) {
+                const progress = self.block.progress();
+                if (comptime @TypeOf(observer) != void) {
+                    try observer.rejected(.{
+                        .kind = .blob_gas,
+                        .transaction = entry.tx,
+                        .tx_index = tx_index,
+                        .progress_before = progress,
+                        .blob_gas_used_before = accumulated.blob_gas_used,
+                    });
+                }
+                var result = foldedResult(.blob_gas_limit_exceeded, tx_index, progress, requests_hash);
+                result.blob_gas_used = accumulated.blob_gas_used;
+                return result;
+            }
+            const progress_before = self.block.progress();
+            const tx_result = transactPayload(
+                Engine,
+                self.block,
+                self.env,
+                entry.tx,
+                if (self.step_capture.active())
+                    .{ .steps = self.step_capture.contextPtr() }
+                else if (self.observe_state)
+                    .observations
+                else
+                    .normal,
+                self.collector,
+            ) catch |err| switch (err) {
+                error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
+                error.BlockGasExceeded => {
+                    const progress = self.block.progress();
+                    if (comptime @TypeOf(observer) != void) {
+                        try observer.rejected(.{
+                            .kind = .block_gas,
+                            .transaction = entry.tx,
+                            .tx_index = tx_index,
+                            .progress_before = progress_before,
+                            .blob_gas_used_before = accumulated.blob_gas_used,
+                        });
+                    }
+                    return foldedResult(.block_gas_exceeded, tx_index, progress, requests_hash);
+                },
+                else => return err,
+            };
+            const included = switch (tx_result) {
+                .included => |value| value,
+                .rejected => {
+                    const progress = self.block.progress();
+                    if (comptime @TypeOf(observer) != void) {
+                        try observer.rejected(.{
+                            .kind = .transaction,
+                            .transaction = entry.tx,
+                            .tx_index = tx_index,
+                            .progress_before = progress_before,
+                            .blob_gas_used_before = accumulated.blob_gas_used,
+                        });
+                    }
+                    return foldedResult(.transaction_rejected, tx_index, progress, requests_hash);
+                },
+            };
+            const receipt = included.receipt;
+            const progress_after = self.block.progress();
+            if (comptime @TypeOf(observer) != void) {
+                try observer.included(.{
+                    .transaction = entry.tx,
+                    .tx_index = tx_index,
+                    .progress_before = progress_before,
+                    .progress_after = progress_after,
+                    .result = &included.result,
+                    .logs = receipt.logs,
+                    .blob_gas_used_after = next_blob_gas_used,
+                });
+            }
+            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, eth_receipt.logsBloom(receipt.logs));
+            if (revision.isImpl(.prague)) {
+                eip6110.appendRequestDataFromLogs(allocator, &accumulated.deposit_request_data, receipt.logs) catch |err| switch (err) {
+                    error.InvalidRequest => return foldedResult(.invalid_requests, tx_index, self.block.progress(), requests_hash),
+                    else => return err,
+                };
+            }
+            accumulated.blob_gas_used = next_blob_gas_used;
+            const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
+            accumulated.encoded_receipts.append(allocator, encoded_receipt) catch |err| {
+                allocator.free(encoded_receipt);
+                return err;
+            };
+            const after_context: Executor.system_contracts.AfterTransactionContext = .{
+                .number = self.env.number,
+                .timestamp = self.env.timestamp,
+                .transaction_index = progress_after.tx_count - 1,
+                .status = receipt.status,
+                .gas_used = receipt.gas_used,
+                .cumulative_gas_used = progress_after.gas_used,
+                .cumulative_block_gas = progress_after.block_gas.total,
+                .cumulative_state_gas = progress_after.block_gas.state,
+            };
+            const after_result = if (self.step_capture.active())
+                Executor.system_contracts.applyAfterTransactionCaptured(
+                    self.executor,
+                    lifecycleExecutionContext(self.env),
+                    after_context,
+                    self.step_capture.contextPtr(),
+                    self.collector,
+                )
+            else if (self.observe_state)
+                Executor.system_contracts.applyAfterTransactionObserved(
+                    self.executor,
+                    lifecycleExecutionContext(self.env),
+                    after_context,
+                    self.collector,
+                )
+            else
+                Executor.system_contracts.applyAfterTransaction(
+                    self.executor,
+                    lifecycleExecutionContext(self.env),
+                    after_context,
+                );
+            after_result catch |err| switch (err) {
+                error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
+                error.SystemCallFailed => return Result{ .status = .system_contract_failed, .tx_index = tx_index },
+                else => return err,
+            };
+
+            if (step_span) |*span| try span.finish();
+            return null;
+        }
+    };
+}
+
+/// Private owner of one admitted backend and its unresolved execution result.
+/// It never escapes BlockSTF: callers execute, compare or produce, then commit
+/// while the Executor remains pinned in this stack frame.
+fn BlockRun(comptime Engine: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        state_backend: Backend,
+        executor: ?Engine.Executor = null,
+        encoded_block_access_list: ?[]u8 = null,
+        block_access_list_mismatch: bool = false,
+        candidate_ready: bool = false,
+        committed: bool = false,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            state_backend: Backend,
+        ) Self {
+            return .{
+                .allocator = allocator,
+                .state_backend = state_backend,
+            };
+        }
+
+        fn deinit(self: *Self) void {
+            if (self.encoded_block_access_list) |encoded| self.allocator.free(encoded);
+            if (self.executor) |*executor| executor.deinit();
+            self.state_backend.deinit();
+            self.* = undefined;
+        }
+
+        fn commit(self: *Self) !void {
+            std.debug.assert(self.candidate_ready);
+            std.debug.assert(!self.committed);
+            const executor = &self.executor.?;
+            try Engine.BlockState.commit(&self.state_backend, executor.acceptedView());
+            self.committed = true;
+        }
+
+        fn takeEncodedBlockAccessList(self: *Self) []u8 {
+            std.debug.assert(self.candidate_ready);
+            std.debug.assert(self.committed);
+            const encoded = self.encoded_block_access_list orelse unreachable;
+            self.encoded_block_access_list = null;
+            return encoded;
+        }
+    };
+}
+
+/// Execute, compare, and commit one validation input while the unresolved
+/// candidate remains private to this stack frame. Internal to `eth/`: public
+/// only for the differential block executor.
+pub fn applyExecution(
     comptime revision: Revision,
     comptime Engine: type,
     allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
-    comptime mode: FoldMode,
-    produced_bal: *?[]u8,
+    input: anytype,
+    claims: Claims,
+    observer: anytype,
+) !Result {
+    var run = BlockRun(Engine).init(allocator, input.state_backend);
+    defer run.deinit();
+
+    if (!block_rules.blockBodyValid(
+        revision,
+        Engine.specification.block.block_access_list,
+        input,
+        claims,
+    )) return .{ .status = .invalid_block_body };
+
+    var result = try executeBlock(revision, Engine, allocator, input, &run, observer);
+    if (result.status != .valid) return result;
+
+    var block_hash_mismatch = false;
+    if (claims.header_hash) |claim| {
+        result.block_hash = block_rules.reconstructHeaderHash(
+            revision,
+            allocator,
+            input,
+            result,
+            claim,
+        ) catch |err| switch (err) {
+            error.ExtraDataTooLong,
+            error.HeaderSurfaceMismatch,
+            error.InvalidHeaderReconstruction,
+            => return .{ .status = .header_surface_mismatch },
+            else => return err,
+        };
+        block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
+    }
+    result.status = block_rules.compareBlock(
+        result,
+        claims,
+        run.block_access_list_mismatch,
+        block_hash_mismatch,
+    );
+    if (result.status == .valid) try run.commit();
+    return result;
+}
+
+fn produceExecution(
+    comptime revision: Revision,
+    comptime Engine: type,
+    allocator: std.mem.Allocator,
+    input: anytype,
+    observer: anytype,
+) !ProduceOutcome {
+    var run = BlockRun(Engine).init(allocator, input.state_backend);
+    defer run.deinit();
+
+    if (!block_rules.blockBodyValid(
+        revision,
+        Engine.specification.block.block_access_list,
+        input,
+        null,
+    )) return .{ .rejected = .{ .status = .invalid_block_body } };
+
+    const result = try executeBlock(revision, Engine, allocator, input, &run, observer);
+    if (result.status != .valid) return .{ .rejected = result };
+
+    try run.commit();
+    return .{ .produced = .{
+        .output = DerivedBlockOutput.fromResult(result),
+        .encoded_block_access_list = run.takeEncodedBlockAccessList(),
+    } };
+}
+
+/// Shared authoritative serial transition for validation and block production.
+/// It derives an unresolved candidate but neither judges claims nor commits it.
+fn executeBlock(
+    comptime revision: Revision,
+    comptime Engine: type,
+    allocator: std.mem.Allocator,
+    input: anytype,
+    run: *BlockRun(Engine),
     observer: anytype,
 ) !Result {
     // One spec fact gates the header field, observation recording, claim
     // verification, and the candidate lane.
-    const record_block_access_list = Engine.specification.block.block_access_list;
-
-    var state_backend = input.state_backend;
-    defer state_backend.deinit();
-
-    std.debug.assert(produced_bal.* == null);
-    if (mode == .produce) {
-        std.debug.assert(input.block_access_list == null);
-        std.debug.assert(std.meta.eql(input.header_claims, HeaderClaims{}));
-        std.debug.assert(input.header_hash_claim == null);
-        std.debug.assert(input.bal_differential == null);
-        comptime std.debug.assert(@TypeOf(observer) == *NoBlockObserver);
-        if (!record_block_access_list) return .{ .status = .invalid_block_body };
-    }
-    if (!blockBodyValid(revision, record_block_access_list, input)) return .{ .status = .invalid_block_body };
-    if (parentHeaderStatus(revision, input)) |status| return .{ .status = status };
-    if (!blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
+    const block_access_list_enabled = Engine.specification.block.block_access_list;
+    const block_access_list = if (comptime @hasField(@TypeOf(input), "block_access_list"))
+        input.block_access_list
+    else
+        null;
+    const validates_block_access_list = @hasField(@TypeOf(input), "block_access_list");
+    const resource_preparer = if (comptime @hasField(@TypeOf(input), "execution_resource_preparer"))
+        input.execution_resource_preparer
+    else
+        null;
+    const precheck_claim_state = if (comptime @hasField(@TypeOf(input), "precheck_block_access_list_state"))
+        input.precheck_block_access_list_state
+    else
+        false;
+    if (block_rules.parentHeaderStatus(revision, input)) |status| return .{ .status = status };
+    if (!block_rules.blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
     var block_access_list_mismatch = false;
-    const block_access_transaction_count = try blockAccessTransactionCount(input.transactions.len);
+    const block_access_transaction_count = try block_admission.transactionCount(input.transactions.len);
 
-    var claimed_block_access_list: ?eth_bal.Decoded = null;
-    var claimed_block_access_counts: ?eth_bal.Counts = null;
-    defer if (claimed_block_access_list) |*decoded| decoded.deinit(allocator);
-    if (input.block_access_list) |encoded_claim| {
-        var bal_budget = rlp.Budget.init(eth_bal.blockDecodeLimits(
-            encoded_claim.len,
-            block_access_transaction_count,
-            input.env.gas_limit,
-        ));
-        claimed_block_access_list = eth_bal.decodeWithBudget(allocator, encoded_claim, &bal_budget) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.DecodeAllocationLimitExceeded,
-            error.DecodeItemLimitExceeded,
-            => return .{ .status = .block_access_list_too_large },
-            else => return .{ .status = .invalid_block_access_list },
-        };
-        claimed_block_access_counts = validateBlockAccessList(claimed_block_access_list.?.accounts, block_access_transaction_count, input.env.gas_limit) catch |err| switch (err) {
-            error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
-            else => return .{ .status = .invalid_block_access_list },
-        };
-        if (input.execution_resource_preparer) |preparer| {
-            var plan = try bal_witness.planAllocAssumeValidated(
-                allocator,
-                claimed_block_access_list.?.accounts,
-            );
-            defer plan.deinit(allocator);
+    var bal_claim = block_admission.Claim.decode(
+        allocator,
+        block_access_list,
+        block_access_transaction_count,
+        input.env.gas_limit,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.BlockAccessListTooLarge => return .{ .status = .block_access_list_too_large },
+        error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
+    };
+    defer bal_claim.deinit(allocator);
+    try bal_claim.prepareResources(allocator, resource_preparer);
 
-            // This BlockSTF hook is an optimization. A caller that requires
-            // eager availability can invoke the preparer before `apply` and
-            // choose its own retry/error policy.
-            preparer.prepare(plan.resources) catch {};
+    if (comptime @TypeOf(observer) != void) {
+        if (bal_claim.accounts()) |claimed_accounts| {
+            observer.claimDecoded(claimed_accounts, run.state_backend.reader());
         }
     }
-
-    if (claimed_block_access_list) |*claim| observer.claimDecoded(claim.accounts, state_backend.reader());
 
     var observed_block_access_list: ?eth_bal.Decoded = null;
     defer if (observed_block_access_list) |*decoded| decoded.deinit(allocator);
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    const admitted_state = Engine.BlockState.admit(allocator, .{
-        .backend = &state_backend,
-        .validated_claim = if (claimed_block_access_list) |*claim| claim.accounts else null,
-        .precheck_claim_state = input.precheck_block_access_list_state,
+    const executor_state = Engine.BlockState.admit(allocator, .{
+        .backend = &run.state_backend,
+        .validated_claim = bal_claim.accounts(),
+        .precheck_claim_state = precheck_claim_state,
     }) catch |err| switch (err) {
         error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
         error.InvalidWitness => return .{ .status = .invalid_witness },
         else => return err,
     };
-    var executor = Engine.Executor.initOwned(allocator, admitted_state, .{
+    run.executor = Engine.Executor.init(allocator, .{
+        .state = executor_state,
         .prepared_code_backend = input.prepared_code_backend,
         .block_hash_source = input.block_hash_source,
     });
-    defer executor.deinit();
-    if (claimed_block_access_counts) |counts| {
+    const executor = &run.executor.?;
+    if (bal_claim.counts) |counts| {
         // Capacity is advisory; it must not change block validity on allocation failure.
         executor.reserveAcceptedAccessHint(.{
             .accounts = counts.accounts,
@@ -1142,34 +1080,25 @@ fn serialFold(
         }) catch {};
     }
 
-    var observation_builder = tracked_state_projector.BlockBuilder.init(allocator);
-    defer observation_builder.deinit();
-    var observation_collector = ObservationCollector(Engine.BlockState){
-        .builder = if (record_block_access_list) &observation_builder else null,
-        .target = if (input.capture) |capture| capture.observations else null,
+    var consensus_bal = tracked_state_projector.BlockBuilder.init(allocator);
+    defer consensus_bal.deinit();
+    var observation_sink = StateObservationSink(Engine.BlockState){
+        .consensus_bal = if (block_access_list_enabled) &consensus_bal else null,
+        .external_target = if (input.capture) |capture| capture.observations else null,
     };
-    const observe_state = record_block_access_list or observation_collector.target != null;
-    const capture_steps = if (input.capture) |capture| capture.steps != null else false;
-    var capture_context = Executor.CaptureContext.init(
-        allocator,
-        null,
-    );
-    defer capture_context.deinit();
-    var capture_open = false;
-    if (capture_steps) {
-        try capture_context.begin();
-        capture_open = true;
-    }
-    defer if (capture_open) capture_context.abort() catch {};
+    const observe_state = block_access_list_enabled or observation_sink.external_target != null;
+    var step_capture = block_capture.StepScope.init(allocator, input.capture);
+    defer step_capture.deinit();
+    try step_capture.beginBlock();
 
     var block = try Engine.BlockExecution.init(
-        &executor,
+        executor,
         input.env,
     );
     defer block.discardIfUnfinished();
 
     if (input.block_header) |header| {
-        observation_collector.block_access_index = 0;
+        observation_sink.block_access_index = 0;
         const context: Executor.system_contracts.BeforeBlockContext = .{
             .number = input.env.number,
             .timestamp = input.env.timestamp,
@@ -1178,14 +1107,14 @@ fn serialFold(
         };
         const before_result = if (observe_state)
             Executor.system_contracts.applyBeforeBlockObserved(
-                &executor,
+                executor,
                 lifecycleExecutionContext(input.env),
                 context,
-                &observation_collector,
+                &observation_sink,
             )
         else
             Executor.system_contracts.applyBeforeBlock(
-                &executor,
+                executor,
                 lifecycleExecutionContext(input.env),
                 context,
             );
@@ -1195,196 +1124,33 @@ fn serialFold(
             else => return err,
         };
     }
-    observer.beforeBlock(input.block_header);
+    if (comptime @TypeOf(observer) != void) observer.beforeBlock(input.block_header);
 
-    var encoded_receipts: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (encoded_receipts.items) |encoded_receipt| allocator.free(encoded_receipt);
-        encoded_receipts.deinit(allocator);
-    }
-    var deposit_request_data: std.ArrayList(u8) = .empty;
-    defer deposit_request_data.deinit(allocator);
-    var block_logs_bloom = empty_logs_bloom;
-    var blob_gas_used: u64 = 0;
-    const blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_params);
+    var accumulated = BlockAccumulator{
+        .allocator = allocator,
+        .blob_gas_limit = try blockBlobGasLimit(revision, Engine, input.env.blob_params),
+    };
+    defer accumulated.deinit();
 
+    const fold = PayloadFold(revision, Engine){
+        .allocator = allocator,
+        .env = input.env,
+        .block = &block,
+        .executor = executor,
+        .collector = &observation_sink,
+        .step_capture = &step_capture,
+        .observe_state = observe_state,
+    };
     for (input.transactions, 0..) |entry, tx_index| {
-        if (capture_steps) try capture_context.beginTrace(.{
-            .tape = input.capture.?.steps.?.tape,
-            .profile = input.capture.?.steps.?.profile,
-        });
-        var step_capture_open = capture_steps;
-        defer if (step_capture_open) capture_context.abortTrace() catch {};
-
-        observation_collector.block_access_index =
-            try eth_bal.transactionIndex(try blockAccessTransactionCount(tx_index));
-        const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
-        const next_blob_gas_used = std.math.add(u64, blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
-        if (next_blob_gas_used > blob_gas_limit) {
-            const progress = block.progress();
-            if (observer.isActive()) {
-                try observer.rejected(.{
-                    .kind = .blob_gas,
-                    .transaction = entry.tx,
-                    .tx_index = tx_index,
-                    .progress_before = progress,
-                    .blob_gas_used_before = blob_gas_used,
-                });
-            }
-            return .{
-                .status = .blob_gas_limit_exceeded,
-                .tx_index = tx_index,
-                .gas_used = progress.gas_used,
-                .block_gas_used = progress.block_gas.total,
-                .block_state_gas_used = progress.block_gas.state,
-                .blob_gas_used = blob_gas_used,
-                .requests_hash = computed_requests_hash,
-            };
-        }
-        const progress_before = block.progress();
-        const tx_result = transactPayload(
-            Engine,
-            &block,
-            input.env,
-            entry.tx,
-            if (capture_steps)
-                .{ .steps = &capture_context }
-            else if (observe_state)
-                .observations
-            else
-                .normal,
-            &observation_collector,
-        ) catch |err| switch (err) {
-            error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
-            error.BlockGasExceeded => {
-                const progress = block.progress();
-                if (observer.isActive()) {
-                    try observer.rejected(.{
-                        .kind = .block_gas,
-                        .transaction = entry.tx,
-                        .tx_index = tx_index,
-                        .progress_before = progress_before,
-                        .blob_gas_used_before = blob_gas_used,
-                    });
-                }
-                return .{
-                    .status = .block_gas_exceeded,
-                    .tx_index = tx_index,
-                    .gas_used = progress.gas_used,
-                    .block_gas_used = progress.block_gas.total,
-                    .block_state_gas_used = progress.block_gas.state,
-                    .requests_hash = computed_requests_hash,
-                };
-            },
-            else => return err,
-        };
-        const included = switch (tx_result) {
-            .included => |value| value,
-            .rejected => {
-                const progress = block.progress();
-                if (observer.isActive()) {
-                    try observer.rejected(.{
-                        .kind = .transaction,
-                        .transaction = entry.tx,
-                        .tx_index = tx_index,
-                        .progress_before = progress_before,
-                        .blob_gas_used_before = blob_gas_used,
-                    });
-                }
-                return .{
-                    .status = .transaction_rejected,
-                    .tx_index = tx_index,
-                    .gas_used = progress.gas_used,
-                    .block_gas_used = progress.block_gas.total,
-                    .block_state_gas_used = progress.block_gas.state,
-                    .requests_hash = computed_requests_hash,
-                };
-            },
-        };
-        const receipt = included.receipt;
-        const progress_after = block.progress();
-        if (observer.isActive()) {
-            try observer.included(.{
-                .transaction = entry.tx,
-                .tx_index = tx_index,
-                .progress_before = progress_before,
-                .progress_after = progress_after,
-                .result = &included.result,
-                .logs = receipt.logs,
-                .blob_gas_used_after = next_blob_gas_used,
-            });
-        }
-        mergeLogsBloom(&block_logs_bloom, logsBloom(receipt.logs));
-        if (revision.isImpl(.prague)) {
-            eip6110.appendRequestDataFromLogs(allocator, &deposit_request_data, receipt.logs) catch |err| switch (err) {
-                error.InvalidRequest => {
-                    const progress = block.progress();
-                    return .{
-                        .status = .invalid_requests,
-                        .tx_index = tx_index,
-                        .gas_used = progress.gas_used,
-                        .block_gas_used = progress.block_gas.total,
-                        .block_state_gas_used = progress.block_gas.state,
-                        .requests_hash = computed_requests_hash,
-                    };
-                },
-                else => return err,
-            };
-        }
-        blob_gas_used = next_blob_gas_used;
-        const encoded_receipt = try encodeReceiptView(allocator, entry.tx.kind, receipt);
-        errdefer allocator.free(encoded_receipt);
-        try encoded_receipts.append(allocator, encoded_receipt);
-        const after_context: Executor.system_contracts.AfterTransactionContext = .{
-            .number = input.env.number,
-            .timestamp = input.env.timestamp,
-            .transaction_index = progress_after.tx_count - 1,
-            .status = receipt.status,
-            .gas_used = receipt.gas_used,
-            .cumulative_gas_used = progress_after.gas_used,
-            .cumulative_block_gas = progress_after.block_gas.total,
-            .cumulative_state_gas = progress_after.block_gas.state,
-        };
-        const after_result = if (capture_steps)
-            Executor.system_contracts.applyAfterTransactionCaptured(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-                &capture_context,
-                &observation_collector,
-            )
-        else if (observe_state)
-            Executor.system_contracts.applyAfterTransactionObserved(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-                &observation_collector,
-            )
-        else
-            Executor.system_contracts.applyAfterTransaction(
-                &executor,
-                lifecycleExecutionContext(input.env),
-                after_context,
-            );
-        after_result catch |err| switch (err) {
-            error.InvalidWitness => return .{ .status = .invalid_witness, .tx_index = tx_index },
-            error.SystemCallFailed => return .{ .status = .system_contract_failed, .tx_index = tx_index },
-            else => return err,
-        };
-
-        if (capture_steps) {
-            const span = try capture_context.finishTrace();
-            step_capture_open = false;
-            const steps = input.capture.?.steps.?;
-            var span_outstanding = true;
-            defer if (span_outstanding) steps.tape.resolve(span) catch {};
-            try steps.target.consume(span);
-            try steps.tape.resolve(span);
-            span_outstanding = false;
-            try steps.tape.reset();
-        }
+        if (try fold.executePayloadTransaction(
+            entry,
+            tx_index,
+            &accumulated,
+            computed_requests_hash,
+            observer,
+        )) |terminal| return terminal;
     }
-    try observer.finish();
+    if (comptime @TypeOf(observer) != void) try observer.finish();
 
     const effective_parent_blob_gas = if (revision.isImpl(.cancun))
         if (input.parent_header) |parent_header| parent_header.blobGasInput() else input.parent_blob_gas
@@ -1404,20 +1170,21 @@ fn serialFold(
         }
     };
 
-    observation_collector.block_access_index =
+    observation_sink.block_access_index =
         try eth_bal.postExecutionSystemIndex(block_access_transaction_count);
     const withdrawals_result = if (observe_state)
         applyWithdrawals(
-            &executor,
+            executor,
             lifecycleExecutionContext(input.env),
             input.withdrawals,
-            &observation_collector,
+            &observation_sink,
         )
     else
-        applyWithdrawalsNormal(
-            &executor,
+        applyWithdrawals(
+            executor,
             lifecycleExecutionContext(input.env),
             input.withdrawals,
+            {},
         );
     withdrawals_result catch |err| {
         return switch (Executor.errors.normalize(err)) {
@@ -1426,15 +1193,24 @@ fn serialFold(
         };
     };
 
-    const derived_requests_result = deriveRequestsMode(
-        allocator,
-        &executor,
-        input.env,
-        block.progress(),
-        deposit_request_data.items,
-        observe_state,
-        &observation_collector,
-    );
+    const derived_requests_result = if (observe_state)
+        deriveRequests(
+            allocator,
+            executor,
+            input.env,
+            block.progress(),
+            accumulated.deposit_request_data.items,
+            &observation_sink,
+        )
+    else
+        deriveRequests(
+            allocator,
+            executor,
+            input.env,
+            block.progress(),
+            accumulated.deposit_request_data.items,
+            {},
+        );
     const derived_requests = derived_requests_result catch |err| {
         return switch (Executor.errors.normalize(err)) {
             error.InvalidWitness => .{ .status = .invalid_witness },
@@ -1449,127 +1225,109 @@ fn serialFold(
         else => return err,
     };
 
-    if (capture_steps) {
-        _ = try capture_context.finish();
-        capture_open = false;
-    }
-    if (record_block_access_list) {
-        observed_block_access_list = observation_builder.finish() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return err,
-        };
-        // BlockBuilder emits canonical structure; only its consensus item budget remains.
-        validateBlockAccessCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
-            error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
-            else => return err,
-        };
+    try step_capture.finishBlock();
+    if (block_access_list_enabled) {
+        const claim_verified_without_artifact = if (comptime validates_block_access_list and
+            @TypeOf(observer) == void)
+        blk: {
+            const expected = bal_claim.accounts() orelse break :blk false;
+            if (!try consensus_bal.matchesClaim(expected)) break :blk false;
+            computed_block_access_list_hash = crypto.keccak256(block_access_list.?);
+            break :blk true;
+        } else false;
 
-        observed_block_access_list_encoded = try eth_bal.encodeAlloc(allocator, observed_block_access_list.?.accounts);
-        computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
-        if (input.block_access_list) |encoded_claim| {
-            if (!std.mem.eql(u8, observed_block_access_list_encoded.?, encoded_claim)) {
-                block_access_list_mismatch = true;
-                if (input.bal_differential) |report| {
-                    if (report.mismatch_writer) |writer| {
-                        writer.print("{f}", .{bal_diff.Diff{
-                            .expected = claimed_block_access_list.?.accounts,
-                            .actual = observed_block_access_list.?.accounts,
-                        }}) catch {
-                            report.mismatch_write_failed = true;
-                        };
+        if (claim_verified_without_artifact) {
+            // The admitted canonical claim is the observed BAL; validation
+            // needs its commitment but owns no produced artifact.
+        } else {
+            observed_block_access_list = consensus_bal.finish() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return err,
+            };
+            // BlockBuilder emits canonical structure; only its consensus item budget remains.
+            block_admission.validateCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
+                error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
+                else => return err,
+            };
+
+            var needs_encoded_block_access_list = !validates_block_access_list or
+                @TypeOf(observer) != void;
+            if (block_access_list) |encoded_claim| {
+                if (!eth_bal.eql(bal_claim.accounts().?, observed_block_access_list.?.accounts)) {
+                    block_access_list_mismatch = true;
+                    needs_encoded_block_access_list = true;
+                    if (comptime @TypeOf(observer) != void) {
+                        observer.blockAccessListMismatch(
+                            bal_claim.accounts().?,
+                            observed_block_access_list.?.accounts,
+                        );
                     }
+                } else if (!needs_encoded_block_access_list) {
+                    computed_block_access_list_hash = crypto.keccak256(encoded_claim);
                 }
+            } else {
+                needs_encoded_block_access_list = true;
+            }
+            if (needs_encoded_block_access_list) {
+                observed_block_access_list_encoded = try eth_bal.encodeAlloc(
+                    allocator,
+                    observed_block_access_list.?.accounts,
+                );
+                computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
             }
         }
     }
-    observer.finishCandidate(input.withdrawals);
+    if (comptime @TypeOf(observer) != void) observer.finishCandidate(input.withdrawals);
 
     const block_result = block.finish();
     const accepted_state = executor.acceptedView();
 
-    var result = Result{
+    const result = Result{
         .status = .valid,
         .gas_used = block_result.gas_used,
         .block_gas_used = block_result.block_gas.total,
         .block_state_gas_used = block_result.block_gas.state,
         .state_root = Engine.BlockState.stateRoot(
             allocator,
-            &state_backend,
+            &run.state_backend,
             accepted_state,
         ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,
         },
         .transactions_root = try transactionRoot(allocator, input.transactions),
-        .receipts_root = try trie.receiptRoot(allocator, encoded_receipts.items),
+        .receipts_root = try trie.receiptRoot(allocator, accumulated.encoded_receipts.items),
         .withdrawals_root = try trie.withdrawalsRoot(allocator, input.withdrawals),
-        .logs_bloom = block_logs_bloom,
-        .blob_gas_used = blob_gas_used,
+        .logs_bloom = accumulated.logs_bloom,
+        .blob_gas_used = accumulated.blob_gas_used,
         .excess_blob_gas = excess_blob_gas,
         .requests_hash = computed_requests_hash,
         .block_access_list_hash = computed_block_access_list_hash,
     };
 
-    observer.compareBlock(.{
-        .gas_used = result.gas_used,
-        .block_gas_used = result.block_gas_used,
-        .block_state_gas_used = result.block_state_gas_used,
-        .blob_gas_used = result.blob_gas_used,
-        .receipts_root = result.receipts_root,
-        .logs_bloom = result.logs_bloom,
-        .requests_hash = result.requests_hash,
-        .encoded_receipts = encoded_receipts.items,
-        .requests = derived_requests,
-        .encoded_block_access_list = observed_block_access_list_encoded orelse &.{},
-        .block_access_list_matched = !block_access_list_mismatch,
-        .transaction_count = input.transactions.len,
-    });
-
-    var block_hash_mismatch = false;
-    if (input.header_hash_claim) |claim| {
-        result.block_hash = reconstructHeaderHash(revision, allocator, input, result, claim) catch |err| switch (err) {
-            error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidHeaderReconstruction => return .{ .status = .header_surface_mismatch },
-            else => return err,
-        };
-        block_hash_mismatch = !std.mem.eql(u8, &result.block_hash, &claim.block_hash);
+    if (comptime @TypeOf(observer) != void) {
+        observer.compareBlock(.{
+            .gas_used = result.gas_used,
+            .block_gas_used = result.block_gas_used,
+            .block_state_gas_used = result.block_state_gas_used,
+            .blob_gas_used = result.blob_gas_used,
+            .receipts_root = result.receipts_root,
+            .logs_bloom = result.logs_bloom,
+            .requests_hash = result.requests_hash,
+            .encoded_receipts = accumulated.encoded_receipts.items,
+            .requests = derived_requests,
+            .encoded_block_access_list = observed_block_access_list_encoded orelse &.{},
+            .block_access_list_matched = !block_access_list_mismatch,
+            .transaction_count = input.transactions.len,
+        });
     }
 
-    if (mode == .compare) {
-        applyConsensusRootComparisons(&result, input.root_checks);
-        if (result.status == .valid and input.header_claims.gas_used != null and result.gas_used != input.header_claims.gas_used.?) result.status = .gas_used_mismatch;
-        if (result.status == .valid and input.header_claims.block_gas_used != null and result.block_gas_used != input.header_claims.block_gas_used.?) result.status = .block_gas_used_mismatch;
-        if (result.status == .valid and input.header_claims.block_state_gas_used != null and result.block_state_gas_used != input.header_claims.block_state_gas_used.?) result.status = .block_state_gas_used_mismatch;
-        if (result.status == .valid) {
-            if (input.header_claims.logs_bloom) |expected_bloom| {
-                if (!std.mem.eql(u8, &result.logs_bloom, &expected_bloom)) result.status = .logs_bloom_mismatch;
-            }
-        }
-        if (result.status == .valid and input.header_claims.blob_gas_used != null and result.blob_gas_used != input.header_claims.blob_gas_used.?) result.status = .blob_gas_used_mismatch;
-        if (result.status == .valid) {
-            if (input.header_claims.excess_blob_gas) |expected_excess_blob_gas| {
-                if (result.excess_blob_gas == null or result.excess_blob_gas.? != expected_excess_blob_gas) result.status = .excess_blob_gas_mismatch;
-            }
-        }
-        if (result.status == .valid) {
-            if (input.header_claims.requests_hash) |expected_requests_hash| {
-                if (!std.mem.eql(u8, &result.requests_hash, &expected_requests_hash)) result.status = .requests_hash_mismatch;
-            }
-        }
-        if (result.status == .valid and block_access_list_mismatch) result.status = .block_access_list_mismatch;
-        if (result.status == .valid) {
-            if (input.header_claims.block_access_list_hash) |expected_block_access_list_hash| {
-                if (!std.mem.eql(u8, &result.block_access_list_hash, &expected_block_access_list_hash)) result.status = .block_access_list_hash_mismatch;
-            }
-        }
-        if (result.status == .valid and block_hash_mismatch) result.status = .block_hash_mismatch;
+    run.block_access_list_mismatch = block_access_list_mismatch;
+    if (comptime !validates_block_access_list) {
+        run.encoded_block_access_list = observed_block_access_list_encoded;
+        observed_block_access_list_encoded = null;
     }
-    if (result.status == .valid) {
-        try Engine.BlockState.commit(&state_backend, accepted_state);
-        if (mode == .produce) {
-            produced_bal.* = observed_block_access_list_encoded.?;
-            observed_block_access_list_encoded = null;
-        }
-    }
+    run.candidate_ready = true;
     return result;
 }
 
@@ -1619,221 +1377,15 @@ fn transactPayload(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
         ),
-        .observations => block.transactWithPreludeObserved(
+        .observations => block.observe(observer).transactWithPrelude(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
-            observer,
         ),
-        .steps => |context| block.transactWithPreludeCaptured(
+        .steps => |context| block.capture(context, observer).transactWithPrelude(
             tx_value,
             Engine.BlockExecution.Prelude.init(&prelude),
-            context,
-            observer,
         ),
     };
-}
-
-fn blockBodyValid(
-    comptime revision: Revision,
-    comptime block_access_list: bool,
-    input: AssumeDecodedBlockInput,
-) bool {
-    // TODO: spec-icfy after moving block_stf out of eth
-    if (!revision.isImpl(.shanghai) and input.withdrawals.len != 0) return false;
-    if (!revision.isImpl(.shanghai) and input.root_checks.reconstructed_header.withdrawals != null) return false;
-    if (!revision.isImpl(.cancun)) {
-        if (input.parent_blob_gas != null or
-            input.header_claims.blob_gas_used != null or
-            input.header_claims.excess_blob_gas != null)
-        {
-            return false;
-        }
-        if (input.block_header) |header| {
-            if (header.parent_beacon_block_root != null) return false;
-        }
-        if (input.header_hash_claim) |claim| {
-            if (claim.parent_beacon_block_root != null) return false;
-        }
-    }
-    if (!revision.isImpl(.prague) and input.header_claims.requests_hash != null) return false;
-    // Only payload and header fields decide validity. `bal_differential` is a
-    // caller-owned diagnostic pointer: a mixed-fork verifier supplies it for
-    // every block and reads `.not_run` back on the forks that have no list.
-    if (!block_access_list and
-        (input.block_access_list != null or
-            input.header_claims.block_access_list_hash != null))
-    {
-        return false;
-    }
-    return true;
-}
-
-fn reconstructHeaderHash(
-    comptime revision: Revision,
-    allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
-    result: Result,
-    claim: HeaderHashClaim,
-) ![32]u8 {
-    if (!revision.isImpl(.merge)) return error.InvalidHeaderReconstruction;
-    if (input.block_header) |block_header| {
-        if (block_header.number != input.env.number or block_header.timestamp != input.env.timestamp) {
-            return error.InvalidHeaderReconstruction;
-        }
-        if (block_header.parent_hash) |parent_hash| {
-            if (!std.mem.eql(u8, &parent_hash, &claim.parent_hash)) return error.InvalidHeaderReconstruction;
-        }
-        if (!optionalHashEqual(block_header.parent_beacon_block_root, claim.parent_beacon_block_root)) {
-            return error.InvalidHeaderReconstruction;
-        }
-    }
-
-    const excess_blob_gas: ?u64 = if (revision.isImpl(.cancun))
-        std.math.cast(u64, result.excess_blob_gas orelse return error.InvalidHeaderReconstruction) orelse
-            return error.InvalidHeaderReconstruction
-    else
-        null;
-    const header = eth_header.ExecutionHeader{
-        .parent_hash = claim.parent_hash,
-        .coinbase = input.env.coinbase,
-        .state_root = result.state_root,
-        .transactions_root = result.transactions_root,
-        .receipts_root = result.receipts_root,
-        .logs_bloom = result.logs_bloom,
-        .number = input.env.number,
-        .gas_limit = input.env.gas_limit,
-        .gas_used = result.block_gas_used,
-        .timestamp = input.env.timestamp,
-        .extra_data = claim.extra_data,
-        .prev_randao = uint256.toBytes32(input.env.prev_randao),
-        .base_fee_per_gas = if (revision.isImpl(.london)) input.env.base_fee else null,
-        .withdrawals_root = if (revision.isImpl(.shanghai)) result.withdrawals_root else null,
-        .blob_gas_used = if (revision.isImpl(.cancun)) result.blob_gas_used else null,
-        .excess_blob_gas = excess_blob_gas,
-        .parent_beacon_block_root = if (revision.isImpl(.cancun)) claim.parent_beacon_block_root else null,
-        .requests_hash = if (revision.isImpl(.prague)) result.requests_hash else null,
-        .block_access_list_hash = if (revision.isImpl(.amsterdam)) result.block_access_list_hash else null,
-        .slot_number = if (revision.isImpl(.amsterdam)) input.env.slot_number else null,
-    };
-    return try header.hash(allocator, revision);
-}
-
-fn optionalHashEqual(lhs: ?[32]u8, rhs: ?[32]u8) bool {
-    if (lhs == null or rhs == null) return lhs == null and rhs == null;
-    return std.mem.eql(u8, &lhs.?, &rhs.?);
-}
-
-fn applyConsensusRootComparisons(result: *Result, checks: RootChecks) void {
-    inline for (consensus_root_comparisons) |comparison| {
-        if (result.status != .valid) return;
-        if (rootClaimValue(comparison, checks)) |expected| {
-            const derived = derivedRootValue(comparison.field, result.*);
-            if (!std.mem.eql(u8, &derived, &expected)) result.status = comparison.status;
-        }
-    }
-}
-
-fn rootClaimValue(comptime comparison: ConsensusRootComparison, checks: RootChecks) ?[32]u8 {
-    return switch (comparison.field) {
-        .state => checks.payload_header.state.value,
-        .transactions => if (checks.reconstructed_header.transactions) |claim| claim.value else null,
-        .receipts => checks.payload_header.receipts.value,
-        .withdrawals => if (checks.reconstructed_header.withdrawals) |claim| claim.value else null,
-    };
-}
-
-fn derivedRootValue(field: RootField, result: Result) [32]u8 {
-    return switch (field) {
-        .state => result.state_root,
-        .transactions => result.transactions_root,
-        .receipts => result.receipts_root,
-        .withdrawals => result.withdrawals_root,
-    };
-}
-
-fn blockAccessTransactionCount(transaction_count: usize) !eth_bal.BlockAccessIndex {
-    return std.math.cast(eth_bal.BlockAccessIndex, transaction_count) orelse error.BlockAccessIndexOverflow;
-}
-
-fn validateBlockAccessList(block_access_list: eth_bal.BlockAccessList, transaction_count: eth_bal.BlockAccessIndex, gas_limit: u64) eth_bal.ValidationError!eth_bal.Counts {
-    try eth_bal.validate(block_access_list, .{ .transaction_count = transaction_count });
-    const counts = eth_bal.count(block_access_list);
-    try validateBlockAccessCounts(counts, gas_limit);
-    return counts;
-}
-
-fn validateBlockAccessCounts(counts: eth_bal.Counts, gas_limit: u64) eth_bal.ValidationError!void {
-    if (gas_limit != 0 and counts.blockAccessItems() > gas_limit / eth_bal.item_cost)
-        return error.BlockAccessListGasLimitExceeded;
-}
-
-fn parentHeaderStatus(comptime revision: Revision, input: AssumeDecodedBlockInput) ?Status {
-    if (!revision.isImpl(.merge) or input.env.number == 0) return null;
-
-    const parent = input.parent_header orelse return .parent_header_mismatch;
-    const current = input.block_header orelse return .parent_header_mismatch;
-    const current_parent_hash = current.parent_hash orelse return .parent_hash_mismatch;
-    if (!std.mem.eql(u8, &current_parent_hash, &parent.hash)) return .parent_hash_mismatch;
-    if (current.number != input.env.number) return .block_number_mismatch;
-    const expected_number = std.math.add(u64, parent.number, 1) catch return .block_number_mismatch;
-    if (input.env.number != expected_number) return .block_number_mismatch;
-    if (current.timestamp != input.env.timestamp) return .timestamp_mismatch;
-    if (input.env.timestamp <= parent.timestamp) return .timestamp_mismatch;
-    if (!gasLimitValid(input.env.gas_limit, parent.gas_limit)) return .gas_limit_mismatch;
-    const expected_base_fee = expectedBaseFee(parent) orelse return .base_fee_mismatch;
-    if (input.env.base_fee != expected_base_fee) return .base_fee_mismatch;
-    return null;
-}
-
-const gas_limit_adjustment_factor: u64 = 1024;
-const gas_limit_minimum: u64 = 5000;
-const elasticity_multiplier: u64 = 2;
-const base_fee_max_change_denominator: u256 = 8;
-
-fn gasLimitValid(gas_limit: u64, parent_gas_limit: u64) bool {
-    if (gas_limit < gas_limit_minimum) return false;
-    const adjustment = parent_gas_limit / gas_limit_adjustment_factor;
-    const upper: u128 = @as(u128, parent_gas_limit) + adjustment;
-    const lower = parent_gas_limit - adjustment;
-    return @as(u128, gas_limit) < upper and gas_limit > lower;
-}
-
-fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
-    const target = parent.gas_limit / elasticity_multiplier;
-    if (target == 0) return null;
-    if (parent.gas_used == target) return parent.base_fee_per_gas;
-
-    const gas_delta = if (parent.gas_used > target)
-        parent.gas_used - target
-    else
-        target - parent.gas_used;
-    const fee_delta_product = uint256.checkedMul(parent.base_fee_per_gas, @as(u256, gas_delta)) orelse return null;
-    const target_fee_delta = @divFloor(fee_delta_product, @as(u256, target));
-    var base_fee_delta = @divFloor(target_fee_delta, base_fee_max_change_denominator);
-
-    if (parent.gas_used > target) {
-        base_fee_delta = @max(base_fee_delta, 1);
-        return uint256.checkedAdd(parent.base_fee_per_gas, base_fee_delta);
-    }
-    if (base_fee_delta > parent.base_fee_per_gas) return null;
-    return parent.base_fee_per_gas - base_fee_delta;
-}
-
-fn blockContextValid(comptime revision: Revision, input: AssumeDecodedBlockInput) bool {
-    if (input.block_header) |header| {
-        if (header.number != input.env.number or header.timestamp != input.env.timestamp) return false;
-    }
-    if (input.env.number == 0) return true;
-
-    if (revision.isImpl(.cancun)) {
-        const header = input.block_header orelse return false;
-        if (header.parent_beacon_block_root == null) return false;
-    }
-    if (revision.isImpl(.prague)) {
-        const header = input.block_header orelse return false;
-        if (header.parent_hash == null) return false;
-    }
-    return true;
 }
 
 fn transactionRoot(allocator: std.mem.Allocator, transactions: []const TransactionInput) ![32]u8 {
@@ -1844,7 +1396,8 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
     return try trie.transactionRoot(allocator, encoded.items);
 }
 
-fn decodeRawTransactions(
+/// Internal to `eth/`: shared by the differential block executor.
+pub fn decodeRawTransactions(
     allocator: std.mem.Allocator,
     raw_transactions: []const []const u8,
 ) ![]const TransactionInput {
@@ -1860,35 +1413,22 @@ fn decodeRawTransactions(
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 
-fn applyWithdrawals(
+/// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
+/// the instrumentation at comptime: a state-observation collector, or `{}`
+/// for unobserved execution.
+pub fn applyWithdrawals(
     executor: anytype,
     execution_context: execution.ExecutionContext,
     withdrawals: []const Withdrawal,
     observer: anytype,
 ) !void {
     if (withdrawals.len == 0) return;
-    try executor.beginObservedStateTransition(execution_context);
+    const observed = comptime @TypeOf(observer) != void;
+    const scope = if (comptime observed) executor.observe(observer) else executor;
+    try scope.beginStateTransition(execution_context);
     errdefer executor.discardStateTransition();
     for (withdrawals) |withdrawal| {
-        try executor.observeAccountAccess(withdrawal.address);
-        const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch return error.WithdrawalBalanceOverflow;
-        executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
-            error.BalanceOverflow => return error.WithdrawalBalanceOverflow,
-            else => return err,
-        };
-    }
-    try executor.commitTransactionObserved(observer);
-}
-
-fn applyWithdrawalsNormal(
-    executor: anytype,
-    execution_context: execution.ExecutionContext,
-    withdrawals: []const Withdrawal,
-) !void {
-    if (withdrawals.len == 0) return;
-    try executor.beginStateTransition(execution_context);
-    errdefer executor.discardStateTransition();
-    for (withdrawals) |withdrawal| {
+        if (comptime observed) try executor.observeAccountAccess(withdrawal.address);
         const amount_wei = std.math.mul(u256, withdrawal.amount, withdrawal_gwei_in_wei) catch
             return error.WithdrawalBalanceOverflow;
         executor.addBalance(withdrawal.address, amount_wei) catch |err| switch (err) {
@@ -1896,35 +1436,18 @@ fn applyWithdrawalsNormal(
             else => return err,
         };
     }
-    try executor.commitTransaction();
+    try scope.commitTransaction();
 }
 
-fn deriveRequests(
+/// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
+/// the instrumentation at comptime: a state-observation collector, or `{}`
+/// for unobserved execution.
+pub fn deriveRequests(
     allocator: std.mem.Allocator,
     executor: anytype,
     env: Env,
     progress: vm.BlockResult,
     deposit_request_data: []const u8,
-    observer: anytype,
-) ![]const []const u8 {
-    return deriveRequestsMode(
-        allocator,
-        executor,
-        env,
-        progress,
-        deposit_request_data,
-        true,
-        observer,
-    );
-}
-
-fn deriveRequestsMode(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-    deposit_request_data: []const u8,
-    observe: bool,
     observer: anytype,
 ) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
@@ -1941,20 +1464,28 @@ fn deriveRequestsMode(
         deposit_request_owned = false;
     }
 
-    const block_end_requests = if (observe)
-        try deriveFinalizeRequests(
-            allocator,
+    const finalize_context: FinalizeBlockContext = .{
+        .number = env.number,
+        .timestamp = env.timestamp,
+        .transaction_count = progress.tx_count,
+        .gas_used = progress.gas_used,
+        .block_gas = progress.block_gas.total,
+        .state_gas = progress.block_gas.state,
+    };
+    const block_end_requests = if (comptime @TypeOf(observer) != void)
+        try Executor.system_contracts.applyFinalizeBlockObserved(
             executor,
-            env,
-            progress,
+            lifecycleExecutionContext(env),
+            allocator,
+            finalize_context,
             observer,
         )
     else
-        try deriveFinalizeRequestsNormal(
-            allocator,
+        try Executor.system_contracts.applyFinalizeBlock(
             executor,
-            env,
-            progress,
+            lifecycleExecutionContext(env),
+            allocator,
+            finalize_context,
         );
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
@@ -1965,56 +1496,14 @@ fn deriveRequestsMode(
     return try requests.toOwnedSlice(allocator);
 }
 
-fn deriveFinalizeRequests(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-    observer: anytype,
-) ![]const []const u8 {
-    return Executor.system_contracts.applyFinalizeBlockObserved(
-        executor,
-        lifecycleExecutionContext(env),
-        allocator,
-        .{
-            .number = env.number,
-            .timestamp = env.timestamp,
-            .transaction_count = progress.tx_count,
-            .gas_used = progress.gas_used,
-            .block_gas = progress.block_gas.total,
-            .state_gas = progress.block_gas.state,
-        },
-        observer,
-    );
-}
-
-fn deriveFinalizeRequestsNormal(
-    allocator: std.mem.Allocator,
-    executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
-) ![]const []const u8 {
-    return Executor.system_contracts.applyFinalizeBlock(
-        executor,
-        lifecycleExecutionContext(env),
-        allocator,
-        .{
-            .number = env.number,
-            .timestamp = env.timestamp,
-            .transaction_count = progress.tx_count,
-            .gas_used = progress.gas_used,
-            .block_gas = progress.block_gas.total,
-            .state_gas = progress.block_gas.state,
-        },
-    );
-}
-
-fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
     for (requests) |request| allocator.free(request);
     allocator.free(requests);
 }
 
-fn transactionBlobGasUsed(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn transactionBlobGasUsed(
     comptime revision: Revision,
     comptime Engine: type,
     tx: transaction.Transaction,
@@ -2026,7 +1515,8 @@ fn transactionBlobGasUsed(
     return std.math.mul(u64, blob_count, gas_per_blob) catch error.BlobGasOverflow;
 }
 
-fn blockBlobGasLimit(
+/// Internal to `eth/`: shared with the BAL candidate lane.
+pub fn blockBlobGasLimit(
     comptime revision: Revision,
     comptime Engine: type,
     blob_params: ?transaction.BlobParams,
@@ -2051,193 +1541,13 @@ fn effectiveBlobScheduleOptional(comptime Engine: type, params: ?transaction.Blo
     return if (params) |value| schedule.withParams(value) else schedule;
 }
 
-const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
-    pub fn toWire(topic: u256) [32]u8 {
-        return uint256.toBytes32(topic);
-    }
-
-    pub fn fromWire(encoded: [32]u8) u256 {
-        return uint256.fromBytes32(&encoded);
-    }
-});
-
-const LogRlp = rlp.Struct(Log, .{
-    .topics = rlp.BoundedListOf(TopicRlp, 4),
-});
-
-/// Consensus receipt wire payload; `encodeReceipt` writes its typed RLP form.
-pub const ReceiptPayload = struct {
-    status: u8,
-    cumulative_gas_used: u64,
-    logs_bloom: [256]u8,
-    logs: []const Log,
-
-    pub const Rlp = rlp.Struct(@This(), .{
-        .logs = rlp.ListOf(LogRlp),
-    });
-};
-
-pub fn encodeReceipt(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: TxReceiptView) ![]u8 {
-    return encodeReceiptView(allocator, kind, receipt);
-}
-
-fn encodeReceiptView(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: anytype) ![]u8 {
-    const logs = try allocator.alloc(Log, receipt.logs.len());
-    defer allocator.free(logs);
-    for (logs, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
-    const payload: ReceiptPayload = .{
-        .status = receiptStatus(receipt.status),
-        .cumulative_gas_used = receipt.cumulative_gas_used,
-        .logs_bloom = logsBloom(receipt.logs),
-        .logs = logs,
-    };
-    const payload_len = try rlp.encodedLen(ReceiptPayload, &payload);
-    const type_id = transactionType(kind);
-    const envelope_len: usize = if (type_id == null) 0 else 1;
-    const encoded_len = std.math.add(usize, envelope_len, payload_len) catch
-        return error.EncodedLengthOverflow;
-    const encoded = try allocator.alloc(u8, encoded_len);
-    errdefer allocator.free(encoded);
-
-    if (type_id) |id| encoded[0] = id;
-    const written = try rlp.encode(ReceiptPayload, encoded[envelope_len..], &payload);
-    std.debug.assert(written.len == payload_len);
-    return encoded;
-}
-
-fn receiptStatus(status: TxStatus) u8 {
-    return switch (status) {
-        .success => 1,
-        .revert, .invalid, .out_of_gas => 0,
-    };
-}
-
-fn transactionType(kind: transaction.TxKind) ?u8 {
-    return switch (kind) {
-        .legacy => null,
-        .access_list => 0x01,
-        .dynamic_fee => 0x02,
-        .blob => 0x03,
-        .set_code => 0x04,
-    };
-}
-
-pub fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
-    var bloom = [_]u8{0} ** 256;
-    for (0..logs.len()) |index| {
-        const event_log = logs.get(index);
-        addBloomEntry(&bloom, &event_log.address);
-        for (event_log.topics) |topic| {
-            const encoded_topic = uint256.toBytes32(topic);
-            addBloomEntry(&bloom, &encoded_topic);
-        }
-    }
-    return bloom;
-}
-
-fn mergeLogsBloom(target: *[256]u8, source: [256]u8) void {
-    const target_words = std.mem.bytesAsSlice(u64, target[0..]);
-    const source_words = std.mem.bytesAsSlice(u64, source[0..]);
-    for (target_words, source_words) |*target_word, source_word| target_word.* |= source_word;
-}
-
-test "word-wise logs bloom merge matches byte-wise oracle" {
-    var seed: u64 = 0x9e3779b97f4a7c15;
-    for (0..256) |_| {
-        var target: [256]u8 = undefined;
-        var source: [256]u8 = undefined;
-        var expected: [256]u8 = undefined;
-        for (&target, &source, &expected) |*target_byte, *source_byte, *expected_byte| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            target_byte.* = @truncate(seed);
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            source_byte.* = @truncate(seed);
-            expected_byte.* = target_byte.* | source_byte.*;
-        }
-        mergeLogsBloom(&target, source);
-        try std.testing.expectEqualSlices(u8, &expected, &target);
-    }
-}
-
-fn addBloomEntry(bloom: *[256]u8, entry: []const u8) void {
-    const hash = crypto.keccak256(entry);
-    inline for (.{ 0, 2, 4 }) |offset| {
-        const bit_to_set: usize = ((@as(usize, hash[offset]) & 0x07) << 8) | @as(usize, hash[offset + 1]);
-        const bit_index = 0x07ff - bit_to_set;
-        bloom[bit_index / 8] |= @as(u8, 1) << @intCast(7 - (bit_index % 8));
-    }
-}
-
-test "BlockSTF validates parent-derived header rules before execution" {
-    const parent_hash = [_]u8{0x11} ** 32;
-    var input = AssumeDecodedBlockInput{
-        .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
-        .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
-        .parent_header = .{
-            .hash = parent_hash,
-            .number = 7,
-            .timestamp = 10,
-            .gas_limit = 10_000_000,
-            .gas_used = 5_000_000,
-            .base_fee_per_gas = 7,
-        },
-        .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
-        .transactions = &.{},
-        .root_checks = .{
-            .payload_header = .{
-                .state = .fromHash(trie.empty_root_hash),
-                .receipts = .fromHash(trie.empty_root_hash),
-            },
-            .reconstructed_header = .{
-                .transactions = .fromHash(trie.empty_root_hash),
-            },
-        },
-    };
-    try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(.merge, input));
-
-    input.block_header.?.parent_hash = [_]u8{0x22} ** 32;
-    try std.testing.expectEqual(Status.parent_hash_mismatch, parentHeaderStatus(.merge, input).?);
-    input.block_header.?.parent_hash = parent_hash;
-
-    input.env.number = 9;
-    input.block_header.?.number = 9;
-    try std.testing.expectEqual(Status.block_number_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.number = 8;
-    input.block_header.?.number = 8;
-
-    input.env.timestamp = 10;
-    input.block_header.?.timestamp = 10;
-    try std.testing.expectEqual(Status.timestamp_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.timestamp = 11;
-    input.block_header.?.timestamp = 11;
-
-    input.env.gas_limit = 10_000_000 + 10_000_000 / gas_limit_adjustment_factor;
-    try std.testing.expectEqual(Status.gas_limit_mismatch, parentHeaderStatus(.merge, input).?);
-    input.env.gas_limit = 10_000_000;
-
-    input.env.base_fee = 8;
-    try std.testing.expectEqual(Status.base_fee_mismatch, parentHeaderStatus(.merge, input).?);
-}
-test "BlockSTF derives EIP-1559 base fee from parent usage" {
-    const parent = ParentHeaderContext{
-        .hash = [_]u8{0} ** 32,
-        .number = 0,
-        .timestamp = 0,
-        .gas_limit = 20_000_000,
-        .gas_used = 20_000_000,
-        .base_fee_per_gas = 1_000_000_000,
-    };
-    try std.testing.expectEqual(@as(u256, 1_125_000_000), expectedBaseFee(parent).?);
-
-    var below_target = parent;
-    below_target.gas_used = 0;
-    try std.testing.expectEqual(@as(u256, 875_000_000), expectedBaseFee(below_target).?);
-}
+pub const ReceiptPayload = eth_receipt.Payload;
+pub const encodeReceipt = eth_receipt.encode;
+pub const logsBloom = eth_receipt.logsBloom;
 
 test {
     _ = @import("./block_stf_test.zig");
+    _ = block_rules;
+    _ = eth_receipt;
+    _ = differential_executor;
 }

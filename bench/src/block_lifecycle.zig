@@ -181,7 +181,7 @@ fn runGrowableLifecycle(comptime Engine: type, allocator: std.mem.Allocator, opt
     defer access_list.deinit(allocator);
 
     const start_ns = try common.monotonicNowNs();
-    var executor = Engine.Executor.init(allocator, .{ .state_reader = memory.reader() });
+    var executor = Engine.Executor.init(allocator, .{ .state = .{ .reader = memory.reader() } });
     errdefer executor.deinit();
 
     var block = try Engine.BlockExecution.init(
@@ -209,7 +209,7 @@ fn commitChanges(executor: anytype, memory: *MemoryStore) !void {
 
 fn seedState(memory: *MemoryStore, case: Case) !void {
     var sender = try memory.getOrCreateAccount(sender_address);
-    sender.balance = std.math.maxInt(u256);
+    sender.account.balance = std.math.maxInt(u256);
 
     var contract = try memory.getOrCreateAccount(contract_address);
     try contract.setCode(contractCode(case));

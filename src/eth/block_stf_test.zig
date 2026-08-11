@@ -46,11 +46,11 @@ const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
 fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(header_state),
-            .receipts = .fromHash(header_receipts),
+            .state = header_state,
+            .receipts = header_receipts,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(local_transactions),
+            .transactions = local_transactions,
         },
     };
 }
@@ -58,12 +58,12 @@ fn testRootChecks(header_state: [32]u8, local_transactions: [32]u8, header_recei
 fn testRootChecksWithWithdrawals(header_state: [32]u8, local_transactions: [32]u8, header_receipts: [32]u8, local_withdrawals: [32]u8) RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(header_state),
-            .receipts = .fromHash(header_receipts),
+            .state = header_state,
+            .receipts = header_receipts,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(local_transactions),
-            .withdrawals = .fromHash(local_withdrawals),
+            .transactions = local_transactions,
+            .withdrawals = local_withdrawals,
         },
     };
 }
@@ -387,6 +387,56 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.invalid_witness, invalid.status);
     try std.testing.expectEqual(@as(?usize, 0), invalid.tx_index);
+}
+
+test "BlockSTF receipt ownership survives a later trace-consumer error" {
+    const StfAmsterdam = t.CaptureBlockStf(.amsterdam) orelse return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const target = address.addr(0x2000);
+    const account_key = trie.hashedAddressKey(target);
+    const account_value = try trie.accountValueFrom(scratch, .{ .balance = 1_000_000 });
+    const state_node = try testLeafNode(scratch, &account_key, account_value);
+    const pre_state_root = crypto.keccak256(state_node);
+    const nodes = [_][]const u8{state_node};
+    const tx_input = [_]TransactionInput{.{
+        .tx = .{ .sender = target, .to = target, .gas_limit = 21_000 },
+        .encoded = "tx0",
+    }};
+
+    const FailingTraceConsumer = struct {
+        fn consume(_: *anyopaque, _: trace.TraceSpan) !void {
+            return error.TestTraceConsumerFailure;
+        }
+    };
+    var target_context: u8 = 0;
+    var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+    defer tape.deinit();
+
+    try std.testing.expectError(
+        error.TestTraceConsumerFailure,
+        StfAmsterdam.applyAssumeDecoded(std.testing.allocator, .{
+            .env = .{ .gas_limit = 21_000 },
+            .state_backend = try Backend.fromWitness(
+                std.testing.allocator,
+                pre_state_root,
+                &nodes,
+                &.{},
+            ),
+            .transactions = &tx_input,
+            .capture = .{ .steps = .{
+                .tape = &tape,
+                .target = trace.TraceSpanTarget.init(&target_context, FailingTraceConsumer.consume),
+            } },
+            .root_checks = testRootChecks(
+                trie.empty_root_hash,
+                trie.empty_root_hash,
+                trie.empty_root_hash,
+            ),
+        }),
+    );
 }
 
 test "BlockSTF validates withdrawals root" {

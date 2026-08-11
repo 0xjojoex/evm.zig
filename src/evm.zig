@@ -16,7 +16,6 @@ pub const mpt = @import("mpt");
 pub const opcode = @import("./opcode.zig");
 pub const precompile = @import("./precompile.zig");
 pub const prepared_code = @import("./prepared_code.zig");
-pub const range = @import("./range.zig");
 pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
@@ -32,7 +31,7 @@ const vm = @import("./vm.zig");
 /// Compile one complete exact engine specification.
 pub const Vm = vm.Vm;
 pub const VmWithOptions = vm.VmWithOptions;
-pub const EngineType = vm.EngineType;
+pub const VmType = vm.VmType;
 pub const BalStatelessVm = vm.BalStatelessVm;
 pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
 
@@ -63,7 +62,7 @@ pub const ConcurrentBlockHashSource = BlockHashSource.Concurrent;
 pub const Transaction = Evm.Transaction;
 pub const Executed = Evm.Executed;
 pub const Outcome = Evm.Outcome;
-pub const TxStatus = Evm.TxStatus;
+pub const TxStatus = vm.TxStatus;
 pub const TxExecutionResult = vm.TxExecutionResult;
 pub const AccountView = vm.AccountView;
 pub const BlockResult = vm.BlockResult;

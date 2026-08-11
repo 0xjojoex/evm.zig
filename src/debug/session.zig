@@ -33,10 +33,6 @@ pub fn bind(comptime Executor: type) type {
             call_runtime: runtime.CallRuntime,
             open: bool,
             intervened: bool,
-            /// Set between a frame's `finishFrame` and its matching `popFrame`.
-            /// That frame already resolved its own checkpoint, so `abort` must
-            /// not revert it again if an error unwinds through the gap.
-            top_frame_resolved: bool,
 
             /// Begin controlled execution for one root message.
             ///
@@ -52,7 +48,6 @@ pub fn bind(comptime Executor: type) type {
                     .call_runtime = runtime.CallRuntime.init(executor),
                     .open = false,
                     .intervened = false,
-                    .top_frame_resolved = false,
                 };
                 if (executor.currentCaptureContext() != null) return error.CaptureActive;
 
@@ -109,21 +104,20 @@ pub fn bind(comptime Executor: type) type {
                     }
 
                     const host_result = try self.call_runtime.finishFrame(index, frame.result());
-                    self.top_frame_resolved = true;
                     if (self.call_runtime.frames.len() == self.call_runtime.frame_base + 1) {
                         const stable = try runtime.stabilizeFinalResult(self.call_runtime.executor, host_result);
                         const completion: Completion = if (self.intervened)
                             .{ .intervened = stable }
                         else
                             .{ .canonical = stable };
-                        self.popResolvedFrame();
+                        self.call_runtime.popResolvedFrame();
                         self.close();
                         return .{ .finished = completion };
                     }
 
                     const parent_index = self.call_runtime.frames.len() - 2;
                     try self.call_runtime.resumeSuspended(parent_index, host_result);
-                    self.popResolvedFrame();
+                    self.call_runtime.popResolvedFrame();
                 }
                 unreachable;
             }
@@ -217,24 +211,7 @@ pub fn bind(comptime Executor: type) type {
             /// transaction owner still resolves the root attempt separately.
             pub fn abort(self: *Session) void {
                 std.debug.assert(self.open);
-                if (self.top_frame_resolved) self.popResolvedFrame();
-                while (self.call_runtime.frames.len() > self.call_runtime.frame_base) {
-                    const index = self.call_runtime.frames.len() - 1;
-                    switch (self.call_runtime.frames.control(index).kind) {
-                        .root_call => {},
-                        .call => |checkpoint_state| self.call_runtime.executor.state.revertToCheckpoint(checkpoint_state),
-                        .create => |child| self.call_runtime.executor.state.revertToCheckpoint(child.checkpoint_state),
-                    }
-                    self.call_runtime.popFrame();
-                }
                 self.close();
-            }
-
-            /// Drop a frame whose checkpoint `finishFrame` already resolved.
-            fn popResolvedFrame(self: *Session) void {
-                std.debug.assert(self.top_frame_resolved);
-                self.top_frame_resolved = false;
-                self.call_runtime.popFrame();
             }
 
             fn close(self: *Session) void {

@@ -144,15 +144,14 @@ pub fn bind(comptime spec: ExactSpec) type {
                 msg.precheck_failure = .call_depth_exceeded;
             }
 
-            const continuation = Interpreter.CallResume{
-                .gas_limit = msg.gas,
-                .out_offset = out_offset_usize,
-                .out_size = out_size_usize,
-                .state_gas_charged = account_state_gas,
-            };
             frame.suspendWith(.{ .call = .{
                 .msg = msg,
-                .continuation = continuation,
+                .continuation = .{
+                    .gas_limit = msg.gas,
+                    .out_offset = out_offset_usize,
+                    .out_size = out_size_usize,
+                    .state_gas_charged = account_state_gas,
+                },
             } });
         }
 
@@ -285,13 +284,12 @@ pub fn bind(comptime spec: ExactSpec) type {
             }
             msg.gas = child_gas.gas;
 
-            const continuation = Interpreter.CreateResume{
-                .gas_limit = msg.gas,
-                .state_gas_charged = account_state_gas,
-            };
             frame.suspendWith(.{ .create = .{
                 .msg = msg,
-                .continuation = continuation,
+                .continuation = .{
+                    .gas_limit = msg.gas,
+                    .state_gas_charged = account_state_gas,
+                },
             } });
         }
 

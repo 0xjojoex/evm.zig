@@ -6,6 +6,7 @@
 //!   - `accumulator` ordered acceptance and block artifact folds
 //!   - `schedule`    bounded concurrency and its fallback policy
 //!   - `runner`      block lifecycle and status assignment
+//!   - `block_executor` caller-bound parallel executor and candidate-lane ops
 
 const std = @import("std");
 
@@ -14,6 +15,7 @@ pub const lane = @import("differential/lane.zig");
 pub const accumulator = @import("differential/accumulator.zig");
 pub const schedule = @import("differential/schedule.zig");
 pub const runner = @import("differential/runner.zig");
+pub const block_executor = @import("differential/block_executor.zig");
 
 pub const Status = report.Status;
 pub const Report = report.Report;

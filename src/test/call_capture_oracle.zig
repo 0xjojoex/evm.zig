@@ -73,14 +73,14 @@ test "transaction validation rejection produces no call frame" {
     errdefer capture.context.abort() catch {};
 
     var vm = Cancun.init(&executor);
-    const outcome = try vm.transactCaptured(.{
+    const outcome = try vm.capture(&capture.context).transact(.{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = .{
             .sender = sender,
             .to = recipient,
             .gas_limit = 20_999,
         },
-    }, &capture.context);
+    });
     switch (outcome) {
         .executed => |executed| {
             executed.discardIfCurrent();
@@ -134,11 +134,10 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, gas),
         .{ .call = .{ .sender = sender, .recipient = recursive } },
         .legacy(gas),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -219,7 +218,7 @@ fn runCase(comptime case: cases.Case) !void {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    _ = try executor.executeCaptured(
+    _ = try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
@@ -227,7 +226,6 @@ fn runCase(comptime case: cases.Case) !void {
             .value = try parseHexInt(u256, case.value),
         } },
         .legacy(case.gas),
-        &capture.context,
     );
     const span = try capture.finish();
 

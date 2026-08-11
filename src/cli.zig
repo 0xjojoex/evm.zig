@@ -279,7 +279,7 @@ fn runEvmzCase(
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
     const sender = try evmz.address.fromHex(cases.sender);
-    _ = try executor.executeCaptured(
+    _ = try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
@@ -287,7 +287,6 @@ fn runEvmzCase(
             .value = try parseHexInt(u256, case.value),
         } },
         .legacy(case.gas),
-        &capture.context,
     );
     const evmz_span = try capture.finish();
 

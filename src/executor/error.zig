@@ -1,7 +1,7 @@
 //! Stable infrastructure failures exposed above the reusable executor.
 //!
 //! Executor internals deliberately accept type-erased state, capture, prepared-
-//! code, and precompile providers. Their arbitrary errors are normalized to
+//! code, and native-contract providers. Their arbitrary errors are normalized to
 //! `InfrastructureFailure`; native failures keep their useful names. State
 //! readers get one strategy-failure signal and retain provider detail locally.
 //! Lifecycle misuse is asserted at its owning boundary and capture/trace
@@ -19,7 +19,7 @@ pub const Error = error{
     BalanceOverflow,
     CodeHashMismatch,
     CodeUnavailable,
-    InvalidPrecompileOutput,
+    InvalidNativeContractOutput,
     InvalidWitness,
     NotImplemented,
     SystemCallFailed,
@@ -42,7 +42,7 @@ pub fn normalize(err: anyerror) Error {
         error.BalanceOverflow => error.BalanceOverflow,
         error.CodeHashMismatch => error.CodeHashMismatch,
         error.CodeUnavailable => error.CodeUnavailable,
-        error.InvalidPrecompileOutput => error.InvalidPrecompileOutput,
+        error.InvalidNativeContractOutput => error.InvalidNativeContractOutput,
         error.InvalidWitness => error.InvalidWitness,
         error.NotImplemented => error.NotImplemented,
         error.SystemCallFailed => error.SystemCallFailed,

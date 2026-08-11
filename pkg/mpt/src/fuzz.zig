@@ -264,7 +264,11 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
         key.* = mpt.StdKeccak256Context.keccak256(.{}, seed);
     }
     var order: [differential_entry_count]usize = .{ 0, 1, 2, 3 };
-    std.mem.sort(usize, &order, &keys, keyOrderLessThan);
+    std.mem.sort(usize, &order, &keys, struct {
+        fn lessThan(keys_: *const [differential_entry_count]mpt.Root, lhs: usize, rhs: usize) bool {
+            return std.mem.lessThan(u8, &keys_[lhs], &keys_[rhs]);
+        }
+    }.lessThan);
 
     var unique: usize = 0;
     var sorted_keys: [differential_entry_count]mpt.Root = undefined;
@@ -301,10 +305,6 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
         hashed_updates[0..unique],
     );
     try expectRootEqual(expected, via_occurrence);
-}
-
-fn keyOrderLessThan(keys: *const [differential_entry_count]mpt.Root, lhs: usize, rhs: usize) bool {
-    return std.mem.order(u8, &keys[lhs], &keys[rhs]) == .lt;
 }
 
 fn checkArbitraryProofDeterminism(trie: mpt.DefaultTrie, smith: *std.testing.Smith) !void {

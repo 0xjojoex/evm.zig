@@ -114,7 +114,7 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.transactObserved(.{
+    const executed = try evmz.t.expectExecuted(try vm.observe().transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,
@@ -160,7 +160,7 @@ test "Amsterdam wrong-chain authorization authority is never accessed" {
     wrong_chain.chain_id = 0xdead;
     const authorization_list = [_]transaction.AuthorizationTuple{wrong_chain};
     var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.transactObserved(.{
+    const executed = try evmz.t.expectExecuted(try vm.observe().transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,
@@ -240,12 +240,13 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try executor.beginObservedTransaction(testExecutionContext(sender, 100_000), sender, contract);
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     }, 0);
-    try executor.retainStateTransitionObserved(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
     try std.testing.expect(observations.found);
@@ -273,10 +274,11 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     const request = transaction.executionRequest(context, message, .{
         .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
     });
-    try executor.beginObservedMessageScope(request, .{});
+    const observed = executor.observe(&observations);
+    try observed.beginMessageScope(request, .{});
     defer executor.discardStateTransition();
     const outcome = try executor.executeTransactionRequestPhased(request);
-    try executor.retainStateTransitionObserved(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expectEqual(evmz.executor.TransactionExecutionStage.preparation, outcome.stage);
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, outcome.result.status());
@@ -347,9 +349,9 @@ const AccountObservation = struct {
 
     pub fn observe(
         self: *@This(),
-        pending: evmz.state.TrackedState.PendingView,
+        observation: Executor.Observation,
     ) !void {
-        const accounts = pending.observations().accounts;
+        const accounts = observation.observations().accounts;
         var index: u32 = 0;
         while (index < accounts.len()) : (index += 1) {
             const fact = accounts.at(index);

@@ -75,8 +75,8 @@ test "BAL executor releases an unconsumed state backend" {
             .transactions = &.{},
             .root_checks = .{
                 .payload_header = .{
-                    .state = .fromHash(trie.empty_root_hash),
-                    .receipts = .fromHash(trie.empty_root_hash),
+                    .state = trie.empty_root_hash,
+                    .receipts = trie.empty_root_hash,
                 },
             },
             .bal_differential = &report,

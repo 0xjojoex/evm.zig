@@ -24,9 +24,6 @@ const StatelessBlockState = @This();
 const StorageKey = storage_status.Key;
 const TransientStorageMap = SparseHashMap(StorageKey, u256);
 
-/// Dense state must be admitted by its block domain before executor ownership.
-pub const standalone_reader_initialization = false;
-
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
 pub const AttemptId = checkpoint_types.AttemptId;

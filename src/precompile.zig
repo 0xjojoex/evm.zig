@@ -3,7 +3,6 @@
 const std = @import("std");
 const address = @import("address.zig");
 const crypto = @import("crypto.zig");
-const precompile_runtime = @import("execution/precompile_runtime.zig");
 const precompile_backend = @import("precompile/backend.zig");
 const uint256 = @import("uint256.zig");
 
@@ -98,8 +97,8 @@ pub fn Exact(comptime config: Config) type {
 
         pub fn execute(
             entry: Entry,
-            call: precompile_runtime.PrecompileCall,
-        ) Error!precompile_runtime.PrecompileOutcome {
+            call: Call,
+        ) Error!Result {
             return executeWithConfig(entry, call, config);
         }
     };
@@ -107,15 +106,10 @@ pub fn Exact(comptime config: Config) type {
 
 pub fn executeWithConfig(
     entry: Contract,
-    call: precompile_runtime.PrecompileCall,
+    call: Call,
     comptime config: Config,
-) Error!precompile_runtime.PrecompileOutcome {
-    return .{ .result = try executeContract(entry, .{
-        .allocator = call.allocator,
-        .input_data = call.message.input_data,
-        .gas = call.message.gas,
-        .output_buffer = call.output_buffer,
-    }, config) };
+) Error!Result {
+    return executeContract(entry, call, config);
 }
 
 pub const Error = std.mem.Allocator.Error || error{

@@ -446,8 +446,8 @@ fn runPayloadExact(
         .block_access_list = block_access_list,
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(try hashField(&payload, "stateRoot")),
-                .receipts = .fromHash(try hashField(&payload, "receiptsRoot")),
+                .state = try hashField(&payload, "stateRoot"),
+                .receipts = try hashField(&payload, "receiptsRoot"),
             },
         },
         .header_claims = .{
@@ -555,8 +555,8 @@ fn runBlockBodyExact(
         .parent_header = parent.headerContext(),
         .root_checks = .{
             .payload_header = .{
-                .state = .fromHash(try hashField(&header, "stateRoot")),
-                .receipts = .fromHash(try hashField(&header, "receiptTrie")),
+                .state = try hashField(&header, "stateRoot"),
+                .receipts = try hashField(&header, "receiptTrie"),
             },
         },
         .header_claims = .{

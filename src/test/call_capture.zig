@@ -84,11 +84,10 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 300_000),
         .{ .call = .{ .sender = sender, .recipient = root, .input = &root_input } },
         .legacy(300_000),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -125,11 +124,10 @@ test "call capture closes an immediate insufficient-balance call" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -158,7 +156,7 @@ test "root insufficient-balance capture preserves unspent gas" {
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
-        const result = (try executor.executeCaptured(
+        const result = (try executor.capture(&capture.context).execute(
             evmz.t.defaultExecutionContext(sender, gas),
             .{ .call = .{
                 .sender = sender,
@@ -166,7 +164,6 @@ test "root insufficient-balance capture preserves unspent gas" {
                 .value = 1,
             } },
             .legacy(gas),
-            &capture.context,
         )).expectCall();
         const span = try capture.finish();
 
@@ -194,11 +191,10 @@ test "call capture retains immediate depth-limit cause" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    try executor.beginCapturedTransaction(
+    try executor.capture(&capture.context).beginTransaction(
         evmz.t.defaultExecutionContext(sender, 20_000),
         sender,
         child,
-        &capture.context,
     );
     defer executor.discardStateTransition();
     var host = executor.host();
@@ -243,11 +239,10 @@ test "call capture retains opcode-local CALL depth attempt" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    try executor.beginCapturedTransaction(
+    try executor.capture(&capture.context).beginTransaction(
         evmz.t.defaultExecutionContext(sender, 200_000),
         sender,
         root,
-        &capture.context,
     );
     defer executor.discardStateTransition();
     var host = executor.host();
@@ -346,11 +341,10 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
-        try executor.beginCapturedTransaction(
+        try executor.capture(&capture.context).beginTransaction(
             evmz.t.defaultExecutionContext(sender, 200_000),
             sender,
             root,
-            &capture.context,
         );
         defer executor.discardStateTransition();
         var host = executor.host();
@@ -406,11 +400,10 @@ test "call capture distinguishes CREATE collision from rollback" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -448,11 +441,10 @@ test "call capture retains invalid deployed code and local rollback" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -485,7 +477,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 100),
         .{ .create = .{
             .sender = sender,
@@ -493,7 +485,6 @@ test "call capture retains Frontier committed code-store out-of-gas" {
             .init_code = &init_code,
         } },
         .legacy(100),
-        &capture.context,
     )).expectCreate();
     const span = try capture.finish();
 
@@ -549,11 +540,10 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
         try capture.context.begin();
         errdefer capture.context.abort() catch {};
 
-        const result = (try executor.executeCaptured(
+        const result = (try executor.capture(&capture.context).execute(
             evmz.t.defaultExecutionContext(sender, 200_000),
             .{ .call = .{ .sender = sender, .recipient = root } },
             .legacy(200_000),
-            &capture.context,
         )).expectCall();
         const span = try capture.finish();
 
@@ -587,11 +577,10 @@ test "call capture retains pinned write-protection category" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-        &capture.context,
     )).expectCall();
     const span = try capture.finish();
 
@@ -619,11 +608,10 @@ test "call capture records SELFDESTRUCT as a semantic child" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    _ = try executor.executeCaptured(
+    _ = try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 100_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(100_000),
-        &capture.context,
     );
     const span = try capture.finish();
 
@@ -658,7 +646,7 @@ test "root CREATE capture closes after runtime-code finalization" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .create = .{
             .sender = sender,
@@ -666,7 +654,6 @@ test "root CREATE capture closes after runtime-code finalization" {
             .init_code = &init_code,
         } },
         .legacy(200_000),
-        &capture.context,
     )).expectCreate();
     const span = try capture.finish();
 

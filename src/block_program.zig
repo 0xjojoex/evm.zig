@@ -7,15 +7,10 @@
 const std = @import("std");
 
 const CaptureContext = @import("./executor/capture_context.zig").Context;
+const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const Address = @import("./address.zig").Address;
 const execution = @import("./execution.zig");
 const transaction_program = @import("./transaction/program.zig");
-
-const AttemptMode = union(enum) {
-    normal,
-    observed,
-    captured: *CaptureContext,
-};
 
 pub const BeforeBlockContext = struct {
     number: u64,
@@ -124,7 +119,6 @@ pub fn executorFor(block: anytype) @TypeOf(block.transaction_runtime.executor) {
 }
 
 pub fn requireActive(block: anytype) void {
-    std.debug.assert(!block.finished);
     const executor = executorFor(block);
     std.debug.assert(executor.active_block_execution_generation == block.generation);
 }
@@ -157,89 +151,103 @@ test "block hook collections preserve insertion order" {
     try std.testing.expectEqual(second_recipient, calls.slice()[1].recipient);
 }
 
-/// Internal flat binder used by a concrete VM program's `Block(...)` closure.
-pub fn bind(
-    comptime RuntimeWithPrelude: type,
-    comptime ExecutorType: type,
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime RejectionType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
+/// Bind block-fold semantics above one transaction runtime.
+/// Concrete VM programs expose this through `Program.Block(...)`.
+///
+/// Transaction carriers are read off the bound runtime; block-fold carriers
+/// (Env, Included, Result) are decls of the implementation, welded to its
+/// signatures by `validateImplementation`. The prelude author types widen by
+/// the implementation's `PreludeError` without rebuilding the program.
+pub fn BlockProgramType(
+    comptime Runtime: type,
     comptime ImplementationType: type,
 ) type {
-    comptime std.debug.assert(@hasDecl(ImplementationType, "PreludeError"));
+    comptime {
+        for (.{ "PreludeError", "Env", "Included", "Result" }) |name| {
+            if (!@hasDecl(ImplementationType, name))
+                @compileError("block implementation must declare `" ++ name ++ "`");
+        }
+    }
+    comptime validateImplementation(Runtime, ImplementationType);
 
-    return BoundBlockProgram(
-        RuntimeWithPrelude,
-        ExecutorType,
-        TransactionType,
-        TransactInputType,
-        OutputType,
-        RejectionType,
-        RuntimeWithPrelude.Prelude,
-        RuntimeWithPrelude.PreludeContext,
-        EnvType,
-        IncludedType,
-        ResultType,
-        ImplementationType,
-    );
-}
-
-fn BoundBlockProgram(
-    comptime TransactionRuntimeType: type,
-    comptime ExecutorType: type,
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime RejectionType: type,
-    comptime PreludeType: type,
-    comptime PreludeContextType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
-    comptime ImplementationType: type,
-) type {
-    const OutcomeType = TransactOutcome(IncludedType, RejectionType);
     const ContractError = error{
         UncommittedChanges,
     };
-    const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ContractError;
-    const TransactionLogs = TransactionRuntimeType.TransactionLogs;
-    comptime validateImplementation(
-        TransactionType,
-        TransactInputType,
-        OutputType,
-        TransactionLogs,
-        EnvType,
-        IncludedType,
-        ResultType,
-        ImplementationType,
-    );
+    const ErrorType = Runtime.Error || ImplementationType.Error || ImplementationType.PreludeError || ContractError;
+
+    const OutcomeType = TransactOutcome(ImplementationType.Included, Runtime.Rejection);
 
     return struct {
         const Self = @This();
 
-        const TransactionRuntime = TransactionRuntimeType;
-        const Executor = ExecutorType;
-        pub const Transaction = TransactionType;
-        pub const Output = OutputType;
-        pub const Rejection = RejectionType;
-        pub const Prelude = PreludeType;
-        pub const PreludeContext = PreludeContextType;
-        pub const Env = EnvType;
-        pub const Included = IncludedType;
-        pub const Result = ResultType;
+        const TransactionRuntime = Runtime;
+        const Executor = Runtime.Executor;
+        pub const Transaction = Runtime.Transaction;
+        pub const Output = Runtime.Output;
+        pub const Rejection = Runtime.Rejection;
+        pub const Prelude = Runtime.PreludeFor(ImplementationType.PreludeError);
+        pub const PreludeContext = Runtime.PreludeContextFor(ImplementationType.PreludeError);
+        pub const Env = ImplementationType.Env;
+        pub const Included = ImplementationType.Included;
+        pub const Result = ImplementationType.Result;
         pub const Outcome = OutcomeType;
         pub const Error = ErrorType;
 
-        transaction_runtime: TransactionRuntimeType,
+        transaction_runtime: TransactionRuntime,
         generation: u64,
         environment: Env,
         state: ImplementationType.State,
-        finished: bool = false,
+
+        fn Instrumented(comptime Observer: type) type {
+            return struct {
+                block: *Self,
+                mode: InstrumentationMode,
+                observer: Observer,
+
+                pub fn transact(
+                    self: @This(),
+                    transaction_value: Transaction,
+                ) anyerror!Outcome {
+                    return self.block.transactOwned(
+                        transaction_value,
+                        null,
+                        self.mode,
+                        self.observer,
+                    );
+                }
+
+                pub fn transactWithPrelude(
+                    self: @This(),
+                    transaction_value: Transaction,
+                    prelude: transaction_program.PreludeBinding,
+                ) anyerror!Outcome {
+                    return self.block.transactOwned(
+                        transaction_value,
+                        prelude,
+                        self.mode,
+                        self.observer,
+                    );
+                }
+            };
+        }
+
+        /// Borrow a block facade that records and consumes pending observations.
+        pub fn observe(self: *Self, observer: anytype) Instrumented(@TypeOf(observer)) {
+            return .{ .block = self, .mode = .observed, .observer = observer };
+        }
+
+        /// Borrow a block facade bound to passive capture and an observation consumer.
+        pub fn capture(
+            self: *Self,
+            context: *CaptureContext,
+            observer: anytype,
+        ) Instrumented(@TypeOf(observer)) {
+            return .{
+                .block = self,
+                .mode = .{ .captured = context },
+                .observer = observer,
+            };
+        }
 
         /// Claim one Executor branch for an ordered block fold.
         ///
@@ -254,7 +262,7 @@ fn BoundBlockProgram(
             std.debug.assert(!executor.hasCurrentTransaction());
             if (executor.acceptedView().hasChanges()) return error.UncommittedChanges;
             return .{
-                .transaction_runtime = TransactionRuntimeType.init(executor),
+                .transaction_runtime = TransactionRuntime.init(executor),
                 .generation = claim(executor),
                 .environment = environment,
                 .state = ImplementationType.init(environment),
@@ -270,7 +278,7 @@ fn BoundBlockProgram(
                 transaction_value,
                 null,
                 .normal,
-                IgnorePending{},
+                {},
             ) catch |err| return @errorCast(err);
         }
 
@@ -279,52 +287,21 @@ fn BoundBlockProgram(
         pub fn transactWithPrelude(
             self: *Self,
             transaction_value: Transaction,
-            prelude: Prelude,
+            prelude: transaction_program.PreludeBinding,
         ) Error!Outcome {
             return self.transactOwned(
                 transaction_value,
                 prelude,
                 .normal,
-                IgnorePending{},
+                {},
             ) catch |err| return @errorCast(err);
-        }
-
-        /// Inspect one included transaction while its state is sealed but still
-        /// pending. The observer must copy or consume borrowed views before
-        /// returning; successful observation is followed by retain.
-        pub fn transactWithPreludeObserved(
-            self: *Self,
-            transaction_value: Transaction,
-            prelude: Prelude,
-            observer: anytype,
-        ) anyerror!Outcome {
-            return self.transactOwned(transaction_value, prelude, .observed, observer);
-        }
-
-        /// Capture root execution events and inspect the sealed included state.
-        ///
-        /// Captured events are written into `capture`; borrowed observer views
-        /// remain valid only for the duration of `observer.observe`.
-        pub fn transactWithPreludeCaptured(
-            self: *Self,
-            transaction_value: Transaction,
-            prelude: Prelude,
-            capture: *CaptureContext,
-            observer: anytype,
-        ) anyerror!Outcome {
-            return self.transactOwned(
-                transaction_value,
-                prelude,
-                .{ .captured = capture },
-                observer,
-            );
         }
 
         fn transactOwned(
             self: *Self,
             transaction_value: Transaction,
-            prelude: ?Prelude,
-            mode: AttemptMode,
+            prelude: ?transaction_program.PreludeBinding,
+            mode: InstrumentationMode,
             observer: anytype,
         ) anyerror!Outcome {
             requireActive(self);
@@ -333,28 +310,19 @@ fn BoundBlockProgram(
                 &self.state,
                 &transaction_value,
             );
-            const outcome = if (prelude) |value| switch (mode) {
-                .normal => try transaction_program.transactInBlockWithPrelude(
+            const outcome = if (prelude) |value|
+                try transaction_program.transactInBlockWithPrelude(
                     &self.transaction_runtime,
                     input,
                     value,
-                ),
-                .observed => try transaction_program.transactObservedInBlockWithPrelude(
+                    mode,
+                )
+            else
+                try transaction_program.transactInBlock(
                     &self.transaction_runtime,
                     input,
-                    value,
-                ),
-                .captured => |capture| try transaction_program.transactCapturedInBlockWithPrelude(
-                    &self.transaction_runtime,
-                    input,
-                    value,
-                    capture,
-                ),
-            } else switch (mode) {
-                .normal => try transaction_program.transactInBlock(&self.transaction_runtime, input),
-                .observed => try transaction_program.transactObservedInBlock(&self.transaction_runtime, input),
-                .captured => unreachable,
-            };
+                    mode,
+                );
             return switch (outcome) {
                 .rejected => |reason| .{ .rejected = reason },
                 .executed => |executed_value| blk: {
@@ -374,7 +342,8 @@ fn BoundBlockProgram(
                         view.logs,
                         plan,
                     );
-                    try observer.observe(executed.pendingView());
+                    if (comptime @TypeOf(observer) != void)
+                        try observer.observe(executed.observation());
                     executed.retain();
                     ImplementationType.applyInclude(&self.state, plan);
                     break :blk .{ .included = included };
@@ -395,7 +364,6 @@ fn BoundBlockProgram(
             requireActive(self);
             const result = ImplementationType.finish(&self.environment, &self.state);
             release(executorFor(self), self.generation);
-            self.finished = true;
             return result;
         }
 
@@ -403,62 +371,52 @@ fn BoundBlockProgram(
         ///
         /// This is the idempotent cleanup operation for `defer`.
         pub fn discardIfUnfinished(self: *Self) void {
-            if (self.finished) return;
             const executor = executorFor(self);
             if (executor.active_block_execution_generation != self.generation) return;
             executor.discardAccepted();
             release(executor, self.generation);
-            self.finished = true;
         }
-
-        const IgnorePending = struct {
-            pub fn observe(_: IgnorePending, _: ExecutorType.State.PendingView) !void {}
-        };
     };
 }
 
-fn validateImplementation(
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime TransactionLogsType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
-    comptime Implementation: type,
-) void {
+fn validateImplementation(comptime Runtime: type, comptime Implementation: type) void {
     comptime {
         std.debug.assert(@hasDecl(Implementation, "State"));
         std.debug.assert(@hasDecl(Implementation, "InclusionPlan"));
         std.debug.assert(@hasDecl(Implementation, "Error"));
 
-        assertSignature(Implementation.init, &.{EnvType}, Implementation.State);
+        const Env = Implementation.Env;
+        const Transaction = Runtime.Transaction;
+        const Output = Runtime.Output;
+        const Logs = Runtime.TransactionLogs;
+
+        assertSignature(Implementation.init, &.{Env}, Implementation.State);
         assertSignature(Implementation.transactInput, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-            *const TransactionType,
-        }, TransactInputType);
+            *const Transaction,
+        }, Runtime.TransactInput);
         assertSignature(Implementation.planInclude, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-            *const TransactionType,
-            *const OutputType,
-            TransactionLogsType,
+            *const Transaction,
+            *const Output,
+            Logs,
         }, Implementation.Error!Implementation.InclusionPlan);
         assertSignature(Implementation.included, &.{
-            *const TransactionType,
-            *const OutputType,
-            TransactionLogsType,
+            *const Transaction,
+            *const Output,
+            Logs,
             Implementation.InclusionPlan,
-        }, IncludedType);
+        }, Implementation.Included);
         assertSignature(Implementation.applyInclude, &.{
             *Implementation.State,
             Implementation.InclusionPlan,
         }, void);
         assertSignature(Implementation.finish, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-        }, ResultType);
+        }, Implementation.Result);
     }
 }
 

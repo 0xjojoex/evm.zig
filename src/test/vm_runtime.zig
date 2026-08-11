@@ -15,7 +15,6 @@ const Call = support.Call;
 const Create = support.Create;
 const Env = support.Env;
 const MemoryStore = support.MemoryStore;
-const SystemCall = support.SystemCall;
 const TxStatus = support.TxStatus;
 const transact = support.transact;
 const expectExecuted = support.expectExecuted;
@@ -79,9 +78,9 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         code_hash: [32]u8,
         calls: usize = 0,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
+        pub fn observe(self: *@This(), observation: Osaka.Executor.Observation) !void {
             self.calls += 1;
-            const view = pending.observations();
+            const view = observation.observations();
             var index: u32 = 0;
             while (index < view.accounts.len()) : (index += 1) {
                 const fact = view.accounts.at(index);
@@ -100,7 +99,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     var prepared_pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer prepared_pool.deinit();
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
         .prepared_code_backend = prepared_pool.backend(),
     });
     defer executor.deinit();
@@ -111,10 +110,11 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
         .code_hash = code_hash,
     };
     const prepared = try prepared_pool.getOrPrepare(code_hash, &code);
-    try executor.beginObservedStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
+    const observed = executor.observe(&observations);
+    try observed.beginStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
     const view = try executor.getCode(contract);
-    try executor.retainStateTransitionObserved(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expect(view.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view);
@@ -135,7 +135,7 @@ test "Executor runs low-level standalone call" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -173,7 +173,7 @@ test "Executor runs low-level standalone create" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Berlin.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -211,7 +211,7 @@ test "transaction STF validates and executes a call" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -251,7 +251,7 @@ test "executed transaction discards without allocating" {
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var executor = Default.Executor.init(failing_allocator.allocator(), .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -280,7 +280,7 @@ test "executed transaction discards without allocating" {
     failing_allocator.fail_index = std.math.maxInt(usize);
 
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
 }
 
@@ -293,7 +293,7 @@ test "copied execution handles cannot discard a newer transaction" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -392,7 +392,7 @@ test "transaction STF forwards BLOCKHASH to the Executor source" {
 
     var block_hashes = TestBlockHashSource{};
     var executor = Prague.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
         .block_hash_source = block_hashes.source(),
     });
     defer executor.deinit();
@@ -423,7 +423,7 @@ test "transaction STF reports successful create address" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
 
     var executor = Berlin.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -459,7 +459,7 @@ test "transaction STF returns rejected validation result" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .nonce = 7, .balance = 10_000_000 });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -488,7 +488,7 @@ test "rejected transaction preserves the retained Executor overlay" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -527,7 +527,7 @@ test "explicit backend commit persists then rebases the Executor overlay" {
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -563,7 +563,7 @@ test "Executor discardAccepted drops retained overlay without touching its reade
     try evmz.t.seedStoreAccount(&memory, contract, .{ .code = &store_42_code });
 
     var executor = Osaka.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -594,7 +594,7 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try contract_account.setCode(&.{ 0x5f, 0x5f, 0x55, 0x00 });
 
     var executor = Amsterdam.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -620,7 +620,7 @@ test "Executor exposes borrowed logs after transaction retention" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -634,7 +634,7 @@ test "Executor exposes borrowed logs after transaction retention" {
         },
     }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    const logs = executor.logs();
+    const logs = executor.logView();
     try std.testing.expectEqual(@as(usize, 1), logs.len());
     try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &logs.get(0).address);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, logs.get(0).topics[0]);
@@ -649,7 +649,7 @@ test "rejected transaction clears the Executor log surface" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -663,7 +663,7 @@ test "rejected transaction clears the Executor log surface" {
         },
     }));
     try std.testing.expectEqual(TxStatus.success, accepted.status);
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
 
     const rejected = try transact(Default, &executor, .{
         .env = .{ .gas_limit = 1_000_000 },
@@ -676,7 +676,7 @@ test "rejected transaction clears the Executor log surface" {
         },
     });
     try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
 }
 
 test "transaction STF uses comptime transaction gas policy" {
@@ -689,7 +689,7 @@ test "transaction STF uses comptime transaction gas policy" {
     try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
 
     var executor = London.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 
@@ -720,7 +720,7 @@ test "transaction STF uses comptime transaction gas policy" {
         },
     }) orelse return error.SkipZigTest;
     var custom_executor = HighIntrinsicVm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer custom_executor.deinit();
 
@@ -752,7 +752,7 @@ test "exact spec owns total transaction gas limit as a value" {
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
     }) orelse return error.SkipZigTest;
     var strict_executor = Strict.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer strict_executor.deinit();
 
@@ -772,7 +772,7 @@ test "exact spec owns total transaction gas limit as a value" {
     );
 
     var standard_executor = London.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer standard_executor.deinit();
     var default_vm = London.init(&standard_executor);
@@ -782,327 +782,4 @@ test "exact spec owns total transaction gas limit as a value" {
         .rejected => return error.UnexpectedRejection,
     };
     executed.discard();
-}
-
-test "exact spec owns block hooks as static dispatch" {
-    const recipient = addr(0xcafe);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, recipient, .{
-        .code = &.{
-            0x60, 0x2a, // PUSH1 42
-            0x5f, // PUSH0
-            0x55, // SSTORE
-            0x00, // STOP
-        },
-    });
-
-    const hooks = struct {
-        fn beforeBlock(_: system.BeforeBlockContext) system.BlockSystemCalls {
-            var calls: system.BlockSystemCalls = .{};
-            calls.append(.{
-                .sender = addr(0),
-                .recipient = addr(0xcafe),
-                .gas = 100_000,
-                .require_code = true,
-            });
-            return calls;
-        }
-    };
-    const Hooked = evmz.t.CustomVm(.cancun, .{
-        .block = .{ .beforeBlock = hooks.beforeBlock },
-    }) orelse return error.SkipZigTest;
-    var executor = Hooked.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-    var block = try Hooked.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-
-    try block.beforeBlock(.{});
-    try std.testing.expectEqual(@as(u256, 42), try executor.getStorage(recipient, 0));
-}
-
-test "Sequential validation rejection skips rollback snapshot" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var executor = Default.Executor.init(failing_allocator.allocator(), .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    try std.testing.expect((try executor.getAccountOrLoad(sender)) != null);
-    failing_allocator.fail_index = failing_allocator.alloc_index;
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-    const rejected = try block.transact(.{
-        .sender = sender,
-        .nonce = 99,
-        .to = recipient,
-        .gas_limit = 300_000,
-    });
-    try std.testing.expectEqual(EthValidationError.nonce_too_high, try expectRejected(rejected));
-    try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 0), (try block.finish()).tx_count);
-}
-
-test "Sequential systemCall updates embedded block gas and restores overflow" {
-    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-    try evmz.t.seedStoreAccount(&memory, recipient, .{ .code = &.{ 0x60, 0x00, 0x50, 0x00 } });
-
-    var executor = Prague.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-    var block = try Prague.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 9 },
-    });
-    defer block.discardIfUnfinished();
-
-    const call = SystemCall{
-        .sender = addr(0xaaaa),
-        .recipient = recipient,
-        .gas = 9,
-    };
-    const result = try block.systemCall(call);
-
-    try std.testing.expectEqual(interpreter_module.Status.success, result.status());
-    try std.testing.expectEqualSlices(u8, &.{}, result.outputData());
-    const progress = block.progress();
-    try std.testing.expectEqual(@as(u64, 5), progress.gas_used);
-    try std.testing.expectEqual(@as(u64, 5), progress.block_gas.total);
-
-    try std.testing.expectError(error.GasAllowanceExceeded, block.systemCall(call));
-    const restored = block.progress();
-    try std.testing.expectEqual(@as(u64, 5), restored.gas_used);
-    try std.testing.expectEqual(@as(u64, 5), restored.block_gas.total);
-}
-
-test "Sequential includes each transaction before returning" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-    const first = switch (try block.transact(.{
-        .sender = sender,
-        .to = recipient,
-        .gas_limit = 100_000,
-    })) {
-        .included => |included| included,
-        .rejected => return error.UnexpectedRejection,
-    };
-    try std.testing.expectEqual(TxStatus.success, first.result.status);
-    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
-
-    const second = switch (try block.transact(.{
-        .sender = sender,
-        .nonce = 1,
-        .to = recipient,
-        .gas_limit = 100_000,
-    })) {
-        .included => |included| included,
-        .rejected => return error.UnexpectedRejection,
-    };
-    try std.testing.expectEqual(TxStatus.success, second.result.status);
-    try std.testing.expectEqual(@as(u64, 2), block.progress().tx_count);
-    try std.testing.expectEqual(@as(u64, 2), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u64, 2), (try block.finish()).tx_count);
-}
-
-test "Sequential discardIfUnfinished drops included executions" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    _ = try block.transact(.{
-        .sender = sender,
-        .to = recipient,
-        .gas_limit = 100_000,
-    });
-    _ = try block.transact(.{
-        .sender = sender,
-        .nonce = 1,
-        .to = recipient,
-        .gas_limit = 100_000,
-    });
-
-    block.discardIfUnfinished();
-    try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expect(!executor.acceptedChanges().hasChanges());
-}
-
-test "Sequential endTransactions closes the transaction phase" {
-    var executor = Default.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-    try block.endTransactions();
-    try std.testing.expectError(error.TransactionPhaseClosed, block.transact(.{
-        .sender = addr(0xaaaa),
-        .to = addr(0xbbbb),
-        .gas_limit = 100_000,
-    }));
-    try std.testing.expectEqual(@as(u64, 0), (try block.finish()).tx_count);
-}
-
-test "Sequential rejects an overlay retained outside its lifetime" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    const executed = switch (try transact(Default, &executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-        .tx = .{
-            .sender = sender,
-            .to = recipient,
-            .gas_limit = 100_000,
-        },
-    })) {
-        .executed => |value| value,
-        .rejected => return error.UnexpectedRejection,
-    };
-    defer executed.discardIfCurrent();
-    try std.testing.expect(executed.changes().hasChanges());
-    executed.retain();
-
-    try std.testing.expectError(
-        error.UncommittedChanges,
-        Default.Sequential.init(&executor, .{ .env = .{ .gas_limit = 1_000_000 } }),
-    );
-    executor.discardAccepted();
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-    _ = try block.finish();
-}
-
-test "Sequential rejects transaction whose gas limit exceeds remaining block dimensions" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 29_000 },
-    });
-    defer block.discardIfUnfinished();
-    const first = switch (try block.transact(.{
-        .sender = sender,
-        .to = recipient,
-        .gas_limit = 29_000,
-    })) {
-        .included => |included| included,
-        .rejected => return error.UnexpectedRejection,
-    };
-    const first_result = first.result;
-    try std.testing.expectEqual(TxStatus.success, first_result.status);
-    try std.testing.expectEqual(@as(u64, 15_000), first_result.gas.block.total);
-
-    const rejected = try block.transact(.{
-        .sender = sender,
-        .to = recipient,
-        .gas_limit = 29_000,
-    });
-    try std.testing.expectEqual(EthValidationError.gas_allowance_exceeded, try expectRejected(rejected));
-    try std.testing.expectEqual(@as(u64, 1), (try block.finish()).tx_count);
-
-    const changes = executor.acceptedChanges();
-    try std.testing.expectEqual(@as(u32, 1), changes.accounts.len());
-    try std.testing.expectEqual(@as(u64, 1), accountChange(changes, sender).?.account.?.nonce);
-    try std.testing.expectEqual(@as(u32, 0), changes.storage_writes.len());
-}
-
-test "Sequential returns included result and borrowed receipt view" {
-    const sender = addr(0xaaaa);
-    const recipient = addr(0xbbbb);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
-
-    var executor = Default.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
-    });
-    defer executor.deinit();
-
-    var block = try Default.Sequential.init(&executor, .{
-        .env = .{ .gas_limit = 1_000_000 },
-    });
-    defer block.discardIfUnfinished();
-    const included = switch (try block.transact(.{
-        .sender = sender,
-        .to = recipient,
-        .gas_limit = 300_000,
-        .value = 7,
-    })) {
-        .included => |value| value,
-        .rejected => return error.UnexpectedRejection,
-    };
-    const receipt = included.receipt;
-    const result = included.result;
-    try std.testing.expectEqual(@as(u64, 1), block.progress().tx_count);
-    try std.testing.expectEqual(TxStatus.success, receipt.status);
-    try std.testing.expectEqual(result.gas.used, receipt.gas_used);
-    try std.testing.expectEqual(result.gas.used, receipt.cumulative_gas_used);
-    try std.testing.expectEqual(@as(usize, 1), receipt.logs.len());
-    try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, receipt.logs.get(0).topics[0]);
-    const summary = try block.finish();
-    try std.testing.expectEqual(@as(u64, 1), summary.tx_count);
 }

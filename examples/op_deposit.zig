@@ -183,7 +183,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
         pub fn transact(
             context: *OpContext,
             tx: DepositTransaction,
-        ) Error!evmz.transaction.TransitionOutcome(DepositOutput, DepositRejection) {
+        ) Error!evmz.transaction.TransitionOutcomeType(DepositOutput, DepositRejection) {
             if (tx.is_system_transaction) {
                 return .{ .rejected = .system_transaction_after_regolith };
             }
@@ -313,12 +313,16 @@ fn OpTransition(
     comptime DepositImplementation: type,
 ) type {
     return struct {
+        pub const Context = OpContext;
+        pub const Transaction = OpTransaction;
+        pub const Output = OpOutput;
+        pub const Rejection = OpRejection;
         pub const Error = EthereumTransition.Error || DepositImplementation.Error;
 
         pub fn transact(
             context: *OpContext,
             tx: OpTransaction,
-        ) Error!evmz.transaction.TransitionOutcome(OpOutput, OpRejection) {
+        ) Error!evmz.transaction.TransitionOutcomeType(OpOutput, OpRejection) {
             return switch (tx) {
                 .ethereum => |ethereum| switch (try EthereumTransition.transact(context, ethereum)) {
                     .rejected => |reason| .{ .rejected = .{ .ethereum = reason } },
@@ -358,6 +362,10 @@ pub const OpBlockEnv = struct {
 /// between `planInclude`, which may still fail while the output is only
 /// borrowed, and `applyInclude`, which commits once the transaction retains.
 const OpBlockProgram = struct {
+    pub const Env = OpBlockEnv;
+    pub const Included = OpIncludedTransaction;
+    pub const Result = u64;
+
     pub const State = u64;
     pub const Error = error{TransactionCountOverflow};
     pub const PreludeError = error{};
@@ -418,19 +426,8 @@ fn OpFamilyFromSpec(comptime revision: OpRevision, comptime spec_value: evmz.eth
     const EthereumTransition = EthereumVm.Transition(OpInput);
     const DepositImplementation = DepositTransition(Context, EthereumVm);
     const CombinedTransition = OpTransition(Context, EthereumTransition, DepositImplementation);
-    const TransactionVm = EthereumVm.Program(
-        OpTransaction,
-        OpInput,
-        OpOutput,
-        OpRejection,
-        CombinedTransition,
-    );
-    const BlockExecution = TransactionVm.Block(
-        OpBlockEnv,
-        OpIncludedTransaction,
-        u64,
-        OpBlockProgram,
-    );
+    const TransactionVm = EthereumVm.Program(CombinedTransition);
+    const BlockExecution = TransactionVm.Block(OpBlockProgram);
 
     return struct {
         pub const specification = spec_value;
@@ -754,7 +751,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     try recipient_account.setCode(&runtime_code);
 
     var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     var block = try Ecotone.Block.init(
@@ -914,27 +911,16 @@ test "Fjord activates RIP-7212 P256VERIFY at 3450 gas" {
     try std.testing.expect(!Ecotone.Evm.specification.precompile.active(p256_address));
     try std.testing.expect(Fjord.Evm.specification.precompile.active(p256_address));
 
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const message: evmz.Host.Message = .{
-        .depth = 0,
-        .kind = .call,
-        .gas = fjord_precompile_config.gas.get(.p256verify) + 1,
-        .sender = address.addr(0),
-        .input_data = &.{},
-        .value = 0,
-    };
+    const gas = fjord_precompile_config.gas.get(.p256verify) + 1;
     const precompile = Fjord.Evm.specification.precompile.resolve(p256_address).?;
-    const outcome = try Fjord.Evm.specification.precompile.execute(precompile, .{
+    const result = try Fjord.Evm.specification.precompile.execute(precompile, .{
         .allocator = std.testing.allocator,
-        .host = &host,
-        .message = &message,
+        .input_data = &.{},
+        .gas = gas,
     });
-    const result = outcome.result;
 
     try std.testing.expectEqual(evmz.precompile.Status.success, result.status);
-    try std.testing.expectEqual(@as(i64, 1), result.gas_left);
+    try std.testing.expectEqual(gas - fjord_precompile_config.gas.get(.p256verify), result.gas_left);
     try std.testing.expectEqual(@as(usize, 0), result.output_data.len);
 }
 

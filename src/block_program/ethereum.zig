@@ -1,29 +1,54 @@
 //! Ethereum sequential block program for one transaction runtime.
 //!
 //! The VM-owned block binder owns executor claims and retain/discard. This
-//! module owns Ethereum inclusion accounting and the journaled
-//! before-transaction system-call prelude.
+//! module owns Ethereum inclusion accounting, the receipt/included shapes,
+//! and the journaled before-transaction system-call prelude.
 
 const std = @import("std");
 
 const address = @import("../address.zig");
+const execution = @import("../execution.zig");
 const executor = @import("../executor.zig");
+const transaction = @import("../transaction.zig");
 
-/// Build Ethereum's block fold implementation and transaction prelude for one
-/// bound transaction runtime.
-pub fn bind(
-    comptime TransactionRuntime: type,
-    comptime Env: type,
-    comptime IncludedTransaction: type,
-    comptime BlockResult: type,
-) type {
+/// Summary of included transactions in an Ethereum block fold.
+pub const Result = struct {
+    /// Cumulative receipt gas.
+    gas_used: u64 = 0,
+    /// Cumulative block/header gas contribution.
+    block_gas: transaction.BlockGas = .{},
+    tx_count: u64 = 0,
+};
+
+/// Build Ethereum's block fold implementation for one bound transaction
+/// runtime. Every carrier is read off the runtime; the block environment is
+/// the concrete Ethereum `Env` carried by the input. The standard
+/// before-transaction prelude and receipt shape ride as decls.
+pub fn ImplType(comptime TransactionRuntime: type) type {
+    const EnvType = transaction.Env;
+    comptime std.debug.assert(@FieldType(TransactionRuntime.TransactInput, "env") == EnvType);
     const Transaction = TransactionRuntime.Transaction;
     const TransactionInput = TransactionRuntime.TransactInput;
     const TransactionOutput = TransactionRuntime.Output;
     const TransactionLogs = TransactionRuntime.TransactionLogs;
 
+    // Borrowed per-transaction receipt; `logs` is valid only while the
+    // owning execution scope stays unresolved.
+    const ReceiptType = struct {
+        status: execution.Status,
+        gas_used: u64 = 0,
+        cumulative_gas_used: u64 = 0,
+        created_address: ?address.Address = null,
+        logs: TransactionLogs = .empty,
+    };
+
+    const IncludedTransaction = struct {
+        result: TransactionOutput,
+        receipt: ReceiptType,
+    };
+
     const BeforeTransactionPrelude = struct {
-        env: Env,
+        env: EnvType,
         transaction_index: u64,
 
         pub fn run(
@@ -42,8 +67,18 @@ pub fn bind(
         }
     };
 
-    const ImplementationType = struct {
-        pub const State = BlockResult;
+    const FoldResult = Result;
+
+    return struct {
+        // Carrier decls the block binder reads; init/included/finish
+        // signatures are welded to them by the binder's validation.
+        pub const Env = EnvType;
+        pub const Included = IncludedTransaction;
+        pub const Result = FoldResult;
+        pub const Receipt = ReceiptType;
+        pub const Prelude = BeforeTransactionPrelude;
+
+        pub const State = FoldResult;
         pub const Error = error{ BlockGasExceeded, Overflow };
         pub const PreludeError = error{};
         pub const InclusionPlan = struct { next: State };
@@ -104,13 +139,8 @@ pub fn bind(
             state.* = plan.next;
         }
 
-        pub fn finish(_: *const Env, state: *const State) BlockResult {
+        pub fn finish(_: *const Env, state: *const State) FoldResult {
             return state.*;
         }
-    };
-
-    return struct {
-        pub const Prelude = BeforeTransactionPrelude;
-        pub const Implementation = ImplementationType;
     };
 }

@@ -47,7 +47,7 @@ pub fn transact(comptime VmType: type, allocator: std.mem.Allocator, request: Re
     }
 
     var executor = VmType.Executor.init(allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 

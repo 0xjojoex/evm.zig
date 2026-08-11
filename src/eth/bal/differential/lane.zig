@@ -24,6 +24,11 @@ const vm = @import("../../../vm.zig");
 
 pub fn Lane(comptime Engine: type) type {
     return struct {
+        pub const ExecutionDependencies = struct {
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?vm.BlockHashSource = null,
+        };
+
         /// Everything a lane needs that stays constant for the whole block.
         pub const Context = struct {
             env: vm.Env,
@@ -145,13 +150,13 @@ pub fn Lane(comptime Engine: type) type {
                 self: *CapturedExecution,
                 allocator: std.mem.Allocator,
                 reader: Reader,
-                options: Engine.Executor.Services,
+                dependencies: ExecutionDependencies,
             ) !void {
-                self.executor = Engine.Executor.initOwned(
-                    allocator,
-                    Engine.BlockState.initState(allocator, reader),
-                    options,
-                );
+                self.executor = Engine.Executor.init(allocator, .{
+                    .state = .{ .reader = reader },
+                    .prepared_code_backend = dependencies.prepared_code_backend,
+                    .block_hash_source = dependencies.block_hash_source,
+                });
             }
 
             pub fn deinit(self: *CapturedExecution) void {
@@ -169,10 +174,10 @@ pub fn Lane(comptime Engine: type) type {
 
             pub fn observe(
                 self: *ObservationCollector,
-                pending: Engine.Executor.State.PendingView,
+                transition_view: Engine.Executor.Observation,
             ) !void {
                 var transition = try tracked_state_projector.materialize(
-                    pending.observations(),
+                    transition_view.observations(),
                     self.allocator,
                 );
                 defer transition.deinit(self.allocator);
@@ -215,7 +220,7 @@ pub fn Lane(comptime Engine: type) type {
             defer execution.deinit();
 
             var runtime = Engine.init(&execution.executor);
-            const outcome = try runtime.transactObserved(.{
+            const outcome = try runtime.observe().transact(.{
                 .env = context.env,
                 .tx = included.transaction,
                 .progress = .{

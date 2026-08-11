@@ -277,21 +277,18 @@ pub const WitnessCatalog = struct {
             .present => |present| present,
             .absent => return null,
         };
-        const target = @intFromEnum(bound.node);
-        var low: usize = 0;
-        var high = self.accounts.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            const current = @intFromEnum(self.accounts.items[mid].node);
-            if (current < target) {
-                low = mid + 1;
-            } else if (current > target) {
-                high = mid;
-            } else {
-                return self.accounts.items[mid].decoded;
+        const S = struct {
+            fn compareAccountNode(target: mpt.catalog.NodeId, item: CatalogAccount) std.math.Order {
+                return std.math.order(@intFromEnum(target), @intFromEnum(item.node));
             }
-        }
-        return error.InvalidNode;
+        };
+        const index = std.sort.binarySearch(
+            CatalogAccount,
+            self.accounts.items,
+            bound.node,
+            S.compareAccountNode,
+        ) orelse return error.InvalidNode;
+        return self.accounts.items[index].decoded;
     }
 
     pub fn storage(
@@ -325,17 +322,18 @@ pub const WitnessCatalog = struct {
     }
 
     fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.catalog.RootRef {
-        var low: usize = 0;
-        var high = self.storage_roots.items.len;
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            switch (std.mem.order(u8, &self.storage_roots.items[mid].hash, &digest)) {
-                .lt => low = mid + 1,
-                .gt => high = mid,
-                .eq => return self.storage_roots.items[mid].root,
+        const S = struct {
+            fn compareStorageRootHash(context: [32]u8, item: StorageCatalogRoot) std.math.Order {
+                return std.mem.order(u8, &context, &item.hash);
             }
-        }
-        return null;
+        };
+        const index = std.sort.binarySearch(
+            StorageCatalogRoot,
+            self.storage_roots.items,
+            digest,
+            S.compareStorageRootHash,
+        ) orelse return null;
+        return self.storage_roots.items[index].root;
     }
 };
 
@@ -420,7 +418,13 @@ fn sortDeduplicateStorageRootAccounts(
     accounts: []const CatalogAccount,
 ) usize {
     if (account_indices.len < 2) return account_indices.len;
-    std.mem.sort(u32, account_indices, accounts, storageRootAccountLessThan);
+
+    std.mem.sort(u32, account_indices, accounts, struct {
+        fn lessThan(accounts_: []const CatalogAccount, lhs: u32, rhs: u32) bool {
+            return std.mem.lessThan(u8, &accounts_[lhs].decoded.storage_root, &accounts_[rhs].decoded.storage_root);
+        }
+    }.lessThan);
+
     var unique_len: usize = 1;
     for (account_indices[1..]) |account_index| {
         const previous = accounts[account_indices[unique_len - 1]].decoded.storage_root;
@@ -430,14 +434,6 @@ fn sortDeduplicateStorageRootAccounts(
         unique_len += 1;
     }
     return unique_len;
-}
-
-fn storageRootAccountLessThan(accounts: []const CatalogAccount, lhs: u32, rhs: u32) bool {
-    return std.mem.order(
-        u8,
-        &accounts[lhs].decoded.storage_root,
-        &accounts[rhs].decoded.storage_root,
-    ) == .lt;
 }
 
 pub const Proof = struct {
@@ -509,8 +505,7 @@ fn updateRootIndexed(allocator: Allocator, root_hash: [32]u8, indexed: *const In
 
     const sorted = try allocator.dupe(Update, updates);
     defer allocator.free(sorted);
-    std.mem.sort(Update, sorted, {}, updateLessThan);
-    try rejectDuplicateUpdates(sorted);
+    mpt.Sort.byKey(Update, sorted);
 
     const trie = structuralTrie(allocator);
 
@@ -1096,25 +1091,10 @@ fn nibbleAt(key: []const u8, index: usize) u8 {
     return if (index % 2 == 0) byte >> 4 else byte & 0x0f;
 }
 
-fn pairLessThan(_: void, lhs: Pair, rhs: Pair) bool {
-    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
-}
-
-fn updateLessThan(_: void, lhs: Update, rhs: Update) bool {
-    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
-}
-
 fn rejectDuplicateKeys(pairs: []const Pair) Error!void {
     if (pairs.len < 2) return;
     for (pairs[1..], 1..) |pair, index| {
         if (std.mem.eql(u8, pairs[index - 1].key, pair.key)) return error.DuplicateKey;
-    }
-}
-
-fn rejectDuplicateUpdates(updates: []const Update) UpdateError!void {
-    if (updates.len < 2) return;
-    for (updates[1..], 1..) |update, index| {
-        if (std.mem.eql(u8, updates[index - 1].key, update.key)) return error.DuplicateKey;
     }
 }
 
@@ -1803,7 +1783,7 @@ test "authenticated account facts preserve cached absence" {
 
 fn sortedPairsForTest(allocator: Allocator, pairs: []const Pair) ![]Pair {
     const sorted = try allocator.dupe(Pair, pairs);
-    std.mem.sort(Pair, sorted, {}, pairLessThan);
+    mpt.Sort.byKey(Pair, sorted);
     try rejectDuplicateKeys(sorted);
     return sorted;
 }

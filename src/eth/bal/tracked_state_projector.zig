@@ -93,6 +93,14 @@ pub const BlockBuilder = struct {
         return result;
     }
 
+    /// Compare without detaching the canonical BAL. A mismatch leaves the
+    /// builder available to materialize the observed value for diagnostics.
+    pub fn matchesClaim(self: *BlockBuilder, expected: bal.BlockAccessList) !bool {
+        std.debug.assert(!self.finished);
+        try self.flush();
+        return self.shards.matchesClaim(expected);
+    }
+
     fn flush(self: *BlockBuilder) !void {
         var active = self.active orelse return;
         self.active = null;

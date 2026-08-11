@@ -53,7 +53,6 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         claim: *const ClaimView,
         report: *Report,
         accumulator: Accumulator,
-        claim_executor: ?Engine.Executor = null,
         parallel_batch: ?Schedule = null,
         active: bool = true,
 
@@ -116,9 +115,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
         pub fn deinit(self: *Self) void {
             self.discardPending();
             if (self.parallel_batch) |*batch| batch.deinit();
-            if (self.claim_executor) |*executor| executor.deinit();
             self.accumulator.deinit();
-            self.claim_executor = null;
         }
 
         fn laneContext(self: *const Self) Lane.Context {
@@ -329,11 +326,11 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             const block_access_index = std.math.cast(bal.BlockAccessIndex, candidate_tx_index) orelse
                 return error.BlockAccessIndexOverflow;
             var claim_reader = ClaimReader.init(self.base_reader, self.claim, block_access_index);
-            const executor_options: Engine.Executor.Services = .{
+            const dependencies: Lane.ExecutionDependencies = .{
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             };
-            self.verifyRejectedAgainstClaim(rejected, claim_reader.reader(), executor_options) catch |err| {
+            self.verifyRejectedAgainstClaim(rejected, claim_reader.reader(), dependencies) catch |err| {
                 self.stopForRejectedError(err, rejected.tx_index, claim_reader.strategy_failure);
             };
         }
@@ -342,22 +339,17 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self: *Self,
             rejected: Rejected,
             reader: Reader,
-            executor_options: Engine.Executor.Services,
+            dependencies: Lane.ExecutionDependencies,
         ) !void {
-            if (self.claim_executor) |*executor|
-                executor.resetOwned(
-                    Engine.BlockState.initState(self.allocator, reader),
-                    executor_options,
-                )
-            else
-                self.claim_executor = Engine.Executor.initOwned(
-                    self.allocator,
-                    Engine.BlockState.initState(self.allocator, reader),
-                    executor_options,
-                );
+            var executor = Engine.Executor.init(self.allocator, .{
+                .state = .{ .reader = reader },
+                .prepared_code_backend = dependencies.prepared_code_backend,
+                .block_hash_source = dependencies.block_hash_source,
+            });
+            defer executor.deinit();
 
             const progress = self.accumulator.progress;
-            var runtime = Engine.init(&self.claim_executor.?);
+            var runtime = Engine.init(&executor);
             const outcome = try runtime.transact(.{
                 .env = self.env,
                 .tx = rejected.transaction,

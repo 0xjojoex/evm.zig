@@ -15,19 +15,6 @@ len: u16 = 0,
 
 const Stack = @This();
 
-inline fn swapSlot(a: *u256, b: *u256) void {
-    const tmp = a.*;
-    a.* = b.*;
-    b.* = tmp;
-}
-
-pub fn PopN(comptime n: usize) type {
-    if (n == 0) {
-        @compileError("PopN requires at least one value");
-    }
-    return std.meta.Tuple(&([_]type{u256} ** n));
-}
-
 comptime {
     if (@sizeOf(usize) == 8 and @sizeOf(Stack) != 16) {
         @compileError("Stack view must stay compact; rerun VM-loop canary benches");
@@ -63,11 +50,11 @@ pub inline fn pop(self: *Stack) u256 {
     return self.base[self.len];
 }
 
-pub inline fn popN(self: *Stack, comptime n: usize) PopN(n) {
+pub inline fn popN(self: *Stack, comptime n: usize) [n]u256 {
     std.debug.assert(self.len >= n);
     self.len -= n;
 
-    var values: PopN(n) = undefined;
+    var values: [n]u256 = undefined;
     inline for (0..n) |i| {
         values[i] = self.base[self.len + n - 1 - i];
     }
@@ -82,13 +69,13 @@ pub fn peek(self: *Stack) ?u256 {
 pub inline fn swap(self: *Stack, comptime n: usize) void {
     std.debug.assert(self.len > n);
     const target = self.len - 1 - n;
-    swapSlot(&self.base[target], &self.base[self.len - 1]);
+    std.mem.swap(u256, &self.base[target], &self.base[self.len - 1]);
 }
 
 pub inline fn swapDepth(self: *Stack, n: usize) void {
     std.debug.assert(self.len > n);
     const target = self.len - 1 - n;
-    swapSlot(&self.base[target], &self.base[self.len - 1]);
+    std.mem.swap(u256, &self.base[target], &self.base[self.len - 1]);
 }
 
 /// Duplicate the nth element from the top of the stack
@@ -104,10 +91,10 @@ pub fn dupDepth(self: *Stack, n: usize) void {
 
 pub inline fn exchangeDepths(self: *Stack, n: usize, m: usize) void {
     std.debug.assert(self.len > n and self.len > m);
-    swapSlot(&self.base[self.len - 1 - n], &self.base[self.len - 1 - m]);
+    std.mem.swap(u256, &self.base[self.len - 1 - n], &self.base[self.len - 1 - m]);
 }
 
-pub inline fn peekN(self: *Stack, comptime n: usize) ?u256 {
+inline fn peekN(self: *Stack, comptime n: usize) ?u256 {
     if (self.len < n) {
         return null;
     }

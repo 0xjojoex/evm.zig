@@ -117,7 +117,7 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     try contract_account.setCode(&bytecode);
 
     var executor = evmz.Evm.Executor.init(allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 

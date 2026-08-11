@@ -20,20 +20,26 @@ const Address = address.Address;
 /// Build the Ethereum transaction implementation for one exact execution spec.
 /// The bound Context carries the public block environment and
 /// progress; `Output` is the family-facing executed transaction result.
-pub fn bind(
+pub fn ImplType(
     comptime spec: ExactSpec,
     comptime ExactExecutor: type,
-    comptime Context: type,
-    comptime Output: type,
+    comptime ContextType: type,
+    comptime OutputType: type,
 ) type {
-    comptime std.debug.assert(Context.Executor == ExactExecutor);
+    comptime std.debug.assert(ContextType.Executor == ExactExecutor);
     const PreparedTransaction = transaction.Prepared(tx_settlement.DefaultPlan);
-    const Rejection = transaction_validation.ValidationError;
 
     return struct {
         const Settlement = transaction.SettlementRuntime(spec);
         const authorization_spec = spec.authorization;
         const settlement_spec = spec.settlement;
+
+        // Carrier decls the program binder reads; the `transact` signature is
+        // welded to them at bind time.
+        pub const Context = ContextType;
+        pub const Transaction = transaction.Transaction;
+        pub const Output = OutputType;
+        pub const Rejection = transaction_validation.ValidationError;
 
         pub const Error = Context.Error || error{
             Overflow,
@@ -123,7 +129,7 @@ pub fn bind(
         pub fn transact(
             context: *Context,
             tx_value: transaction.Transaction,
-        ) Error!transaction.TransitionOutcome(Output, Rejection) {
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
             const input_value = context.input();
             const prepared = (transaction_prepare.Runtime(spec){}).prepare(.{
                 .tx = tx_value,
@@ -140,7 +146,7 @@ pub fn bind(
         fn completeExecutable(
             context: *Context,
             executable: PreparedTransaction,
-        ) Error!transaction.TransitionOutcome(Output, Rejection) {
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
             const request = transaction.executionRequest(
                 executable.scope.context,
                 executable.message,
@@ -233,7 +239,7 @@ pub fn bind(
             executable: PreparedTransaction,
             initial_gas: execution.ExecutionGas,
         ) Error!execution.ExecutionResult {
-            var preparation_checkpoint = try context.checkpoint();
+            var preparation_checkpoint = context.checkpoint();
             defer preparation_checkpoint.deinit();
 
             var gas = PreExecutionGas.init(initial_gas);
@@ -245,7 +251,7 @@ pub fn bind(
                 &gas,
             );
             if (!authorized) {
-                preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                preparation_checkpoint.restore();
                 return gas.includedOutOfGas();
             }
             try warmDelegatedTransactionTarget(context, executable.message);
@@ -256,16 +262,14 @@ pub fn bind(
                 gas.gas,
             ));
             if (outcome.stage == .preparation) {
-                preparation_checkpoint.restore() catch |err| return context.infrastructureError(err);
+                preparation_checkpoint.restore();
                 return gas.includedOutOfGas();
             }
 
             var result = outcome.result;
             gas.foldInto(&result);
-            if (executionRolledBack(result.outcome.status)) {
-                preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
-            } else {
-                preparation_checkpoint.commit() catch |err| return context.infrastructureError(err);
+            preparation_checkpoint.commit();
+            if (!executionRolledBack(result.outcome.status)) {
                 try context.finalizeState();
             }
             return result;

@@ -645,7 +645,7 @@ fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
 
 fn FixtureHost(comptime revision: evmz.eth.Revision) type {
     const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
-    const TxResult = transaction.TransactOutcome(evmz.TxExecutionResult, ExactVm.Rejection);
+    const TxResult = transaction.TransactOutcomeType(evmz.TxExecutionResult, ExactVm.Rejection);
 
     return struct {
         allocator: std.mem.Allocator,
@@ -668,7 +668,7 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
             try seedMemoryStore(allocator, store, pre);
 
             var executor = ExactVm.Executor.init(allocator, .{
-                .state_reader = store.reader(),
+                .state = .{ .reader = store.reader() },
                 .block_hash_source = EestStateBlockHashSource.source(),
             });
             errdefer executor.deinit();

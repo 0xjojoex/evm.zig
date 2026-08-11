@@ -9,6 +9,7 @@
 const std = @import("std");
 
 const ClaimView = @import("../ClaimView.zig");
+const bal_diff = @import("../diff.zig");
 const bal = @import("../model.zig");
 const runner_types = @import("runner.zig");
 const report_types = @import("report.zig");
@@ -94,11 +95,6 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
             );
         }
 
-        pub fn isActive(self: *const Self) bool {
-            const runner = if (self.runner) |*value| value else return false;
-            return runner.active;
-        }
-
         pub fn beforeBlock(self: *Self, header: anytype) void {
             const runner = if (self.runner) |*value| value else return;
             runner.verifyBeforeBlock(header);
@@ -122,6 +118,20 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
         pub fn finishCandidate(self: *Self, withdrawals: []const Operations.Withdrawal) void {
             const runner = if (self.runner) |*value| value else return;
             self.candidate = runner.finishCandidate(withdrawals);
+        }
+
+        pub fn blockAccessListMismatch(
+            self: *Self,
+            expected: bal.BlockAccessList,
+            actual: bal.BlockAccessList,
+        ) void {
+            const writer = self.report.mismatch_writer orelse return;
+            writer.print("{f}", .{bal_diff.Diff{
+                .expected = expected,
+                .actual = actual,
+            }}) catch {
+                self.report.mismatch_write_failed = true;
+            };
         }
 
         /// Compare candidate outcome-derived BAL evidence and block accounting

@@ -12,6 +12,7 @@ const trace = @import("./trace.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
 const uint256 = @import("./uint256.zig");
 const ExactSpec = @import("./spec.zig").Spec;
+const block_state = @import("./vm/block_state.zig");
 
 const CaptureContext = executor_module.CaptureContext;
 const TransactionExecutionStage = executor_module.TransactionExecutionStage;
@@ -45,11 +46,25 @@ fn runStandaloneObserved(
     gas: execution_values.ExecutionGas,
     observer: anytype,
 ) !Host.Result {
-    return executor.executeStandaloneObserved(
+    return executor.observe(observer).executeStandalone(
         .{ .context = context, .message = message, .gas = gas },
         .{},
-        observer,
     );
+}
+
+fn beginCreateScope(
+    executor: anytype,
+    context: execution_values.ExecutionContext,
+    create: execution_values.Create,
+    gas: execution_values.ExecutionGas,
+) !execution_values.EvmExecutionRequest {
+    const request = execution_values.EvmExecutionRequest{
+        .context = context,
+        .message = .{ .create = create },
+        .gas = gas,
+    };
+    try executor.beginMessageScope(request, .{});
+    return request;
 }
 
 const testExecutionContext = evmz.t.defaultExecutionContext;
@@ -70,10 +85,10 @@ const DenseTransitionObserver = struct {
     code_hash: [32]u8,
     summary: ?DenseTransitionSummary = null,
 
-    pub fn observe(self: *@This(), pending: anytype) !void {
-        const changes = pending.changes();
-        const observations = pending.observations();
-        const logs = pending.logs();
+    pub fn observe(self: *@This(), observation: anytype) !void {
+        const changes = observation.changes();
+        const observations = observation.observations();
+        const logs = observation.logs();
         self.summary = .{
             .account_changes = changes.accounts.len(),
             .storage_changes = changes.storage_writes.len(),
@@ -116,11 +131,9 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     backing_account.account.balance = 10;
     try backing_account.storage.put(7, 3);
 
-    var tracked = Amsterdam.Executor.initOwned(
-        std.testing.allocator,
-        Amsterdam.BlockState.initState(std.testing.allocator, backing.reader()),
-        .{},
-    );
+    var tracked = Amsterdam.Executor.init(std.testing.allocator, .{
+        .state = .{ .reader = backing.reader() },
+    });
     defer tracked.deinit();
     const dense_facts = try ParentFacts.initCopy(
         std.testing.allocator,
@@ -134,17 +147,17 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
         &.{},
     );
     const DenseEngine = @import("./vm.zig").BalStatelessVm(evmz.eth.amsterdam);
-    var dense = DenseEngine.Executor.initOwned(
-        std.testing.allocator,
-        dense_state,
-        .{},
-    );
+    var dense = DenseEngine.Executor.init(std.testing.allocator, .{ .state = dense_state });
     defer dense.deinit();
 
     const context = testExecutionContext(target, 100_000);
-    try tracked.beginObservedStateTransition(context);
+    var tracked_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    var dense_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    const observed_tracked = tracked.observe(&tracked_observer);
+    const observed_dense = dense.observe(&dense_observer);
+    try observed_tracked.beginStateTransition(context);
     defer tracked.discardStateTransition();
-    try dense.beginObservedStateTransition(context);
+    try observed_dense.beginStateTransition(context);
     defer dense.discardStateTransition();
 
     const undeclared = evmz.addr(2);
@@ -162,9 +175,9 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try dense.addBalance(target, 5);
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
 
-    var tracked_checkpoint = try tracked.checkpoint();
+    var tracked_checkpoint = tracked.checkpoint();
     defer tracked_checkpoint.deinit();
-    var dense_checkpoint = try dense.checkpoint();
+    var dense_checkpoint = dense.checkpoint();
     defer dense_checkpoint.deinit();
 
     const tracked_load = try tracked.state.loadStorage(target, 7);
@@ -181,8 +194,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try tracked.addBalance(target, 7);
     try dense.addBalance(target, 7);
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try tracked_checkpoint.restore();
-    try dense_checkpoint.restore();
+    tracked_checkpoint.restore();
+    dense_checkpoint.restore();
     try std.testing.expectEqual(@as(u256, 15), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try dense.getStorage(target, 7));
@@ -191,8 +204,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
 
     tracked.discardStateTransition();
     dense.discardStateTransition();
-    try tracked.beginObservedStateTransition(context);
-    try dense.beginObservedStateTransition(context);
+    try observed_tracked.beginStateTransition(context);
+    try observed_dense.beginStateTransition(context);
     try std.testing.expectEqual(@as(u256, 10), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try tracked.getStorage(target, 7));
@@ -211,10 +224,10 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     _ = try tracked.state.setStorage(target, 7, 11);
     _ = try dense.state.setStorage(target, 7, 11);
 
-    var tracked_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
-    var dense_observer = DenseTransitionObserver{ .code_hash = replacement_hash };
-    try tracked.retainStateTransitionObserved(&tracked_observer);
-    try dense.retainStateTransitionObserved(&dense_observer);
+    tracked_observer.code_hash = replacement_hash;
+    dense_observer.code_hash = replacement_hash;
+    try observed_tracked.retainStateTransition();
+    try observed_dense.retainStateTransition();
     try std.testing.expectEqualDeep(tracked_observer.summary, dense_observer.summary);
     try std.testing.expectEqual(@as(usize, 1), dense.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
@@ -330,12 +343,12 @@ test "CREATE initcode preparation remains execution-local" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-    const result = (try executor.executeCreate(.{
+    const request = try beginCreateScope(&executor, execution_context, .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
-    }, .legacy(100_000))).expectCreate();
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
     executor.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -390,11 +403,10 @@ test "trace replay runs after prepared code leaves the live frame" {
         if (capture_open) capture.abort() catch {};
     }
 
-    try executor.beginCapturedTransaction(
+    try executor.capture(&capture).beginTransaction(
         testExecutionContext(sender, 100_000),
         sender,
         contract,
-        &capture,
     );
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     executor.retainStateTransition();
@@ -409,7 +421,7 @@ test "trace replay runs after prepared code leaves the live frame" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
-test "reset reuses caller-owned prepared artifacts through the supplied backend" {
+test "executor uses caller-owned prepared artifacts through the supplied backend" {
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const contract = evmz.addr(0xc0de);
     const code = evmz.t.bytecode(.{.STOP});
@@ -417,15 +429,11 @@ test "reset reuses caller-owned prepared artifacts through the supplied backend"
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
+    const prepared = try pool.getOrPrepare(code_hash, &code);
     var executor = Osaka.Executor.init(std.testing.allocator, .{
         .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
-
-    const prepared = try pool.getOrPrepare(code_hash, &code);
-    try executor.reset(.{
-        .prepared_code_backend = pool.backend(),
-    });
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
     try executor.beginStateTransition(testExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
@@ -522,7 +530,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
         defer pool.deinit();
         var executor = Osaka.Executor.init(std.testing.allocator, .{
-            .state_reader = witness.reader(),
+            .state = .{ .reader = witness.reader() },
             .prepared_code_backend = pool.backend(),
         });
         defer executor.deinit();
@@ -553,7 +561,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         defer witness.deinit();
 
         var executor = Osaka.Executor.init(std.testing.allocator, .{
-            .state_reader = witness.reader(),
+            .state = .{ .reader = witness.reader() },
             .prepared_code_backend = system_prepared_code.backend(),
         });
         defer executor.deinit();
@@ -674,8 +682,8 @@ test "top-level delegated target is a semantic account access" {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
@@ -722,8 +730,8 @@ test "delegated target is observed before insufficient call balance" {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
@@ -911,7 +919,7 @@ fn executeCreateOpcodeStatus(comptime spec: ExactSpec) !Interpreter.Status {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -928,7 +936,7 @@ fn executeCallResultStore(comptime spec: ExactSpec) !u256 {
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -958,7 +966,7 @@ fn executeTopLevelDelegatedCall(comptime spec: ExactSpec) !i64 {
     const target = evmz.addr(0x3333);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -986,10 +994,10 @@ const CodeObservation = struct {
 
     pub fn observe(
         self: *@This(),
-        pending: TrackedState.PendingView,
+        observation: anytype,
     ) !void {
         self.calls += 1;
-        const view = pending.observations();
+        const view = observation.observations();
         var code_reads: u32 = 0;
         var required_found = false;
         var index: u32 = 0;
@@ -1021,7 +1029,7 @@ fn executeTopFrameValueTransfer(comptime spec: ExactSpec) !TopFrameValueTransfer
     const recipient = evmz.addr(0x2222);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1058,7 +1066,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1075,7 +1083,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
 }
 
 fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
-    const Exec = executor_module.ExecutorType(spec, TrackedState, .{});
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
@@ -1551,7 +1559,7 @@ test "captured runtime records nested call and create frames without generic ste
 
     try capture.begin();
     errdefer capture.abort() catch {};
-    try executor.beginCapturedTransaction(execution_context, sender, contract, &capture);
+    try executor.capture(&capture).beginTransaction(execution_context, sender, contract);
     const result = try executor.executePreparedCallTransaction(.{
         .bytecode = bytecode.view(),
         .sender = sender,
@@ -1905,7 +1913,7 @@ test "transaction payload resolves only its inner checkpoint" {
         try executor.state.addBalance(sender, 7);
         try transaction_runtime.beginExecution(&executor, request, .{});
 
-        var preparation_checkpoint = try executor.checkpoint();
+        var preparation_checkpoint = executor.checkpoint();
         defer preparation_checkpoint.deinit();
         try executor.state.addBalance(sender, 5);
 
@@ -1915,7 +1923,7 @@ test "transaction payload resolves only its inner checkpoint" {
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
 
-        try preparation_checkpoint.commit();
+        preparation_checkpoint.commit();
         const executed = Cancun.Executor.Executed(void){
             .executor = &executor,
             .generation = transaction_runtime.finish(&executor),
@@ -1992,12 +2000,12 @@ test "executor executes top-level create transaction" {
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0x53, 0x60, 0x01, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
 
-    try executor.beginCreateTransaction(execution_context, sender);
-    const result = (try executor.executeCreate(.{
+    const request = try beginCreateScope(&executor, execution_context, .{
         .sender = sender,
         .recipient = create_address,
         .init_code = init_code,
-    }, .legacy(100_000))).expectCreate();
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &create_address, &result.address);
@@ -2033,8 +2041,8 @@ test "Amsterdam value transaction emits transfer log" {
     }, 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), sender, recipient, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), sender, recipient, 7);
 }
 
 test "Osaka value transaction does not emit transfer log" {
@@ -2050,7 +2058,7 @@ test "Osaka value transaction does not emit transfer log" {
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .legacy(50_000), 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
 }
 
 test "Amsterdam nested CALL transfer log rolls back on revert" {
@@ -2079,7 +2087,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
     })).expectCall();
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status());
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
 }
 
@@ -2106,8 +2114,8 @@ test "Amsterdam CREATE endowment emits transfer log" {
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), contract, create_address, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), contract, create_address, 7);
 }
 
 test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
@@ -2131,8 +2139,8 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(usize, 1), executor.logs().len());
-    try expectTransferLog(executor.logs().get(0), contract, beneficiary, 7);
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+    try expectTransferLog(executor.logView().get(0), contract, beneficiary, 7);
 }
 
 fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
@@ -2349,8 +2357,8 @@ test "exact spec drives precompile warm access" {
 
         pub fn execute(
             entry: Entry,
-            call: evmz.execution.PrecompileCall,
-        ) evmz.precompile.Error!evmz.execution.PrecompileOutcome {
+            call: evmz.precompile.Call,
+        ) evmz.precompile.Error!evmz.precompile.Result {
             _ = entry;
             _ = call;
             return error.NotImplemented;
@@ -2394,14 +2402,14 @@ test "exact spec drives precompile execution" {
 
             pub fn execute(
                 entry: Entry,
-                call: evmz.execution.PrecompileCall,
-            ) evmz.precompile.Error!evmz.execution.PrecompileOutcome {
+                call: evmz.precompile.Call,
+            ) evmz.precompile.Error!evmz.precompile.Result {
                 _ = entry;
-                return .{ .result = .{
+                return .{
                     .status = .success,
                     .output_data = try call.allocator.dupe(u8, &.{0xaa}),
-                    .gas_left = call.message.gas - 7,
-                } };
+                    .gas_left = call.gas - 7,
+                };
             }
         };
     };
@@ -2424,6 +2432,7 @@ test "exact spec drives precompile execution" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 993), result.gas_left);
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.maxRowCount());
 }
 
 test "exact spec drives selfdestruct host policy" {
@@ -2479,11 +2488,14 @@ test "create warms created address from Berlin" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-
     const init_code = &.{ 0x60, 0x00, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = init_code,
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expect(executor.state.isAccountWarm(create_address));
@@ -2531,10 +2543,14 @@ test "create address collision preserves nonce and warmth outside payload rollba
     const create_address = evmz.address.create(sender, 0);
     try evmz.t.seedExecutorAccount(&executor, create_address, .{ .nonce = 1 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = &.{0x00},
+        .value = 1,
+    }, .legacy(100_000));
     defer executor.discardStateTransition();
-
-    const result = (try executor.executeCreateTransaction(sender, create_address, &.{0x00}, .legacy(100_000), 1)).expectCreate();
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
@@ -2560,8 +2576,8 @@ fn createObservesTarget(creator_balance: u256) !bool {
         target: Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
-            const accounts = pending.observations().accounts;
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 if (std.mem.eql(u8, &accounts.at(index).address, &self.target))
@@ -2785,11 +2801,14 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
-    try executor.beginCreateTransaction(execution_context, sender);
-
     const init_code = &.{ 0x60, 0xef, 0x60, 0x00, 0x53, 0x60, 0x10, 0x60, 0x00, 0xf3 };
     const create_address = evmz.address.create(sender, 0);
-    const result = (try executor.executeCreateTransaction(sender, create_address, init_code, .legacy(100_000), 0)).expectCreate();
+    const request = try beginCreateScope(&executor, execution_context, .{
+        .sender = sender,
+        .recipient = create_address,
+        .init_code = init_code,
+    }, .legacy(100_000));
+    const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
@@ -2921,9 +2940,9 @@ test "sealed observations expose storage state without a trace tape" {
         expected: u256,
         calls: usize = 0,
 
-        pub fn observe(self: *@This(), pending: TrackedState.PendingView) !void {
+        pub fn observe(self: *@This(), observation: anytype) !void {
             self.calls += 1;
-            const storage = pending.observations().storage;
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -2955,10 +2974,11 @@ test "sealed observations expose storage state without a trace tape" {
             0x00, // STOP
         },
     });
-    try executor.beginObservedTransaction(execution_context, sender, contract);
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(execution_context, sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    try executor.retainStateTransitionObserved(&observations);
+    try observed.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), observations.calls);
@@ -3086,7 +3106,6 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
     const seeded_empty = evmz.addr(0x00e0);
     var executor = TangerineWhistle.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.reset(.{});
     try std.testing.expect(executor.state.retains_empty_accounts);
     executor.discardAccepted();
     try std.testing.expect(executor.state.retains_empty_accounts);

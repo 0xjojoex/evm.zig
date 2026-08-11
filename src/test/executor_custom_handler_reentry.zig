@@ -103,7 +103,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
 
     try capture.begin();
     errdefer capture.abort() catch {};
-    const result = (try executor.executeCaptured(
+    const result = (try executor.capture(&capture).execute(
         .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -113,7 +113,6 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
             .recipient = parent,
         } },
         .legacy(100_000),
-        &capture,
     )).expectCall();
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;
@@ -122,7 +121,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
     try std.testing.expectEqual(@as(usize, ReentrantInstruction.max_depth), ReentrantInstruction.call_count);
     try std.testing.expect(ReentrantInstruction.root_stack_moved);
     try std.testing.expect(ReentrantInstruction.root_capture_stable);
-    try std.testing.expectEqual(ReentrantVm.Executor.default_max_live_frames, capture.frame_captures.capacity);
+    try std.testing.expectEqual(evmz.executor.default_max_live_frames, capture.frame_captures.capacity);
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(parent, 0));
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(child, 0));
 

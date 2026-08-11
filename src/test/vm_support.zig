@@ -17,7 +17,6 @@ pub const Create = vm_module.Create;
 pub const Env = vm_module.Env;
 pub const Log = vm_module.Log;
 pub const MemoryStore = evmz.state.MemoryStore;
-pub const SystemCall = vm_module.SystemCall;
 pub const TxExecutionResult = vm_module.TxExecutionResult;
 pub const TxStatus = vm_module.TxStatus;
 

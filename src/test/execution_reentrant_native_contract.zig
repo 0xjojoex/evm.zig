@@ -10,11 +10,11 @@ const StatefulRuntime = struct {
     invalid_borrow: bool = false,
     borrowed: [1]u8 = .{0xff},
 
-    fn service(self: *StatefulRuntime) execution.PrecompileRuntime {
+    fn service(self: *StatefulRuntime) execution.ReentrantNativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.PrecompileCall) !evmz.precompile.Result {
+    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
         const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
         if (self.service_error) |err| return err;
         _ = try call.host.setStorage(call.message.recipient, 7, self.tx_kind);
@@ -24,20 +24,12 @@ const StatefulRuntime = struct {
             .gas_left = call.message.gas - 9,
             .output_owned = false,
         };
-        const output = if (call.output_buffer) |buffer| blk: {
-            if (buffer.len < 1) return error.OutputBufferTooSmall;
-            buffer[0] = self.tx_kind;
-            break :blk buffer[0..1];
-        } else blk: {
-            const owned = try call.allocator.alloc(u8, 1);
-            owned[0] = self.tx_kind;
-            break :blk owned;
-        };
+        const output = try call.allocator.alloc(u8, 1);
+        output[0] = self.tx_kind;
         return .{
             .status = if (self.fail) .failure else .success,
             .output_data = output,
             .gas_left = call.message.gas - 9,
-            .output_owned = call.output_buffer == null,
         };
     }
 };
@@ -46,11 +38,11 @@ const ReentrantRuntime = struct {
     child: evmz.Address,
     called: bool = false,
 
-    fn service(self: *ReentrantRuntime) execution.PrecompileRuntime {
+    fn service(self: *ReentrantRuntime) execution.ReentrantNativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.PrecompileCall) !evmz.precompile.Result {
+    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
         const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
         const result = (try call.host.call(.{
             .depth = call.message.depth + 1,
@@ -67,7 +59,7 @@ const ReentrantRuntime = struct {
         return .{
             .status = if (result.status() == .success) .success else .failure,
             // Keep this empty and unowned: this test isolates stack-arena
-            // rebinding from the separate borrowed precompile-output lifetime.
+            // rebinding from the separate native-output lifetime.
             .output_data = &.{},
             .gas_left = result.gas_left,
             .output_owned = false,
@@ -76,20 +68,14 @@ const ReentrantRuntime = struct {
 };
 
 const ReentrantOutputRuntime = struct {
-    saw_borrowed_output: bool = false,
-
-    fn service(self: *ReentrantOutputRuntime) execution.PrecompileRuntime {
+    fn service(self: *ReentrantOutputRuntime) execution.ReentrantNativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.PrecompileCall) !evmz.precompile.Result {
+    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
         const self: *ReentrantOutputRuntime = @ptrCast(@alignCast(ptr));
-        self.saw_borrowed_output = self.saw_borrowed_output or call.output_buffer != null;
-
-        const output = if (call.output_buffer) |buffer| blk: {
-            if (buffer.len < 1) return error.OutputBufferTooSmall;
-            break :blk buffer[0..1];
-        } else try call.allocator.alloc(u8, 1);
+        _ = self;
+        const output = try call.allocator.alloc(u8, 1);
         const outer = call.message.input_data.len == 0;
         output[0] = if (outer) 0xaa else 0xbb;
 
@@ -112,122 +98,122 @@ const ReentrantOutputRuntime = struct {
             .status = .success,
             .output_data = output,
             .gas_left = call.message.gas,
-            .output_owned = call.output_buffer == null,
         };
     }
 };
 
-const StatefulPrecompile = struct {
+const StatefulNativeContract = struct {
     const target = evmz.addr(0x1234);
 
-    pub const Entry = enum { family };
-
-    pub fn resolve(address: evmz.Address) ?Entry {
-        return if (std.mem.eql(u8, &address, &target)) .family else null;
-    }
-
     pub fn active(address: evmz.Address) bool {
-        return resolve(address) != null;
-    }
-
-    pub fn execute(
-        _: Entry,
-        call: execution.PrecompileCall,
-    ) evmz.precompile.Error!execution.PrecompileOutcome {
-        return call.executeRuntime();
+        return std.mem.eql(u8, &address, &target);
     }
 };
 
 const StatefulVm = evmz.Vm(evmz.eth.cancun.extend(.{
-    .precompile = StatefulPrecompile,
+    .reentrant_native_contract = StatefulNativeContract,
 }));
 
-test "family precompile runtime can use host state and keeps EVM rollback semantics" {
+test "active reentrant native contract requires an embedding runtime" {
+    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    var executor = StatefulVm.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    try std.testing.expectError(
+        error.MissingReentrantNativeContractRuntime,
+        executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
+    );
+}
+
+test "reentrant native contract can use host state and keeps EVM rollback semantics" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
     const success = (try executor.executeStandalone(
-        request(sender, StatefulPrecompile.target, &.{}),
+        request(sender, StatefulNativeContract.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, success.status());
     try std.testing.expectEqualSlices(u8, &.{0x7e}, success.output_data);
-    try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulPrecompile.target, 7));
+    try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
+    try std.testing.expectEqual(@as(usize, 0), executor.frame_store.maxRowCount());
 
     runtime.tx_kind = 0x99;
     runtime.fail = true;
     const failure = (try executor.executeStandalone(
-        request(sender, StatefulPrecompile.target, &.{}),
+        request(sender, StatefulNativeContract.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.invalid, failure.status());
-    try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulPrecompile.target, 7));
+    try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
 
     runtime.fail = false;
     runtime.service_error = error.NotImplemented;
     try std.testing.expectError(
         error.NotImplemented,
-        executor.executeStandalone(request(sender, StatefulPrecompile.target, &.{}), .{}),
+        executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
     );
 
     runtime.service_error = null;
     runtime.invalid_borrow = true;
     try std.testing.expectError(
-        error.InvalidPrecompileOutput,
-        executor.executeStandalone(request(sender, StatefulPrecompile.target, &.{}), .{}),
+        error.InvalidNativeContractOutput,
+        executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
     );
 }
 
-test "Executor reset preserves and replaces the precompile runtime" {
+test "executor construction selects the supplied reentrant native contract runtime" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = first_runtime.service(),
+    var first_executor = StatefulVm.Executor.init(std.testing.allocator, .{
+        .reentrant_native_contract_runtime = first_runtime.service(),
     });
-    defer executor.deinit();
+    defer first_executor.deinit();
 
-    const first = (try executor.executeStandalone(
-        request(sender, StatefulPrecompile.target, &.{}),
+    const first = (try first_executor.executeStandalone(
+        request(sender, StatefulNativeContract.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
-    try executor.reset(.{
-        .precompile_runtime = second_runtime.service(),
+    var second_executor = StatefulVm.Executor.init(std.testing.allocator, .{
+        .reentrant_native_contract_runtime = second_runtime.service(),
     });
-    const second = (try executor.executeStandalone(
-        request(sender, StatefulPrecompile.target, &.{}),
+    defer second_executor.deinit();
+
+    const second = (try second_executor.executeStandalone(
+        request(sender, StatefulNativeContract.target, &.{}),
         .{},
     )).expectCall();
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
 }
 
-test "runtime precompile output survives synchronous host reentry" {
+test "reentrant native contract output survives synchronous host reentry" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
     const result = (try executor.executeStandalone(
-        request(sender, StatefulPrecompile.target, &.{}),
+        request(sender, StatefulNativeContract.target, &.{}),
         .{},
     )).expectCall();
 
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
-    try std.testing.expect(!runtime.saw_borrowed_output);
 }
 
-test "reentrant precompile call preserves parent stack across arena growth" {
+test "reentrant native contract preserves parent stack across arena growth" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const parent = evmz.addr(0xbbbb);
@@ -261,7 +247,7 @@ test "reentrant precompile call preserves parent stack across arena growth" {
 
     var runtime = ReentrantRuntime{ .child = child };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .precompile_runtime = runtime.service(),
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 

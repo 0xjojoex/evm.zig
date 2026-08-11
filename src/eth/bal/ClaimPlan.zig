@@ -146,7 +146,16 @@ pub const ClaimPlan = struct {
         }
         std.debug.assert(storage_index == storage.len);
 
-        std.mem.sort(AccountId, account_trie_order, accounts, accountTrieLessThan);
+        const S = struct {
+            fn accountTrieLessThan(claims: []const AccountClaim, lhs: AccountId, rhs: AccountId) bool {
+                return std.mem.lessThan(
+                    u8,
+                    &claims[@intFromEnum(lhs)].trie_key,
+                    &claims[@intFromEnum(rhs)].trie_key,
+                );
+            }
+        };
+        std.mem.sort(AccountId, account_trie_order, accounts, S.accountTrieLessThan);
         try rejectAccountKeyCollisions(accounts, account_trie_order);
         for (accounts) |account| {
             const range = storage_trie_order[account.storage.start..account.storage.end()];
@@ -199,20 +208,15 @@ pub const ClaimPlan = struct {
     /// Resolve one full raw slot inside its account's canonical BAL range.
     pub fn storageId(self: ClaimPlan, account: AccountId, slot: u256) ?StorageId {
         const range = self.accounts[@intFromEnum(account)].storage;
-        var low: usize = range.start;
-        var high: usize = range.end();
-        while (low < high) {
-            const mid = low + (high - low) / 2;
-            const current = self.storage[mid].slot;
-            if (current < slot) {
-                low = mid + 1;
-            } else if (current > slot) {
-                high = mid;
-            } else {
-                return @enumFromInt(@as(u32, @intCast(mid)));
+        const window = self.storage[range.start..range.end()];
+        const S = struct {
+            fn compareStorageSlot(target: u256, item: StorageClaim) std.math.Order {
+                return std.math.order(target, item.slot);
             }
-        }
-        return null;
+        };
+        const offset = std.sort.binarySearch(StorageClaim, window, slot, S.compareStorageSlot) orelse
+            return null;
+        return @enumFromInt(@as(u32, @intCast(range.start + offset)));
     }
 
     pub fn allocationBytes(self: ClaimPlan) usize {

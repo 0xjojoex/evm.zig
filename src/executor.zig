@@ -9,8 +9,9 @@
 //!
 //! 1. `Vm.transact` for complete family transaction semantics. Completion
 //!    returns one `Executed` owner that must be retained or discarded.
-//! 2. `executeStandalone*` for a fully managed raw CALL/CREATE message. These
-//!    methods do not perform family validation, charging, or settlement.
+//! 2. `executeStandalone`, `observe()`, or `capture()` for a fully managed raw
+//!    CALL/CREATE message. These do not perform family validation, charging,
+//!    or settlement.
 //! 3. Manual scope methods for STF work and diagnostic harnesses that must place
 //!    checkpoints themselves. A successful manual transition must be committed
 //!    or explicitly retained; failure cleanup must discard it.
@@ -35,7 +36,6 @@ const execution_values = @import("./execution.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 pub const EvmResult = Host.Result;
-const EvmResultType = EvmResult;
 
 /// Root execution reports whether the VM reached payload execution so the
 /// transaction program can place its preparation checkpoint without
@@ -50,13 +50,13 @@ pub const TransactionExecutionOutcome = struct {
     result: execution_values.ExecutionResult,
 };
 
-const TransactionExecutionOutcomeType = TransactionExecutionOutcome;
 const call_runtime = @import("./executor/call_runtime.zig");
 pub const capture_context = @import("./executor/capture_context.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
 const FrameStore = @import("./executor/frame_store.zig");
 const host_callbacks = @import("./executor/host_callbacks.zig");
+const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 pub const state_io = @import("./executor/state_io.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
 pub const transfer_logs = @import("./executor/transfer_logs.zig");
@@ -66,10 +66,6 @@ const transaction_runtime = @import("./transaction/runtime.zig");
 const uint256 = @import("./uint256.zig");
 
 const CallScratchSlots = std.ArrayList(*call_scratch_storage.Slot);
-
-const IgnorePending = struct {
-    pub fn observe(_: IgnorePending, _: anytype) !void {}
-};
 
 const ScopeRoot = struct {
     sender: Address,
@@ -92,19 +88,29 @@ const ScopeRoot = struct {
 
 pub const code_deposit_gas: i64 = 200;
 
-/// Construction options for the execution substrate.
-///
-/// State admission belongs to the selected VM/domain. `block_hash_source` is a
-/// separate execution service because native BLOCKHASH reads chain history,
-/// not account/trie state. Capture is selected by an explicit transaction
-/// entrypoint, not construction.
-const ExecutorServices = struct {
-    /// Caller-owned derived-artifact service. Its allocation, I/O,
-    /// synchronization, and capacity policy are outside executor bounds.
-    prepared_code_backend: ?prepared_code.Backend = null,
-    block_hash_source: ?BlockHashSource = null,
-    precompile_runtime: ?execution_values.PrecompileRuntime = null,
-};
+/// Construct the public initializer for one state domain. Only domains with a
+/// semantic empty baseline may omit `state`; authenticated dense domains keep
+/// the field structurally required.
+fn ExecutorInitType(comptime StateDomain: type) type {
+    const StateInit = StateDomain.ExecutorStateInit;
+    if (@hasDecl(StateDomain, "default_executor_state_init")) {
+        const default_state: StateInit = StateDomain.default_executor_state_init;
+        return struct {
+            state: StateInit = default_state,
+            /// Caller-owned derived-artifact service. Its allocation, I/O,
+            /// synchronization, and capacity policy are outside executor bounds.
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?BlockHashSource = null,
+            reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
+        };
+    }
+    return struct {
+        state: StateInit,
+        prepared_code_backend: ?prepared_code.Backend = null,
+        block_hash_source: ?BlockHashSource = null,
+        reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
+    };
+}
 
 /// A top-level call whose bytecode has already been prepared by the caller.
 ///
@@ -126,13 +132,6 @@ pub const Create = execution_values.Create;
 pub const Message = execution_values.Message;
 pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
 
-const PreparedCallTransactionType = PreparedCallTransaction;
-const CallType = Call;
-const CreateType = Create;
-const MessageType = Message;
-const code_deposit_gas_value = code_deposit_gas;
-const default_max_live_frames_value = default_max_live_frames;
-const ErrorType = errors.Error;
 pub const CaptureContext = capture_context.Context;
 
 /// Non-consensus capabilities selected when compiling an exact executor.
@@ -141,14 +140,14 @@ pub const CompileOptions = struct {
     step_capture: bool = false,
 };
 
-/// Compile one exact executor over a concrete state representation.
+/// Compile one exact executor over a state domain.
 ///
-/// `initOwned` and `resetOwned` take ownership of `StateModel`. Admission,
+/// The domain defines how its executor state is constructed. Admission,
 /// authenticated facts, and commitment construction remain outside this
 /// executor boundary.
 pub fn ExecutorType(
     comptime spec: ExactSpec,
-    comptime StateModel: type,
+    comptime StateDomain: type,
     comptime options_value: CompileOptions,
 ) type {
     return struct {
@@ -158,39 +157,12 @@ pub fn ExecutorType(
 
         pub const specification = spec;
         pub const compile_options = options_value;
-        pub const State = StateModel;
-        pub const ScopeCheckpoint = StateModel.Checkpoint;
-        pub const BranchCheckpoint = StateModel.BranchCheckpoint;
-        pub const Error = ErrorType;
-        pub const Services = ExecutorServices;
-        pub const Init = if (StateModel.standalone_reader_initialization)
-            struct {
-                state_reader: ?state_io.StateReader = null,
-                prepared_code_backend: ?prepared_code.Backend = null,
-                block_hash_source: ?BlockHashSource = null,
-                precompile_runtime: ?execution_values.PrecompileRuntime = null,
-            }
-        else
-            Services;
-        pub const init = if (StateModel.standalone_reader_initialization)
-            initTracked
-        else
-            initOwned;
-        pub const reset = if (StateModel.standalone_reader_initialization)
-            resetTracked
-        else
-            resetOwned;
-        pub const PreparedCallTransaction = PreparedCallTransactionType;
-        pub const Call = CallType;
-        pub const Create = CreateType;
-        pub const Message = MessageType;
-        pub const EvmResult = EvmResultType;
-        pub const TransactionExecutionOutcome = TransactionExecutionOutcomeType;
-        pub const code_deposit_gas = code_deposit_gas_value;
-        pub const default_max_live_frames = default_max_live_frames_value;
+        pub const State = StateDomain.State;
+        pub const BranchCheckpoint = State.BranchCheckpoint;
+        pub const Init = ExecutorInitType(StateDomain);
 
         allocator: std.mem.Allocator,
-        state: StateModel,
+        state: State,
         frame_store: FrameStore,
         call_scratch_slots: CallScratchSlots,
         prepared_code_scratch: call_scratch_storage.Slot,
@@ -204,42 +176,45 @@ pub fn ExecutorType(
         checkpoint_top: usize = 0,
         next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
-        precompile_runtime: ?execution_values.PrecompileRuntime = null,
+        reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        const ExecutionMode = union(enum) {
-            normal,
-            observed,
-            captured: *CaptureContext,
-
-            fn observesState(self: ExecutionMode) bool {
-                return self != .normal;
-            }
-
-            fn captureContext(self: ExecutionMode) ?*CaptureContext {
-                return switch (self) {
-                    .normal, .observed => null,
-                    .captured => |context| context,
-                };
-            }
-        };
-
         const ManualStateAttempt = struct {
-            id: StateModel.AttemptId,
-            mode: ExecutionMode,
+            id: State.AttemptId,
+            mode: InstrumentationMode,
         };
 
         const TransactionRuntimeState = struct {
-            state_attempt_id: StateModel.AttemptId,
+            state_attempt_id: State.AttemptId,
             generation: u64,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             phase: enum { active, pending } = .active,
             nonce_advanced: bool = false,
             payload_started: bool = false,
+        };
+
+        /// Callback-scoped semantic view of one sealed transition.
+        /// State attempt identity and resolution remain private to Executor.
+        pub const Observation = struct {
+            log_view: State.LogView,
+            changes_view: State.ChangesView,
+            observations_view: State.ObservationsView,
+
+            pub fn logs(self: Observation) State.LogView {
+                return self.log_view;
+            }
+
+            pub fn changes(self: Observation) State.ChangesView {
+                return self.changes_view;
+            }
+
+            pub fn observations(self: Observation) State.ObservationsView {
+                return self.observations_view;
+            }
         };
 
         /// The exclusive externally copyable owner of one completed but
@@ -255,21 +230,15 @@ pub fn ExecutorType(
 
                 pub const View = struct {
                     output: *const Output,
-                    logs: StateModel.LogView,
+                    logs: State.LogView,
                 };
 
                 /// Borrow family output and logs while this result is unresolved.
                 pub fn view(self: *const Execution) View {
                     return .{
                         .output = &self.output_value,
-                        .logs = self.pendingView().logs(),
+                        .logs = self.logs(),
                     };
-                }
-
-                /// Borrow the family output while this result is unresolved.
-                pub fn output(self: *const Execution) *const Output {
-                    _ = self.state();
-                    return &self.output_value;
                 }
 
                 /// Copy the family output while leaving state unresolved.
@@ -279,30 +248,27 @@ pub fn ExecutorType(
                 }
 
                 /// Borrow transaction logs while this result is unresolved.
-                pub fn logs(self: Execution) StateModel.LogView {
-                    return self.pendingView().logs();
+                pub fn logs(self: Execution) State.LogView {
+                    _ = self.state();
+                    return self.executor.state.pendingView().logs();
                 }
 
-                /// Return the Executor allocator after validating this generation.
-                pub fn allocator(self: Execution) std.mem.Allocator {
+                /// Borrow the callback-scoped semantic observation before resolution.
+                pub fn observation(self: Execution) Observation {
                     _ = self.state();
-                    return self.executor.allocator;
-                }
-
-                /// Borrow the complete sealed state view before resolution.
-                pub fn pendingView(self: Execution) StateModel.PendingView {
-                    _ = self.state();
-                    return self.executor.state.pendingView();
+                    return self.executor.currentObservation();
                 }
 
                 /// Borrow net state changes before resolution.
-                pub fn changes(self: Execution) StateModel.ChangesView {
-                    return self.pendingView().changes();
+                pub fn changes(self: Execution) State.ChangesView {
+                    _ = self.state();
+                    return self.executor.state.pendingView().changes();
                 }
 
                 /// Borrow retained state observations before resolution.
-                pub fn observations(self: Execution) StateModel.ObservationsView {
-                    return self.pendingView().observations();
+                pub fn observations(self: Execution) State.ObservationsView {
+                    _ = self.state();
+                    return self.executor.state.pendingView().observations();
                 }
 
                 /// Accept this transaction's sealed state into the Executor branch.
@@ -346,6 +312,145 @@ pub fn ExecutorType(
             };
         }
 
+        pub fn ObservedExecutor(comptime Observer: type) type {
+            return struct {
+                executor: *Self,
+                observer: Observer,
+
+                pub fn beginTransaction(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                    sender: Address,
+                    recipient: Address,
+                ) !void {
+                    try self.executor.beginTransactionMode(context, sender, recipient, .observed);
+                }
+
+                pub fn beginMessageScope(
+                    self: @This(),
+                    request: execution_values.EvmExecutionRequest,
+                    scope_init: execution_values.ExecutionScopeInit,
+                ) !void {
+                    try self.executor.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
+                }
+
+                pub fn beginStateTransition(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                ) !void {
+                    try self.executor.openTransactionScope(context, .observed);
+                }
+
+                pub fn commitTransaction(self: @This()) !void {
+                    try self.executor.commitTransactionWithObserver(self.observer);
+                }
+
+                pub fn retainStateTransition(self: @This()) !void {
+                    try self.executor.retainStateTransitionWithObserver(self.observer);
+                }
+
+                pub fn executeStandalone(
+                    self: @This(),
+                    request: execution_values.EvmExecutionRequest,
+                    scope_init: execution_values.ExecutionScopeInit,
+                ) !EvmResult {
+                    return self.executor.runStandaloneContext(
+                        request.context,
+                        request.message,
+                        request.gas,
+                        scope_init,
+                        .observed,
+                        self.observer,
+                    );
+                }
+
+                pub fn executeSystemCall(
+                    self: @This(),
+                    context: execution_values.ExecutionContext,
+                    sender: Address,
+                    recipient: Address,
+                    input: []const u8,
+                    gas: execution_values.ExecutionGas,
+                ) !execution_values.ExecutionResult {
+                    return self.executor.executeSystemCallMode(
+                        context,
+                        sender,
+                        recipient,
+                        input,
+                        gas,
+                        .observed,
+                        self.observer,
+                    );
+                }
+            };
+        }
+
+        /// Bind an observer to observed execution operations.
+        pub fn observe(self: *Self, observer: anytype) ObservedExecutor(@TypeOf(observer)) {
+            return .{ .executor = self, .observer = observer };
+        }
+
+        pub const CapturedExecutor = struct {
+            executor: *Self,
+            context: *CaptureContext,
+
+            pub fn beginTransaction(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+            ) !void {
+                try self.executor.beginTransactionMode(
+                    execution_context,
+                    sender,
+                    recipient,
+                    .{ .captured = self.context },
+                );
+            }
+
+            pub fn execute(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                message: Message,
+                gas: execution_values.ExecutionGas,
+            ) !EvmResult {
+                return self.executor.runStandaloneContext(
+                    execution_context,
+                    message,
+                    gas,
+                    .{},
+                    .{ .captured = self.context },
+                    {},
+                );
+            }
+
+            pub fn executeSystemCall(
+                self: CapturedExecutor,
+                execution_context: execution_values.ExecutionContext,
+                sender: Address,
+                recipient: Address,
+                input: []const u8,
+                gas: execution_values.ExecutionGas,
+                observer: anytype,
+            ) !execution_values.ExecutionResult {
+                return self.executor.executeSystemCallMode(
+                    execution_context,
+                    sender,
+                    recipient,
+                    input,
+                    gas,
+                    .{ .captured = self.context },
+                    observer,
+                );
+            }
+        };
+
+        /// Borrow a captured execution view. The facade owns no transaction or
+        /// capture lifetime; both remain with the Executor and caller context.
+        pub fn capture(self: *Self, context: *CaptureContext) CapturedExecutor {
+            return .{ .executor = self, .context = context };
+        }
+
         pub fn transactionAccountSummary(self: *Self, account_address: Address) !?AccountState {
             transaction_runtime.requireActive(self);
             return self.getAccountOrLoad(account_address);
@@ -353,7 +458,7 @@ pub fn ExecutorType(
 
         pub fn advanceTransactionNonce(
             self: *Self,
-            message: MessageType,
+            message: Message,
         ) !void {
             const runtime_state = if (self.transaction_runtime_state) |*value| value else unreachable;
             std.debug.assert(runtime_state.phase == .active);
@@ -374,18 +479,18 @@ pub fn ExecutorType(
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Self,
-            journal_checkpoint: StateModel.Checkpoint,
+            journal_checkpoint: State.Checkpoint,
             id: usize,
             parent_id: usize,
             open: bool = true,
 
-            pub fn commit(self: *ExecutionCheckpoint) !void {
+            pub fn commit(self: *ExecutionCheckpoint) void {
                 self.validateClose();
                 self.executor.state.commitCheckpoint(self.journal_checkpoint);
                 self.finishClose();
             }
 
-            pub fn restore(self: *ExecutionCheckpoint) !void {
+            pub fn restore(self: *ExecutionCheckpoint) void {
                 self.validateClose();
                 self.executor.state.revertToCheckpoint(self.journal_checkpoint);
                 self.finishClose();
@@ -411,34 +516,18 @@ pub fn ExecutorType(
             }
         };
 
-        /// Take exclusive ownership of an already-admitted state value.
-        pub fn initOwned(allocator: std.mem.Allocator, state: State, options: Services) Self {
+        /// Construct and take exclusive ownership of domain state.
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
             return .{
                 .allocator = allocator,
-                .state = state,
-                .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
+                .state = StateDomain.initExecutorState(allocator, options.state),
+                .frame_store = .{ .stable_metadata_capacity = default_max_live_frames },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
                 .block_hash_source = options.block_hash_source,
-                .precompile_runtime = options.precompile_runtime,
+                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
                 .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
-            };
-        }
-
-        fn initTracked(allocator: std.mem.Allocator, options: Init) Self {
-            return initOwned(
-                allocator,
-                State.initForSpec(allocator, spec, options.state_reader),
-                servicesFromTrackedOptions(options),
-            );
-        }
-
-        fn servicesFromTrackedOptions(options: Init) Services {
-            return .{
-                .prepared_code_backend = options.prepared_code_backend,
-                .block_hash_source = options.block_hash_source,
-                .precompile_runtime = options.precompile_runtime,
             };
         }
 
@@ -450,51 +539,13 @@ pub fn ExecutorType(
             return null;
         }
 
-        fn assertExecutionMode(mode: ExecutionMode) void {
+        fn assertExecutionMode(mode: InstrumentationMode) void {
             const context = mode.captureContext() orelse return;
             std.debug.assert(context.isActive());
         }
 
         pub fn traceAccountAccess(self: *Self, account_address: Address) !void {
             try self.state.observeAccountAccess(account_address);
-        }
-
-        /// Replace the owned state after verifying the current executor is idle.
-        pub fn resetOwned(self: *Self, state: State, options: Services) void {
-            std.debug.assert(!self.hasActiveBlockExecution());
-            std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
-            std.debug.assert(!self.state.scopeActive());
-            std.debug.assert(self.prepared_code_execution_depth == 0);
-
-            self.state.deinit();
-            self.state = state;
-            self.execution_context = null;
-            self.scope_root = null;
-            self.manual_state_attempt = null;
-            self.block_hash_source = options.block_hash_source;
-            self.precompile_runtime = options.precompile_runtime;
-            self.prepared_code_backend = options.prepared_code_backend;
-            self.clearLastOutput();
-        }
-
-        fn resetTracked(self: *Self, options: Init) !void {
-            std.debug.assert(!self.hasActiveBlockExecution());
-            std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
-            std.debug.assert(!self.state.scopeActive());
-            std.debug.assert(self.prepared_code_execution_depth == 0);
-
-            self.state.reset(options.state_reader);
-            self.execution_context = null;
-            self.scope_root = null;
-            self.manual_state_attempt = null;
-            self.block_hash_source = options.block_hash_source;
-            self.precompile_runtime = options.precompile_runtime;
-            self.prepared_code_backend = options.prepared_code_backend;
-            self.clearLastOutput();
         }
 
         pub fn beginPreparedCodeExecution(self: *Self) void {
@@ -532,7 +583,7 @@ pub fn ExecutorType(
             self.endPreparedCodeExecution();
         }
 
-        pub fn reserveAcceptedAccessHint(self: *Self, hint: StateModel.AccessHint) !void {
+        pub fn reserveAcceptedAccessHint(self: *Self, hint: State.AccessHint) !void {
             try self.state.reserveAcceptedAccessHint(hint);
         }
 
@@ -570,7 +621,7 @@ pub fn ExecutorType(
         fn openTransactionScope(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             std.debug.assert(self.execution_context == null);
             std.debug.assert(self.checkpoint_top == 0);
@@ -611,50 +662,19 @@ pub fn ExecutorType(
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
         pub fn beginTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address, recipient: Address) !void {
-            try self.openTransactionScope(context, .normal);
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, recipient);
+            try self.beginTransactionMode(context, sender, recipient, .normal);
         }
 
-        /// Open an observed manual call transaction scope.
-        ///
-        /// This has the same ownership contract as `beginTransaction`; the
-        /// observed mode is carried into any root message execution.
-        pub fn beginObservedTransaction(
+        fn beginTransactionMode(
             self: *Self,
             context: execution_values.ExecutionContext,
             sender: Address,
             recipient: Address,
+            mode: InstrumentationMode,
         ) !void {
-            try self.openTransactionScope(context, .observed);
+            try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
             try warmTransactionAccesses(self, sender, recipient);
-        }
-
-        /// Open a captured manual call transaction scope.
-        ///
-        /// This has the same ownership contract as `beginTransaction`; captured
-        /// call events are written into `capture`.
-        pub fn beginCapturedTransaction(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            capture: *CaptureContext,
-        ) !void {
-            try self.openTransactionScope(context, .{ .captured = capture });
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, recipient);
-        }
-
-        /// Open a manual create transaction scope.
-        ///
-        /// This is the create counterpart to `beginTransaction`; there is no recipient
-        /// to warm before the create address is derived during execution.
-        pub fn beginCreateTransaction(self: *Self, context: execution_values.ExecutionContext, sender: Address) !void {
-            try self.openTransactionScope(context, .normal);
-            errdefer self.discardStateTransition();
-            try warmTransactionAccesses(self, sender, null);
         }
 
         /// Open a direct message-execution scope from its authoritative context.
@@ -672,21 +692,12 @@ pub fn ExecutorType(
             try self.beginMessageScopeContext(request.context, request.message, scope_init, .normal);
         }
 
-        /// Open the observed counterpart to `beginMessageScope`.
-        pub fn beginObservedMessageScope(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-        ) !void {
-            try self.beginMessageScopeContext(request.context, request.message, scope_init, .observed);
-        }
-
         fn beginMessageScopeContext(
             self: *Self,
             context: execution_values.ExecutionContext,
-            message: Self.Message,
+            message: Message,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
@@ -697,7 +708,7 @@ pub fn ExecutorType(
         fn beginSystemCall(
             self: *Self,
             context: execution_values.ExecutionContext,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
         ) !void {
             try self.openTransactionScope(context, mode);
         }
@@ -706,11 +717,6 @@ pub fn ExecutorType(
         /// root EVM message. Retain or discard it explicitly.
         pub fn beginStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
             try self.openTransactionScope(context, .normal);
-        }
-
-        /// Open an observed state transition without a root EVM message.
-        pub fn beginObservedStateTransition(self: *Self, context: execution_values.ExecutionContext) !void {
-            try self.openTransactionScope(context, .observed);
         }
 
         /// Mark an account warm in the current transaction scope.
@@ -762,12 +768,8 @@ pub fn ExecutorType(
             try self.state.setCode(address, code);
         }
 
-        pub fn logView(self: *const Self) StateModel.LogView {
+        pub fn logView(self: *const Self) State.LogView {
             return self.state.logView();
-        }
-
-        pub fn logs(self: *const Self) StateModel.LogView {
-            return self.logView();
         }
 
         pub fn clearLogs(self: *Self) void {
@@ -780,7 +782,7 @@ pub fn ExecutorType(
         }
 
         /// Open one journal-backed checkpoint inside the active execution scope.
-        pub fn checkpoint(self: *Self) !ExecutionCheckpoint {
+        pub fn checkpoint(self: *Self) ExecutionCheckpoint {
             self.requireTransactionScope();
             std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
             const id = self.next_checkpoint_id + 1;
@@ -813,18 +815,25 @@ pub fn ExecutorType(
             return self.active_block_execution_generation != null;
         }
 
-        pub fn acceptedView(self: *const Self) StateModel.AcceptedView {
+        pub fn acceptedView(self: *const Self) State.AcceptedView {
             return self.state.acceptedView();
+        }
+
+        fn currentObservation(self: *const Self) Observation {
+            const pending = self.state.pendingView();
+            return .{
+                .log_view = pending.logs(),
+                .changes_view = pending.changes(),
+                .observations_view = pending.observations(),
+            };
         }
 
         /// Run protocol finalization, retain the transition, and close its scope.
         pub fn commitTransaction(self: *Self) !void {
-            try self.commitTransactionObserved(IgnorePending{});
+            try self.commitTransactionWithObserver({});
         }
 
-        /// Finalize and expose the sealed pending view before retaining it.
-        /// Observer failure discards the complete transition.
-        pub fn commitTransactionObserved(self: *Self, observer: anytype) !void {
+        fn commitTransactionWithObserver(self: *Self, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.transaction_runtime_state == null);
             try self.finalizeTransactionState();
@@ -857,14 +866,10 @@ pub fn ExecutorType(
         /// deliberately owns finalization. Failure cleanup must use
         /// `discardStateTransition`.
         pub fn retainStateTransition(self: *Self) void {
-            self.retainStateTransitionObserved(IgnorePending{}) catch unreachable;
+            self.retainStateTransitionWithObserver({}) catch unreachable;
         }
 
-        /// Expose and retain the current manual transition without finalizing it.
-        ///
-        /// Borrowed pending views are valid only during `observer.observe`.
-        /// Observer failure discards the transition.
-        pub fn retainStateTransitionObserved(self: *Self, observer: anytype) !void {
+        fn retainStateTransitionWithObserver(self: *Self, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
             std.debug.assert(self.transaction_runtime_state == null);
             if (self.execution_context == null) return;
@@ -887,9 +892,7 @@ pub fn ExecutorType(
             const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.discard(state_attempt_id);
-            self.manual_state_attempt = null;
-            self.execution_context = null;
-            self.scope_root = null;
+            self.closeManualTransactionLifetime();
         }
 
         fn resolveManualTransaction(self: *Self, observer: anytype) !void {
@@ -897,14 +900,17 @@ pub fn ExecutorType(
             const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.seal(state_attempt_id);
-            observer.observe(self.state.pendingView()) catch |err| {
-                self.state.discard(state_attempt_id);
-                self.manual_state_attempt = null;
-                self.execution_context = null;
-                self.scope_root = null;
-                return err;
-            };
+            if (comptime @TypeOf(observer) != void)
+                observer.observe(self.currentObservation()) catch |err| {
+                    self.state.discard(state_attempt_id);
+                    self.closeManualTransactionLifetime();
+                    return err;
+                };
             self.state.retain(state_attempt_id);
+            self.closeManualTransactionLifetime();
+        }
+
+        fn closeManualTransactionLifetime(self: *Self) void {
             self.manual_state_attempt = null;
             self.execution_context = null;
             self.scope_root = null;
@@ -934,7 +940,7 @@ pub fn ExecutorType(
         }
 
         /// Borrow the cumulative accepted changes relative to the state reader.
-        pub fn acceptedChanges(self: *const Self) StateModel.ChangesView {
+        pub fn acceptedChanges(self: *const Self) State.ChangesView {
             std.debug.assert(self.transaction_runtime_state == null);
             return self.acceptedView().changes();
         }
@@ -977,7 +983,7 @@ pub fn ExecutorType(
         }
 
         /// Execute a raw call inside an already-open tx scope.
-        pub fn executeCall(self: *Self, message: Self.Call, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeCall(self: *Self, message: Call, gas: execution_values.ExecutionGas) !EvmResult {
             return runtime.executeCall(self, message, gas);
         }
 
@@ -994,24 +1000,12 @@ pub fn ExecutorType(
         }
 
         /// Execute a raw call with caller-provided prepared bytecode.
-        pub fn executePreparedCallTransaction(self: *Self, options: Self.PreparedCallTransaction) !execution_values.ExecutionResult {
+        pub fn executePreparedCallTransaction(self: *Self, options: PreparedCallTransaction) !execution_values.ExecutionResult {
             return runtime.executePreparedCallTransaction(self, options);
         }
 
-        /// Execute a raw create inside an already-open create tx scope.
-        pub fn executeCreateTransaction(
-            self: *Self,
-            sender: Address,
-            recipient: Address,
-            init_code: []const u8,
-            gas: execution_values.ExecutionGas,
-            value: u256,
-        ) !Self.EvmResult {
-            return runtime.executeCreateTransaction(self, sender, recipient, init_code, gas, value);
-        }
-
         /// Execute a raw create/create2 message inside an already-open tx scope.
-        pub fn executeCreate(self: *Self, message: Self.Create, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeCreate(self: *Self, message: Create, gas: execution_values.ExecutionGas) !EvmResult {
             return runtime.executeCreate(self, message, gas);
         }
 
@@ -1019,7 +1013,7 @@ pub fn ExecutorType(
         ///
         /// This does not open or close a transaction scope. Use `executeStandalone` for the
         /// fully-managed raw-message lifecycle.
-        pub fn executeMessage(self: *Self, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeMessage(self: *Self, message: Message, gas: execution_values.ExecutionGas) !EvmResult {
             self.validateScopeRoot(.fromMessage(message));
             const call_capture = try runtime.beginRootCapture(self, message, gas);
             const result = try switch (message) {
@@ -1028,59 +1022,6 @@ pub fn ExecutorType(
             };
             if (call_capture) |token| try runtime.finishRootHostCapture(self, token, result);
             return result;
-        }
-
-        fn runStandalone(self: *Self, context: execution_values.ExecutionContext, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .normal,
-                IgnorePending{},
-            );
-        }
-
-        /// Run one direct message and consume its sealed observations before
-        /// the transition is retained.
-        fn runStandaloneObserved(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            message: Self.Message,
-            gas: execution_values.ExecutionGas,
-            observer: anytype,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .observed,
-                observer,
-            );
-        }
-
-        /// Execute one raw message with a managed scope and passive capture.
-        ///
-        /// `capture` must already be active and outlive this call. Captured
-        /// artifacts do not own or resolve transaction state. This uses the
-        /// default initial warm set; family validation, charging, settlement,
-        /// and receipts remain outside this API.
-        pub fn executeCaptured(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            message: Self.Message,
-            gas: execution_values.ExecutionGas,
-            capture: *CaptureContext,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                context,
-                message,
-                gas,
-                .{},
-                .{ .captured = capture },
-                IgnorePending{},
-            );
         }
 
         /// Execute one normalized raw message with a fully managed lifecycle.
@@ -1094,60 +1035,40 @@ pub fn ExecutorType(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
-        ) !Self.EvmResult {
+        ) !EvmResult {
             return self.runStandaloneContext(
                 request.context,
                 request.message,
                 request.gas,
                 scope_init,
                 .normal,
-                IgnorePending{},
-            );
-        }
-
-        /// Execute a managed raw message and expose its sealed state before retain.
-        ///
-        /// `observer` may only borrow the pending view during `observe`; an
-        /// observer error discards the complete transition.
-        pub fn executeStandaloneObserved(
-            self: *Self,
-            request: execution_values.EvmExecutionRequest,
-            scope_init: execution_values.ExecutionScopeInit,
-            observer: anytype,
-        ) !Self.EvmResult {
-            return self.runStandaloneContext(
-                request.context,
-                request.message,
-                request.gas,
-                scope_init,
-                .observed,
-                observer,
+                {},
             );
         }
 
         fn runStandaloneContext(
             self: *Self,
             context: execution_values.ExecutionContext,
-            message: Self.Message,
+            message: Message,
             gas: execution_values.ExecutionGas,
             scope_init: execution_values.ExecutionScopeInit,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             observer: anytype,
-        ) !Self.EvmResult {
+        ) !EvmResult {
             try self.beginMessageScopeContext(context, message, scope_init, mode);
             errdefer self.discardStateTransition();
 
-            var pre_execution = try self.checkpoint();
+            var pre_execution = self.checkpoint();
             defer pre_execution.deinit();
 
             const result = try self.executeMessage(message, gas);
             if (executionRolledBack(result.status())) {
-                try pre_execution.restore();
-                try self.retainStateTransitionObserved(observer);
+                pre_execution.restore();
+                try self.retainStateTransitionWithObserver(observer);
             } else {
                 try self.finalizeTransactionState();
-                try pre_execution.commit();
-                try self.retainStateTransitionObserved(observer);
+                pre_execution.commit();
+                try self.retainStateTransitionWithObserver(observer);
             }
             return result;
         }
@@ -1167,7 +1088,7 @@ pub fn ExecutorType(
         pub fn executeTransactionRequestPhased(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
-        ) !TransactionExecutionOutcomeType {
+        ) !TransactionExecutionOutcome {
             self.validateScopeContext(request.context);
             self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrustedPhased(request);
@@ -1176,7 +1097,7 @@ pub fn ExecutorType(
         fn executeTransactionRequestTrustedPhased(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
-        ) !TransactionExecutionOutcomeType {
+        ) !TransactionExecutionOutcome {
             switch (request.message) {
                 .call => |call| try self.traceAccountAccess(call.recipient),
                 .create => |create| try self.traceAccountAccess(create.recipient),
@@ -1220,50 +1141,7 @@ pub fn ExecutorType(
                 input,
                 gas,
                 .normal,
-                IgnorePending{},
-            );
-        }
-
-        /// Execute one system call and expose its checkpoint-resolved pending
-        /// state before the transition is retained.
-        pub fn executeSystemCallObserved(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            input: []const u8,
-            gas: execution_values.ExecutionGas,
-            observer: anytype,
-        ) !execution_values.ExecutionResult {
-            return self.executeSystemCallMode(
-                context,
-                sender,
-                recipient,
-                input,
-                gas,
-                .observed,
-                observer,
-            );
-        }
-
-        pub fn executeSystemCallCaptured(
-            self: *Self,
-            context: execution_values.ExecutionContext,
-            sender: Address,
-            recipient: Address,
-            input: []const u8,
-            gas: execution_values.ExecutionGas,
-            capture: *CaptureContext,
-            observer: anytype,
-        ) !execution_values.ExecutionResult {
-            return self.executeSystemCallMode(
-                context,
-                sender,
-                recipient,
-                input,
-                gas,
-                .{ .captured = capture },
-                observer,
+                {},
             );
         }
 
@@ -1274,7 +1152,7 @@ pub fn ExecutorType(
             recipient: Address,
             input: []const u8,
             gas: execution_values.ExecutionGas,
-            mode: ExecutionMode,
+            mode: InstrumentationMode,
             observer: anytype,
         ) !execution_values.ExecutionResult {
             self.beginPreparedCodeExecution();
@@ -1284,11 +1162,8 @@ pub fn ExecutorType(
             errdefer self.discardStateTransition();
 
             self.clearLastOutput();
-            const checkpoint_state = self.state.checkpoint();
-            var checkpoint_open = true;
-            errdefer {
-                if (checkpoint_open) self.state.revertToCheckpoint(checkpoint_state);
-            }
+            var execution_checkpoint = self.checkpoint();
+            defer execution_checkpoint.deinit();
 
             const resolved = try runtime.resolveCode(self, recipient);
             const resolved_view = try runtime.resolvedCodeView(self, resolved);
@@ -1306,41 +1181,21 @@ pub fn ExecutorType(
                 .code_address = recipient,
             };
 
-            const call_result = (try switch (mode) {
+            const host_result = try switch (mode) {
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
-            }).expectCall();
-            const result = execution_values.ExecutionResult{
-                .outcome = call_result.outcome,
-                .frame_halt = call_result.frame_halt,
-                .gas_left = call_result.gas_left,
-                .gas_refund = call_result.gas_refund,
-                .gas_reservoir = call_result.gas_reservoir,
-                .state_gas_spent = call_result.state_gas_spent,
-                .state_gas_from_gas_left = call_result.state_gas_from_gas_left,
-                .output_data = self.lastOutputData(),
             };
+            _ = host_result.expectCall();
 
-            if (executionRolledBack(result.outcome.status)) {
-                self.state.revertToCheckpoint(checkpoint_state);
-                checkpoint_open = false;
-                try self.retainStateTransitionObserved(observer);
+            if (executionRolledBack(host_result.status())) {
+                execution_checkpoint.restore();
+                try self.retainStateTransitionWithObserver(observer);
             } else {
-                self.state.commitCheckpoint(checkpoint_state);
-                checkpoint_open = false;
-                try self.commitTransactionObserved(observer);
+                execution_checkpoint.commit();
+                try self.commitTransactionWithObserver(observer);
             }
 
-            return .{
-                .outcome = result.outcome,
-                .frame_halt = result.frame_halt,
-                .gas_left = result.gas_left,
-                .gas_refund = result.gas_refund,
-                .gas_reservoir = result.gas_reservoir,
-                .state_gas_spent = result.state_gas_spent,
-                .state_gas_from_gas_left = result.state_gas_from_gas_left,
-                .output_data = self.lastOutputData(),
-            };
+            return host_result.executionResult(self.lastOutputData());
         }
 
         /// Transfer value between accounts, returning false on insufficient balance.

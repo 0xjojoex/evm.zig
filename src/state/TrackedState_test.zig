@@ -459,8 +459,7 @@ test "pending and accepted views expose native tracked state" {
     state.seal(attempt);
 
     const pending = state.pendingView();
-    try std.testing.expectEqual(attempt, pending.attemptId());
-    try std.testing.expectEqual(@as(u64, 0), pending.accepted().generation());
+    try std.testing.expectEqual(@as(u64, 0), state.generation);
     try std.testing.expectEqual(@as(usize, 1), pending.logs().len());
     const event_log = pending.logs().get(0);
     try std.testing.expectEqual(addr(1), event_log.address);
@@ -469,7 +468,7 @@ test "pending and accepted views expose native tracked state" {
 
     state.retain(attempt);
     const accepted = state.acceptedView();
-    try std.testing.expectEqual(@as(u64, 1), accepted.generation());
+    try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expect(accepted.hasChanges());
     try std.testing.expectEqual(@as(usize, 1), state.logView().len());
     try std.testing.expectEqual(addr(1), state.logView().get(0).address);
@@ -778,7 +777,7 @@ test "accepted branch checkpoint restores cumulative state and is reusable" {
     var first_restore = try checkpoint_state.clone();
     defer first_restore.deinit();
     state.restoreBranch(&first_restore);
-    try std.testing.expectEqual(@as(u64, 1), state.acceptedView().generation());
+    try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
     try std.testing.expectEqual(@as(u256, 22), try state.getStorage(addr(1), 2));
     try std.testing.expectEqualSlices(u8, &baseline_code, try state.getCode(addr(1)));
@@ -863,14 +862,14 @@ test "accepted branch checkpoint clone failure leaves current state unchanged" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     try std.testing.expectError(error.OutOfMemory, checkpoint_state.clone());
     try std.testing.expect(failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 2), state.acceptedView().generation());
+    try std.testing.expectEqual(@as(u64, 2), state.generation);
     try std.testing.expectEqual(@as(u256, 22), try state.getBalance(addr(1)));
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     var restore = try checkpoint_state.clone();
     defer restore.deinit();
     state.restoreBranch(&restore);
-    try std.testing.expectEqual(@as(u64, 1), state.acceptedView().generation());
+    try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
 }
 
@@ -898,6 +897,6 @@ test "accepted branch restore does not allocate after capture" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     state.restoreBranch(&checkpoint_state);
     try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 1), state.acceptedView().generation());
+    try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
 }

@@ -153,7 +153,6 @@ pub fn Trie(comptime KeccakContext: type) type {
             already_sorted: bool,
         ) AllocBuildError!Root {
             if (entries.len == 0) return empty_root;
-            try root_mod.validateEntries(entries, already_sorted);
             const needed = try root_mod.requirements(entries);
             const scratch_len = try root_mod.workspaceSizeFor(entries.len, needed, !already_sorted);
             const scratch = try self.allocator.alloc(u8, scratch_len);
@@ -233,8 +232,6 @@ pub fn Trie(comptime KeccakContext: type) type {
             index: *const NodeIndex,
             updates: []const Update,
         ) AllocUpdateError!Root {
-            if (updates.len == 0) return root_hash;
-            try sparse.validateUpdates(updates, true);
             return sparse.updateSorted(
                 self.keccak_context,
                 self.allocator,
@@ -369,7 +366,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                             .value = item.value,
                         };
                     }
-                    std.mem.sort(sparse.Update, structural_updates, {}, updateLessThan);
+                    Sort.byKey(sparse.Update, structural_updates);
                     return self.structural.updateSorted(root_hash, index, structural_updates);
                 }
 
@@ -391,7 +388,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                             .value = item.value,
                         };
                     }
-                    std.mem.sort(occurrence.Update, structural_updates, {}, catalogUpdateLessThan);
+                    Sort.byKey(occurrence.Update, structural_updates);
                     return self.structural.updateCatalog(
                         workspace,
                         root_hash,
@@ -400,18 +397,27 @@ pub fn Trie(comptime KeccakContext: type) type {
                         structural_updates,
                     );
                 }
-
-                fn updateLessThan(_: void, lhs: sparse.Update, rhs: sparse.Update) bool {
-                    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
-                }
-
-                fn catalogUpdateLessThan(_: void, lhs: occurrence.Update, rhs: occurrence.Update) bool {
-                    return std.mem.order(u8, &lhs.key, &rhs.key) == .lt;
-                }
             };
         }
     };
 }
+
+pub const Sort = struct {
+    inline fn keyBytes(key: anytype) []const u8 {
+        return switch (@typeInfo(std.meta.Child(@TypeOf(key)))) {
+            .array => key,
+            else => key.*,
+        };
+    }
+
+    pub inline fn byKey(comptime T: type, items: []T) void {
+        std.mem.sort(T, items, {}, struct {
+            fn lessThan(_: void, lhs: T, rhs: T) bool {
+                return std.mem.lessThan(u8, keyBytes(&lhs.key), keyBytes(&rhs.key));
+            }
+        }.lessThan);
+    }
+};
 
 pub const DefaultTrie = Trie(StdKeccak256Context);
 

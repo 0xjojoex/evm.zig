@@ -22,7 +22,6 @@ pub const Context = struct {
     mark: ?trace.TraceMark = null,
     active: bool = false,
     tape_attached: bool = false,
-    call_attached: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -60,16 +59,6 @@ pub const Context = struct {
         };
     }
 
-    pub fn initBoundedWithCalls(
-        frame_storage: []trace.TraceCapture,
-        trace_binding: ?TraceBinding,
-        call_binding: CallBinding,
-    ) Context {
-        var context = initBounded(frame_storage, trace_binding);
-        context.call_arena = call_binding.arena;
-        return context;
-    }
-
     pub fn deinit(self: *Context) void {
         std.debug.assert(!self.active);
         std.debug.assert(self.frame_captures.items.len == 0);
@@ -101,7 +90,6 @@ pub const Context = struct {
 
         if (self.call_arena) |arena| {
             _ = try arena.finish();
-            self.detachScopedCalls();
         }
         const span = if (self.mark != null) try self.finishTrace() else null;
         self.active = false;
@@ -118,7 +106,6 @@ pub const Context = struct {
         }
         if (self.call_arena) |arena| {
             try arena.abort();
-            self.detachScopedCalls();
         }
         self.active = false;
     }
@@ -133,30 +120,6 @@ pub const Context = struct {
 
     pub inline fn capturesCalls(self: *const Context) bool {
         return self.active and self.call_arena != null;
-    }
-
-    /// Enable call capture for one payload while the outer context remains
-    /// active for a wider state-capture scope.
-    pub fn beginCalls(self: *Context, binding: CallBinding) !void {
-        if (!self.active) return error.CaptureOperationNotActive;
-        if (self.call_arena != null) return error.CallCaptureOperationActive;
-        self.call_arena = binding.arena;
-        self.call_attached = true;
-        errdefer self.detachScopedCalls();
-        try binding.arena.begin();
-    }
-
-    pub fn finishCalls(self: *Context) !trace.CallSpan {
-        if (!self.active or !self.call_attached) return error.CallCaptureOperationNotActive;
-        const span = try self.call_arena.?.finish();
-        self.detachScopedCalls();
-        return span;
-    }
-
-    pub fn abortCalls(self: *Context) !void {
-        if (!self.active or !self.call_attached) return error.CallCaptureOperationNotActive;
-        try self.call_arena.?.abort();
-        self.detachScopedCalls();
     }
 
     pub fn beginCall(self: *Context, event: trace.CallStart) !?trace.CallToken {
@@ -302,12 +265,6 @@ pub const Context = struct {
         self.trace_profile = .{};
         self.tape_attached = false;
     }
-
-    fn detachScopedCalls(self: *Context) void {
-        if (!self.call_attached) return;
-        self.call_arena = null;
-        self.call_attached = false;
-    }
 };
 
 test "capture context scopes a trace tape" {
@@ -327,29 +284,6 @@ test "capture context scopes a trace tape" {
     defer tape.resolve(span) catch unreachable;
 
     try std.testing.expectEqual(@as(usize, 1), span.frames.len);
-}
-
-test "call binding attaches for one payload inside a wider capture scope" {
-    var arena = trace.CallArena.init(std.testing.allocator);
-    defer arena.deinit();
-    var context = Context.init(std.testing.allocator, null);
-    defer context.deinit();
-
-    try context.begin();
-    try context.beginCalls(.{ .arena = &arena });
-    const token = (try context.beginCall(.{
-        .depth = 0,
-        .kind = .call,
-        .from = @splat(0x11),
-        .to = @splat(0x22),
-        .code_address = @splat(0x22),
-    })).?;
-    try context.finishCall(token, .{ .status = .success, .gas_left = 0 });
-    const call_span = try context.finishCalls();
-
-    try std.testing.expectEqual(@as(usize, 1), call_span.rows.len);
-    try std.testing.expect(!context.capturesCalls());
-    try std.testing.expect((try context.finish()) == null);
 }
 
 test "scoped trace detaches from a reusable state capture context" {

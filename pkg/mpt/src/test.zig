@@ -972,8 +972,8 @@ test "sparse update uses bounded frames for deep Patricia topology" {
         entries[index] = .{ .key = &keys[index], .value = &values[index] };
         updates[index] = .{ .key = &keys[index], .value = &values[index] };
     }
-    std.mem.sort(mpt.Entry, &entries, {}, entryLessThan);
-    std.mem.sort(mpt.Update, &updates, {}, updateLessThan);
+    mpt.Sort.byKey(mpt.Entry, &entries);
+    mpt.Sort.byKey(mpt.Update, &updates);
 
     const trie = mpt.init(std.testing.allocator);
     const actual = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
@@ -983,11 +983,21 @@ test "sparse update uses bounded frames for deep Patricia topology" {
 
 test "sparse update validates the full batch before mutation" {
     const trie = mpt.init(std.testing.allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &mpt.empty_root,
+        &(try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &.{})),
+    );
     const unsorted = [_]mpt.Update{
         .{ .key = "b", .value = "1" },
         .{ .key = "a", .value = "2" },
     };
     try std.testing.expectError(error.UnsortedKeys, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &unsorted));
+    const duplicate = [_]mpt.Update{
+        .{ .key = "a", .value = "1" },
+        .{ .key = "a", .value = "2" },
+    };
+    try std.testing.expectError(error.DuplicateKey, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &duplicate));
     const empty = [_]mpt.Update{.{ .key = "a", .value = "" }};
     try std.testing.expectError(error.EmptyValue, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &empty));
 }
@@ -1010,14 +1020,6 @@ fn expectSameLookup(expected: mpt.Lookup, actual: mpt.Lookup) !void {
             .absent => |actual_reason| try std.testing.expectEqual(expected_reason, actual_reason),
         },
     }
-}
-
-fn entryLessThan(_: void, lhs: mpt.Entry, rhs: mpt.Entry) bool {
-    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
-}
-
-fn updateLessThan(_: void, lhs: mpt.Update, rhs: mpt.Update) bool {
-    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
 }
 
 fn leafWithValueLen(comptime value_len: usize) [value_len + 3]u8 {

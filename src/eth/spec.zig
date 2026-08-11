@@ -264,7 +264,7 @@ const semantics = struct {
     }
 
     fn amsterdamTopLevelDelegatedAccountAccess(input: execution.TopLevelDelegatedAccountAccessInput) ?execution.DelegatedAccountAccess {
-        const warm = input.target_is_precompile or input.already_warm;
+        const warm = input.target_is_native_contract or input.already_warm;
         return .{
             .status = if (warm) .warm else .cold,
             .gas = amsterdamDelegatedAccountAccess(!warm),
@@ -611,6 +611,7 @@ pub const frontier: Spec = .{
     .valueTransferLog = semantics.noValueTransferLog,
     .instruction = eth_instruction.frontier,
     .precompile = eth_precompile.Exact(eth_precompile.frontier_config),
+    .reentrant_native_contract = execution.NoReentrantNativeContracts,
 };
 
 pub const frontier_thawing = frontier;

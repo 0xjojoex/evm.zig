@@ -690,8 +690,8 @@ pub fn updateSorted(
     index: *const proof.NodeIndex,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
-    try validateUpdates(updates, true);
     if (updates.len == 0) return root_hash;
+    try validateUpdates(updates);
 
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer arena.deinit();
@@ -724,13 +724,12 @@ pub fn updateSorted(
     return context.encodeRoot(root_node);
 }
 
-pub fn validateUpdates(updates: []const Update, sorted: bool) errors.InputError!void {
+fn validateUpdates(updates: []const Update) errors.InputError!void {
     for (updates) |update| {
         if (update.value) |value| {
             if (value.len == 0) return error.EmptyValue;
         }
     }
-    if (!sorted) return;
     for (updates[1..], 1..) |update, index| {
         switch (std.mem.order(u8, updates[index - 1].key, update.key)) {
             .lt => {},

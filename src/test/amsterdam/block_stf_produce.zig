@@ -451,8 +451,8 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
 
 test "BlockSTF parallel raw API owns decode failure cleanup" {
     const empty_roots: block_stf.RootChecks = .{ .payload_header = .{
-        .state = .fromHash(evmz.eth.trie.empty_root_hash),
-        .receipts = .fromHash(evmz.eth.trie.empty_root_hash),
+        .state = evmz.eth.trie.empty_root_hash,
+        .receipts = evmz.eth.trie.empty_root_hash,
     } };
     var report = bal.Report{};
     const invalid_raw = [_][]const u8{"not an RLP transaction"};
@@ -908,25 +908,12 @@ test "BlockSTF produce rejects an oversized BAL without artifact or commit" {
     try std.testing.expect(memory.getAccount(recipient) == null);
 }
 
-test "BlockSTF produce rejects pre-Amsterdam candidates without an artifact" {
-    if (comptime !evmz.t.forkEnabled(.prague)) return error.SkipZigTest;
-    var outcome = try block_stf.Exact(.prague).produce(std.testing.allocator, .{
-        .state_backend = try Backend.fromWitness(
-            std.testing.allocator,
-            evmz.eth.trie.empty_root_hash,
-            &.{},
-            &.{},
-        ),
-        .transactions = &.{},
-    });
-    defer outcome.deinit(std.testing.allocator);
-
-    switch (outcome) {
-        .produced => return error.TestUnexpectedResult,
-        .rejected => |result| try std.testing.expectEqual(
-            block_stf.Status.invalid_block_body,
-            result.status,
-        ),
+test "pre-Amsterdam BlockSTF does not expose BAL-only capabilities" {
+    const Prague = evmz.t.BlockStf(.prague) orelse return error.SkipZigTest;
+    comptime {
+        std.debug.assert(@TypeOf(Prague.produce) == type);
+        std.debug.assert(@TypeOf(Prague.produceAssumeDecoded) == type);
+        std.debug.assert(!@hasDecl(Prague.BalExecutor, "init"));
     }
 }
 
@@ -951,12 +938,12 @@ fn parentBlobGas() block_stf.ParentBlobGas {
 fn rootChecks(output: block_stf.DerivedBlockOutput) block_stf.RootChecks {
     return .{
         .payload_header = .{
-            .state = .fromHash(output.state_root),
-            .receipts = .fromHash(output.receipts_root),
+            .state = output.state_root,
+            .receipts = output.receipts_root,
         },
         .reconstructed_header = .{
-            .transactions = .fromHash(output.transactions_root),
-            .withdrawals = .fromHash(output.withdrawals_root),
+            .transactions = output.transactions_root,
+            .withdrawals = output.withdrawals_root,
         },
     };
 }

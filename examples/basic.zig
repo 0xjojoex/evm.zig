@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     defer memory.deinit();
 
     const sender_account = try memory.getOrCreateAccount(sender);
-    sender_account.balance = 1_000_000;
+    sender_account.account.balance = 1_000_000;
 
     const contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(&.{
@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var executor = evmz.Evm.Executor.init(allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
 

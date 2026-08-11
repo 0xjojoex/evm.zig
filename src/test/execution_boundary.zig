@@ -14,6 +14,15 @@ test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
 
+test "Executor observation boundary hides StateModel pending views" {
+    const Executor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const Executed = Executor.Executed(void);
+
+    try std.testing.expect(@hasDecl(Executor, "Observation"));
+    try std.testing.expect(@hasDecl(Executed, "observation"));
+    try std.testing.expect(!@hasDecl(Executed, "pendingView"));
+}
+
 test "discarding a manual state transition rolls back its mutations" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const account = evmz.addr(0xaaaa);
@@ -51,11 +60,11 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try std.testing.expect(executor.state.isAccountWarm(contract));
     try std.testing.expect(executor.state.isAccountWarm(other));
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
     try executor.warmAccount(reverted);
     try executor.addBalance(reverted, 7);
-    try checkpoint.restore();
+    checkpoint.restore();
 
     try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(other));
@@ -149,10 +158,10 @@ test "execution checkpoint preserves family pre-scope writes" {
     try executor.state.setBalance(sender, 7);
     try transaction_runtime.beginExecution(&executor, request(sender, contract), .{});
 
-    var execution_checkpoint = try executor.checkpoint();
+    var execution_checkpoint = executor.checkpoint();
     defer execution_checkpoint.deinit();
     try executor.state.setBalance(sender, 9);
-    try execution_checkpoint.restore();
+    execution_checkpoint.restore();
 
     try std.testing.expectEqual(@as(u256, 7), executor.getAccount(sender).?.balance);
     const executed = ShanghaiExecutor.Executed(void){
@@ -172,8 +181,8 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
-            const storage = pending.observations().storage;
+        pub fn observe(self: *@This(), observation: BerlinExecutor.Observation) !void {
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -189,23 +198,24 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     var observations = Observer{ .contract = contract };
     var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.beginObservedTransaction(
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
     );
     defer executor.discardStateTransition();
 
-    var committed = try executor.checkpoint();
+    var committed = executor.checkpoint();
     defer committed.deinit();
     _ = try executor.state.setStorage(contract, 7, 1);
-    try committed.commit();
+    committed.commit();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     var host = executor.host();
     _ = try host.getExecutionContext();
 
-    var reverted = try executor.checkpoint();
+    var reverted = executor.checkpoint();
     defer reverted.deinit();
     _ = try executor.state.setStorage(contract, 7, 2);
     try executor.state.warmAccount(additional);
@@ -214,13 +224,13 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         .topics = &.{3},
         .data = &.{0x42},
     });
-    try reverted.restore();
+    reverted.restore();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.isAccountWarm(additional));
-    try std.testing.expectEqual(@as(usize, 0), executor.logs().len());
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     _ = try host.getExecutionContext();
-    try executor.retainStateTransitionObserved(&observations);
+    try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }
 
@@ -234,15 +244,15 @@ test "checkpoint nests LIFO and deinit restores an open token" {
     defer executor.discardStateTransition();
 
     {
-        var outer = try executor.checkpoint();
+        var outer = executor.checkpoint();
         defer outer.deinit();
         _ = try executor.state.setStorage(contract, 7, 1);
 
-        var inner = try executor.checkpoint();
+        var inner = executor.checkpoint();
         defer inner.deinit();
         _ = try executor.state.setStorage(contract, 7, 2);
 
-        try inner.restore();
+        inner.restore();
         try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     }
 
@@ -258,19 +268,19 @@ test "successive checkpoints receive distinct ids" {
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
 
-    var first = try executor.checkpoint();
+    var first = executor.checkpoint();
     const first_id = first.id;
     _ = try executor.state.setStorage(contract, 7, 1);
-    try first.commit();
+    first.commit();
     first.deinit();
 
-    var current = try executor.checkpoint();
+    var current = executor.checkpoint();
     defer current.deinit();
     try std.testing.expect(first_id != current.id);
     _ = try executor.state.setStorage(contract, 7, 2);
 
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
-    try current.restore();
+    current.restore();
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
 }
 
@@ -282,8 +292,8 @@ test "checkpoint revert preserves reads without retaining storage effects" {
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), pending: evmz.state.TrackedState.PendingView) !void {
-            const storage = pending.observations().storage;
+        pub fn observe(self: *@This(), observation: AmsterdamExecutor.Observation) !void {
+            const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
@@ -299,18 +309,19 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     var observations = Observer{ .contract = contract };
     var executor = AmsterdamExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try executor.beginObservedTransaction(
+    const observed = executor.observe(&observations);
+    try observed.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         contract,
     );
     defer executor.discardStateTransition();
 
-    var checkpoint = try executor.checkpoint();
+    var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(contract, 8, 1);
-    try checkpoint.restore();
-    try executor.retainStateTransitionObserved(&observations);
+    checkpoint.restore();
+    try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }
 
@@ -392,11 +403,10 @@ test "bounded trace capture failure rolls back the standalone operation" {
     const request_value = request(sender, contract);
     try std.testing.expectError(
         error.TraceCapacityExceeded,
-        executor.executeCaptured(
+        executor.capture(&capture).execute(
             request_value.context,
             request_value.message,
             request_value.gas,
-            &capture,
         ),
     );
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
@@ -435,11 +445,10 @@ test "captured CALL publishes return data and parent memory output after resume"
     try capture.begin();
     errdefer capture.abort() catch {};
     const request_value = request(sender, contract);
-    const result = try executor.executeCaptured(
+    const result = try executor.capture(&capture).execute(
         request_value.context,
         request_value.message,
         request_value.gas,
-        &capture,
     );
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;

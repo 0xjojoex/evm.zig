@@ -34,9 +34,6 @@ const TransientStorageMap = SparseHashMap(StorageKey, u256);
 const CodeMap = SparseHashMap(CodeHash, CodeEntry);
 const minimum_code_chunk_bytes = 4096;
 
-/// Ordinary VM executors can construct this state directly from a reader.
-pub const standalone_reader_initialization = true;
-
 pub const AccountId = TransactionAccountMap.EntryId;
 pub const StorageId = TransactionStorageMap.EntryId;
 pub const AcceptedAccountId = AcceptedAccountMap.EntryId;
@@ -655,10 +652,6 @@ pub const ObservationsView = struct {
 pub const AcceptedView = struct {
     handle: *const anyopaque,
 
-    pub fn generation(self: AcceptedView) u64 {
-        return self.tracked().generation;
-    }
-
     pub fn hasChanges(self: AcceptedView) bool {
         return self.changes().hasChanges();
     }
@@ -679,10 +672,6 @@ pub const PendingView = struct {
 
     pub fn accepted(self: PendingView) AcceptedView {
         return self.tracked().acceptedView();
-    }
-
-    pub fn attemptId(self: PendingView) AttemptId {
-        return self.transaction().id;
     }
 
     pub fn logs(self: PendingView) LogView {
@@ -1157,7 +1146,7 @@ pub fn deinit(self: *TrackedState) void {
     self.* = undefined;
 }
 
-pub fn reset(self: *TrackedState, reader: ?StateReader) void {
+fn reset(self: *TrackedState, reader: ?StateReader) void {
     const allocator = self.allocator;
     const retains_empty_accounts = self.retains_empty_accounts;
     std.debug.assert(self.epoch != std.math.maxInt(u64));

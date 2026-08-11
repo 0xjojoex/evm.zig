@@ -36,6 +36,10 @@ pub const FrameResult = struct {
     /// output into their retained result storage before releasing the frame.
     output_data: []u8,
 
+    comptime {
+        std.debug.assert(@sizeOf(FrameResult) == 64);
+    }
+
     pub fn status(self: FrameResult) Status {
         return self.halt.status();
     }
@@ -61,31 +65,31 @@ pub const FrameResult = struct {
     }
 };
 
-pub const CallResume = struct {
-    gas_limit: i64,
-    out_offset: usize,
-    out_size: usize,
-    state_gas_charged: i64 = 0,
-};
-
-pub const CreateResume = struct {
-    gas_limit: i64,
-    state_gas_charged: i64 = 0,
-};
-
-pub const CallAction = struct {
-    msg: Host.Message,
-    continuation: CallResume,
-};
-
-pub const CreateAction = struct {
-    msg: Host.Message,
-    continuation: CreateResume,
-};
-
 pub const Action = union(enum) {
-    call: CallAction,
-    create: CreateAction,
+    call: Call,
+    create: Create,
+
+    pub const CallResume = struct {
+        gas_limit: i64,
+        out_offset: usize,
+        out_size: usize,
+        state_gas_charged: i64 = 0,
+    };
+
+    pub const CreateResume = struct {
+        gas_limit: i64,
+        state_gas_charged: i64 = 0,
+    };
+
+    pub const Call = struct {
+        msg: Host.Message,
+        continuation: CallResume,
+    };
+
+    pub const Create = struct {
+        msg: Host.Message,
+        continuation: CreateResume,
+    };
 };
 
 pub const RunResult = union(enum) {
@@ -98,8 +102,6 @@ pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
     bytecode: Bytecode.View,
-    memory_allocator: ?std.mem.Allocator = null,
-    memory_retain_capacity: bool = false,
     io: ?*frame_io.Slot = null,
 };
 
@@ -252,6 +254,15 @@ pub const CallFrame = struct {
     output_range: Memory.Range = .{},
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
 
+    comptime {
+        std.debug.assert(@sizeOf(CallFrame) == 416);
+        std.debug.assert(@alignOf(CallFrame) == 16);
+        std.debug.assert(@offsetOf(CallFrame, "msg") == 248);
+        std.debug.assert(@offsetOf(CallFrame, "stack") == 256);
+        std.debug.assert(@offsetOf(CallFrame, "memory") == 272);
+        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 320);
+    }
+
     pub fn init(
         self: *CallFrame,
         allocator: std.mem.Allocator,
@@ -267,11 +278,7 @@ pub const CallFrame = struct {
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
         self.stack = stack;
-        const memory_allocator = options.memory_allocator orelse allocator;
-        self.memory = if (options.memory_retain_capacity)
-            Memory.initRetainingCapacity(memory_storage, memory_allocator)
-        else
-            Memory.init(memory_storage, memory_allocator);
+        self.memory = Memory.init(memory_storage, allocator);
         self.pc = 0;
         self.code = code;
         self.gas_left = options.msg.gas;
@@ -289,12 +296,6 @@ pub const CallFrame = struct {
 
     pub fn deinit(self: *CallFrame) void {
         self.memory.deinit();
-        self.deinitOwnedFields();
-        self.* = undefined;
-    }
-
-    pub fn deinitRetainingMemoryCapacity(self: *CallFrame) void {
-        self.memory.deinitRetainingCapacity();
         self.deinitOwnedFields();
         self.* = undefined;
     }
@@ -353,74 +354,56 @@ pub const CallFrame = struct {
 
     /// Resume only a CALL action. A mismatch leaves the frame suspended.
     pub fn resumeWithCall(self: *CallFrame, child: Host.CallResult) !void {
-        const continuation = switch (self.state) {
-            .suspended => |action| switch (action) {
-                .call => |call_action| call_action.continuation,
-                .create => return error.ResumeKindMismatch,
-            },
-            else => return error.FrameNotSuspended,
-        };
-        self.state = .running;
-        try self.applyCallResult(continuation, child);
+        const continuation = (try self.takeSuspended(.call)).continuation;
+        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
+
+        const output_size = @min(continuation.out_size, child.output_data.len);
+        self.memory.writeBytes(continuation.out_offset, child.output_data[0..output_size]);
+        try self.replaceReturnData(child.output_data);
+        self.stack.push(@intFromBool(child.outcome.status == .success));
     }
 
     /// Resume only a CREATE action. A mismatch leaves the frame suspended.
     pub fn resumeWithCreate(self: *CallFrame, child: Host.CreateResult) !void {
-        const continuation = switch (self.state) {
-            .suspended => |action| switch (action) {
-                .call => return error.ResumeKindMismatch,
-                .create => |create_action| create_action.continuation,
-            },
-            else => return error.FrameNotSuspended,
-        };
-        self.state = .running;
-        try self.applyCreateResult(continuation, child);
-    }
-
-    fn applyCallResult(self: *CallFrame, continuation: CallResume, child: Host.CallResult) !void {
-        const child_gas_left = @max(child.gas_left, 0);
-        const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
-        self.gas_reservoir = child.gas_reservoir;
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, child.state_gas_spent) catch std.math.maxInt(i64);
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, child.state_gas_from_gas_left) catch std.math.maxInt(i64);
-        if (child.outcome.status != .success) {
-            self.refillStateGas(continuation.state_gas_charged);
-        }
-        if (!gas_charged) return;
-        if (child.outcome.status == .success) {
-            // EIP-2200: child call-frame refunds only survive committed frames.
-            self.gas_refund += child.gas_refund;
-        }
-
-        const output_size = @min(continuation.out_size, child.output_data.len);
-        self.memory.writeBytes(continuation.out_offset, child.output_data[0..output_size]);
-
-        try self.replaceReturnData(child.output_data);
-        self.stack.push(if (child.outcome.status == .success) 1 else 0);
-    }
-
-    fn applyCreateResult(self: *CallFrame, continuation: CreateResume, child: Host.CreateResult) !void {
-        const child_gas_left = @max(child.gas_left, 0);
-        const gas_charged = self.trackGas(continuation.gas_limit - child_gas_left);
-        self.gas_reservoir = child.gas_reservoir;
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, child.state_gas_spent) catch std.math.maxInt(i64);
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, child.state_gas_from_gas_left) catch std.math.maxInt(i64);
-        if (child.outcome.status != .success) {
-            self.refillStateGas(continuation.state_gas_charged);
-        }
-        if (!gas_charged) return;
-        if (child.outcome.status == .success) {
-            // EIP-2200: child call-frame refunds only survive committed frames.
-            self.gas_refund += child.gas_refund;
-        }
+        const continuation = (try self.takeSuspended(.create)).continuation;
+        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
 
         if (child.outcome.status == .success) {
+            // A deployed contract yields its address, never return data.
             try self.replaceReturnData(&.{});
             self.stack.push(evmz.address.toU256(child.address));
         } else {
             try self.replaceReturnData(child.output_data);
             self.stack.push(0);
         }
+    }
+
+    /// Take the pending action of `kind` and put the frame back in `.running`,
+    /// leaving it suspended if the kind does not match.
+    fn takeSuspended(
+        self: *CallFrame,
+        comptime kind: std.meta.Tag(Action),
+    ) !@FieldType(Action, @tagName(kind)) {
+        const action = self.suspendedAction() orelse return error.FrameNotSuspended;
+        if (action.* != kind) return error.ResumeKindMismatch;
+        const payload = @field(action.*, @tagName(kind));
+        self.state = .running;
+        return payload;
+    }
+
+    /// Fold a returned child frame's gas accounting into this one. Returns
+    /// whether execution may continue.
+    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: anytype) bool {
+        const succeeded = child.outcome.status == .success;
+        const gas_charged = self.trackGas(gas_limit - @max(child.gas_left, 0));
+        self.gas_reservoir = child.gas_reservoir;
+        self.state_gas_spent +|= child.state_gas_spent;
+        self.state_gas_from_gas_left +|= child.state_gas_from_gas_left;
+        if (!succeeded) self.refillStateGas(state_gas_charged);
+        if (!gas_charged) return false;
+        // EIP-2200: child call-frame refunds only survive committed frames.
+        if (succeeded) self.gas_refund += child.gas_refund;
+        return true;
     }
 
     /// Returns whether execution may continue after the charge.
@@ -503,7 +486,7 @@ pub const CallFrame = struct {
         return self.stack.pop();
     }
 
-    pub inline fn popN(self: *CallFrame, comptime n: usize) ?Stack.PopN(n) {
+    pub inline fn popN(self: *CallFrame, comptime n: usize) ?[n]u256 {
         if (!self.requireStack(n)) return null;
         return self.stack.popN(n);
     }
@@ -614,6 +597,14 @@ pub const CallFrameSlot = struct {
     memory_storage: Memory.Storage = .empty,
     io_storage: frame_io.Slot = undefined,
     msg: Host.Message = undefined,
+
+    comptime {
+        std.debug.assert(@sizeOf(CallFrameSlot) == 33440);
+        std.debug.assert(@offsetOf(CallFrameSlot, "frame") == 0);
+        std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
+        std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));
+        std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
+    }
 
     pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
         self.io_storage = frame_io.Slot.init(allocator);
@@ -855,20 +846,16 @@ test "captured tail memory exhaustion remains a resource error" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    try Memory.reserveCapacity(&memory_storage, std.testing.allocator, 32);
-    defer memory_storage.deinit(std.testing.allocator);
     var io_storage = frame_io.Slot.init(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
-    try frame.init(std.testing.allocator, .{
+    try frame.init(no_growth_allocator, .{
         .host = &host,
         .msg = &msg,
         .bytecode = bytecode.view(),
         .io = &io_storage,
-        .memory_allocator = no_growth_allocator,
-        .memory_retain_capacity = true,
     }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
-    defer frame.deinitRetainingMemoryCapacity();
+    defer frame.deinit();
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
     defer tape.deinit();
@@ -1015,7 +1002,7 @@ test "yielded action stays in the call frame until resume" {
     });
     defer owned.deinit();
 
-    const continuation = CallResume{
+    const continuation = Action.CallResume{
         .gas_limit = 10,
         .out_offset = 0,
         .out_size = 0,
@@ -1220,8 +1207,6 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             host: *Host,
             msg: *const Host.Message,
             source: Source = .{ .code = &.{} },
-            memory_allocator: ?std.mem.Allocator = null,
-            memory_retain_capacity: bool = false,
         };
 
         allocator: std.mem.Allocator,
@@ -1248,8 +1233,6 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
                 .host = options.host,
                 .msg = options.msg,
                 .bytecode = bytecode,
-                .memory_allocator = options.memory_allocator,
-                .memory_retain_capacity = options.memory_retain_capacity,
             });
             return .{
                 .allocator = allocator,
@@ -1270,23 +1253,4 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             return Interpreter(spec).init(self.frame);
         }
     };
-}
-
-comptime {
-    // If any of the following size/align/offset changes, rerun VM-loop canary benches
-    std.debug.assert(@sizeOf(FrameResult) == 64);
-    // Layout repinned after Host.Message address fields gained align(8)
-    // (guest-step keeper). Rerun the VM-loop canary benches before relying
-    // on native numbers measured against the previous pins.
-    std.debug.assert(@sizeOf(CallFrame) == 416);
-    std.debug.assert(@alignOf(CallFrame) == 16);
-    std.debug.assert(@offsetOf(CallFrame, "stack") == 256);
-    std.debug.assert(@offsetOf(CallFrame, "memory") == 272);
-    std.debug.assert(@offsetOf(CallFrame, "gas_left") == 320);
-    std.debug.assert(@offsetOf(CallFrame, "msg") == 248);
-    std.debug.assert(@sizeOf(CallFrameSlot) == 33440);
-    std.debug.assert(@offsetOf(CallFrameSlot, "frame") == 0);
-    std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
-    std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));
-    std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
 }

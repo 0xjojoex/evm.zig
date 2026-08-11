@@ -825,11 +825,10 @@ test "debug session rejects an active capture context" {
     defer capture.deinit();
     try capture.begin();
     defer capture.abort() catch {};
-    try executor.beginCapturedTransaction(
+    try executor.capture(&capture).beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
         sender,
         recipient,
-        &capture,
     );
     defer executor.discardStateTransition();
     var bytecode = try executor.prepareBytecode(&code);

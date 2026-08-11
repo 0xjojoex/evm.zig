@@ -21,33 +21,24 @@ test "supported state domains analyze as complete engine products" {
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
 }
 
-test "dense BlockSTF does not expose callable block production" {
+test "Amsterdam BlockSTF combines spec and state capabilities" {
     const Tracked = evmz.Vm(evmz.eth.amsterdam);
     const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
     const TrackedBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Tracked);
     const DenseBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Dense);
 
     comptime {
-        std.debug.assert(Tracked.BlockState.block_production);
-        std.debug.assert(!Dense.BlockState.block_production);
+        std.debug.assert(Tracked.BlockState.supports_block_production);
+        std.debug.assert(!Dense.BlockState.supports_block_production);
+        std.debug.assert(Tracked.BlockState.supports_external_observation_capture);
+        std.debug.assert(!Dense.BlockState.supports_external_observation_capture);
         std.debug.assert(@TypeOf(TrackedBlockStf.produce) != type);
         std.debug.assert(@TypeOf(TrackedBlockStf.produceAssumeDecoded) != type);
         std.debug.assert(@TypeOf(DenseBlockStf.produce) == type);
         std.debug.assert(@TypeOf(DenseBlockStf.produceAssumeDecoded) == type);
+        std.debug.assert(@hasDecl(TrackedBlockStf.BalExecutor, "init"));
+        std.debug.assert(!@hasDecl(DenseBlockStf.BalExecutor, "init"));
     }
-}
-
-test "ordinary VM constructs its tracked executor without exposing the state domain" {
-    const ExactVm = evmz.Vm(evmz.eth.amsterdam);
-
-    comptime {
-        std.debug.assert(ExactVm.BlockState.State == evmz.state.TrackedState);
-        std.debug.assert(@hasField(ExactVm.Executor.Init, "state_reader"));
-    }
-
-    var executor = ExactVm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    try std.testing.expect(executor.state.reader == null);
 }
 
 fn analyzeEngineProduct(comptime Engine: type) void {
@@ -81,7 +72,7 @@ test "exact VM closes the complete spec without revision state" {
         std.debug.assert(@typeInfo(TransitionContextPointer).pointer.child == Context);
         std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
             Cancun.specification,
-            Cancun.BlockState.State,
+            Cancun.BlockState,
             Cancun.compile_options,
         ));
     }
@@ -89,7 +80,6 @@ test "exact VM closes the complete spec without revision state" {
     try std.testing.expect(@hasDecl(Cancun, "transact"));
     try std.testing.expect(@hasDecl(Cancun, "Program"));
     try std.testing.expect(@hasDecl(Cancun, "BlockExecution"));
-    try std.testing.expect(@hasDecl(Cancun, "Sequential"));
     try std.testing.expect(!@hasDecl(Cancun, "TransactionPolicy"));
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
 }
@@ -129,7 +119,7 @@ test "Spec.extend creates a distinct exact VM from static values" {
     try evmz.t.seedStoreAccount(&memory, addr(0xaaaa), .{ .balance = 10_000_000 });
 
     var executor = Strict.Executor.init(std.testing.allocator, .{
-        .state_reader = memory.reader(),
+        .state = .{ .reader = memory.reader() },
     });
     defer executor.deinit();
     const outcome = try transact(Strict, &executor, .{
@@ -141,30 +131,4 @@ test "Spec.extend creates a distinct exact VM from static values" {
         },
     });
     try std.testing.expectEqual(Strict.Rejection.gas_allowance_exceeded, try expectRejected(outcome));
-}
-
-test "custom transaction program remains bound to the exact Executor" {
-    const Input = Default.TransactInput;
-    const Context = Default.Context(Input);
-    const Transition = Default.Transition(Input);
-    const Program = Default.Program(
-        transaction.Transaction,
-        Input,
-        Default.Output,
-        Default.Rejection,
-        Transition,
-    );
-
-    comptime {
-        std.debug.assert(Program.Executor == Default.Executor);
-        std.debug.assert(Program.Executor == evmz.executor.ExecutorType(
-            Program.specification,
-            Default.BlockState.State,
-            Default.compile_options,
-        ));
-        std.debug.assert(Program.Context == Context);
-        std.debug.assert(Program.Transaction == Default.Transaction);
-        std.debug.assert(Program.Output == Default.Output);
-        std.debug.assert(Program.Error != anyerror);
-    }
 }

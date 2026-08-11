@@ -41,26 +41,26 @@ const CustomSet = struct {
 
     pub fn execute(
         entry: Entry,
-        call: evmz.execution.PrecompileCall,
-    ) evmz.precompile.Error!evmz.execution.PrecompileOutcome {
+        call: evmz.precompile.Call,
+    ) evmz.precompile.Error!evmz.precompile.Result {
         switch (entry) {
             .standard => |standard| return StandardSet.execute(standard, call),
             .reverse => {
-                if (call.message.gas < reverse_gas) {
-                    return .{ .result = .{
+                if (call.gas < reverse_gas) {
+                    return .{
                         .status = .out_of_gas,
                         .output_data = &.{},
                         .gas_left = 0,
                         .output_owned = false,
-                    } };
+                    };
                 }
-                const output = try call.allocator.dupe(u8, call.message.input_data);
+                const output = try call.allocator.dupe(u8, call.input_data);
                 std.mem.reverse(u8, output);
-                return .{ .result = .{
+                return .{
                     .status = .success,
                     .output_data = output,
-                    .gas_left = call.message.gas - reverse_gas,
-                } };
+                    .gas_left = call.gas - reverse_gas,
+                };
             },
         }
     }

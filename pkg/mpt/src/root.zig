@@ -211,7 +211,11 @@ pub fn root(
     var fixed = std.heap.FixedBufferAllocator.init(workspace.buffer);
     const allocator = fixed.allocator();
     const sorted = allocator.dupe(Entry, entries) catch return error.WorkspaceTooSmall;
-    std.mem.sort(Entry, sorted, {}, entryLessThan);
+    std.mem.sortUnstable(Entry, sorted, {}, struct {
+        fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
+            return std.mem.lessThan(u8, lhs.key, rhs.key);
+        }
+    }.lessThan);
     try validateOrder(sorted);
     return buildRootWithAllocator(keccak_context, workspace, &fixed, sorted, needed);
 }
@@ -503,7 +507,7 @@ fn alignForward(value: usize, alignment: usize) error{Overflow}!usize {
     return with_mask & ~mask;
 }
 
-pub fn validateEntries(entries: []const Entry, sorted: bool) Error!void {
+fn validateEntries(entries: []const Entry, sorted: bool) Error!void {
     for (entries) |entry| {
         if (entry.value.len == 0) return error.EmptyValue;
     }
@@ -518,10 +522,6 @@ fn validateOrder(entries: []const Entry) Error!void {
             .gt => return error.UnsortedKeys,
         }
     }
-}
-
-fn entryLessThan(_: void, lhs: Entry, rhs: Entry) bool {
-    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
 }
 
 fn commonPrefixLen(entries: []const Entry, depth: usize) usize {
