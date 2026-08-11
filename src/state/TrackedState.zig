@@ -789,7 +789,7 @@ pub const Journal = struct {
 
     pub const TransientUndo = struct {
         key: StorageKey,
-        previous: ?u256,
+        previous: u256,
     };
 
     fn init() Journal {
@@ -1513,11 +1513,7 @@ fn revertEntry(self: *TrackedState, tx: *Transaction, entry: Journal.Entry) void
         },
         .transient_storage => |undo_id| {
             const undo = tx.undo.takeTransient(undo_id);
-            if (undo.previous) |previous| {
-                tx.scope.transient_storage.putAssumeCapacity(undo.key, previous);
-            } else {
-                _ = tx.scope.transient_storage.remove(undo.key);
-            }
+            tx.scope.transient_storage.putAssumeCapacity(undo.key, undo.previous);
         },
     }
 }
@@ -1941,18 +1937,17 @@ pub fn setTransientStorage(self: *TrackedState, address: Address, key: u256, val
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
     const storage_key = StorageKey{ .address = address, .key = key };
-    const previous = tx.scope.transient_storage.get(storage_key);
-    if ((previous orelse 0) == value) return;
-    if (previous == null and value != 0) try tx.scope.transient_storage.ensureUnusedCapacity(1);
+    const previous_entry = tx.scope.transient_storage.get(storage_key);
+    const previous = previous_entry orelse 0;
+    if (previous == value) return;
+    if (previous_entry == null) try tx.scope.transient_storage.ensureUnusedCapacity(1);
     try tx.undo.appendTransient(self.allocator, .{
         .key = storage_key,
         .previous = previous,
     });
-    if (value == 0) {
-        _ = tx.scope.transient_storage.remove(storage_key);
-    } else {
-        tx.scope.transient_storage.putAssumeCapacity(storage_key, value);
-    }
+    // A zero row is semantically absent and is reclaimed with the transaction.
+    // Keeping it avoids probe-cluster repair on TSTORE zero and rollback.
+    tx.scope.transient_storage.putAssumeCapacity(storage_key, value);
 }
 
 pub fn emitLog(self: *TrackedState, event_log: Host.Log) !void {

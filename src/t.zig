@@ -442,7 +442,7 @@ pub const MockHost = struct {
         });
     }
 
-    fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+    fn getTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = self;
         _ = address;
@@ -450,7 +450,7 @@ pub const MockHost = struct {
         return 1;
     }
 
-    fn setTransientStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !void {
+    fn setTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = self;
         _ = address;

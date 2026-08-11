@@ -45,7 +45,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     const nested = state.checkpoint();
     const replacement_code = [_]u8{0x5f};
     try state.setCode(.fromAddress(target), &replacement_code);
-    try state.setTransientStorage(target, 8, 12);
+    try state.setTransientStorage(.fromAddress(target), 8, 12);
     var topics = [_]u256{1};
     var data = [_]u8{ 2, 3 };
     try state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
@@ -53,7 +53,8 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     state.revertToCheckpoint(nested);
 
     try std.testing.expectEqualSlices(u8, &parent_code, try state.getCode(.fromAddress(target)));
-    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(target, 8));
+    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(.fromAddress(target), 8));
+    try std.testing.expectEqual(@as(u32, 1), state.transient_storage.count());
     try std.testing.expectEqual(@as(usize, 0), state.logView().len());
     try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     try std.testing.expectEqual(@as(usize, 1), state.observed_accounts.items.len);
@@ -62,7 +63,10 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     try std.testing.expect(!state.observed_storage.items[0].effect.written);
 
     try state.setCode(.fromAddress(target), &replacement_code);
-    try state.setTransientStorage(target, 8, 12);
+    try state.setTransientStorage(.fromAddress(target), 8, 12);
+    try state.setTransientStorage(.fromAddress(target), 8, 0);
+    try std.testing.expectEqual(@as(u32, 1), state.transient_storage.count());
+    try state.setTransientStorage(.fromAddress(target), 8, 12);
     try state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
     topics[0] = 9;
     data[0] = 9;
@@ -97,7 +101,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     const next_attempt = state.beginObservedTransaction();
     state.beginScope();
     try std.testing.expectEqual(@as(usize, 0), state.logView().len());
-    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(target, 8));
+    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(.fromAddress(target), 8));
     state.closeScope();
     state.discard(next_attempt);
 }

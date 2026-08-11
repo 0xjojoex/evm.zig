@@ -239,7 +239,7 @@ pub fn parseAddress(string: []const u8) !Address {
     if (hex.len != 40) return error.InvalidAddress;
 
     var address: Address = undefined;
-    try parseHexInto(hex, &address);
+    try parseHexInto(hex, &address.bytes);
     return address;
 }
 

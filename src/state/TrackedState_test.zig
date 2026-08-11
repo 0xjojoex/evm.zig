@@ -305,6 +305,11 @@ test "transient state and owned logs follow checkpoint rollback" {
     state.revertToCheckpoint(checkpoint);
 
     try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    try std.testing.expectEqual(@as(u32, 1), state.tx.?.scope.transient_storage.count());
+    try state.setTransientStorage(addr(1), 4, 12);
+    try state.setTransientStorage(addr(1), 4, 0);
+    try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    try std.testing.expectEqual(@as(u32, 1), state.tx.?.scope.transient_storage.count());
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.rows.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.topics.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.data.items.len);

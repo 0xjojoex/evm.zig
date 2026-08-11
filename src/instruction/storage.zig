@@ -128,7 +128,8 @@ pub fn bind(comptime spec: ExactSpec) type {
 
 pub fn tload(frame: *CallFrame) !void {
     const key = frame.pop() orelse return;
-    const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
+    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
+    const value = try frame.host.getTransientStorage(recipient, key);
     frame.stack.push(value);
 }
 
@@ -140,7 +141,8 @@ pub fn tstore(frame: *CallFrame) !void {
 
     const key, const value = frame.popN(2) orelse return;
 
-    try frame.host.setTransientStorage(frame.msg.recipient, key, value);
+    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
+    try frame.host.setTransientStorage(recipient, key, value);
 }
 
 test "transient storage opcodes are only enabled from Cancun" {

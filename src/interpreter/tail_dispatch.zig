@@ -552,7 +552,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
 
             const slot = sp - 1;
-            const value = ctx.frame.host.getTransientStorage(ctx.frame.msg.recipient, slot[0]) catch |err| {
+            const recipient: evmz.AddressWord = .fromAddress(ctx.frame.msg.recipient);
+            const value = ctx.frame.host.getTransientStorage(recipient, slot[0]) catch |err| {
                 recordError(ctx, ip, slot, next_gas, err);
                 return .thrown;
             };
@@ -568,7 +569,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
             const nsp = sp - 2;
             const key = (sp - 1)[0];
-            ctx.frame.host.setTransientStorage(ctx.frame.msg.recipient, key, nsp[0]) catch |err| {
+            const recipient: evmz.AddressWord = .fromAddress(ctx.frame.msg.recipient);
+            ctx.frame.host.setTransientStorage(recipient, key, nsp[0]) catch |err| {
                 recordError(ctx, ip, nsp, next_gas, err);
                 return .thrown;
             };

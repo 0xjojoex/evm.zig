@@ -16,13 +16,47 @@ const records = @import("./ParentFacts.zig");
 const checkpoint_types = @import("../state/checkpoint.zig");
 const storage_status = @import("../state/storage.zig");
 const trie = @import("../eth/trie.zig");
-const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
+const sparse_hash_map = @import("../state/sparse_hash_map.zig");
 const Views = @import("./views.zig").ViewType(StatelessBlockState);
 
 const Allocator = std.mem.Allocator;
 const StatelessBlockState = @This();
-const StorageKey = storage_status.Key;
-const TransientStorageMap = SparseHashMap(StorageKey, u256);
+
+const TransientStorageKey = extern struct {
+    address_word: address.AddressWord,
+    slot_words: [4]u64,
+
+    fn init(target: address.AddressWord, slot: u256) TransientStorageKey {
+        return .{ .address_word = target, .slot_words = @bitCast(slot) };
+    }
+
+    const HashContext = struct {
+        pub inline fn hash(_: HashContext, value: TransientStorageKey) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.asBytes(&value));
+        }
+
+        pub inline fn eql(_: HashContext, a: TransientStorageKey, b: TransientStorageKey) bool {
+            return address.AddressWord.eql(a.address_word, b.address_word) and
+                a.slot_words[0] == b.slot_words[0] and
+                a.slot_words[1] == b.slot_words[1] and
+                a.slot_words[2] == b.slot_words[2] and
+                a.slot_words[3] == b.slot_words[3];
+        }
+    };
+};
+
+const TransientStorageMap = sparse_hash_map.WithContext(
+    TransientStorageKey,
+    u256,
+    TransientStorageKey.HashContext,
+);
+
+comptime {
+    // Transient keys stay inside one transaction-owned map. Word storage carries
+    // one boundary conversion through every hash/equality probe and drops padding.
+    std.debug.assert(@sizeOf(TransientStorageKey) == 56);
+    std.debug.assert(@alignOf(TransientStorageKey) == 8);
+}
 
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
@@ -283,8 +317,8 @@ const Journal = struct {
     };
 
     const TransientUndo = struct {
-        key: StorageKey,
-        previous: ?u256,
+        key: TransientStorageKey,
+        previous: u256,
     };
 
     entries: std.ArrayList(Entry) = .empty,
@@ -1298,34 +1332,32 @@ pub fn accountHasStorage(
 
 pub fn getTransientStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     key: u256,
 ) u256 {
     self.assertTransaction();
-    return self.transient_storage.get(.{ .address = target, .key = key }) orelse 0;
+    return self.transient_storage.get(.init(target, key)) orelse 0;
 }
 
 pub fn setTransientStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     key: u256,
     value: u256,
 ) !void {
     self.assertTransaction();
-    const storage_key = StorageKey{ .address = target, .key = key };
-    const previous = self.transient_storage.get(storage_key);
-    if ((previous orelse 0) == value) return;
-    if (previous == null and value != 0)
-        try self.transient_storage.ensureUnusedCapacity(1);
+    const storage_key = TransientStorageKey.init(target, key);
+    const previous_entry = self.transient_storage.get(storage_key);
+    const previous = previous_entry orelse 0;
+    if (previous == value) return;
+    if (previous_entry == null) try self.transient_storage.ensureUnusedCapacity(1);
     try self.journal.appendTransient(self.allocator, .{
         .key = storage_key,
         .previous = previous,
     });
-    if (value == 0) {
-        _ = self.transient_storage.remove(storage_key);
-    } else {
-        self.transient_storage.putAssumeCapacity(storage_key, value);
-    }
+    // Zero is transient storage's semantic absence. Retain the row until the
+    // transaction-wide clear so checkpoint rollback never repairs probe clusters.
+    self.transient_storage.putAssumeCapacity(storage_key, value);
 }
 
 pub fn emitLog(self: *StatelessBlockState, event_log: Host.Log) !void {
@@ -1872,11 +1904,7 @@ fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
                 const index = @intFromEnum(undo_id);
                 std.debug.assert(index + 1 == self.journal.transient.items.len);
                 const undo = self.journal.transient.pop().?;
-                if (undo.previous) |previous| {
-                    self.transient_storage.putAssumeCapacity(undo.key, previous);
-                } else {
-                    _ = self.transient_storage.remove(undo.key);
-                }
+                self.transient_storage.putAssumeCapacity(undo.key, undo.previous);
             },
         }
     }
@@ -2403,7 +2431,7 @@ test "dense transaction cleans every allocation failure" {
             defer if (state.transaction_active) discardTestTransaction(&state, attempt);
             try state.setBalance(.fromAddress(target), 4);
             try state.setCode(.fromAddress(target), &.{0x5f});
-            try state.setTransientStorage(target, 8, 12);
+            try state.setTransientStorage(.fromAddress(target), 8, 12);
             try state.emitLog(.{
                 .address = target,
                 .topics = &.{1},

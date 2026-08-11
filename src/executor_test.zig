@@ -217,7 +217,7 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try tracked.setCode(target, &replacement_code);
     try dense.setCode(target, &replacement_code);
     try tracked.state.setTransientStorage(target, 8, 12);
-    try dense.state.setTransientStorage(target, 8, 12);
+    try dense.state.setTransientStorage(.fromAddress(target), 8, 12);
     const topics = [_]u256{7};
     const data = [_]u8{8};
     try tracked.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });

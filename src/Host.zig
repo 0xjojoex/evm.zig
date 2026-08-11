@@ -337,8 +337,8 @@ pub const VTable = struct {
     observeAccountAccess: ?*const fn (ptr: *anyopaque, address: AddressWord, depth: u16) anyerror!void = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
-    getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
-    setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
+    getTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
+    setTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!void,
 
     /// Native fused storage operations. Split access/get/set primitives remain
     /// required for gas-ordering paths that may stop before value access.
@@ -414,9 +414,9 @@ pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
 pub fn call(self: *Self, msg: Message) !Result {
     return self.vtable.call(self.ptr, msg);
 }
-pub fn getTransientStorage(self: *Self, address: Address, key: u256) !u256 {
+pub fn getTransientStorage(self: *Self, address: AddressWord, key: u256) !u256 {
     return self.vtable.getTransientStorage(self.ptr, address, key);
 }
-pub fn setTransientStorage(self: *Self, address: Address, key: u256, value: u256) !void {
+pub fn setTransientStorage(self: *Self, address: AddressWord, key: u256, value: u256) !void {
     return self.vtable.setTransientStorage(self.ptr, address, key, value);
 }

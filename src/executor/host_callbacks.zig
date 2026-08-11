@@ -202,14 +202,14 @@ pub fn bind(comptime Executor: type) type {
             return self.state.accessStorage(Executor.executionAddress(address), key);
         }
 
-        fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+        fn getTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.getTransientStorage(address, key);
+            return self.state.getTransientStorage(Executor.executionAddress(address), key);
         }
 
-        fn setTransientStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !void {
+        fn setTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !void {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            try self.state.setTransientStorage(address, key, value);
+            try self.state.setTransientStorage(Executor.executionAddress(address), key, value);
         }
     };
 }
