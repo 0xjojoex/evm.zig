@@ -52,6 +52,11 @@ pub const ResolutionError = error{
     UndeclaredStorage,
 };
 
+const ResolvedStorage = struct {
+    account: AccountId,
+    storage: StorageId,
+};
+
 pub const CodeError = artifacts.CodeStore.CacheError;
 pub const AccessHint = struct {
     accounts: usize,
@@ -413,10 +418,12 @@ transaction_scope_reverted: bool = false,
 /// Admitted hot-translation execution state: two remembered address→ID
 /// entries and one (account, slot)→ID entry. `ClaimPlan` is immutable for the
 /// whole block, so a remembered entry can never go stale and
-/// revert/retain/discard must not touch it. Full-key equality decides a hit;
-/// a miss falls back to the deterministic binary search and evicts entries
-/// round-robin. Two account entries cover the caller/callee alternation of
-/// nested calls, which a single entry misses on every step. Every dynamic
+/// revert/retain/discard must not touch it. Full-key equality decides a hit.
+/// An account miss falls back to `ClaimPlan`'s deterministic linear-probe
+/// table and evicts an account memo entry round-robin; a storage miss binary
+/// searches the account's slot window and replaces the one storage memo entry.
+/// Two account entries cover the caller/callee alternation of nested calls,
+/// which a single entry misses on every step. Every dynamic
 /// translation — CALL-family targets, dynamic-address opcodes, storage
 /// owners, and system calls — passes through `resolveAccount`/
 /// `resolveStorage`, so these entries cover the complete translation domain.
@@ -621,6 +628,17 @@ pub fn resolveStorage(
         .required_observed => error.UndeclaredStorage,
         .optional_warm_only => null,
     };
+}
+
+fn resolveStorageKey(
+    self: *StatelessBlockState,
+    target: address.Address,
+    slot: u256,
+    policy: ResolutionPolicy,
+) ResolutionError!?ResolvedStorage {
+    const account = (try self.resolveAccount(target, policy)) orelse return null;
+    const storage = (try self.resolveStorage(account, slot, policy)) orelse return null;
+    return .{ .account = account, .storage = storage };
 }
 
 pub fn beginTransaction(self: *StatelessBlockState) AttemptId {
@@ -1169,12 +1187,9 @@ pub fn getStorage(
     target: address.Address,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    return self.effectiveStorage(id);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.readResolvedStorage(resolved);
 }
 
 pub fn accessStorage(
@@ -1182,9 +1197,9 @@ pub fn accessStorage(
     target: address.Address,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!Host.AccessStatus {
-    const account = (try self.resolveAccount(target, .optional_warm_only)) orelse return .cold;
-    const id = (try self.resolveStorage(account, slot, .optional_warm_only)) orelse return .cold;
-    return if (try self.warmStorageId(id)) .cold else .warm;
+    const resolved = (try self.resolveStorageKey(target, slot, .optional_warm_only)) orelse
+        return .cold;
+    return self.accessResolvedStorage(resolved);
 }
 
 pub fn loadStorage(
@@ -1192,9 +1207,11 @@ pub fn loadStorage(
     target: address.Address,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
-    const access_status = try self.accessStorage(target, slot);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
     return .{
-        .value = try self.getStorage(target, slot),
+        .value = try self.readResolvedStorage(resolved),
         .access_status = access_status,
     };
 }
@@ -1205,16 +1222,9 @@ pub fn setStorage(
     slot: u256,
     value: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageStatus {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(id);
-    const row = &self.storage[@intFromEnum(id)];
-    const status = storage_status.status(row.execution_original, self.effectiveStorage(id), value);
-    if (self.effectiveStorage(id) != value) try self.writeStorage(id, value);
-    return status;
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.setResolvedStorage(resolved, value);
 }
 
 pub fn storeStorage(
@@ -1223,11 +1233,44 @@ pub fn storeStorage(
     slot: u256,
     value: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageStoreResult {
-    const access_status = try self.accessStorage(target, slot);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
     return .{
-        .storage_status = try self.setStorage(target, slot, value),
+        .storage_status = try self.setResolvedStorage(resolved, value),
         .access_status = access_status,
     };
+}
+
+fn accessResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+) Allocator.Error!Host.AccessStatus {
+    return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
+}
+
+fn readResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+) Allocator.Error!u256 {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    return self.effectiveStorage(resolved.storage);
+}
+
+fn setResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+    value: u256,
+) Allocator.Error!Host.StorageStatus {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    const row = &self.storage[@intFromEnum(resolved.storage)];
+    const current = self.effectiveStorage(resolved.storage);
+    const status = storage_status.status(row.execution_original, current, value);
+    if (current != value) try self.writeStorage(resolved.storage, value);
+    return status;
 }
 
 pub fn originalStorage(
@@ -1235,13 +1278,12 @@ pub fn originalStorage(
     target: address.Address,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(id);
-    return self.storage[@intFromEnum(id)].execution_original;
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    return self.storage[@intFromEnum(resolved.storage)].execution_original;
 }
 
 pub fn accountHasStorage(

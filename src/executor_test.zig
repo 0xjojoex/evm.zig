@@ -185,10 +185,11 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try std.testing.expectEqual(tracked_load, dense_load);
     try std.testing.expectEqual(.cold, dense_load.access_status);
     try std.testing.expect(dense.state.isStorageWarm(target, 7));
-    try std.testing.expectEqual(
-        try tracked.state.setStorage(target, 7, 9),
-        try dense.state.setStorage(target, 7, 9),
-    );
+    const tracked_store = try tracked.state.storeStorage(target, 7, 9);
+    const dense_store = try dense.state.storeStorage(target, 7, 9);
+    try std.testing.expectEqual(tracked_store, dense_store);
+    try std.testing.expectEqual(.warm, dense_store.access_status);
+    try std.testing.expectEqual(.modified, dense_store.storage_status);
     try std.testing.expectEqual(@as(u256, 9), try dense.getStorage(target, 7));
 
     try tracked.addBalance(target, 7);
