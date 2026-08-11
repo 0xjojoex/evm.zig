@@ -75,7 +75,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     const target = evmz.addr(0xdddd);
     var execution_context = testExecutionContext(sender, 300_000);
     execution_context.transaction.gas_price = 1;
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -106,7 +106,7 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     const recipient = evmz.addr(0xbbbb);
     const authority = evmz.addr(0xcccc);
     const target = evmz.addr(0xdddd);
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -150,7 +150,7 @@ test "Amsterdam wrong-chain authorization authority is never accessed" {
     const recipient = evmz.addr(0xbbbb);
     const authority = evmz.addr(0xcccc);
     const target = evmz.addr(0xdddd);
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -185,7 +185,7 @@ test "Amsterdam CREATE collision with alive target skips state charge before chi
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, 1);
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -209,7 +209,7 @@ test "Amsterdam CREATE to pre-existing account leaves state reservoir available"
         .PUSH0, .PUSH0, .PUSH0, .CREATE, .POP,
         .PUSH1, 0x01,   .PUSH0, .SSTORE, .STOP,
     });
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -234,7 +234,7 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     const create_address = evmz.address.create(contract, 0);
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
     var observations = AccountObservation{ .address = create_address };
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -256,7 +256,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     var observations = AccountObservation{ .address = create_address };
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -293,7 +293,7 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
         .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH1, 0x01, .PUSH2, 0xc0, 0xc0, .PUSH2, 0x27, 0x10, .CALL,
         .STOP,
     });
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -324,7 +324,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     defer std.testing.allocator.free(input);
     @memset(input, 0);
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });

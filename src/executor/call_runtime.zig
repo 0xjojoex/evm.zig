@@ -1623,7 +1623,7 @@ test "CREATE final stabilization reuses already-stable output" {
     const runtime = bind(Executor);
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var executor = Executor.init(failing_allocator.allocator(), .{ .state = .{} });
+    var executor = Executor.init(failing_allocator.allocator(), .{});
     defer executor.deinit();
 
     executor.last_call_output.deinit();
@@ -1656,7 +1656,7 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     const runtime = bind(Executor);
     const address = evmz.addr(0x1234);
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     const attempt = executor.state.beginTransaction();
     executor.state.beginScope();
@@ -1691,7 +1691,7 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     const parent_write = evmz.addr(0x3333);
     const child_write = evmz.addr(0x4444);
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
@@ -1766,7 +1766,7 @@ test "nested runtime error restores its transferred checkpoint once" {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10 });
     var recipient_account = evmz.state.MemoryAccount.init(std.testing.allocator);
@@ -1797,7 +1797,7 @@ test "nested runtime error restores its transferred checkpoint once" {
 fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address) !void {
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     const Runtime = bind(Exact.Executor);
-    var executor = Exact.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Exact.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var target_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try target_account.storage.put(1, 1);
@@ -1811,7 +1811,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     const runtime = bind(Executor);
     const child_address = evmz.addr(0x3333);
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var child_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try child_account.setCode(&.{ 0x60, 0x07, 0x60, 0x00, 0x55, 0x00 });

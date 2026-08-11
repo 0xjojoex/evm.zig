@@ -24,6 +24,11 @@ const vm = @import("../../../vm.zig");
 
 pub fn Lane(comptime Engine: type) type {
     return struct {
+        pub const ExecutionDependencies = struct {
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?vm.BlockHashSource = null,
+        };
+
         /// Everything a lane needs that stays constant for the whole block.
         pub const Context = struct {
             env: vm.Env,
@@ -145,11 +150,12 @@ pub fn Lane(comptime Engine: type) type {
                 self: *CapturedExecution,
                 allocator: std.mem.Allocator,
                 reader: Reader,
-                options: Engine.Executor.Services,
+                dependencies: ExecutionDependencies,
             ) !void {
                 self.executor = Engine.Executor.init(allocator, .{
                     .state = .{ .reader = reader },
-                    .services = options,
+                    .prepared_code_backend = dependencies.prepared_code_backend,
+                    .block_hash_source = dependencies.block_hash_source,
                 });
             }
 

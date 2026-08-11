@@ -40,6 +40,7 @@ pub fn Tracked(comptime spec: anytype) type {
         pub const ExecutorStateInit = struct {
             reader: ?Reader = null,
         };
+        pub const default_executor_state_init: ExecutorStateInit = .{};
         pub const supports_block_production = true;
         pub const supports_external_observation_capture = true;
 

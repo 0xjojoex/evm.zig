@@ -117,7 +117,7 @@ const StatefulVm = evmz.Vm(evmz.eth.cancun.extend(.{
 test "active reentrant native contract requires an embedding runtime" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = StatefulVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try std.testing.expectError(
@@ -131,8 +131,7 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .reentrant_native_contract_runtime = runtime.service() },
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
@@ -174,8 +173,7 @@ test "executor construction selects the supplied reentrant native contract runti
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
     var first_executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .reentrant_native_contract_runtime = first_runtime.service() },
+        .reentrant_native_contract_runtime = first_runtime.service(),
     });
     defer first_executor.deinit();
 
@@ -187,8 +185,7 @@ test "executor construction selects the supplied reentrant native contract runti
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
     var second_executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .reentrant_native_contract_runtime = second_runtime.service() },
+        .reentrant_native_contract_runtime = second_runtime.service(),
     });
     defer second_executor.deinit();
 
@@ -204,8 +201,7 @@ test "reentrant native contract output survives synchronous host reentry" {
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .reentrant_native_contract_runtime = runtime.service() },
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
@@ -251,8 +247,7 @@ test "reentrant native contract preserves parent stack across arena growth" {
 
     var runtime = ReentrantRuntime{ .child = child };
     var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .state = .{},
-        .services = .{ .reentrant_native_contract_runtime = runtime.service() },
+        .reentrant_native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 

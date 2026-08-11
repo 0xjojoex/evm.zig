@@ -49,7 +49,7 @@ fn expectCallParity(
     };
     const context = evmz.t.defaultExecutionContext(sender, @intCast(gas));
 
-    var normal_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var normal_executor = Executor.init(std.testing.allocator, .{});
     defer normal_executor.deinit();
     try normal_executor.beginTransaction(context, sender, recipient);
     defer normal_executor.discardStateTransition();
@@ -59,7 +59,7 @@ fn expectCallParity(
     defer normal_code.deinit(std.testing.allocator);
     const normal = try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view());
 
-    var controlled_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();
     try controlled_executor.beginTransaction(context, sender, recipient);
     defer controlled_executor.discardStateTransition();
@@ -149,7 +149,7 @@ test "debug session matches uninterrupted execution" {
         .code_address = recipient,
     };
 
-    var normal_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var normal_executor = Executor.init(std.testing.allocator, .{});
     defer normal_executor.deinit();
     try normal_executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
@@ -163,7 +163,7 @@ test "debug session matches uninterrupted execution" {
     defer normal_code.deinit(std.testing.allocator);
     const normal = (try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view())).expectCall();
 
-    var controlled_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();
     try controlled_executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
@@ -286,7 +286,7 @@ test "debug session dispatches a child and resumes its parent" {
         .code_address = recipient,
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var child_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try child_account.setCode(&.{
@@ -385,7 +385,7 @@ test "debug session can substitute a call before continuing" {
         0xf3, // RETURN
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 200_000),
@@ -454,7 +454,7 @@ test "debug session mismatch remains canonical when dispatched" {
         .CALL,  .STOP,
     });
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 200_000),
@@ -531,7 +531,7 @@ test "debug session can substitute a create before continuing" {
         .code_address = recipient,
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 200_000),
@@ -620,7 +620,7 @@ test "debug session aborts at child and action boundaries" {
         .code_address = recipient,
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var child_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try child_account.setCode(&.{
@@ -730,7 +730,7 @@ test "debug session resolves and executes a custom instruction" {
         .code_address = recipient,
     };
 
-    var normal_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var normal_executor = Executor.init(std.testing.allocator, .{});
     defer normal_executor.deinit();
     try normal_executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
@@ -744,7 +744,7 @@ test "debug session resolves and executes a custom instruction" {
     defer normal_code.deinit(std.testing.allocator);
     const normal = (try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view())).expectCall();
 
-    var controlled_executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();
     try controlled_executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 100_000),
@@ -819,7 +819,7 @@ test "debug session rejects an active capture context" {
         .code_address = recipient,
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var capture = evmz.executor.CaptureContext.init(std.testing.allocator, null);
     defer capture.deinit();
@@ -871,7 +871,7 @@ test "debug session inspection rebinds to the active frame" {
         .code_address = recipient,
     };
 
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &child_code });
     try executor.beginTransaction(
@@ -963,7 +963,7 @@ test "failed debug session init leaves no prepared-code execution scope" {
     };
 
     var failing = ArmedFailingAllocator{ .backing = std.testing.allocator };
-    var executor = Executor.init(failing.allocator(), .{ .state = .{} });
+    var executor = Executor.init(failing.allocator(), .{});
     defer executor.deinit();
     try executor.beginTransaction(
         evmz.t.defaultExecutionContext(sender, 200_000),

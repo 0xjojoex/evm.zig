@@ -639,9 +639,9 @@ test "Sequential next transaction stops when the previous after hook fails" {
 }
 
 test "independent Executors admit independent Sequential lifetimes" {
-    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var first_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer first_executor.deinit();
-    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var second_executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer second_executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &first_executor, .{ .gas_limit = 1_000_000 });
@@ -654,7 +654,7 @@ test "independent Executors admit independent Sequential lifetimes" {
 }
 
 test "stale Sequential cleanup cannot resolve a later generation" {
-    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = evmz.Evm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var first = try beginBlock(evmz.Evm, &executor, .{ .gas_limit = 1_000_000 });

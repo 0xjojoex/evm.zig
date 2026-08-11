@@ -10,14 +10,14 @@ const block_hash_source = @import("./BlockHashSource.zig");
 const block_program_module = @import("./block_program.zig");
 const engine_spec = @import("./spec.zig");
 const ethereum_block_program = @import("./block_program/ethereum.zig");
-const ethereum_transition = @import("./transaction/transition.zig");
+const ethereum_tx_transition = @import("./transaction/transition.zig");
 const transaction_validation = @import("./transaction/validation.zig");
 const executor_module = @import("./executor.zig");
 const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
-const interpreter_module = @import("./Interpreter.zig");
-const instruction_module = @import("./instruction.zig");
+const interpreter = @import("./Interpreter.zig");
+const instruction = @import("./instruction.zig");
 const state_module = @import("./state.zig");
 const block_state = @import("./vm/block_state.zig");
 const transaction = @import("./transaction.zig");
@@ -111,7 +111,7 @@ pub fn Vm(comptime spec: engine_spec.Spec) type {
 }
 
 pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: CompileOptions) type {
-    return EngineType(spec, block_state.Tracked(spec), options_value);
+    return VmType(spec, block_state.Tracked(spec), options_value);
 }
 
 pub fn BalStatelessVm(comptime spec: engine_spec.Spec) type {
@@ -122,104 +122,82 @@ pub fn BalStatelessVmWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, block_state.BalStateless, options_value);
+    return VmType(spec, block_state.BalStateless, options_value);
 }
 
-pub fn EngineType(
+pub fn VmType(
     comptime spec: engine_spec.Spec,
-    comptime BlockState: type,
-    comptime options_value: CompileOptions,
-) type {
-    BlockState.checkSpec(spec);
-    return VmCore(
-        spec,
-        options_value,
-        BlockState,
-        executor_module.ExecutorType(spec, BlockState, options_value),
-    );
-}
-
-fn VmCore(
-    comptime spec: engine_spec.Spec,
-    comptime options_value: CompileOptions,
     comptime BlockStateType: type,
-    comptime ExecutorType: type,
+    comptime options_value: CompileOptions,
 ) type {
-    const InstructionType = instruction_module.Instruction(spec);
-    const InterpreterType = interpreter_module.Interpreter(spec);
-    const ReceiptType = struct {
-        status: TxStatus,
-        gas_used: u64 = 0,
-        cumulative_gas_used: u64 = 0,
-        created_address: ?Address = null,
-        logs: ExecutorType.State.LogView = .empty,
-    };
-    const IncludedTransactionType = struct {
-        result: TxExecutionResult,
-        receipt: ReceiptType,
-    };
-    const PublicTransactInput = struct {
-        env: Env,
-        tx: transaction.Transaction,
-        progress: transaction.PreparationBlockProgress = .{},
-    };
-    const PublicContext = transaction_program.Context(ExecutorType, PublicTransactInput);
-    const EthereumTransition = ethereum_transition.bind(
-        spec,
-        ExecutorType,
-        PublicContext,
-        TxExecutionResult,
-    );
-    const TransactionRuntime = transaction_program.bind(
-        ExecutorType,
-        transaction.Transaction,
-        PublicTransactInput,
-        TxExecutionResult,
-        transaction_validation.ValidationError,
-        EthereumTransition,
-    );
-    const EthereumBlock = ethereum_block_program.bind(
-        TransactionRuntime,
-        Env,
-        IncludedTransactionType,
-        BlockResult,
-    );
-    const BlockTransactionRuntime = transaction_program.bindWithPreludeError(
-        ExecutorType,
-        transaction.Transaction,
-        PublicTransactInput,
-        TxExecutionResult,
-        transaction_validation.ValidationError,
-        EthereumTransition,
-        EthereumBlock.Implementation.PreludeError,
-    );
-    const BlockExecutionType = block_program_module.bind(
-        BlockTransactionRuntime,
-        ExecutorType,
-        transaction.Transaction,
-        PublicTransactInput,
-        TxExecutionResult,
-        transaction_validation.ValidationError,
-        Env,
-        IncludedTransactionType,
-        BlockResult,
-        EthereumBlock.Implementation,
-    );
+    comptime BlockStateType.checkSpec(spec);
 
     return struct {
         const Self = @This();
+
+        const PublicTransactInput = struct {
+            env: Env,
+            tx: transaction.Transaction,
+            progress: transaction.PreparationBlockProgress = .{},
+        };
+
+        const EthereumTxTransition = Self.Transition(PublicTransactInput);
+
+        const TransactionRuntime = Self.Program(
+            transaction.Transaction,
+            PublicTransactInput,
+            TxExecutionResult,
+            transaction_validation.ValidationError,
+            EthereumTxTransition,
+        );
+
+        const EthereumBlock = ethereum_block_program.bind(TransactionRuntime, Env, IncludedTransactionType, BlockResult);
+
+        const BlockTransactionRuntime = transaction_program.ProgramType(
+            Executor,
+            transaction.Transaction,
+            PublicTransactInput,
+            TxExecutionResult,
+            transaction_validation.ValidationError,
+            EthereumTxTransition,
+            EthereumBlock.Implementation.PreludeError,
+        );
+        const BlockExecutionType = block_program_module.bind(
+            BlockTransactionRuntime,
+            Executor,
+            transaction.Transaction,
+            PublicTransactInput,
+            TxExecutionResult,
+            transaction_validation.ValidationError,
+            Env,
+            IncludedTransactionType,
+            BlockResult,
+            EthereumBlock.Implementation,
+        );
+
+        const ReceiptType = struct {
+            status: TxStatus,
+            gas_used: u64 = 0,
+            cumulative_gas_used: u64 = 0,
+            created_address: ?Address = null,
+            logs: Executor.State.LogView = .empty,
+        };
+        const IncludedTransactionType = struct {
+            result: TxExecutionResult,
+            receipt: ReceiptType,
+        };
+
         pub const specification = spec;
         pub const compile_options = options_value;
         pub const BlockState = BlockStateType;
-        pub const Instruction = InstructionType;
-        pub const Executor = ExecutorType;
-        pub const Interpreter = InterpreterType;
+
+        pub const Executor = executor_module.ExecutorType(spec, BlockState, options_value);
+        pub const Interpreter = interpreter.Interpreter(spec);
         pub const Transaction = transaction.Transaction;
         pub const TransactionLog = Log;
         pub const TransactionLogs = TransactionRuntime.TransactionLogs;
         pub const TransactInput = PublicTransactInput;
         pub const Output = TxExecutionResult;
-        pub const TxStatus = execution.Status;
         pub const Rejection = transaction_validation.ValidationError;
         pub const Executed = TransactionRuntime.Executed;
         pub const Prelude = TransactionRuntime.Prelude;
@@ -277,17 +255,12 @@ fn VmCore(
 
         /// Define the narrow family-authoring context for a custom input type.
         pub fn Context(comptime Input: type) type {
-            return transaction_program.Context(ExecutorType, Input);
+            return transaction_program.ContextType(Executor, Input);
         }
 
         /// Bind Ethereum transaction stage helpers to a custom input type.
         pub fn Transition(comptime Input: type) type {
-            return ethereum_transition.bind(
-                spec,
-                ExecutorType,
-                Context(Input),
-                TxExecutionResult,
-            );
+            return ethereum_tx_transition.bind(spec, Executor, Context(Input), TxExecutionResult);
         }
 
         /// Bind one closed transaction representation and workflow to this VM.
@@ -298,13 +271,14 @@ fn VmCore(
             comptime RejectionType: type,
             comptime ImplementationType: type,
         ) type {
-            return transaction_program.bind(
-                ExecutorType,
+            return transaction_program.ProgramType(
+                Executor,
                 TransactionType,
                 InputType,
                 OutputType,
                 RejectionType,
                 ImplementationType,
+                error{},
             );
         }
 

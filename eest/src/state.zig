@@ -669,7 +669,7 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
 
             var executor = ExactVm.Executor.init(allocator, .{
                 .state = .{ .reader = store.reader() },
-                .services = .{ .block_hash_source = EestStateBlockHashSource.source() },
+                .block_hash_source = EestStateBlockHashSource.source(),
             });
             errdefer executor.deinit();
 

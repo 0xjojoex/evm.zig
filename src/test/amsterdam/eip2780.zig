@@ -171,7 +171,7 @@ test "Amsterdam top-frame delegated target honors transaction warmth" {
 }
 
 fn executorWithSender(sender: Address, balance: u256) !Executor {
-    var executor = Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Executor.init(std.testing.allocator, .{});
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = balance });
     return executor;
 }

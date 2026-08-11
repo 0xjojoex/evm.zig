@@ -101,7 +101,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     defer prepared_pool.deinit();
     var executor = Osaka.Executor.init(std.testing.allocator, .{
         .state = .{ .reader = memory.reader() },
-        .services = .{ .prepared_code_backend = prepared_pool.backend() },
+        .prepared_code_backend = prepared_pool.backend(),
     });
     defer executor.deinit();
 
@@ -337,7 +337,7 @@ test "Executed retainResult retains state and returns the validated output" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
-    var executor = Cancun.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
 
@@ -394,7 +394,7 @@ test "transaction STF forwards BLOCKHASH to the Executor source" {
     var block_hashes = TestBlockHashSource{};
     var executor = Prague.Executor.init(std.testing.allocator, .{
         .state = .{ .reader = memory.reader() },
-        .services = .{ .block_hash_source = block_hashes.source() },
+        .block_hash_source = block_hashes.source(),
     });
     defer executor.deinit();
 
@@ -971,7 +971,7 @@ test "Sequential discardIfUnfinished drops included executions" {
 }
 
 test "Sequential endTransactions closes the transaction phase" {
-    var executor = Default.Executor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = Default.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var block = try Default.Sequential.init(&executor, .{

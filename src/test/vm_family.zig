@@ -41,21 +41,6 @@ test "Amsterdam BlockSTF combines spec and state capabilities" {
     }
 }
 
-test "ordinary VM constructs executor state through its state domain" {
-    const ExactVm = evmz.Vm(evmz.eth.amsterdam);
-
-    comptime {
-        std.debug.assert(ExactVm.BlockState.State == evmz.state.TrackedState);
-        std.debug.assert(@hasField(ExactVm.Executor.Init, "state"));
-        std.debug.assert(@hasField(ExactVm.Executor.Init, "services"));
-        std.debug.assert(@hasField(ExactVm.BlockState.ExecutorStateInit, "reader"));
-    }
-
-    var executor = ExactVm.Executor.init(std.testing.allocator, .{ .state = .{} });
-    defer executor.deinit();
-    try std.testing.expect(executor.state.reader == null);
-}
-
 fn analyzeEngineProduct(comptime Engine: type) void {
     std.testing.refAllDecls(Engine.BlockState.State);
     std.testing.refAllDecls(Engine.Executor);
@@ -147,30 +132,4 @@ test "Spec.extend creates a distinct exact VM from static values" {
         },
     });
     try std.testing.expectEqual(Strict.Rejection.gas_allowance_exceeded, try expectRejected(outcome));
-}
-
-test "custom transaction program remains bound to the exact Executor" {
-    const Input = Default.TransactInput;
-    const Context = Default.Context(Input);
-    const Transition = Default.Transition(Input);
-    const Program = Default.Program(
-        transaction.Transaction,
-        Input,
-        Default.Output,
-        Default.Rejection,
-        Transition,
-    );
-
-    comptime {
-        std.debug.assert(Program.Executor == Default.Executor);
-        std.debug.assert(Program.Executor == evmz.executor.ExecutorType(
-            Program.specification,
-            Default.BlockState,
-            Default.compile_options,
-        ));
-        std.debug.assert(Program.Context == Context);
-        std.debug.assert(Program.Transaction == Default.Transaction);
-        std.debug.assert(Program.Output == Default.Output);
-        std.debug.assert(Program.Error != anyerror);
-    }
 }

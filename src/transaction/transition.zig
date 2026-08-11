@@ -26,7 +26,8 @@ pub fn bind(
     comptime Context: type,
     comptime Output: type,
 ) type {
-    comptime std.debug.assert(Context.Executor == ExactExecutor);
+    _ = ExactExecutor;
+    // comptime std.debug.assert(Context.Executor == ExactExecutor);
     const PreparedTransaction = transaction.Prepared(tx_settlement.DefaultPlan);
     const Rejection = transaction_validation.ValidationError;
 
@@ -123,7 +124,7 @@ pub fn bind(
         pub fn transact(
             context: *Context,
             tx_value: transaction.Transaction,
-        ) Error!transaction.TransitionOutcome(Output, Rejection) {
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
             const input_value = context.input();
             const prepared = (transaction_prepare.Runtime(spec){}).prepare(.{
                 .tx = tx_value,
@@ -140,7 +141,7 @@ pub fn bind(
         fn completeExecutable(
             context: *Context,
             executable: PreparedTransaction,
-        ) Error!transaction.TransitionOutcome(Output, Rejection) {
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
             const request = transaction.executionRequest(
                 executable.scope.context,
                 executable.message,

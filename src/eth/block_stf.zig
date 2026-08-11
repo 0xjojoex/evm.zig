@@ -1068,10 +1068,8 @@ fn executeBlock(
     };
     run.executor = Engine.Executor.init(allocator, .{
         .state = executor_state,
-        .services = .{
-            .prepared_code_backend = input.prepared_code_backend,
-            .block_hash_source = input.block_hash_source,
-        },
+        .prepared_code_backend = input.prepared_code_backend,
+        .block_hash_source = input.block_hash_source,
     });
     const executor = &run.executor.?;
     if (bal_claim.counts) |counts| {

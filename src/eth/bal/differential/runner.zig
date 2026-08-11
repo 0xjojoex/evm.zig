@@ -326,11 +326,11 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             const block_access_index = std.math.cast(bal.BlockAccessIndex, candidate_tx_index) orelse
                 return error.BlockAccessIndexOverflow;
             var claim_reader = ClaimReader.init(self.base_reader, self.claim, block_access_index);
-            const executor_options: Engine.Executor.Services = .{
+            const dependencies: Lane.ExecutionDependencies = .{
                 .prepared_code_backend = self.prepared_code_backend,
                 .block_hash_source = self.block_hash_source,
             };
-            self.verifyRejectedAgainstClaim(rejected, claim_reader.reader(), executor_options) catch |err| {
+            self.verifyRejectedAgainstClaim(rejected, claim_reader.reader(), dependencies) catch |err| {
                 self.stopForRejectedError(err, rejected.tx_index, claim_reader.strategy_failure);
             };
         }
@@ -339,11 +339,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             self: *Self,
             rejected: Rejected,
             reader: Reader,
-            executor_options: Engine.Executor.Services,
+            dependencies: Lane.ExecutionDependencies,
         ) !void {
             var executor = Engine.Executor.init(self.allocator, .{
                 .state = .{ .reader = reader },
-                .services = executor_options,
+                .prepared_code_backend = dependencies.prepared_code_backend,
+                .block_hash_source = dependencies.block_hash_source,
             });
             defer executor.deinit();
 

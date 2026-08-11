@@ -57,8 +57,8 @@ pub const PrepareResult = transaction_mod.PrepareResult;
 pub const recoverSender = signing.recoverSender;
 pub const signingHash = signing.signingHash;
 pub const recoverAuthorizationSigner = signing.recoverAuthorizationSigner;
-pub const TransitionOutcome = program_mod.TransitionOutcome;
-pub const TransactOutcome = program_mod.TransactOutcome;
+pub const TransitionOutcomeType = program_mod.TransitionOutcomeType;
+pub const TransactOutcomeType = program_mod.TransactOutcomeType;
 pub const GasRuntime = gas_mod.Runtime;
 pub const SettlementRuntime = settlement_mod.Runtime;
 

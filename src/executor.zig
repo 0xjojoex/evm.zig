@@ -90,19 +90,29 @@ const ScopeRoot = struct {
 
 pub const code_deposit_gas: i64 = 200;
 
-/// Construction options for the execution substrate.
-///
-/// State admission belongs to the selected VM/domain. `block_hash_source` is a
-/// separate execution service because native BLOCKHASH reads chain history,
-/// not account/trie state. Capture is selected by an explicit transaction
-/// entrypoint, not construction.
-const ExecutorServices = struct {
-    /// Caller-owned derived-artifact service. Its allocation, I/O,
-    /// synchronization, and capacity policy are outside executor bounds.
-    prepared_code_backend: ?prepared_code.Backend = null,
-    block_hash_source: ?BlockHashSource = null,
-    reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
-};
+/// Construct the public initializer for one state domain. Only domains with a
+/// semantic empty baseline may omit `state`; authenticated dense domains keep
+/// the field structurally required.
+fn ExecutorInitType(comptime StateDomain: type) type {
+    const StateInit = StateDomain.ExecutorStateInit;
+    if (@hasDecl(StateDomain, "default_executor_state_init")) {
+        const default_state: StateInit = StateDomain.default_executor_state_init;
+        return struct {
+            state: StateInit = default_state,
+            /// Caller-owned derived-artifact service. Its allocation, I/O,
+            /// synchronization, and capacity policy are outside executor bounds.
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?BlockHashSource = null,
+            reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
+        };
+    }
+    return struct {
+        state: StateInit,
+        prepared_code_backend: ?prepared_code.Backend = null,
+        block_hash_source: ?BlockHashSource = null,
+        reentrant_native_contract_runtime: ?execution_values.ReentrantNativeContractRuntime = null,
+    };
+}
 
 /// A top-level call whose bytecode has already been prepared by the caller.
 ///
@@ -159,11 +169,7 @@ pub fn ExecutorType(
         pub const State = StateDomain.State;
         pub const BranchCheckpoint = State.BranchCheckpoint;
         pub const Error = ErrorType;
-        pub const Services = ExecutorServices;
-        pub const Init = struct {
-            state: StateDomain.ExecutorStateInit,
-            services: Services = .{},
-        };
+        pub const Init = ExecutorInitType(StateDomain);
         pub const PreparedCallTransaction = PreparedCallTransactionType;
         pub const Call = CallType;
         pub const Create = CreateType;
@@ -530,23 +536,15 @@ pub fn ExecutorType(
 
         /// Construct and take exclusive ownership of domain state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
-            return initWithState(
-                allocator,
-                StateDomain.initExecutorState(allocator, options.state),
-                options.services,
-            );
-        }
-
-        fn initWithState(allocator: std.mem.Allocator, state: State, services: Services) Self {
             return .{
                 .allocator = allocator,
-                .state = state,
+                .state = StateDomain.initExecutorState(allocator, options.state),
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
-                .block_hash_source = services.block_hash_source,
-                .reentrant_native_contract_runtime = services.reentrant_native_contract_runtime,
-                .prepared_code_backend = services.prepared_code_backend,
+                .block_hash_source = options.block_hash_source,
+                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+                .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = frame_io.ByteSlot.init(allocator),
             };
         }

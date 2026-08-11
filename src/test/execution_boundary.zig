@@ -26,7 +26,7 @@ test "Executor observation boundary hides StateModel pending views" {
 test "discarding a manual state transition rolls back its mutations" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const account = evmz.addr(0xaaaa);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try executor.beginStateTransition(evmz.t.defaultExecutionContext(account, 100_000));
@@ -45,7 +45,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
     const contract = evmz.addr(0xbbbb);
     const other = evmz.addr(0xcccc);
     const reverted = evmz.addr(0xdddd);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     const execution_context = evmz.t.defaultExecutionContext(sender, 100_000);
@@ -103,7 +103,7 @@ test "beginMessageScope derives root identity context and raw warmth" {
             .blob_hashes = &blob_hashes,
         },
     };
-    var executor = ShanghaiExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     defer executor.discardStateTransition();
 
@@ -148,7 +148,7 @@ test "execution checkpoint preserves family pre-scope writes" {
     const ShanghaiExecutor = (evmz.t.Vm(.shanghai) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var executor = ShanghaiExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try transaction_runtime.begin(&executor, .normal);
@@ -196,7 +196,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         }
     };
     var observations = Observer{ .contract = contract };
-    var executor = BerlinExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     const observed = executor.observe(&observations);
     try observed.beginTransaction(
@@ -238,7 +238,7 @@ test "checkpoint nests LIFO and deinit restores an open token" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
@@ -263,7 +263,7 @@ test "successive checkpoints receive distinct ids" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = BerlinExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
@@ -307,7 +307,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
         }
     };
     var observations = Observer{ .contract = contract };
-    var executor = AmsterdamExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = AmsterdamExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     const observed = executor.observe(&observations);
     try observed.beginTransaction(
@@ -333,7 +333,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
     const revert_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .SSTORE, .PUSH0, .PUSH0, .REVERT });
 
     {
-        var executor = ShanghaiExecutor.init(std.testing.allocator, .{ .state = .{} });
+        var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &success_code });
 
@@ -345,7 +345,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
     }
 
     {
-        var executor = ShanghaiExecutor.init(std.testing.allocator, .{ .state = .{} });
+        var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
@@ -391,7 +391,7 @@ test "bounded trace capture failure rolls back the standalone operation" {
     });
     defer tape.deinit();
 
-    var executor = ShanghaiExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
@@ -430,7 +430,7 @@ test "captured CALL publishes return data and parent memory output after resume"
         .PUSH2, 0x12, 0x34,   .GAS,   .CALL,  .STOP,
     });
 
-    var executor = CancunExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = CancunExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
     try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &child_code });
@@ -496,7 +496,7 @@ test "nested CREATE revert output survives child frame release" {
         0x01,            .PUSH0, .REVERT,
     });
 
-    var executor = CancunExecutor.init(std.testing.allocator, .{ .state = .{} });
+    var executor = CancunExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
