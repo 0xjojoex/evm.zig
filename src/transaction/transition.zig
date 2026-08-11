@@ -122,6 +122,21 @@ pub fn ImplType(
             out_of_gas,
         };
 
+        const AuthorityState = packed struct {
+            written: bool = false,
+            pre_delegated_known: bool = false,
+            pre_delegated: bool = false,
+            delegation_set: bool = false,
+        };
+
+        const AuthorityIndex = Address.HashMap(AuthorityState);
+
+        comptime {
+            // One authorization-list lifetime owns every fact for an address.
+            std.debug.assert(@bitSizeOf(AuthorityState) == 4);
+            std.debug.assert(@sizeOf(AuthorityState) == 1);
+        }
+
         fn settlementPlanner(_: *const Context) Settlement {
             return .{};
         }
@@ -355,30 +370,30 @@ pub fn ImplType(
         ) !bool {
             if (!authorization_spec.active) return true;
             const allocator = try context.allocator();
-            var written_accounts = Address.HashMap(void).init(allocator);
-            defer written_accounts.deinit();
-            try written_accounts.put(message.sender(), {});
+            var authorities = AuthorityIndex.init(allocator);
+            defer authorities.deinit();
+            try markWritten(&authorities, message.sender());
             switch (message) {
-                .call => |call| if (call.value != 0) try written_accounts.put(call.recipient, {}),
+                .call => |call| if (call.value != 0) try markWritten(&authorities, call.recipient),
                 .create => {},
             }
-            var pre_delegated = Address.HashMap(bool).init(allocator);
-            defer pre_delegated.deinit();
-            var delegation_set_for = Address.HashMap(void).init(allocator);
-            defer delegation_set_for.deinit();
             for (scope.authorization_list) |authorization| {
                 const outcome = try applyAuthorizationTuple(
                     context,
                     chain_id,
                     authorization,
                     gas,
-                    &written_accounts,
-                    &pre_delegated,
-                    &delegation_set_for,
+                    &authorities,
                 );
                 if (outcome == .out_of_gas) return false;
             }
             return gas.apply(malformedAuthorizationGasAdjustment(scope));
+        }
+
+        fn markWritten(authorities: *AuthorityIndex, account: Address) !void {
+            const entry = try authorities.getOrPut(account);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            entry.value_ptr.written = true;
         }
 
         fn applyAuthorizationTuple(
@@ -386,9 +401,7 @@ pub fn ImplType(
             chain_id: u256,
             tuple: transaction.AuthorizationTuple,
             gas: *PreExecutionGas,
-            written_accounts: *Address.HashMap(void),
-            pre_delegated_by_authority: *Address.HashMap(bool),
-            delegation_set_for: *Address.HashMap(void),
+            authorities: *AuthorityIndex,
         ) !AuthorizationTupleOutcome {
             const eip7702 = executor.eip7702;
             if (!eip7702.authorizationSignatureShapeValid(
@@ -408,12 +421,13 @@ pub fn ImplType(
             const account_exists = existing_account != null;
             const existing_code = if (account_exists) try context.code(tuple.signer) else &.{};
             const currently_delegated = eip7702.delegationTarget(existing_code) != null;
-            const delegated_before_first = if (pre_delegated_by_authority.get(tuple.signer)) |delegated|
-                delegated
-            else blk: {
-                try pre_delegated_by_authority.put(tuple.signer, currently_delegated);
-                break :blk currently_delegated;
-            };
+            const entry = try authorities.getOrPut(tuple.signer);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            const authority_state = entry.value_ptr;
+            if (!authority_state.pre_delegated_known) {
+                authority_state.pre_delegated_known = true;
+                authority_state.pre_delegated = currently_delegated;
+            }
             if (existing_account) |account| {
                 if (existing_code.len != 0 and !currently_delegated)
                     return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
@@ -426,15 +440,15 @@ pub fn ImplType(
             const clears_delegation = Address.eql(tuple.target, address.zero_address);
             const adjustment = authorization_spec.successGasAdjustment(.{
                 .account_exists = account_exists,
-                .account_already_written = written_accounts.contains(tuple.signer),
+                .account_already_written = authority_state.written,
                 .clears_delegation = clears_delegation,
-                .delegated_before_transaction = delegated_before_first,
-                .delegation_set_before = delegation_set_for.contains(tuple.signer),
+                .delegated_before_transaction = authority_state.pre_delegated,
+                .delegation_set_before = authority_state.delegation_set,
             });
             if (!gas.apply(adjustment)) return .out_of_gas;
 
-            try written_accounts.put(tuple.signer, {});
-            if (!clears_delegation) try delegation_set_for.put(tuple.signer, {});
+            authority_state.written = true;
+            if (!clears_delegation) authority_state.delegation_set = true;
             if (clears_delegation) {
                 try context.clearCode(tuple.signer);
             } else {

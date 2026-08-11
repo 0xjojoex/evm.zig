@@ -101,6 +101,47 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     try std.testing.expectEqual(target, eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
+test "Amsterdam repeated authorizations share authority history" {
+    const sender = evmz.addr(0xaaaa);
+    const recipient = evmz.addr(0xbbbb);
+    const authority = evmz.addr(0xcccc);
+    const first_target = evmz.addr(0xdddd);
+    const final_target = evmz.addr(0xeeee);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+
+    var second = evmz.t.testAuthorization(authority, final_target);
+    second.nonce = 1;
+    const authorization_list = [_]transaction.AuthorizationTuple{
+        evmz.t.testAuthorization(authority, first_target),
+        second,
+    };
+    var vm = evmz.Evm.init(&executor);
+    const executed = try evmz.t.expectExecuted(try vm.transact(.{
+        .env = .{ .gas_limit = 600_000 },
+        .tx = .{
+            .kind = .set_code,
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 600_000,
+            .max_fee_per_gas = 1,
+            .authorization_list = &authorization_list,
+        },
+    }));
+    defer executed.discardIfCurrent();
+
+    const result = executed.result();
+    try std.testing.expectEqual(evmz.TxStatus.success, result.status);
+    try std.testing.expectEqual(
+        @as(u64, eth_tx.amsterdam_new_account_state_gas + eth_tx.amsterdam_auth_base_state_gas),
+        result.gas.block.state,
+    );
+    try std.testing.expectEqual(@as(u64, 2), executor.getAccount(authority).?.nonce);
+    try std.testing.expectEqual(final_target, eip7702.delegationTarget(try executor.getCode(authority)).?);
+}
+
 test "Amsterdam invalid loaded authorization authority is a semantic access" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
