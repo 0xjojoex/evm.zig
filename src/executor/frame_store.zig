@@ -132,6 +132,14 @@ pub fn maxRowCount(self: *const FrameStore) usize {
     return self.max_rows;
 }
 
+pub fn metadataPointersStable(self: *const FrameStore) bool {
+    const capacity = self.stable_metadata_capacity orelse return false;
+    return self.frames.capacity >= capacity and
+        self.messages.capacity >= capacity and
+        self.memories.capacity >= capacity and
+        self.ios.capacity >= capacity;
+}
+
 /// Addressable words for the active LIFO frame set, including the active
 /// frame's 1,024-word execution headroom.
 pub fn activeStackWordCount(self: *const FrameStore) usize {
@@ -225,9 +233,9 @@ fn ensureConstructedRow(self: *FrameStore, allocator: std.mem.Allocator, index: 
     std.debug.assert(index < self.memories.capacity);
     std.debug.assert(index < self.ios.capacity);
 
-    const io = frame_io.Slot.init(allocator);
     self.memories.appendAssumeCapacity(.empty);
-    self.ios.appendAssumeCapacity(io);
+    self.ios.appendAssumeCapacity(undefined);
+    self.ios.items[index].init(allocator);
 }
 
 fn popUninitialized(self: *FrameStore) void {
@@ -243,8 +251,7 @@ fn rebindActiveFrames(self: *FrameStore) void {
     for (0..self.frames.items.len) |index| {
         self.frames.items[index].msg = &self.messages.items[index];
         self.frames.items[index].memory.rebindStorage(&self.memories.items[index]);
-        self.frames.items[index].io = &self.ios.items[index];
-        self.frames.items[index].return_data = self.ios.items[index].return_data.slice();
+        self.frames.items[index].rebindIo(&self.ios.items[index]);
     }
 }
 
@@ -355,6 +362,16 @@ test "frame store rebinds active rows after growth" {
     store.frame(first).stack.push(33);
     try store.frame(first).memory.expandToFit(0, 32);
     store.frame(first).memory.writeBytes(0, "abc");
+    store.frame(first).state = .running;
+    const continuation: Interpreter.Action.CallResume = .{
+        .gas_limit = 10,
+        .out_offset = 4,
+        .out_size = 8,
+    };
+    store.frame(first).suspendWith(.{ .call = .{
+        .msg = first_msg,
+        .continuation = continuation,
+    } });
 
     var second_msg = evmz.t.defaultMessage();
     second_msg.depth = 1;
@@ -368,6 +385,14 @@ test "frame store rebinds active rows after growth" {
     store.frame(second).stack.push(44);
 
     try std.testing.expect(store.frame(first).msg == &store.messages.items[first]);
+    try std.testing.expect(store.frame(first).suspendedAction().? == &store.ios.items[first].action);
+    const rebound_action = store.frame(first).suspendedAction() orelse return error.ExpectedAction;
+    const rebound_call = switch (rebound_action.*) {
+        .call => |value| value,
+        .create => return error.ExpectedCallAction,
+    };
+    try std.testing.expectEqual(continuation, rebound_call.continuation);
+    try std.testing.expectEqual(first_msg.depth, rebound_call.msg.depth);
     try std.testing.expectEqual(@as(u32, 0), store.frame(first).stack.base_word);
     try std.testing.expectEqual(@as(u32, 3), store.frame(second).stack.base_word);
     try std.testing.expectEqual(@intFromPtr(&store.stack_words.items[0]), @intFromPtr(store.frame(first).stack.base));
@@ -443,6 +468,7 @@ test "stable metadata capacity prevents active frame relocation" {
         &root_msg,
     );
     const root_ptr = store.frame(root);
+    try std.testing.expect(store.metadataPointersStable());
     try std.testing.expectEqual(@as(usize, 2), store.frames.capacity);
     try std.testing.expectEqual(@as(usize, 1), store.memories.items.len);
     try std.testing.expectEqual(@as(usize, 1), store.ios.items.len);

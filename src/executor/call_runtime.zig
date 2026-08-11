@@ -315,12 +315,12 @@ pub fn bind(comptime Executor: type) type {
             }
 
             pub fn dispatchSuspension(self: *CallRuntime, frame_index: usize, action: *const Interpreter.Action) !void {
-                // `action` borrows the suspended frame's state, and starting a
-                // child may grow the frame store and move that frame. Own the
-                // action before anything below can invalidate it.
-                const owned = action.*;
-                switch (owned) {
-                    .call => |call_action| {
+                // Executor reserves pointer-bearing frame storage before the
+                // root frame is acquired, so child pushes cannot move action.
+                std.debug.assert(self.frames.metadataPointersStable());
+                std.debug.assert(action == self.frames.frame(frame_index).suspendedAction().?);
+                switch (action.*) {
+                    .call => |*call_action| {
                         const continuation = call_action.continuation;
                         if (try self.startCall(call_action.msg)) |host_result| {
                             try self.frames.frame(frame_index).resumeWith(host_result);
@@ -332,7 +332,7 @@ pub fn bind(comptime Executor: type) type {
                             try self.captureReturnData(frame_index);
                         }
                     },
-                    .create => |create_action| {
+                    .create => |*create_action| {
                         if (try self.startCreate(create_action.msg)) |host_result| {
                             try self.frames.frame(frame_index).resumeWith(host_result);
                             try self.captureReturnData(frame_index);

@@ -1,4 +1,34 @@
+//! Owned byte buffers and cold storage carried beside an executing frame.
+
 const std = @import("std");
+const Host = @import("./Host.zig");
+
+pub const Action = union(enum) {
+    call: Call,
+    create: Create,
+
+    pub const CallResume = struct {
+        gas_limit: i64,
+        out_offset: usize,
+        out_size: usize,
+        state_gas_charged: i64 = 0,
+    };
+
+    pub const CreateResume = struct {
+        gas_limit: i64,
+        state_gas_charged: i64 = 0,
+    };
+
+    pub const Call = struct {
+        msg: Host.Message,
+        continuation: CallResume,
+    };
+
+    pub const Create = struct {
+        msg: Host.Message,
+        continuation: CreateResume,
+    };
+};
 
 pub const ByteSlot = struct {
     allocator: std.mem.Allocator = undefined,
@@ -48,11 +78,11 @@ pub const ByteSlot = struct {
 
 pub const Slot = struct {
     return_data: ByteSlot,
+    /// Meaningful only while the owning call frame is suspended.
+    action: Action = undefined,
 
-    pub fn init(allocator: std.mem.Allocator) Slot {
-        return .{
-            .return_data = ByteSlot.init(allocator),
-        };
+    pub fn init(self: *Slot, allocator: std.mem.Allocator) void {
+        self.return_data = ByteSlot.init(allocator);
     }
 
     pub fn deinit(self: *Slot) void {
@@ -66,7 +96,8 @@ pub const Slot = struct {
 };
 
 test "frame return-data slot overwrites and retains capacity" {
-    var slot = Slot.init(std.testing.allocator);
+    var slot: Slot = undefined;
+    slot.init(std.testing.allocator);
     defer slot.deinit();
 
     try std.testing.expectEqualSlices(u8, "abc", try slot.return_data.replace("abc"));
