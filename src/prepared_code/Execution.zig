@@ -15,12 +15,14 @@ backend: ?Backend,
 scratch_allocator: std.mem.Allocator,
 transient_entries: std.AutoHashMap([32]u8, Bytecode.View),
 owned_entries: std.ArrayList(Bytecode),
-/// Two remembered hash→view resolutions with round-robin eviction. Nested
-/// calls resolve the same one or two code hashes on every frame; remembering
-/// them skips the hash-map probe. Entries die with this execution, so a view
-/// can never outlive the scratch storage it points into. Keys stay `[32]u8`:
-/// a by-value parameter sits on compiler-aligned stack storage, so the
-/// byte-wise compare already lowers to word compares and a pre-assembled word
+/// Two remembered hash to view resolutions with round-robin eviction.
+/// Two slots for commonly shape for delegatecall proxy patterns.
+///
+/// Nested calls resolve the same one or two code hashes on every frame;
+/// remembering them skips the hash-map probe. Entries die with this execution,
+/// so a view can never outlive the scratch storage it points into.
+/// Keys stay `[32]u8`: a by-value parameter sits on compiler-aligned stack storage,
+/// so the byte-wise compare already lowers to word compares and a pre-assembled word
 /// key measured slower.
 memo_hashes: [2][32]u8 = undefined,
 memo_views: [2]Bytecode.View = undefined,
