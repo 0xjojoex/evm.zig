@@ -9,7 +9,6 @@ test {
     _ = @import("./test/call_capture_oracle.zig");
     _ = @import("./test/executor_custom_handler_reentry.zig");
     _ = @import("./test/execution_reentrant_native_contract.zig");
-    _ = @import("./test/block_lifecycle.zig");
     _ = @import("./test/mpt_package_test.zig");
     _ = @import("./test/eip2200.zig");
     _ = @import("./test/amsterdam/eip2780.zig");

@@ -151,13 +151,14 @@ test "block hook collections preserve insertion order" {
     try std.testing.expectEqual(second_recipient, calls.slice()[1].recipient);
 }
 
-/// Internal flat binder used by a concrete VM program's `Block(...)` closure.
+/// Bind block-fold semantics above one transaction runtime.
+/// Concrete VM programs expose this through `Program.Block(...)`.
 ///
 /// Transaction carriers are read off the bound runtime; block-fold carriers
 /// (Env, Included, Result) are decls of the implementation, welded to its
 /// signatures by `validateImplementation`. The prelude author types widen by
 /// the implementation's `PreludeError` without rebuilding the program.
-pub fn bind(
+pub fn BlockProgramType(
     comptime Runtime: type,
     comptime ImplementationType: type,
 ) type {
@@ -167,71 +168,32 @@ pub fn bind(
                 @compileError("block implementation must declare `" ++ name ++ "`");
         }
     }
+    comptime validateImplementation(Runtime, ImplementationType);
 
-    return BoundBlockProgram(
-        Runtime,
-        Runtime.Executor,
-        Runtime.Transaction,
-        Runtime.TransactInput,
-        Runtime.Output,
-        Runtime.Rejection,
-        Runtime.PreludeFor(ImplementationType.PreludeError),
-        Runtime.PreludeContextFor(ImplementationType.PreludeError),
-        ImplementationType.Env,
-        ImplementationType.Included,
-        ImplementationType.Result,
-        ImplementationType,
-    );
-}
-
-fn BoundBlockProgram(
-    comptime TransactionRuntimeType: type,
-    comptime ExecutorType: type,
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime RejectionType: type,
-    comptime PreludeType: type,
-    comptime PreludeContextType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
-    comptime ImplementationType: type,
-) type {
-    const OutcomeType = TransactOutcome(IncludedType, RejectionType);
     const ContractError = error{
         UncommittedChanges,
     };
-    const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ImplementationType.PreludeError || ContractError;
-    const TransactionLogs = TransactionRuntimeType.TransactionLogs;
-    comptime validateImplementation(
-        TransactionType,
-        TransactInputType,
-        OutputType,
-        TransactionLogs,
-        EnvType,
-        IncludedType,
-        ResultType,
-        ImplementationType,
-    );
+    const ErrorType = Runtime.Error || ImplementationType.Error || ImplementationType.PreludeError || ContractError;
+
+    const OutcomeType = TransactOutcome(ImplementationType.Included, Runtime.Rejection);
 
     return struct {
         const Self = @This();
 
-        const TransactionRuntime = TransactionRuntimeType;
-        const Executor = ExecutorType;
-        pub const Transaction = TransactionType;
-        pub const Output = OutputType;
-        pub const Rejection = RejectionType;
-        pub const Prelude = PreludeType;
-        pub const PreludeContext = PreludeContextType;
-        pub const Env = EnvType;
-        pub const Included = IncludedType;
-        pub const Result = ResultType;
+        const TransactionRuntime = Runtime;
+        const Executor = Runtime.Executor;
+        pub const Transaction = Runtime.Transaction;
+        pub const Output = Runtime.Output;
+        pub const Rejection = Runtime.Rejection;
+        pub const Prelude = Runtime.PreludeFor(ImplementationType.PreludeError);
+        pub const PreludeContext = Runtime.PreludeContextFor(ImplementationType.PreludeError);
+        pub const Env = ImplementationType.Env;
+        pub const Included = ImplementationType.Included;
+        pub const Result = ImplementationType.Result;
         pub const Outcome = OutcomeType;
         pub const Error = ErrorType;
 
-        transaction_runtime: TransactionRuntimeType,
+        transaction_runtime: TransactionRuntime,
         generation: u64,
         environment: Env,
         state: ImplementationType.State,
@@ -300,7 +262,7 @@ fn BoundBlockProgram(
             std.debug.assert(!executor.hasCurrentTransaction());
             if (executor.acceptedView().hasChanges()) return error.UncommittedChanges;
             return .{
-                .transaction_runtime = TransactionRuntimeType.init(executor),
+                .transaction_runtime = TransactionRuntime.init(executor),
                 .generation = claim(executor),
                 .environment = environment,
                 .state = ImplementationType.init(environment),
@@ -417,48 +379,44 @@ fn BoundBlockProgram(
     };
 }
 
-fn validateImplementation(
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime TransactionLogsType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
-    comptime Implementation: type,
-) void {
+fn validateImplementation(comptime Runtime: type, comptime Implementation: type) void {
     comptime {
         std.debug.assert(@hasDecl(Implementation, "State"));
         std.debug.assert(@hasDecl(Implementation, "InclusionPlan"));
         std.debug.assert(@hasDecl(Implementation, "Error"));
 
-        assertSignature(Implementation.init, &.{EnvType}, Implementation.State);
+        const Env = Implementation.Env;
+        const Transaction = Runtime.Transaction;
+        const Output = Runtime.Output;
+        const Logs = Runtime.TransactionLogs;
+
+        assertSignature(Implementation.init, &.{Env}, Implementation.State);
         assertSignature(Implementation.transactInput, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-            *const TransactionType,
-        }, TransactInputType);
+            *const Transaction,
+        }, Runtime.TransactInput);
         assertSignature(Implementation.planInclude, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-            *const TransactionType,
-            *const OutputType,
-            TransactionLogsType,
+            *const Transaction,
+            *const Output,
+            Logs,
         }, Implementation.Error!Implementation.InclusionPlan);
         assertSignature(Implementation.included, &.{
-            *const TransactionType,
-            *const OutputType,
-            TransactionLogsType,
+            *const Transaction,
+            *const Output,
+            Logs,
             Implementation.InclusionPlan,
-        }, IncludedType);
+        }, Implementation.Included);
         assertSignature(Implementation.applyInclude, &.{
             *Implementation.State,
             Implementation.InclusionPlan,
         }, void);
         assertSignature(Implementation.finish, &.{
-            *const EnvType,
+            *const Env,
             *const Implementation.State,
-        }, ResultType);
+        }, Implementation.Result);
     }
 }
 

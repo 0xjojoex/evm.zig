@@ -10,21 +10,15 @@ const block_hash_source = @import("./BlockHashSource.zig");
 const block_program_module = @import("./block_program.zig");
 const engine_spec = @import("./spec.zig");
 const ethereum_block_program = @import("./block_program/ethereum.zig");
-const ethereum_tx_transition = @import("./transaction/transition.zig");
-const transaction_validation = @import("./transaction/validation.zig");
 const executor_module = @import("./executor.zig");
-const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter = @import("./Interpreter.zig");
-const instruction = @import("./instruction.zig");
 const state_module = @import("./state.zig");
 const block_state = @import("./vm/block_state.zig");
 const transaction = @import("./transaction.zig");
-const transaction_program = @import("./transaction/program.zig");
 
 const Address = address.Address;
-const addr = address.addr;
 
 pub const StateReader = executor_module.state_io.StateReader;
 pub const BlockHashSource = block_hash_source;
@@ -43,11 +37,14 @@ pub const TxStatus = execution.Status;
 /// Complete `Vm.transact` error surface, declared concretely so tooling can
 /// resolve `Vm.Error` without evaluating the program binder. Welded to the
 /// derived program error set inside `VmType`; membership drift fails compilation.
-pub const TransactError = executor_module.errors.Error || error{
-    // Internal prelude transport: caught and replaced by the binder before it
-    // reaches a caller, but nominally part of the program error set today.
-    TransactionPreludeFailed,
-    Overflow,
+pub const TransactError = executor_module.errors.Error || error{Overflow};
+
+/// Caller input for one Ethereum family transaction. One shared definition
+/// serves every compiled VM; each VM re-exports it as `TransactInput`.
+const FamilyTransactInput = struct {
+    env: Env,
+    tx: transaction.Transaction,
+    progress: transaction.PreparationBlockProgress = .{},
 };
 
 /// Execution payload for a transaction that passed validation and ran.
@@ -91,19 +88,6 @@ pub const Create = executor_module.Create;
 pub const EvmResult = executor_module.EvmResult;
 pub const CompileOptions = executor_module.CompileOptions;
 
-/// Explicit non-transaction system call for block-hook style operations.
-pub const SystemCall = struct {
-    sender: Address,
-    recipient: Address,
-    input: []const u8 = &.{},
-    gas: u64,
-};
-
-/// Header facts not already carried by `Env` that seed before-block hooks.
-pub const BeforeBlockInput = struct {
-    parent_hash: ?[32]u8 = null,
-    parent_beacon_block_root: ?[32]u8 = null,
-};
 pub const AfterTransactionContext = block_program_module.AfterTransactionContext;
 pub const FinalizeBlockContext = block_program_module.FinalizeBlockContext;
 
@@ -138,19 +122,11 @@ pub fn VmType(
     return struct {
         const Self = @This();
 
-        const PublicTransactInput = struct {
-            env: Env,
-            tx: transaction.Transaction,
-            progress: transaction.PreparationBlockProgress = .{},
-        };
-
-        const EthereumTxTransition = Self.Transition(PublicTransactInput);
+        const EthereumTxTransition = Self.Transition(FamilyTransactInput);
 
         const TransactionRuntime = Self.Program(EthereumTxTransition);
 
-        const EthereumBlock = ethereum_block_program.bind(TransactionRuntime);
-
-        const BlockExecutionType = TransactionRuntime.Block(EthereumBlock.Implementation);
+        const BlockExecutionType = TransactionRuntime.Block(ethereum_block_program.ImplType(TransactionRuntime));
 
         pub const specification = spec;
         pub const compile_options = options_value;
@@ -161,17 +137,22 @@ pub fn VmType(
         pub const Transaction = transaction.Transaction;
         pub const TransactionLog = Log;
         pub const TransactionLogs = TransactionRuntime.TransactionLogs;
-        pub const TransactInput = PublicTransactInput;
+        pub const TransactInput = FamilyTransactInput;
         pub const Output = TxExecutionResult;
-        pub const Rejection = transaction_validation.ValidationError;
-        pub const Executed = TransactionRuntime.Executed;
+        pub const Rejection = transaction.validation.ValidationError;
+        pub const Executed = Executor.Executed(TxExecutionResult);
         pub const Prelude = TransactionRuntime.Prelude;
         pub const PreludeContext = TransactionRuntime.PreludeContext;
-        pub const Outcome = TransactionRuntime.Outcome;
+        pub const Outcome = transaction.program.TransactOutcomeType(Executed, Rejection);
         pub const Error = TransactError;
 
+        // Public decls above are declared with directly visible arguments so
+        // tooling can bind them; these welds keep them identical to what the
+        // program binder derives.
         comptime {
             assertSameErrorSet(TransactError, TransactionRuntime.Error);
+            std.debug.assert(Executed == TransactionRuntime.Executed);
+            std.debug.assert(Outcome == TransactionRuntime.Outcome);
         }
         pub const Gas = transaction.GasRuntime(spec);
         pub const Settlement = transaction.SettlementRuntime(spec);
@@ -210,12 +191,12 @@ pub fn VmType(
 
         /// Define the narrow family-authoring context for a custom input type.
         pub fn Context(comptime Input: type) type {
-            return transaction_program.ContextType(Executor, Input);
+            return transaction.program.ContextType(Executor, Input);
         }
 
         /// Bind Ethereum transaction stage helpers to a custom input type.
         pub fn Transition(comptime Input: type) type {
-            return ethereum_tx_transition.bind(spec, Executor, Context(Input), TxExecutionResult);
+            return transaction.transition.ImplType(spec, Executor, Context(Input), TxExecutionResult);
         }
 
         /// Bind one closed transaction workflow to this VM.
@@ -223,305 +204,9 @@ pub fn VmType(
         /// All carriers are derived from the implementation's `transact`
         /// signature; its authoring context must be this VM's `Context(Input)`.
         pub fn Program(comptime ImplementationType: type) type {
-            const Bound = transaction_program.ProgramType(ImplementationType);
+            const Bound = transaction.program.ProgramType(ImplementationType);
             comptime std.debug.assert(Bound.Executor == Executor);
             return Bound;
-        }
-
-        /// One-worker Ethereum block lifecycle over the exact VM.
-        pub const Sequential = struct {
-            const SequentialSelf = @This();
-
-            const Phase = enum {
-                transactions,
-                post_transactions,
-                finalized,
-            };
-
-            pub const InitOptions = struct {
-                env: Env,
-            };
-
-            const RetainedTransaction = struct {
-                index: u64,
-                status: execution.Status,
-                gas_used: u64,
-            };
-
-            block: BlockExecution,
-            phase: Phase = .transactions,
-            retained_for_after_hook: ?RetainedTransaction = null,
-
-            fn InstrumentedSession(comptime Observer: type) type {
-                return struct {
-                    session: *SequentialSelf,
-                    mode: InstrumentationMode,
-                    observer: Observer,
-
-                    pub fn transact(self: @This(), tx: Transaction) !BlockExecution.Outcome {
-                        return self.session.transactMode(tx, self.mode, self.observer);
-                    }
-
-                    pub fn systemCall(self: @This(), call: SystemCall) !EvmResult {
-                        return self.session.systemCallMode(call, self.mode, self.observer);
-                    }
-                };
-            }
-
-            pub fn observe(self: *SequentialSelf, observer: anytype) InstrumentedSession(@TypeOf(observer)) {
-                return .{ .session = self, .mode = .observed, .observer = observer };
-            }
-
-            pub fn capture(
-                self: *SequentialSelf,
-                context: *executor_module.CaptureContext,
-                observer: anytype,
-            ) InstrumentedSession(@TypeOf(observer)) {
-                return .{
-                    .session = self,
-                    .mode = .{ .captured = context },
-                    .observer = observer,
-                };
-            }
-
-            pub fn init(executor: *Executor, options: InitOptions) !@This() {
-                return .{ .block = try BlockExecution.init(executor, options.env) };
-            }
-
-            /// Return included block progress.
-            pub fn progress(self: *const @This()) BlockResult {
-                self.requireActive();
-                return self.block.progress();
-            }
-
-            pub fn beforeBlock(self: *@This(), input: BeforeBlockInput) !void {
-                self.requireActive();
-                if (self.phase != .transactions) return error.TransactionPhaseClosed;
-                if (block_program_module.executorFor(&self.block).hasCurrentTransaction()) return error.ExecutedTransactionActive;
-                try executor_module.system_contracts.applyBeforeBlock(
-                    block_program_module.executorFor(&self.block),
-                    self.lifecycleExecutionContext(),
-                    .{
-                        .number = self.block.environment.number,
-                        .timestamp = self.block.environment.timestamp,
-                        .parent_hash = input.parent_hash,
-                        .parent_beacon_block_root = input.parent_beacon_block_root,
-                    },
-                );
-            }
-
-            pub fn transact(self: *@This(), tx: Transaction) !BlockExecution.Outcome {
-                return self.transactMode(tx, .normal, {});
-            }
-
-            fn transactMode(
-                self: *@This(),
-                tx: Transaction,
-                mode: InstrumentationMode,
-                observer: anytype,
-            ) !BlockExecution.Outcome {
-                self.requireActive();
-                if (self.phase != .transactions) return error.TransactionPhaseClosed;
-                try self.flushAfterTransaction();
-                const progress_value = self.block.progress();
-                var prelude = EthereumBlock.Prelude{
-                    .env = self.block.environment,
-                    .transaction_index = progress_value.tx_count,
-                };
-                const outcome = switch (mode) {
-                    .normal => try self.block.transactWithPrelude(
-                        tx,
-                        BlockExecution.Prelude.init(&prelude),
-                    ),
-                    .observed => try self.block.observe(observer).transactWithPrelude(
-                        tx,
-                        BlockExecution.Prelude.init(&prelude),
-                    ),
-                    .captured => |context| try self.block.capture(context, observer).transactWithPrelude(
-                        tx,
-                        BlockExecution.Prelude.init(&prelude),
-                    ),
-                };
-                switch (outcome) {
-                    .rejected => {},
-                    .included => |included| self.retained_for_after_hook = .{
-                        .index = progress_value.tx_count,
-                        .status = included.result.status,
-                        .gas_used = included.result.gas.used,
-                    },
-                }
-                return outcome;
-            }
-
-            pub fn endTransactions(self: *@This()) !void {
-                self.requireActive();
-                if (self.phase == .finalized) return error.BlockAlreadyFinalized;
-                try self.flushAfterTransaction();
-                self.phase = .post_transactions;
-            }
-
-            pub fn afterTransaction(self: *@This()) !void {
-                self.requireActive();
-                if (self.retained_for_after_hook == null) return error.NoPendingTransaction;
-                try self.flushAfterTransaction();
-            }
-
-            fn flushAfterTransaction(self: *@This()) !void {
-                const retained = self.retained_for_after_hook orelse return;
-                const progress_value = self.block.progress();
-                try executor_module.system_contracts.applyAfterTransaction(
-                    block_program_module.executorFor(&self.block),
-                    self.lifecycleExecutionContext(),
-                    .{
-                        .number = self.block.environment.number,
-                        .timestamp = self.block.environment.timestamp,
-                        .transaction_index = retained.index,
-                        .status = retained.status,
-                        .gas_used = retained.gas_used,
-                        .cumulative_gas_used = progress_value.gas_used,
-                        .cumulative_block_gas = progress_value.block_gas.total,
-                        .cumulative_state_gas = progress_value.block_gas.state,
-                    },
-                );
-                self.retained_for_after_hook = null;
-            }
-
-            pub fn finalizeBlock(self: *@This(), allocator: std.mem.Allocator) ![]const []const u8 {
-                self.requireActive();
-                if (self.phase == .finalized) return error.BlockAlreadyFinalized;
-                try self.flushAfterTransaction();
-                self.phase = .post_transactions;
-                const progress_value = self.block.progress();
-                const outputs = try executor_module.system_contracts.applyFinalizeBlock(
-                    block_program_module.executorFor(&self.block),
-                    self.lifecycleExecutionContext(),
-                    allocator,
-                    .{
-                        .number = self.block.environment.number,
-                        .timestamp = self.block.environment.timestamp,
-                        .transaction_count = progress_value.tx_count,
-                        .gas_used = progress_value.gas_used,
-                        .block_gas = progress_value.block_gas.total,
-                        .state_gas = progress_value.block_gas.state,
-                    },
-                );
-                self.phase = .finalized;
-                return outputs;
-            }
-
-            /// Execute non-transaction block work and account its regular gas.
-            pub fn systemCall(self: *@This(), call: SystemCall) !EvmResult {
-                return self.systemCallMode(call, .normal, {});
-            }
-
-            fn systemCallMode(
-                self: *@This(),
-                call: SystemCall,
-                mode: InstrumentationMode,
-                observer: anytype,
-            ) !EvmResult {
-                self.requireActive();
-                if (self.phase == .finalized) return error.BlockAlreadyFinalized;
-                try self.flushAfterTransaction();
-                const executor = block_program_module.executorFor(&self.block);
-                const state = &self.block.state;
-                var pre_call = try executor.branchCheckpoint();
-                defer pre_call.deinit();
-
-                const result = executeSystemCallWithExecutor(
-                    executor,
-                    self.block.environment,
-                    call,
-                    mode,
-                    observer,
-                ) catch |err| {
-                    executor.restoreBranch(&pre_call);
-                    return err;
-                };
-                const spent = systemCallGasUsed(call.gas, result.gasLeft());
-                const next_block_gas = state.block_gas.add(transaction.BlockGas.legacy(spent)) catch {
-                    executor.restoreBranch(&pre_call);
-                    return error.GasAllowanceExceeded;
-                };
-                const next_gas_used = std.math.add(u64, state.gas_used, spent) catch {
-                    executor.restoreBranch(&pre_call);
-                    return error.GasAllowanceExceeded;
-                };
-                if (!next_block_gas.withinLimit(self.block.environment.gas_limit)) {
-                    executor.restoreBranch(&pre_call);
-                    return error.GasAllowanceExceeded;
-                }
-
-                state.gas_used = next_gas_used;
-                state.block_gas = next_block_gas;
-                return result;
-            }
-
-            pub fn finish(self: *@This()) !BlockResult {
-                self.requireActive();
-                try self.flushAfterTransaction();
-                return self.block.finish();
-            }
-
-            pub fn discardIfUnfinished(self: *@This()) void {
-                self.retained_for_after_hook = null;
-                self.block.discardIfUnfinished();
-            }
-
-            fn requireActive(self: *const @This()) void {
-                block_program_module.requireActive(&self.block);
-            }
-
-            fn lifecycleExecutionContext(self: *const @This()) execution.ExecutionContext {
-                return self.block.environment.executionContext(.{ .origin = addr(0) });
-            }
-        };
-
-        fn executeSystemCallWithExecutor(
-            executor: *Executor,
-            env: Env,
-            call: SystemCall,
-            mode: InstrumentationMode,
-            observer: anytype,
-        ) !EvmResult {
-            if (env.gas_limit != 0 and call.gas > env.gas_limit) return error.GasAllowanceExceeded;
-            const result = switch (mode) {
-                .normal => try executor.executeSystemCall(
-                    env.executionContext(.{ .origin = call.sender }),
-                    call.sender,
-                    call.recipient,
-                    call.input,
-                    .legacy(call.gas),
-                ),
-                .observed => try executor.observe(observer).executeSystemCall(
-                    env.executionContext(.{ .origin = call.sender }),
-                    call.sender,
-                    call.recipient,
-                    call.input,
-                    .legacy(call.gas),
-                ),
-                .captured => |context| try executor.capture(context).executeSystemCall(
-                    env.executionContext(.{ .origin = call.sender }),
-                    call.sender,
-                    call.recipient,
-                    call.input,
-                    .legacy(call.gas),
-                    observer,
-                ),
-            };
-            return Host.Result.fromCall(.{
-                .outcome = result.outcome,
-                .frame_halt = result.frame_halt,
-                .output_data = result.output_data,
-                .gas_left = result.gas_left,
-                .gas_refund = result.gas_refund,
-            });
-        }
-
-        fn systemCallGasUsed(gas: u64, gas_left: i64) u64 {
-            if (gas_left <= 0) return gas;
-            const left: u64 = @intCast(gas_left);
-            return gas -| @min(gas, left);
         }
     };
 }

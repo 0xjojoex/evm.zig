@@ -165,7 +165,7 @@ pub fn bind(comptime Executor: type) type {
                 if (self.frame_base == 0) {
                     if (self.capture_context) |context| {
                         if (context.capturesSteps()) {
-                            try context.reserveFrameCapacity(Executor.default_max_live_frames);
+                            try context.reserveFrameCapacity(executor_module.default_max_live_frames);
                         }
                     }
                 }

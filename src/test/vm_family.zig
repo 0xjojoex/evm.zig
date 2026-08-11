@@ -80,7 +80,6 @@ test "exact VM closes the complete spec without revision state" {
     try std.testing.expect(@hasDecl(Cancun, "transact"));
     try std.testing.expect(@hasDecl(Cancun, "Program"));
     try std.testing.expect(@hasDecl(Cancun, "BlockExecution"));
-    try std.testing.expect(@hasDecl(Cancun, "Sequential"));
     try std.testing.expect(!@hasDecl(Cancun, "TransactionPolicy"));
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
 }

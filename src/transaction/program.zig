@@ -12,6 +12,7 @@ const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
 const CaptureContext = @import("../executor/capture_context.zig").Context;
 const InstrumentationMode = @import("../executor/instrumentation.zig").Mode;
+const executor_engine = @import("../executor.zig");
 const executor_errors = @import("../executor/error.zig");
 const Host = @import("../Host.zig");
 const state = @import("../state.zig");
@@ -48,10 +49,6 @@ pub fn transactInBlockWithPrelude(
 ) @TypeOf(transaction_program.transactOwned(input, true, prelude, mode)) {
     return transaction_program.transactOwned(input, true, prelude, mode);
 }
-
-/// Internal transport caught by the binder and replaced with the concrete
-/// block-prelude error before it reaches a program caller.
-const ContractError = error{TransactionPreludeFailed};
 
 /// Type-erased block-prelude transport shared by every program instantiation.
 /// Constructed only by `Prelude.init`, which validates the typed `run`
@@ -98,14 +95,10 @@ fn validateTransition(comptime Implementation: type) void {
 pub fn ProgramType(comptime Implementation: type) type {
     comptime validateTransition(Implementation);
 
-    const ContextError = executor_errors.Error || ContractError;
+    const ContextError = executor_errors.Error;
     const Runtime = RuntimeStateType(Implementation.Context.Executor, Implementation.Context.Input);
 
     const ProgramError = ContextError || Implementation.Error;
-
-    const ExecutedType = Implementation.Context.Executor.Executed(Implementation.Output);
-
-    const OutcomeType = TransactOutcomeType(ExecutedType, Implementation.Rejection);
 
     return struct {
         const Self = @This();
@@ -119,10 +112,10 @@ pub fn ProgramType(comptime Implementation: type) type {
         pub const TransactionLog = Host.Log;
         pub const TransactionLogs = Executor.State.LogView;
         pub const Rejection = Implementation.Rejection;
-        pub const Executed = ExecutedType;
+        pub const Executed = Executor.Executed(Output);
         pub const Prelude = PreludeFor(error{});
         pub const PreludeContext = PreludeContextFor(error{});
-        pub const Outcome = OutcomeType;
+        pub const Outcome = TransactOutcomeType(Executed, Rejection);
         pub const Error = ProgramError;
 
         /// Prelude author context whose error set is widened by one block
@@ -142,7 +135,7 @@ pub fn ProgramType(comptime Implementation: type) type {
             mode: InstrumentationMode,
 
             pub fn transact(self: Instrumented, input_value: TransactInput) Error!Outcome {
-                return self.program.transactOwned(input_value, false, null, self.mode);
+                return @errorCast(self.program.transactOwned(input_value, false, null, self.mode));
             }
         };
 
@@ -162,8 +155,8 @@ pub fn ProgramType(comptime Implementation: type) type {
         /// returned type is the only public in-block transaction entry point;
         /// block claims and transaction-runtime choreography stay internal to
         /// that type.
-        pub fn Block(comptime BlockImplementationType: type) type {
-            return block_program.bind(Self, BlockImplementationType);
+        pub fn Block(comptime BlockImplementation: type) type {
+            return block_program.BlockProgramType(Self, BlockImplementation);
         }
 
         /// Execute one family transaction.
@@ -172,7 +165,9 @@ pub fn ProgramType(comptime Implementation: type) type {
         /// rollback-armed `Executed` owner, which the caller must retain or
         /// discard before reusing this Executor.
         pub fn transact(self: *@This(), input_value: TransactInput) Error!Outcome {
-            return self.transactOwned(input_value, false, null, .normal);
+            // No prelude runs outside a block fold, so every possible error
+            // is a member of the declared program set.
+            return @errorCast(self.transactOwned(input_value, false, null, .normal));
         }
 
         /// Borrow a transaction facade that records state observations.
@@ -185,13 +180,16 @@ pub fn ProgramType(comptime Implementation: type) type {
             return .{ .program = self, .mode = .{ .captured = context } };
         }
 
+        /// Internal error type is open: a block prelude may fail with the
+        /// block implementation's own `PreludeError`, which only the block
+        /// binder can name. Public entry points narrow with `@errorCast`.
         fn transactOwned(
             self: *@This(),
             input_value: TransactInput,
             block_claimed: bool,
             prelude: ?PreludeBinding,
             mode: InstrumentationMode,
-        ) Error!OutcomeType {
+        ) anyerror!Outcome {
             const executor = self.executor;
             if (!block_claimed)
                 std.debug.assert(executor.active_block_execution_generation == null);
@@ -207,13 +205,13 @@ pub fn ProgramType(comptime Implementation: type) type {
             errdefer runtime.discardIfActive();
             var context: Context = .{ .handle = &runtime };
             const outcome = Implementation.transact(&context, input_value.tx) catch |err| {
-                if (err != error.TransactionPreludeFailed) return err;
-                std.debug.assert(runtime.preludeFailure() != null);
-                const prelude_error = runtime.preludeFailure() orelse unreachable;
-                return @errorCast(prelude_error);
+                // A recorded prelude failure outranks whatever transport or
+                // follow-on error the implementation surfaced.
+                if (runtime.preludeFailure()) |prelude_error| return prelude_error;
+                return err;
             };
             if (runtime.preludeFailure()) |prelude_error|
-                return @errorCast(prelude_error);
+                return prelude_error;
             return switch (outcome) {
                 .rejected => |reason| blk: {
                     runtime.discardIfActive();
@@ -233,7 +231,7 @@ fn RuntimeStateType(
     comptime Executor: type,
     comptime Input: type,
 ) type {
-    const Error = executor_errors.Error || ContractError;
+    const Error = executor_errors.Error;
 
     return struct {
         const Self = @This();
@@ -286,7 +284,7 @@ fn PreludeContextType(
     comptime Runtime: type,
     comptime PreludeError: type,
 ) type {
-    const ContextError = executor_errors.Error || ContractError || PreludeError;
+    const ContextError = executor_errors.Error || PreludeError;
 
     return struct {
         handle: *anyopaque,
@@ -355,7 +353,7 @@ pub fn ContextType(
     comptime ExecutorType: type,
     comptime InputType: type,
 ) type {
-    const ContextError = executor_errors.Error || ContractError;
+    const ContextError = executor_errors.Error;
     const RuntimeState = RuntimeStateType(ExecutorType, InputType);
 
     return struct {
@@ -424,7 +422,7 @@ pub fn ContextType(
         pub fn runPayload(
             self: *Self,
             request: execution.EvmExecutionRequest,
-        ) ContextError!Executor.TransactionExecutionOutcome {
+        ) ContextError!executor_engine.TransactionExecutionOutcome {
             return runtime_ops.runPayload(self.activeExecutor(), request) catch |err|
                 return executor_errors.normalize(err);
         }
@@ -526,8 +524,11 @@ pub fn ContextType(
                     runtime.requireActive();
                     runtime.prelude = .consumed;
                     binding.run(binding.handle, runtime) catch |err| {
+                        // The real error is recorded on the runtime and
+                        // resurfaced by the binder; this return value only
+                        // aborts the implementation and is never observable.
                         runtime.prelude = .{ .failed = err };
-                        return error.TransactionPreludeFailed;
+                        return error.SystemCallFailed;
                     };
                     runtime.executor.clearLogs();
                     runtime.executor.clearLastOutput();
@@ -560,4 +561,3 @@ pub fn ContextType(
         };
     };
 }
-

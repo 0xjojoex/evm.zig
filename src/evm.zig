@@ -16,7 +16,6 @@ pub const mpt = @import("mpt");
 pub const opcode = @import("./opcode.zig");
 pub const precompile = @import("./precompile.zig");
 pub const prepared_code = @import("./prepared_code.zig");
-pub const range = @import("./range.zig");
 pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");

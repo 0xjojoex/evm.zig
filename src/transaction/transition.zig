@@ -20,7 +20,7 @@ const Address = address.Address;
 /// Build the Ethereum transaction implementation for one exact execution spec.
 /// The bound Context carries the public block environment and
 /// progress; `Output` is the family-facing executed transaction result.
-pub fn bind(
+pub fn ImplType(
     comptime spec: ExactSpec,
     comptime ExactExecutor: type,
     comptime ContextType: type,

@@ -36,7 +36,6 @@ const execution_values = @import("./execution.zig");
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 pub const EvmResult = Host.Result;
-const EvmResultType = EvmResult;
 
 /// Root execution reports whether the VM reached payload execution so the
 /// transaction program can place its preparation checkpoint without
@@ -51,7 +50,6 @@ pub const TransactionExecutionOutcome = struct {
     result: execution_values.ExecutionResult,
 };
 
-const TransactionExecutionOutcomeType = TransactionExecutionOutcome;
 const call_runtime = @import("./executor/call_runtime.zig");
 pub const capture_context = @import("./executor/capture_context.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
@@ -134,13 +132,6 @@ pub const Create = execution_values.Create;
 pub const Message = execution_values.Message;
 pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
 
-const PreparedCallTransactionType = PreparedCallTransaction;
-const CallType = Call;
-const CreateType = Create;
-const MessageType = Message;
-const code_deposit_gas_value = code_deposit_gas;
-const default_max_live_frames_value = default_max_live_frames;
-const ErrorType = errors.Error;
 pub const CaptureContext = capture_context.Context;
 
 /// Non-consensus capabilities selected when compiling an exact executor.
@@ -168,16 +159,7 @@ pub fn ExecutorType(
         pub const compile_options = options_value;
         pub const State = StateDomain.State;
         pub const BranchCheckpoint = State.BranchCheckpoint;
-        pub const Error = ErrorType;
         pub const Init = ExecutorInitType(StateDomain);
-        pub const PreparedCallTransaction = PreparedCallTransactionType;
-        pub const Call = CallType;
-        pub const Create = CreateType;
-        pub const Message = MessageType;
-        pub const EvmResult = EvmResultType;
-        pub const TransactionExecutionOutcome = TransactionExecutionOutcomeType;
-        pub const code_deposit_gas = code_deposit_gas_value;
-        pub const default_max_live_frames = default_max_live_frames_value;
 
         allocator: std.mem.Allocator,
         state: State,
@@ -371,7 +353,7 @@ pub fn ExecutorType(
                     self: @This(),
                     request: execution_values.EvmExecutionRequest,
                     scope_init: execution_values.ExecutionScopeInit,
-                ) !Self.EvmResult {
+                ) !EvmResult {
                     return self.executor.runStandaloneContext(
                         request.context,
                         request.message,
@@ -429,9 +411,9 @@ pub fn ExecutorType(
             pub fn execute(
                 self: CapturedExecutor,
                 execution_context: execution_values.ExecutionContext,
-                message: Self.Message,
+                message: Message,
                 gas: execution_values.ExecutionGas,
-            ) !Self.EvmResult {
+            ) !EvmResult {
                 return self.executor.runStandaloneContext(
                     execution_context,
                     message,
@@ -476,7 +458,7 @@ pub fn ExecutorType(
 
         pub fn advanceTransactionNonce(
             self: *Self,
-            message: MessageType,
+            message: Message,
         ) !void {
             const runtime_state = if (self.transaction_runtime_state) |*value| value else unreachable;
             std.debug.assert(runtime_state.phase == .active);
@@ -539,7 +521,7 @@ pub fn ExecutorType(
             return .{
                 .allocator = allocator,
                 .state = StateDomain.initExecutorState(allocator, options.state),
-                .frame_store = .{ .stable_metadata_capacity = default_max_live_frames_value },
+                .frame_store = .{ .stable_metadata_capacity = default_max_live_frames },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
                 .block_hash_source = options.block_hash_source,
@@ -713,7 +695,7 @@ pub fn ExecutorType(
         fn beginMessageScopeContext(
             self: *Self,
             context: execution_values.ExecutionContext,
-            message: Self.Message,
+            message: Message,
             scope_init: execution_values.ExecutionScopeInit,
             mode: InstrumentationMode,
         ) !void {
@@ -1001,7 +983,7 @@ pub fn ExecutorType(
         }
 
         /// Execute a raw call inside an already-open tx scope.
-        pub fn executeCall(self: *Self, message: Self.Call, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeCall(self: *Self, message: Call, gas: execution_values.ExecutionGas) !EvmResult {
             return runtime.executeCall(self, message, gas);
         }
 
@@ -1018,12 +1000,12 @@ pub fn ExecutorType(
         }
 
         /// Execute a raw call with caller-provided prepared bytecode.
-        pub fn executePreparedCallTransaction(self: *Self, options: Self.PreparedCallTransaction) !execution_values.ExecutionResult {
+        pub fn executePreparedCallTransaction(self: *Self, options: PreparedCallTransaction) !execution_values.ExecutionResult {
             return runtime.executePreparedCallTransaction(self, options);
         }
 
         /// Execute a raw create/create2 message inside an already-open tx scope.
-        pub fn executeCreate(self: *Self, message: Self.Create, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeCreate(self: *Self, message: Create, gas: execution_values.ExecutionGas) !EvmResult {
             return runtime.executeCreate(self, message, gas);
         }
 
@@ -1031,7 +1013,7 @@ pub fn ExecutorType(
         ///
         /// This does not open or close a transaction scope. Use `executeStandalone` for the
         /// fully-managed raw-message lifecycle.
-        pub fn executeMessage(self: *Self, message: Self.Message, gas: execution_values.ExecutionGas) !Self.EvmResult {
+        pub fn executeMessage(self: *Self, message: Message, gas: execution_values.ExecutionGas) !EvmResult {
             self.validateScopeRoot(.fromMessage(message));
             const call_capture = try runtime.beginRootCapture(self, message, gas);
             const result = try switch (message) {
@@ -1053,7 +1035,7 @@ pub fn ExecutorType(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
             scope_init: execution_values.ExecutionScopeInit,
-        ) !Self.EvmResult {
+        ) !EvmResult {
             return self.runStandaloneContext(
                 request.context,
                 request.message,
@@ -1067,12 +1049,12 @@ pub fn ExecutorType(
         fn runStandaloneContext(
             self: *Self,
             context: execution_values.ExecutionContext,
-            message: Self.Message,
+            message: Message,
             gas: execution_values.ExecutionGas,
             scope_init: execution_values.ExecutionScopeInit,
             mode: InstrumentationMode,
             observer: anytype,
-        ) !Self.EvmResult {
+        ) !EvmResult {
             try self.beginMessageScopeContext(context, message, scope_init, mode);
             errdefer self.discardStateTransition();
 
@@ -1106,7 +1088,7 @@ pub fn ExecutorType(
         pub fn executeTransactionRequestPhased(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
-        ) !TransactionExecutionOutcomeType {
+        ) !TransactionExecutionOutcome {
             self.validateScopeContext(request.context);
             self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrustedPhased(request);
@@ -1115,7 +1097,7 @@ pub fn ExecutorType(
         fn executeTransactionRequestTrustedPhased(
             self: *Self,
             request: execution_values.EvmExecutionRequest,
-        ) !TransactionExecutionOutcomeType {
+        ) !TransactionExecutionOutcome {
             switch (request.message) {
                 .call => |call| try self.traceAccountAccess(call.recipient),
                 .create => |create| try self.traceAccountAccess(create.recipient),

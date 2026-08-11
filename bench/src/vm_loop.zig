@@ -115,7 +115,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             defer pre_execution.deinit();
 
             const start_ns = try common.monotonicNowNs();
-            const call_options = Executor.PreparedCallTransaction{
+            const call_options = evmz.executor.PreparedCallTransaction{
                 .bytecode = self.bytecode.view(),
                 .sender = common.caller_address,
                 .recipient = common.contract_address,

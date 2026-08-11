@@ -5,13 +5,15 @@ const std = @import("std");
 const blob_mod = @import("./transaction/blob.zig");
 pub const authorization = @import("./transaction/authorization.zig");
 const gas_mod = @import("./transaction/gas.zig");
-const program_mod = @import("./transaction/program.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
 pub const raw = @import("./transaction/raw.zig");
 pub const signing = @import("./transaction/signing.zig");
 const transaction_mod = @import("./transaction/types.zig");
+pub const transition = @import("./transaction/transition.zig");
+pub const validation = @import("./transaction/validation.zig");
+pub const program = @import("./transaction/program.zig");
 
 pub const AccessListCounts = transaction_mod.AccessListCounts;
 pub const BlobParams = blob_mod.BlobParams;
@@ -57,8 +59,8 @@ pub const PrepareResult = transaction_mod.PrepareResult;
 pub const recoverSender = signing.recoverSender;
 pub const signingHash = signing.signingHash;
 pub const recoverAuthorizationSigner = signing.recoverAuthorizationSigner;
-pub const TransitionOutcomeType = program_mod.TransitionOutcomeType;
-pub const TransactOutcomeType = program_mod.TransactOutcomeType;
+pub const TransitionOutcomeType = program.TransitionOutcomeType;
+pub const TransactOutcomeType = program.TransactOutcomeType;
 pub const GasRuntime = gas_mod.Runtime;
 pub const SettlementRuntime = settlement_mod.Runtime;
 

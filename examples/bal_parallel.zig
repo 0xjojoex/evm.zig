@@ -131,7 +131,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn initState(store: *evmz.state.MemoryStore) !void {
-    (try store.getOrCreateAccount(sender)).balance = 1_000_000;
+    (try store.getOrCreateAccount(sender)).account.balance = 1_000_000;
     try (try store.getOrCreateAccount(target)).setCode(&target_code);
 }
 

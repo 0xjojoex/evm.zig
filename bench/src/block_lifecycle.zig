@@ -209,7 +209,7 @@ fn commitChanges(executor: anytype, memory: *MemoryStore) !void {
 
 fn seedState(memory: *MemoryStore, case: Case) !void {
     var sender = try memory.getOrCreateAccount(sender_address);
-    sender.balance = std.math.maxInt(u256);
+    sender.account.balance = std.math.maxInt(u256);
 
     var contract = try memory.getOrCreateAccount(contract_address);
     try contract.setCode(contractCode(case));

@@ -183,7 +183,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
         pub fn transact(
             context: *OpContext,
             tx: DepositTransaction,
-        ) Error!evmz.transaction.TransitionOutcome(DepositOutput, DepositRejection) {
+        ) Error!evmz.transaction.TransitionOutcomeType(DepositOutput, DepositRejection) {
             if (tx.is_system_transaction) {
                 return .{ .rejected = .system_transaction_after_regolith };
             }
@@ -322,7 +322,7 @@ fn OpTransition(
         pub fn transact(
             context: *OpContext,
             tx: OpTransaction,
-        ) Error!evmz.transaction.TransitionOutcome(OpOutput, OpRejection) {
+        ) Error!evmz.transaction.TransitionOutcomeType(OpOutput, OpRejection) {
             return switch (tx) {
                 .ethereum => |ethereum| switch (try EthereumTransition.transact(context, ethereum)) {
                     .rejected => |reason| .{ .rejected = .{ .ethereum = reason } },
@@ -451,8 +451,7 @@ pub const Delta = OpFamily(.delta);
 pub const Ecotone = OpFamily(.ecotone);
 pub const Fjord = OpFamily(.fjord);
 
-fn retainOutput(outcome: anytype) !OpOutput {
-    return switch (outcome) {
+fn retainOutput(outcome: anytype) !OpOutput { return switch (outcome) {
         .executed => |executed| executed.retainResult(),
         .rejected => error.UnexpectedRejection,
     };

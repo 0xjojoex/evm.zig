@@ -121,7 +121,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
     try std.testing.expectEqual(@as(usize, ReentrantInstruction.max_depth), ReentrantInstruction.call_count);
     try std.testing.expect(ReentrantInstruction.root_stack_moved);
     try std.testing.expect(ReentrantInstruction.root_capture_stable);
-    try std.testing.expectEqual(ReentrantVm.Executor.default_max_live_frames, capture.frame_captures.capacity);
+    try std.testing.expectEqual(evmz.executor.default_max_live_frames, capture.frame_captures.capacity);
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(parent, 0));
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(child, 0));
 

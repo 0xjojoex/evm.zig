@@ -20,10 +20,11 @@ pub const Result = struct {
     tx_count: u64 = 0,
 };
 
-/// Build Ethereum's block fold implementation and transaction prelude for one
-/// bound transaction runtime. Every carrier is read off the runtime; the
-/// block environment is the concrete Ethereum `Env` carried by the input.
-pub fn bind(comptime TransactionRuntime: type) type {
+/// Build Ethereum's block fold implementation for one bound transaction
+/// runtime. Every carrier is read off the runtime; the block environment is
+/// the concrete Ethereum `Env` carried by the input. The standard
+/// before-transaction prelude and receipt shape ride as decls.
+pub fn ImplType(comptime TransactionRuntime: type) type {
     const EnvType = transaction.Env;
     comptime std.debug.assert(@FieldType(TransactionRuntime.TransactInput, "env") == EnvType);
     const Transaction = TransactionRuntime.Transaction;
@@ -68,12 +69,14 @@ pub fn bind(comptime TransactionRuntime: type) type {
 
     const FoldResult = Result;
 
-    const ImplementationType = struct {
+    return struct {
         // Carrier decls the block binder reads; init/included/finish
         // signatures are welded to them by the binder's validation.
         pub const Env = EnvType;
         pub const Included = IncludedTransaction;
         pub const Result = FoldResult;
+        pub const Receipt = ReceiptType;
+        pub const Prelude = BeforeTransactionPrelude;
 
         pub const State = FoldResult;
         pub const Error = error{ BlockGasExceeded, Overflow };
@@ -139,12 +142,5 @@ pub fn bind(comptime TransactionRuntime: type) type {
         pub fn finish(_: *const Env, state: *const State) FoldResult {
             return state.*;
         }
-    };
-
-    return struct {
-        pub const Prelude = BeforeTransactionPrelude;
-        pub const Implementation = ImplementationType;
-        pub const Receipt = ReceiptType;
-        pub const Included = IncludedTransaction;
     };
 }

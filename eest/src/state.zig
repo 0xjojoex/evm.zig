@@ -645,7 +645,7 @@ fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
 
 fn FixtureHost(comptime revision: evmz.eth.Revision) type {
     const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
-    const TxResult = transaction.TransactOutcome(evmz.TxExecutionResult, ExactVm.Rejection);
+    const TxResult = transaction.TransactOutcomeType(evmz.TxExecutionResult, ExactVm.Rejection);
 
     return struct {
         allocator: std.mem.Allocator,
