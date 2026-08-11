@@ -55,7 +55,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try executor.warmAccount(other);
     try executor.warmStorage(other, 1);
     var host = executor.host();
-    try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
+    try std.testing.expectEqual(sender, (try host.executionContext()).transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(executor.state.isAccountWarm(contract));
     try std.testing.expect(executor.state.isAccountWarm(other));
@@ -66,7 +66,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try executor.addBalance(reverted, 7);
     checkpoint.restore();
 
-    try std.testing.expectEqual(sender, (try host.getExecutionContext()).transaction.origin);
+    try std.testing.expectEqual(sender, (try host.executionContext()).transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(other));
     try std.testing.expect(!executor.state.isAccountWarm(reverted));
     try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(reverted));
@@ -120,7 +120,7 @@ test "beginMessageScope derives root identity context and raw warmth" {
     } });
 
     var host = executor.host();
-    try std.testing.expectEqualDeep(execution_context, try host.getExecutionContext());
+    try std.testing.expectEqualDeep(execution_context, (try host.executionContext()).*);
     try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(executor.state.isAccountWarm(recipient));
     try std.testing.expect(!executor.state.isAccountWarm(coinbase));
@@ -213,7 +213,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     var host = executor.host();
-    _ = try host.getExecutionContext();
+    _ = try host.executionContext();
 
     var reverted = executor.checkpoint();
     defer reverted.deinit();
@@ -229,7 +229,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.isAccountWarm(additional));
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
-    _ = try host.getExecutionContext();
+    _ = try host.executionContext();
     try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }

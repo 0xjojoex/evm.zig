@@ -328,7 +328,9 @@ pub const VTable = struct {
     copyCode: *const fn (ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) anyerror!usize,
     emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
-    getExecutionContext: *const fn (ptr: *anyopaque) anyerror!ExecutionContext,
+    /// Project the immutable opcode context without copying it. The pointer is
+    /// valid while the host owner's current execution scope remains active.
+    executionContext: *const fn (ptr: *anyopaque) ?*const ExecutionContext,
     accessAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!?AccessStatus,
@@ -347,11 +349,18 @@ pub const VTable = struct {
 ptr: *anyopaque,
 vtable: *const VTable,
 
+comptime {
+    // Host adapters are copied into runtime helpers. Execution context remains
+    // behind the owner pointer so adding immutable capabilities cannot widen it.
+    std.debug.assert(@sizeOf(Self) == 2 * @sizeOf(usize));
+    std.debug.assert(@alignOf(Self) == @alignOf(usize));
+}
+
 pub fn accountExists(self: *Self, address: AddressWord) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
-pub fn getExecutionContext(self: *Self) !ExecutionContext {
-    return self.vtable.getExecutionContext(self.ptr);
+pub fn executionContext(self: *const Self) !*const ExecutionContext {
+    return self.vtable.executionContext(self.ptr) orelse error.MissingExecutionContext;
 }
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);

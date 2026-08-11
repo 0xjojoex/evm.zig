@@ -63,7 +63,10 @@ fn execute(
     var host_wrapper = ToHost.init(host, context);
     defer host_wrapper.deinit();
 
-    var host_ = host_wrapper.toHost();
+    var host_ = host_wrapper.toHost() catch |err| {
+        log.err("execute failed: {}", .{err});
+        return makeResult(evmc.EVMC_FAILURE, 0, 0, &.{});
+    };
 
     const kind = common.callKindFromEvmc(msg.*.kind) catch |err| {
         log.err("execute failed: {}", .{err});
@@ -247,6 +250,8 @@ const ToHost = struct {
     host_interfcace: [*c]const evmc.evmc_host_interface,
     context: ?*evmc.evmc_host_context,
     blob_hashes: [common.max_blob_hashes]u256 = undefined,
+    execution_context: evmz.execution.ExecutionContext = undefined,
+    execution_context_available: bool = false,
     call_output: std.ArrayList(u8) = .empty,
 
     const Self = @This();
@@ -262,7 +267,13 @@ const ToHost = struct {
         self.call_output.deinit(std.heap.c_allocator);
     }
 
-    pub fn toHost(self: *ToHost) evmz.Host {
+    pub fn toHost(self: *ToHost) !evmz.Host {
+        self.execution_context_available = false;
+        if (self.host_interfcace.*.get_tx_context) |get_tx_context| {
+            const tx_context = get_tx_context(self.context);
+            self.execution_context = try common.fromEvmcTxContext(tx_context, &self.blob_hashes);
+            self.execution_context_available = true;
+        }
         return evmz.Host{
             .ptr = self,
             .vtable = &.{
@@ -278,7 +289,7 @@ const ToHost = struct {
                 .copyCode = copyCode,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
-                .getExecutionContext = getExecutionContext,
+                .executionContext = executionContext,
                 .accessAccount = accessAccount,
                 .accessStorage = accessStorage,
                 .accessDelegatedAccount = accessDelegatedAccount,
@@ -289,6 +300,11 @@ const ToHost = struct {
                 .setTransientStorage = setTransientStorage,
             },
         };
+    }
+
+    fn executionContext(ptr: *anyopaque) ?*const evmz.execution.ExecutionContext {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return if (self.execution_context_available) &self.execution_context else null;
     }
 
     fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
@@ -387,12 +403,6 @@ const ToHost = struct {
             return error.Overflow;
         }
         return fromEvmcBytes32(self.host_interfcace.*.get_block_hash.?(self.context, @intCast(number)));
-    }
-
-    fn getExecutionContext(ptr: *anyopaque) !evmz.execution.ExecutionContext {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        const context = self.host_interfcace.*.get_tx_context.?(self.context);
-        return common.fromEvmcTxContext(context, &self.blob_hashes);
     }
 
     fn accessAccount(ptr: *anyopaque, address: AddressWord) !evmz.Host.AccessStatus {
@@ -616,7 +626,7 @@ test "EVMC ABI 18 nonce callback round-trips through both host adapters" {
 
     var wrapper = ToHost.init(&interface, bridge.toContext());
     defer wrapper.deinit();
-    var round_tripped_host = wrapper.toHost();
+    var round_tripped_host = try wrapper.toHost();
     try std.testing.expectEqual(@as(u64, 7), try round_tripped_host.getNonce(.fromAddress(account_address)));
 }
 
@@ -788,7 +798,7 @@ test "EVMC host wrapper provides required fused storage callbacks" {
 
     var wrapper = ToHost.init(&interface, host_context);
     defer wrapper.deinit();
-    var host = wrapper.toHost();
+    var host = try wrapper.toHost();
 
     const address = evmz.addr(0xbeef);
     const address_word: AddressWord = .fromAddress(address);
@@ -884,7 +894,7 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
 
     var wrapper = ToHost.init(&interface, host_context);
     defer wrapper.deinit();
-    var host = wrapper.toHost();
+    var host = try wrapper.toHost();
 
     const delegated_access = (try host.accessDelegatedAccount(.fromAddress(authority))).?;
     try std.testing.expectEqual(evmz.Host.AccessStatus.cold, delegated_access);

@@ -221,12 +221,12 @@ fn getTxContext(context: ?*evmc.evmc_host_context) callconv(.c) evmc.evmc_tx_con
     }
     const host_context = HostContext.fromContext(context).?;
     const host = host_context.host;
-    const execution_context = host.getExecutionContext() catch {
-        log.warn("getExecutionContext failed", .{});
+    const execution_context = host.executionContext() catch {
+        log.warn("execution context unavailable", .{});
         return std.mem.zeroes(evmc.evmc_tx_context);
     };
     const blob_hashes = common.toEvmcBlobHashes(execution_context.transaction.blob_hashes, &host_context.blob_hashes) catch {
-        log.warn("getExecutionContext blob hash conversion failed", .{});
+        log.warn("execution context blob hash conversion failed", .{});
         return std.mem.zeroes(evmc.evmc_tx_context);
     };
 

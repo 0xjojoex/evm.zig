@@ -1113,14 +1113,8 @@ pub fn bind(comptime Executor: type) type {
             return interpreter.executeUntilSuspended();
         }
 
-        pub fn currentExecutionContext(self: *const Executor) ExecutionContext {
-            std.debug.assert(self.execution_context != null);
-            return self.execution_context.?;
-        }
-
-        pub fn getExecutionContext(ptr: *anyopaque) !ExecutionContext {
-            const self: *Executor = @ptrCast(@alignCast(ptr));
-            return currentExecutionContext(self);
+        pub fn currentExecutionContext(self: *const Executor) *const ExecutionContext {
+            return if (self.execution_context) |*context| context else unreachable;
         }
 
         pub fn callScratch(self: *Executor, depth: u16) !ScratchScope {

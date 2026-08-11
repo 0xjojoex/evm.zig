@@ -26,15 +26,20 @@ pub fn bind(comptime Executor: type) type {
                 .storeStorage = storeStorage,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
+                .executionContext = executionContext,
                 .selfDestruct = Callbacks().selfDestruct,
                 .accessStorage = accessStorage,
                 .accessDelegatedAccount = Callbacks().accessDelegatedAccount,
                 .accessAccount = Callbacks().accessAccount,
                 .observeAccountAccess = observeAccountAccess,
-                .getExecutionContext = call_runtime.getExecutionContext,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
             } };
+        }
+
+        fn executionContext(ptr: *anyopaque) ?*const Host.ExecutionContext {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return if (self.execution_context) |*context| context else null;
         }
 
         fn Callbacks() type {

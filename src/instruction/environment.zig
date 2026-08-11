@@ -114,59 +114,59 @@ pub fn caller(frame: *CallFrame) !void {
 }
 
 pub fn origin(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(evmz.address.toU256(execution_context.transaction.origin));
 }
 
 pub fn gasprice(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.transaction.gas_price);
 }
 
 pub fn basefee(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.base_fee);
 }
 
 pub fn coinbase(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(evmz.address.toU256(execution_context.block.coinbase));
 }
 
 pub fn timestamp(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.timestamp);
 }
 
 pub fn number(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.number);
 }
 
 pub fn slotnum(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.slot_number);
 }
 
 pub fn prevrandao(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.difficulty_or_prev_randao);
 }
 
 pub fn gaslimit(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.gas_limit);
 }
 
 pub fn chainid(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.chain.chain_id);
 }
 
 pub fn blockhash(frame: *CallFrame) !void {
     const block_number: u256 = frame.pop() orelse return;
 
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     const current_number: u256 = execution_context.block.number;
     const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
 
@@ -360,7 +360,7 @@ pub fn returndatacopy(frame: *CallFrame) !void {
 
 pub fn blobhash(frame: *CallFrame) !void {
     const index_word = frame.pop() orelse return;
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     const index = std.math.cast(usize, index_word) orelse {
         @branchHint(.unlikely);
         frame.stack.push(0);
@@ -375,7 +375,7 @@ pub fn blobhash(frame: *CallFrame) !void {
 }
 
 pub fn blobbasefee(frame: *CallFrame) !void {
-    const execution_context = try frame.host.getExecutionContext();
+    const execution_context = try frame.host.executionContext();
     _ = frame.push(execution_context.block.blob_base_fee);
 }
 

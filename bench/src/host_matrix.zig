@@ -190,6 +190,7 @@ fn appendDefaultDirectOps(allocator: std.mem.Allocator, ops: *std.ArrayList(Oper
 }
 
 fn appendBytecodeOps(allocator: std.mem.Allocator, ops: *std.ArrayList(Operation)) !void {
+    try ops.append(allocator, .bytecode_basefee);
     try ops.append(allocator, .bytecode_sload);
     try ops.append(allocator, .bytecode_sstore);
 }

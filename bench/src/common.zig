@@ -123,15 +123,21 @@ pub const CountingHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
+            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
             .accessAccount = accessAccount,
-            .getExecutionContext = getExecutionContext,
             .call = call,
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
+    }
+
+    noinline fn executionContext(ptr: *anyopaque) ?*const evmz.execution.ExecutionContext {
+        const self: *CountingHost = @ptrCast(@alignCast(ptr));
+        self.counters.execution_context += 1;
+        return &self.execution_context;
     }
 
     noinline fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
@@ -251,12 +257,6 @@ pub const CountingHost = struct {
         _ = number;
         self.counters.block_hash += 1;
         return 0;
-    }
-
-    noinline fn getExecutionContext(ptr: *anyopaque) !evmz.execution.ExecutionContext {
-        const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        self.counters.execution_context += 1;
-        return self.execution_context;
     }
 
     noinline fn accessAccount(ptr: *anyopaque, address: AddressWord) !Host.AccessStatus {

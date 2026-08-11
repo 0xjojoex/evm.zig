@@ -22,6 +22,7 @@ pub const Operation = enum {
     host_execution_context,
     host_call,
     host_log,
+    bytecode_basefee,
     bytecode_sload,
     bytecode_sstore,
 };
@@ -125,6 +126,7 @@ pub fn run(allocator: std.mem.Allocator, options: RunOptions) !Measurement {
         .host_call,
         .host_log,
         => try runDirectHostOp(allocator, options.op, options.boundary, options.iterations),
+        .bytecode_basefee,
         .bytecode_sload,
         .bytecode_sstore,
         => blk: {
@@ -169,9 +171,10 @@ fn printUsage() void {
         \\  host-code-size          direct Zig Host.getCodeSize loop
         \\  host-code-hash          direct Zig Host.getCodeHash loop
         \\  host-copy-code          direct Zig Host.copyCode loop
-        \\  host-execution-context         direct Zig Host.getExecutionContext loop
+        \\  host-execution-context  direct Zig Host.executionContext borrow loop
         \\  host-call               direct Zig Host.call loop
         \\  host-log                direct Zig Host.emitLog loop
+        \\  bytecode-basefee       interpreter loop with repeated BASEFEE
         \\  bytecode-sload          interpreter loop with repeated SLOAD
         \\  bytecode-sstore         interpreter loop with repeated SSTORE
         \\
@@ -227,7 +230,7 @@ fn runZigHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize) 
             .host_code_size => std.mem.doNotOptimizeAway(try host.getCodeSize(contract_word)),
             .host_code_hash => std.mem.doNotOptimizeAway(try host.getCodeHash(contract_word)),
             .host_copy_code => std.mem.doNotOptimizeAway(try host.copyCode(contract_word, 0, &code_buffer)),
-            .host_execution_context => std.mem.doNotOptimizeAway(try host.getExecutionContext()),
+            .host_execution_context => std.mem.doNotOptimizeAway(try host.executionContext()),
             .host_call => {
                 msg.gas = common.max_gas - @as(i64, @intCast(i & 0xff));
                 std.mem.doNotOptimizeAway(try host.call(msg));
@@ -237,7 +240,7 @@ fn runZigHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize) 
                 .topics = &.{},
                 .data = &.{},
             })),
-            .bytecode_sload, .bytecode_sstore => unreachable,
+            .bytecode_basefee, .bytecode_sload, .bytecode_sstore => unreachable,
         }
     }
     const end_ns = try common.monotonicNowNs();
@@ -302,7 +305,7 @@ fn runEvmcHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize)
             .host_log => {
                 interface.emit_log.?(context, &address, &log_data, 0, &log_topics, 0);
             },
-            .bytecode_sload, .bytecode_sstore => unreachable,
+            .bytecode_basefee, .bytecode_sload, .bytecode_sstore => unreachable,
         }
     }
     const end_ns = try common.monotonicNowNs();
@@ -349,7 +352,7 @@ fn runBytecodeHostOpExact(
     iterations: usize,
 ) !Measurement {
     const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
-    const bytecode = try storageBytecode(allocator, op, iterations);
+    const bytecode = try repeatedBytecode(allocator, op, iterations);
     defer allocator.free(bytecode);
 
     var counting_host = common.CountingHost.init(allocator, .mock);
@@ -390,8 +393,9 @@ fn runBytecodeHostOpExact(
     };
 }
 
-fn storageBytecode(allocator: std.mem.Allocator, op: Operation, iterations: usize) ![]u8 {
+fn repeatedBytecode(allocator: std.mem.Allocator, op: Operation, iterations: usize) ![]u8 {
     const pattern = switch (op) {
+        .bytecode_basefee => &[_]u8{ 0x48, 0x50 },
         .bytecode_sload => &[_]u8{ 0x60, 0x00, 0x54, 0x50 },
         .bytecode_sstore => &[_]u8{ 0x60, 0x01, 0x60, 0x00, 0x55 },
         else => return error.InvalidBytecodeOperation,
@@ -433,7 +437,7 @@ fn tagNameMatches(value: []const u8, tag_name: []const u8) bool {
 
 pub fn isBytecodeOperation(op: Operation) bool {
     return switch (op) {
-        .bytecode_sload, .bytecode_sstore => true,
+        .bytecode_basefee, .bytecode_sload, .bytecode_sstore => true,
         else => false,
     };
 }
@@ -441,6 +445,7 @@ pub fn isBytecodeOperation(op: Operation) bool {
 test "operation parser accepts dashed names" {
     try std.testing.expectEqual(Operation.host_storage_read, parseOperation("host-storage-read").?);
     try std.testing.expectEqual(Operation.host_log, parseOperation("host-log").?);
+    try std.testing.expectEqual(Operation.bytecode_basefee, parseOperation("bytecode-basefee").?);
     try std.testing.expectEqual(Operation.bytecode_sstore, parseOperation("bytecode-sstore").?);
 }
 
@@ -448,8 +453,8 @@ test "boundary parser accepts evmc" {
     try std.testing.expectEqual(Boundary.evmc, parseBoundary("evmc").?);
 }
 
-test "storage bytecode generation repeats operation and stops" {
-    const code = try storageBytecode(std.testing.allocator, .bytecode_sload, 2);
+test "host bytecode generation repeats operation and stops" {
+    const code = try repeatedBytecode(std.testing.allocator, .bytecode_sload, 2);
     defer std.testing.allocator.free(code);
     try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x00, 0x54, 0x50, 0x60, 0x00, 0x54, 0x50, 0x00 }, code);
 }

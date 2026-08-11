@@ -158,7 +158,6 @@ pub const MockHost = struct {
     store: std.AutoHashMap(u256, u256),
     logs: std.ArrayList(Host.Log),
     execution_context: ExecutionContext,
-    execution_context_reads: u64,
     original_store: std.AutoHashMap(u256, u256),
     code: Address.HashMap([]u8),
     local_account: Address.HashMap(Host.Account),
@@ -169,7 +168,6 @@ pub const MockHost = struct {
     storage_stores: u64,
     block_hash_reads: u64,
     last_block_hash_number: ?u256,
-    execution_context_error: ?anyerror,
     call_error: ?anyerror,
 
     pub fn init(alloc: std.mem.Allocator, execution_context: ?ExecutionContext) Self {
@@ -181,14 +179,12 @@ pub const MockHost = struct {
             .local_account = Address.HashMap(Host.Account).init(alloc),
             .removed_account = Address.HashMap(bool).init(alloc),
             .code = Address.HashMap([]u8).init(alloc),
-            .execution_context_reads = 0,
             .storage_reads = 0,
             .access_storage_reads = 0,
             .storage_loads = 0,
             .storage_stores = 0,
             .block_hash_reads = 0,
             .last_block_hash_number = null,
-            .execution_context_error = null,
             .call_error = null,
             .execution_context = if (execution_context) |ctx| ctx else ExecutionContext{
                 .chain = .{ .chain_id = 0 },
@@ -423,13 +419,6 @@ pub const MockHost = struct {
         return null;
     }
 
-    fn getExecutionContext(ptr: *anyopaque) !ExecutionContext {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        if (self.execution_context_error) |err| return err;
-        self.execution_context_reads += 1;
-        return self.execution_context;
-    }
-
     fn accountExists(ptr: *anyopaque, address_word: AddressWord) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const address = address_word.address();
@@ -484,14 +473,19 @@ pub const MockHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
+            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
             .accessAccount = accessAccount,
-            .getExecutionContext = getExecutionContext,
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
+    }
+
+    fn executionContext(ptr: *anyopaque) ?*const ExecutionContext {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return &self.execution_context;
     }
 };
 
@@ -692,11 +686,12 @@ test "mock host persists storage writes" {
     try expectBytecodeStackTopByRevision(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
 }
 
-test "ORIGIN and GASPRICE each read transaction context from the host" {
+test "ORIGIN and GASPRICE read the borrowed transaction context" {
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
+    try std.testing.expect((try host.executionContext()) == &mock_host.execution_context);
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -708,20 +703,26 @@ test "ORIGIN and GASPRICE each read transaction context from the host" {
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
-
-    try std.testing.expectEqual(@as(u64, 2), mock_host.execution_context_reads);
+    try std.testing.expectEqualSlices(u256, &.{ 0, 0 }, interpreter.call_frame.stack.asSlice());
 }
 
-test "host read errors propagate out of bytecode execution" {
+test "missing execution context fails environment opcodes" {
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
-    mock_host.execution_context_error = error.DatabaseUnavailable;
     var host = mock_host.host();
+    const Missing = struct {
+        fn missing(_: *anyopaque) ?*const ExecutionContext {
+            return null;
+        }
+    };
+    var missing_vtable = host.vtable.*;
+    missing_vtable.executionContext = Missing.missing;
+    host.vtable = &missing_vtable;
     const msg = defaultMessage();
     const code = bytecode(.{.ORIGIN});
 
     try std.testing.expectError(
-        error.DatabaseUnavailable,
+        error.MissingExecutionContext,
         runBytecodeWithHost(&host, &msg, &code, .latest),
     );
 }
@@ -761,7 +762,6 @@ test "SLOTNUM pushes the transaction context slot number" {
     const result = try runBytecodeWithHost(&host, &msg, &code, .amsterdam);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
-    try std.testing.expectEqual(@as(u64, 1), mock_host.execution_context_reads);
 }
 
 fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
