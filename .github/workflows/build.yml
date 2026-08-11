@@ -34,7 +34,7 @@ jobs:
       - name: Run native verification
         run: >-
           zig build
-          test-evmz-native
+          test-evmz-native-all
           test-packages
           guest-payload-test
           guest-payload-abi-check
@@ -60,7 +60,7 @@ jobs:
           cache-size-limit: 512
 
       - name: Run zkVM-profile semantic tests
-        run: zig build test-evmz-zkvm -j2 --summary all
+        run: zig build test-evmz-zkvm-all -j2 --summary all
 
   evmc-test:
     name: EVMC compatibility package

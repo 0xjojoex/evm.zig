@@ -451,7 +451,8 @@ pub const Delta = OpFamily(.delta);
 pub const Ecotone = OpFamily(.ecotone);
 pub const Fjord = OpFamily(.fjord);
 
-fn retainOutput(outcome: anytype) !OpOutput { return switch (outcome) {
+fn retainOutput(outcome: anytype) !OpOutput {
+    return switch (outcome) {
         .executed => |executed| executed.retainResult(),
         .rejected => error.UnexpectedRejection,
     };
