@@ -504,8 +504,8 @@ fn initWithCodeStore(
     errdefer owned_plan.deinit(allocator);
     errdefer owned_facts.deinit(allocator);
     errdefer code.deinit(allocator);
-    std.debug.assert(owned_plan.accounts.len == owned_facts.accounts.len);
-    std.debug.assert(owned_plan.storage.len == owned_facts.storage.len);
+    std.debug.assert(owned_plan.accountCount() == owned_facts.accounts.len);
+    std.debug.assert(owned_plan.storageCount() == owned_facts.storage.len);
 
     const accounts = try allocator.alloc(AccountRow, owned_facts.accounts.len);
     errdefer allocator.free(accounts);
@@ -1293,7 +1293,7 @@ pub fn accountHasStorage(
     const id = (try self.resolveAccount(target, .required_observed)).?;
     try self.observeAccount(id, .{ .accessed = true, .existence_read = true });
     const row = &self.accounts[@intFromEnum(id)];
-    const range = self.plan.accounts[@intFromEnum(id)].storage;
+    const range = self.plan.accountStorageRange(id);
     const begin: usize = range.start;
     const end: usize = range.end();
     for (self.storage[begin..end]) |storage_row| {
@@ -1382,7 +1382,7 @@ pub fn acceptedStorageValueForView(
     id: StorageId,
 ) u256 {
     if (!self.transaction_active) return self.effectiveStorage(id);
-    const account = self.plan.storage[@intFromEnum(id)].account;
+    const account = self.plan.storageAccount(id);
     const account_row = &self.accounts[@intFromEnum(account)];
     const account_generation = if (account_row.observation_generation == self.transaction_generation)
         self.observed_accounts.items[account_row.observation_index].original_storage_generation
@@ -1407,7 +1407,7 @@ pub fn writeStorage(
     value: u256,
 ) Allocator.Error!void {
     self.assertTransaction();
-    const account = self.plan.storage[@intFromEnum(id)].account;
+    const account = self.plan.storageAccount(id);
     try self.observeAccount(account, .{ .accessed = true });
     self.captureStorageOriginal(id);
     self.captureExecutionOriginal(id);
@@ -1624,7 +1624,7 @@ pub fn journalLen(self: *const StatelessBlockState) usize {
 fn captureStorageOriginal(self: *StatelessBlockState, id: StorageId) void {
     const row = &self.storage[@intFromEnum(id)];
     if (row.original_generation == self.transaction_generation) return;
-    const account_id = self.plan.storage[@intFromEnum(id)].account;
+    const account_id = self.plan.storageAccount(id);
     const account = &self.accounts[@intFromEnum(account_id)];
     row.transaction_original = if (account.storage_wipe_transaction_generation == self.transaction_generation)
         row.current
@@ -1642,8 +1642,7 @@ fn captureExecutionOriginal(self: *StatelessBlockState, id: StorageId) void {
 }
 
 fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
-    const claim = self.plan.storage[@intFromEnum(id)];
-    const account = &self.accounts[@intFromEnum(claim.account)];
+    const account = &self.accounts[@intFromEnum(self.plan.storageAccount(id))];
     const row = &self.storage[@intFromEnum(id)];
     if (row.storage_generation != account.storage_generation) return 0;
     return row.current;
@@ -1656,12 +1655,11 @@ fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
 fn compactAcceptedStorageChanges(self: *StatelessBlockState) void {
     var write: usize = 0;
     for (self.dirty_storage.items) |id| {
-        const claim = self.plan.storage[@intFromEnum(id)];
         const row = &self.storage[@intFromEnum(id)];
         if (!row.flags.block_dirty) continue;
         row.flags.block_dirty = false;
         const current = row.storage_generation ==
-            self.accounts[@intFromEnum(claim.account)].storage_generation;
+            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation;
         if (!current) continue;
         self.dirty_storage.items[write] = id;
         write += 1;
@@ -1735,10 +1733,9 @@ fn compactTransactionStorageWipes(self: *StatelessBlockState) void {
 fn compactTransactionStorageChanges(self: *StatelessBlockState) void {
     var write: usize = 0;
     for (self.changed_storage.items) |id| {
-        const claim = self.plan.storage[@intFromEnum(id)];
         const row = &self.storage[@intFromEnum(id)];
         if (row.storage_generation !=
-            self.accounts[@intFromEnum(claim.account)].storage_generation) continue;
+            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation) continue;
         self.changed_storage.items[write] = id;
         write += 1;
     }

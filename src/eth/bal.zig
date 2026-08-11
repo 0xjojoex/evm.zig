@@ -30,8 +30,6 @@ pub const IndexError = model.IndexError;
 pub const ClaimPlan = claim_plan.ClaimPlan;
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
-pub const AccountClaim = claim_plan.AccountClaim;
-pub const StorageClaim = claim_plan.StorageClaim;
 pub const ClaimPlanInitError = claim_plan.InitError;
 
 pub const transactionIndex = model.transactionIndex;

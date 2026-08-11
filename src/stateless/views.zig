@@ -37,9 +37,8 @@ pub fn ViewType(comptime State: type) type {
 
             pub fn at(self: AccountChanges, index: u32) AccountChange {
                 const id = self.ids()[index];
-                const claim = self.state.plan.accounts[@intFromEnum(id)];
                 return .{
-                    .address = claim.address,
+                    .address = self.state.plan.accountAddress(id),
                     .account = accountValue(switch (self.layer) {
                         .accepted => self.state.acceptedAccountValueForView(id),
                         .transaction => self.state.accounts[@intFromEnum(id)].current,
@@ -68,11 +67,10 @@ pub fn ViewType(comptime State: type) type {
 
             pub fn at(self: StorageChanges, index: u32) StorageChange {
                 const id = self.ids()[index];
-                const claim = self.state.plan.storage[@intFromEnum(id)];
-                const account_claim = self.state.plan.accounts[@intFromEnum(claim.account)];
+                const account = self.state.plan.storageAccount(id);
                 return .{
-                    .address = account_claim.address,
-                    .key = claim.slot,
+                    .address = self.state.plan.accountAddress(account),
+                    .key = self.state.plan.storageSlot(id),
                     .value = switch (self.layer) {
                         .accepted => self.state.acceptedStorageValueForView(id),
                         .transaction => self.state.storageValueForView(id),
@@ -101,7 +99,7 @@ pub fn ViewType(comptime State: type) type {
 
             pub fn at(self: StorageWipes, index: u32) [20]u8 {
                 const id = self.ids()[index];
-                return self.state.plan.accounts[@intFromEnum(id)].address;
+                return self.state.plan.accountAddress(id);
             }
 
             fn ids(self: StorageWipes) []const State.AccountId {
@@ -188,7 +186,7 @@ pub fn ViewType(comptime State: type) type {
             pub fn at(self: AccountObservations, index: u32) AccountObservationFact {
                 const observed = self.state.observed_accounts.items[index];
                 return .{
-                    .address = self.state.plan.accounts[@intFromEnum(observed.account)].address,
+                    .address = self.state.plan.accountAddress(observed.account),
                     .original = accountValue(observed.original),
                     .current = accountValue(observed.effect_current),
                     .observation = observed.observation,
@@ -206,10 +204,10 @@ pub fn ViewType(comptime State: type) type {
 
             pub fn at(self: StorageObservations, index: u32) ?StorageObservationFact {
                 const observed = self.state.observed_storage.items[index];
-                const claim = self.state.plan.storage[@intFromEnum(observed.storage)];
+                const account = self.state.plan.storageAccount(observed.storage);
                 return .{
-                    .address = self.state.plan.accounts[@intFromEnum(claim.account)].address,
-                    .key = claim.slot,
+                    .address = self.state.plan.accountAddress(account),
+                    .key = self.state.plan.storageSlot(observed.storage),
                     .original = observed.original,
                     .current = observed.effect_current,
                     .observation = observed.observation,
@@ -219,10 +217,10 @@ pub fn ViewType(comptime State: type) type {
 
             pub fn metadataAt(self: StorageObservations, index: u32) StorageObservationMetadata {
                 const observed = self.state.observed_storage.items[index];
-                const claim = self.state.plan.storage[@intFromEnum(observed.storage)];
+                const account = self.state.plan.storageAccount(observed.storage);
                 return .{
-                    .address = self.state.plan.accounts[@intFromEnum(claim.account)].address,
-                    .key = claim.slot,
+                    .address = self.state.plan.accountAddress(account),
+                    .key = self.state.plan.storageSlot(observed.storage),
                     .observation = observed.observation,
                     .effect = observed.effect,
                 };
@@ -280,12 +278,12 @@ pub fn ViewType(comptime State: type) type {
                 return self.state.plan.storageTrieOrder(account);
             }
 
-            pub fn accountClaim(self: CommitView, id: State.AccountId) *const @TypeOf(self.state.plan.accounts[0]) {
-                return &self.state.plan.accounts[@intFromEnum(id)];
+            pub fn accountTrieKey(self: CommitView, id: State.AccountId) [32]u8 {
+                return self.state.plan.accountTrieKey(id);
             }
 
-            pub fn storageClaim(self: CommitView, id: State.StorageId) *const @TypeOf(self.state.plan.storage[0]) {
-                return &self.state.plan.storage[@intFromEnum(id)];
+            pub fn storageTrieKey(self: CommitView, id: State.StorageId) [32]u8 {
+                return self.state.plan.storageTrieKey(id);
             }
 
             pub fn accountFact(self: CommitView, id: State.AccountId) *const @TypeOf(self.state.facts.accounts[0]) {
@@ -313,9 +311,8 @@ pub fn ViewType(comptime State: type) type {
             }
 
             pub fn storageDirty(self: CommitView, id: State.StorageId) bool {
-                const claim = self.storageClaim(id);
                 const row = &self.state.storage[@intFromEnum(id)];
-                const account = &self.state.accounts[@intFromEnum(claim.account)];
+                const account = &self.state.accounts[@intFromEnum(self.state.plan.storageAccount(id))];
                 return row.flags.block_dirty and
                     row.storage_generation == account.storage_generation;
             }

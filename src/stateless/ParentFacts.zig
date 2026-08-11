@@ -54,22 +54,22 @@ pub fn authenticate(
     plan: claim_plan.ClaimPlan,
     catalog: *const trie.WitnessCatalog,
 ) Error!ParentFacts {
-    const accounts = try allocator.alloc(AccountFact, plan.accounts.len);
+    const accounts = try allocator.alloc(AccountFact, plan.accountCount());
     errdefer allocator.free(accounts);
-    const storage = try allocator.alloc(StorageFact, plan.storage.len);
+    const storage = try allocator.alloc(StorageFact, plan.storageCount());
     errdefer allocator.free(storage);
 
     // Account and storage lookups are serial, so they reuse the same typed
     // scratch slices and capacity is their maximum.
-    const scratch_capacity = @max(plan.accounts.len, plan.storage.len);
+    const scratch_capacity = @max(plan.accountCount(), plan.storageCount());
     const keys = try allocator.alloc(TrieKey, scratch_capacity);
     defer allocator.free(keys);
     const results = try allocator.alloc(mpt.fixed_key.Lookup, scratch_capacity);
     defer allocator.free(results);
-    const account_keys = keys[0..plan.accounts.len];
-    const account_results = results[0..plan.accounts.len];
+    const account_keys = keys[0..plan.accountCount()];
+    const account_results = results[0..plan.accountCount()];
     for (plan.account_trie_order, 0..) |id, index| {
-        account_keys[index] = plan.accounts[@intFromEnum(id)].trie_key;
+        account_keys[index] = plan.accountTrieKey(id);
     }
     var workspace = mpt.fixed_key.Workspace.init();
     try mpt.fixed_key.bindSorted(
@@ -95,8 +95,8 @@ pub fn authenticate(
     }
 
     @memset(storage, .{ .value = 0 });
-    const storage_keys = keys[0..plan.storage.len];
-    const storage_results = results[0..plan.storage.len];
+    const storage_keys = keys[0..plan.storageCount()];
+    const storage_results = results[0..plan.storageCount()];
     for (accounts, 0..) |account, account_index| {
         const id: claim_plan.AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
         const order = plan.storageTrieOrder(id);
@@ -107,11 +107,11 @@ pub fn authenticate(
         };
         if (std.mem.eql(u8, &parent.storage_root, &trie.empty_root_hash)) continue;
 
-        const range = plan.accounts[account_index].storage;
+        const range = plan.accountStorageRange(id);
         const begin: usize = range.start;
         const end: usize = range.end();
         for (order, 0..) |storage_id, offset| {
-            storage_keys[begin + offset] = plan.storage[@intFromEnum(storage_id)].trie_key;
+            storage_keys[begin + offset] = plan.storageTrieKey(storage_id);
         }
         try mpt.fixed_key.bindSorted(
             catalog.topology,
