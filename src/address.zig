@@ -2,11 +2,144 @@
 
 const std = @import("std");
 const crypto = @import("crypto.zig");
+const rlp = @import("rlp");
 
-/// A 20-byte Ethereum account address.
-pub const Address = [20]u8;
+/// A canonical 20-byte Ethereum account address.
+///
+/// Protocol encoders and cryptographic code must use `bytes` explicitly instead
+/// of relying on the in-memory representation. Execution-oriented address forms
+/// may then evolve independently without widening every protocol record.
+pub const Address = extern struct {
+    bytes: [20]u8,
 
-pub const zero_address: Address = std.mem.zeroes(Address);
+    pub const len: usize = 20;
+
+    pub inline fn fromBytes(bytes: [len]u8) Address {
+        return .{ .bytes = bytes };
+    }
+
+    pub inline fn fromU160(value: u160) Address {
+        var bytes: [len]u8 = undefined;
+        std.mem.writeInt(u160, &bytes, value, .big);
+        return fromBytes(bytes);
+    }
+
+    pub inline fn toU256(self: Address) u256 {
+        return std.mem.readInt(u160, &self.bytes, .big);
+    }
+
+    pub inline fn asBytes(self: *const Address) *const [len]u8 {
+        return &self.bytes;
+    }
+
+    pub inline fn eql(a: Address, b: Address) bool {
+        return std.mem.eql(u8, &a.bytes, &b.bytes);
+    }
+
+    pub inline fn order(a: Address, b: Address) std.math.Order {
+        return std.mem.order(u8, &a.bytes, &b.bytes);
+    }
+
+    pub fn formatNumber(self: Address, writer: *std.Io.Writer, number: std.fmt.Number) std.Io.Writer.Error!void {
+        if (number.mode == .hex and number.precision == null and number.width == null) {
+            return writer.printHex(&self.bytes, number.case);
+        }
+        return writer.printIntAny(self.toU256(), number.mode.base() orelse 10, number.case, .{
+            .precision = number.precision,
+            .width = number.width,
+            .alignment = number.alignment,
+            .fill = number.fill,
+        });
+    }
+
+    pub const HashContext = struct {
+        pub inline fn hash(_: HashContext, value: Address) u64 {
+            return std.hash.Wyhash.hash(0, &value.bytes);
+        }
+
+        pub inline fn eql(_: HashContext, a: Address, b: Address) bool {
+            return Address.eql(a, b);
+        }
+    };
+
+    pub fn HashMap(comptime Value: type) type {
+        return std.HashMap(Address, Value, HashContext, std.hash_map.default_max_load_percentage);
+    }
+
+    pub const Rlp = rlp.Mapped(@This(), rlp.FixedBytes(len), struct {
+        pub fn toWire(value: Address) [len]u8 {
+            return value.bytes;
+        }
+
+        pub fn fromWire(bytes: [len]u8) Address {
+            return Address.fromBytes(bytes);
+        }
+    });
+};
+
+/// Word-aligned account identity used across execution callbacks and dense
+/// state translation. Its first 20 in-memory bytes are the canonical address;
+/// the final four bytes are always zero and never cross a protocol boundary.
+pub const AddressWord = extern struct {
+    words: [3]u64,
+
+    pub inline fn fromAddress(value: Address) AddressWord {
+        return .{ .words = .{
+            std.mem.readInt(u64, value.bytes[0..8], .little),
+            std.mem.readInt(u64, value.bytes[8..16], .little),
+            std.mem.readInt(u32, value.bytes[16..20], .little),
+        } };
+    }
+
+    pub inline fn fromU256(value: u256) AddressWord {
+        return .{ .words = .{
+            @byteSwap(@as(u64, @truncate(value >> 96))),
+            @byteSwap(@as(u64, @truncate(value >> 32))),
+            @byteSwap(@as(u32, @truncate(value))),
+        } };
+    }
+
+    pub inline fn address(self: AddressWord) Address {
+        std.debug.assert(self.words[2] <= std.math.maxInt(u32));
+        var bytes: [Address.len]u8 = undefined;
+        std.mem.writeInt(u64, bytes[0..8], self.words[0], .little);
+        std.mem.writeInt(u64, bytes[8..16], self.words[1], .little);
+        std.mem.writeInt(u32, bytes[16..20], @intCast(self.words[2]), .little);
+        return Address.fromBytes(bytes);
+    }
+
+    pub inline fn toU256(self: AddressWord) u256 {
+        return self.address().toU256();
+    }
+
+    pub inline fn eql(a: AddressWord, b: AddressWord) bool {
+        return a.words[0] == b.words[0] and
+            a.words[1] == b.words[1] and
+            a.words[2] == b.words[2];
+    }
+
+    pub inline fn hash(self: AddressWord) u64 {
+        var mixed = self.words[0] ^ std.math.rotl(u64, self.words[1], 23) ^
+            self.words[2] *% 0x9e3779b97f4a7c15;
+        mixed ^= mixed >> 30;
+        mixed *%= 0xbf58476d1ce4e5b9;
+        mixed ^= mixed >> 27;
+        mixed *%= 0x94d049bb133111eb;
+        return mixed ^ (mixed >> 31);
+    }
+};
+
+comptime {
+    // Canonical addresses are stored in protocol records at high cardinality.
+    // If those consumers stop requiring canonical bytes, introduce a role-specific
+    // representation rather than widening this type.
+    std.debug.assert(@sizeOf(Address) == 20);
+    std.debug.assert(@alignOf(Address) == 1);
+    std.debug.assert(@sizeOf(AddressWord) == 24);
+    std.debug.assert(@alignOf(AddressWord) == 8);
+}
+
+pub const zero_address: Address = .{ .bytes = [_]u8{0} ** Address.len };
 
 pub const ParseError = error{
     InvalidAddressHexLength,
@@ -17,6 +150,7 @@ pub const ParseError = error{
 /// address bytes, and comptime-known 40-character hex strings with an optional 0x prefix.
 pub inline fn addr(value: anytype) Address {
     const T = @TypeOf(value);
+    if (T == Address) return value;
     return switch (@typeInfo(T)) {
         .comptime_int => fromComptimeInt(value),
         .int => |info| fromInt(T, info, value),
@@ -27,22 +161,20 @@ pub inline fn addr(value: anytype) Address {
 }
 
 pub fn fromU160(value: u160) Address {
-    var bytes: Address = undefined;
-    std.mem.writeInt(u160, &bytes, value, .big);
-    return bytes;
+    return Address.fromU160(value);
 }
 
 pub fn toU256(address: Address) u256 {
-    return std.mem.readInt(u160, &address, .big);
+    return address.toU256();
 }
 
 pub fn fromHex(hex: []const u8) ParseError!Address {
     const body = if (hasHexPrefix(hex)) hex[2..] else hex;
-    if (body.len != 2 * zero_address.len) return error.InvalidAddressHexLength;
+    if (body.len != 2 * Address.len) return error.InvalidAddressHexLength;
 
-    var bytes: Address = undefined;
+    var bytes: [Address.len]u8 = undefined;
     _ = std.fmt.hexToBytes(&bytes, body) catch return error.InvalidAddressHexCharacter;
-    return bytes;
+    return Address.fromBytes(bytes);
 }
 
 pub fn fromWord(word: u256) Address {
@@ -66,8 +198,7 @@ fn fromInt(comptime T: type, comptime info: std.builtin.Type.Int, value: T) Addr
 }
 
 fn fromArray(comptime T: type, comptime array: std.builtin.Type.Array, value: T) Address {
-    if (T == Address) return value;
-    _ = array;
+    if (array.child == u8 and array.len == Address.len) return Address.fromBytes(value);
     @compileError("addr only accepts [20]u8 address bytes by value; use a string or []const u8 for hex");
 }
 
@@ -82,7 +213,10 @@ inline fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Point
 inline fn fromSinglePointer(comptime Child: type, value: anytype) Address {
     if (Child == Address) return value.*;
     return switch (@typeInfo(Child)) {
-        .array => |array| fromHexStringPointer(array, value),
+        .array => |array| if (array.child == u8 and array.len == Address.len)
+            Address.fromBytes(value.*)
+        else
+            fromHexStringPointer(array, value),
         else => @compileError("addr does not accept pointer to " ++ @typeName(Child)),
     };
 }
@@ -109,11 +243,11 @@ pub fn create(sender: Address, nonce: u64) Address {
     const nonce_rlp = rlpEncodeNonce(&nonce_buf, nonce);
 
     var encoded: [1 + 1 + 20 + 9]u8 = undefined;
-    const payload_len = 1 + sender.len + nonce_rlp.len;
+    const payload_len = 1 + Address.len + nonce_rlp.len;
     encoded[0] = 0xc0 + @as(u8, @intCast(payload_len));
-    encoded[1] = 0x80 + @as(u8, @intCast(sender.len));
-    @memcpy(encoded[2 .. 2 + sender.len], &sender);
-    @memcpy(encoded[2 + sender.len .. 2 + sender.len + nonce_rlp.len], nonce_rlp);
+    encoded[1] = 0x80 + @as(u8, @intCast(Address.len));
+    @memcpy(encoded[2 .. 2 + Address.len], sender.asBytes());
+    @memcpy(encoded[2 + Address.len .. 2 + Address.len + nonce_rlp.len], nonce_rlp);
 
     const hash = crypto.keccak256(encoded[0 .. 1 + payload_len]);
     return fromHash(hash);
@@ -128,7 +262,7 @@ pub fn create2(sender: Address, salt: u256, init_code: []const u8) Address {
 
     var data: [1 + 20 + 32 + 32]u8 = undefined;
     data[0] = 0xff;
-    @memcpy(data[1..21], &sender);
+    @memcpy(data[1..21], sender.asBytes());
     @memcpy(data[21..53], &salt_bytes);
     @memcpy(data[53..85], &init_hash);
 
@@ -137,9 +271,9 @@ pub fn create2(sender: Address, salt: u256, init_code: []const u8) Address {
 }
 
 fn fromHash(hash: [32]u8) Address {
-    var result: Address = undefined;
-    @memcpy(&result, hash[12..32]);
-    return result;
+    var bytes: [Address.len]u8 = undefined;
+    @memcpy(&bytes, hash[12..32]);
+    return Address.fromBytes(bytes);
 }
 
 fn rlpEncodeNonce(buf: *[9]u8, nonce: u64) []const u8 {
@@ -169,13 +303,13 @@ test addr {
     var a = [_]u8{0} ** 20;
     const address1 = addr(1);
     a[19] = 1;
-    try std.testing.expectEqual(a, address1);
+    try std.testing.expectEqual(Address.fromBytes(a), address1);
 
-    try std.testing.expectEqual(a, addr(@as(u8, 1)));
-    try std.testing.expectEqual(a, addr(a));
-    try std.testing.expectEqual(a, addr(&a));
-    try std.testing.expectEqual(a, addr("0000000000000000000000000000000000000001"));
-    try std.testing.expectEqual(a, addr("0x0000000000000000000000000000000000000001"));
+    try std.testing.expectEqual(Address.fromBytes(a), addr(@as(u8, 1)));
+    try std.testing.expectEqual(Address.fromBytes(a), addr(a));
+    try std.testing.expectEqual(Address.fromBytes(a), addr(&a));
+    try std.testing.expectEqual(Address.fromBytes(a), addr("0000000000000000000000000000000000000001"));
+    try std.testing.expectEqual(Address.fromBytes(a), addr("0x0000000000000000000000000000000000000001"));
 }
 
 test fromWord {
@@ -183,7 +317,19 @@ test fromWord {
     var expected = [_]u8{0} ** 20;
     expected[18] = 0x12;
     expected[19] = 0x34;
-    try std.testing.expectEqual(expected, fromWord(word));
+    try std.testing.expectEqual(Address.fromBytes(expected), fromWord(word));
+}
+
+test "address word preserves canonical bytes and truncates EVM words" {
+    const canonical = addr("123456789abcdef00123456789abcdef00123456");
+    const from_address: AddressWord = .fromAddress(canonical);
+    try std.testing.expectEqual(canonical, from_address.address());
+    try std.testing.expectEqual(@as(u64, 0), from_address.words[2] >> 32);
+
+    const evm_word = (@as(u256, 0xdeadbeef) << 160) | canonical.toU256();
+    const from_evm_word: AddressWord = .fromU256(evm_word);
+    try std.testing.expect(AddressWord.eql(from_address, from_evm_word));
+    try std.testing.expectEqual(canonical.toU256(), from_evm_word.toU256());
 }
 
 test fromPublicKey {
@@ -207,8 +353,15 @@ test "address conversion uses Ethereum byte order" {
     var address1234 = [_]u8{0} ** 20;
     address1234[18] = 0x12;
     address1234[19] = 0x34;
-    try std.testing.expectEqual(address1234, addr(0x1234));
-    try std.testing.expectEqual(@as(u256, 0x1234), toU256(address1234));
+    const canonical = Address.fromBytes(address1234);
+    try std.testing.expectEqual(canonical, addr(0x1234));
+    try std.testing.expectEqual(@as(u256, 0x1234), toU256(canonical));
+}
+
+test "address hash preserves canonical byte hashing" {
+    const value = addr("123456789abcdef00123456789abcdef00123456");
+    const ByteContext = std.hash_map.AutoContext([Address.len]u8);
+    try std.testing.expectEqual(ByteContext.hash(.{}, value.bytes), Address.HashContext.hash(.{}, value));
 }
 
 test fromHex {
@@ -216,24 +369,20 @@ test fromHex {
     expected[18] = 0x12;
     expected[19] = 0x34;
 
-    try std.testing.expectEqual(expected, try fromHex("0000000000000000000000000000000000001234"));
-    try std.testing.expectEqual(expected, try fromHex("0X0000000000000000000000000000000000001234"));
+    try std.testing.expectEqual(Address.fromBytes(expected), try fromHex("0000000000000000000000000000000000001234"));
+    try std.testing.expectEqual(Address.fromBytes(expected), try fromHex("0X0000000000000000000000000000000000001234"));
     try std.testing.expectError(error.InvalidAddressHexLength, fromHex("1234"));
     try std.testing.expectError(error.InvalidAddressHexCharacter, fromHex("00000000000000000000000000000000000012zz"));
 }
 
 test create {
-    var sender: Address = undefined;
-    _ = try std.fmt.hexToBytes(&sender, "5fc94da7cae6b2e69799b03858483a676c906772");
-    var expected: Address = undefined;
-    _ = try std.fmt.hexToBytes(&expected, "7ec63eda6c58777cb9f17a99a6a334547d59c9b6");
+    const sender = try fromHex("5fc94da7cae6b2e69799b03858483a676c906772");
+    const expected = try fromHex("7ec63eda6c58777cb9f17a99a6a334547d59c9b6");
     try std.testing.expectEqual(expected, create(sender, 1));
 }
 
 test create2 {
-    var sender: Address = undefined;
-    _ = try std.fmt.hexToBytes(&sender, "0000000000000000000000000000000000000000");
-    var expected: Address = undefined;
-    _ = try std.fmt.hexToBytes(&expected, "4d1a2e2bb4f88f0250f26ffff098b0b30b26bf38");
+    const sender = try fromHex("0000000000000000000000000000000000000000");
+    const expected = try fromHex("4d1a2e2bb4f88f0250f26ffff098b0b30b26bf38");
     try std.testing.expectEqual(expected, create2(sender, 0, &.{0x00}));
 }

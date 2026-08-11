@@ -229,7 +229,7 @@ test "BlockSTF BAL differential rejects correlated claimed values" {
     var changed_first = false;
     var changed_dependent = false;
     for (hostile.accounts) |*account| {
-        if (!std.mem.eql(u8, &account.address, &target)) continue;
+        if (!evmz.Address.eql(account.address, target)) continue;
         for (@constCast(account.storage_changes)) |*slot| {
             const expected_index: bal.BlockAccessIndex = if (slot.slot == first_slot)
                 1
@@ -284,7 +284,7 @@ test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as abs
     });
     var probe_code: [28]u8 = undefined;
     probe_code[0] = 0x73; // PUSH20 destroyed
-    @memcpy(probe_code[1..21], &destroyed);
+    @memcpy(probe_code[1..21], destroyed.asBytes());
     probe_code[21] = 0x3f; // EXTCODEHASH
     probe_code[22] = 0x5f; // PUSH0
     probe_code[23] = 0x52; // MSTORE
@@ -332,7 +332,7 @@ test "BlockSTF BAL differential positions a same-transaction SELFDESTRUCT as abs
     var decoded = try bal.decode(std.testing.allocator, produced.encoded_block_access_list);
     defer decoded.deinit(std.testing.allocator);
     const destroyed_changes = for (decoded.accounts) |*account| {
-        if (std.mem.eql(u8, &account.address, &destroyed)) break account;
+        if (evmz.Address.eql(account.address, destroyed)) break account;
     } else return error.TestExpectedDestroyedAccount;
     try std.testing.expectEqual(@as(usize, 0), destroyed_changes.nonce_changes.len);
     try std.testing.expectEqual(@as(usize, 0), destroyed_changes.code_changes.len);

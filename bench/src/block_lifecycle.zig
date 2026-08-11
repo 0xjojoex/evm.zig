@@ -271,7 +271,7 @@ fn syntheticAccessListAddress(index: usize) evmz.Address {
         address[19 - i] = @intCast(value & 0xff);
         value >>= 8;
     }
-    return address;
+    return .fromBytes(address);
 }
 
 fn runTransactions(block: anytype, options: Options, access_list: []const evmz.transaction.AccessListEntry) !evmz.BlockResult {
@@ -424,6 +424,6 @@ test "block lifecycle storage-only access list uses contract entry" {
     defer access_list.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), access_list.entries.len);
-    try std.testing.expectEqualSlices(u8, &contract_address, &access_list.entries[0].address);
+    try std.testing.expectEqual(contract_address, access_list.entries[0].address);
     try std.testing.expectEqual(@as(usize, 2), access_list.entries[0].storage_keys.len);
 }

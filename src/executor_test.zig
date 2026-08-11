@@ -163,8 +163,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     const undeclared = evmz.addr(2);
     try dense.warmAccount(undeclared);
     try dense.warmStorage(target, 8);
-    try std.testing.expect(!dense.state.isAccountWarm(undeclared));
-    try std.testing.expect(!dense.state.isStorageWarm(target, 8));
+    try std.testing.expect(!dense.state.isAccountWarm(.fromAddress(undeclared)));
+    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 8));
     try std.testing.expectError(error.UndeclaredAccount, dense.getBalance(undeclared));
     try std.testing.expectError(error.UndeclaredStorage, dense.getStorage(target, 8));
     try std.testing.expectError(error.UndeclaredAccount, dense.observeAccountAccess(undeclared));
@@ -181,12 +181,12 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     defer dense_checkpoint.deinit();
 
     const tracked_load = try tracked.state.loadStorage(target, 7);
-    const dense_load = try dense.state.loadStorage(target, 7);
+    const dense_load = try dense.state.loadStorage(.fromAddress(target), 7);
     try std.testing.expectEqual(tracked_load, dense_load);
     try std.testing.expectEqual(.cold, dense_load.access_status);
-    try std.testing.expect(dense.state.isStorageWarm(target, 7));
+    try std.testing.expect(dense.state.isStorageWarm(.fromAddress(target), 7));
     const tracked_store = try tracked.state.storeStorage(target, 7, 9);
-    const dense_store = try dense.state.storeStorage(target, 7, 9);
+    const dense_store = try dense.state.storeStorage(.fromAddress(target), 7, 9);
     try std.testing.expectEqual(tracked_store, dense_store);
     try std.testing.expectEqual(.warm, dense_store.access_status);
     try std.testing.expectEqual(.modified, dense_store.storage_status);
@@ -200,8 +200,8 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try std.testing.expectEqual(@as(u256, 15), try tracked.getBalance(target));
     try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try dense.getStorage(target, 7));
-    try std.testing.expect(!dense.state.isStorageWarm(target, 7));
-    try std.testing.expectEqual(.cold, (try dense.state.loadStorage(target, 7)).access_status);
+    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 7));
+    try std.testing.expectEqual(.cold, (try dense.state.loadStorage(.fromAddress(target), 7)).access_status);
 
     tracked.discardStateTransition();
     dense.discardStateTransition();
@@ -223,7 +223,7 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     try tracked.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
     try dense.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
     _ = try tracked.state.setStorage(target, 7, 11);
-    _ = try dense.state.setStorage(target, 7, 11);
+    _ = try dense.state.setStorage(.fromAddress(target), 7, 11);
 
     tracked_observer.code_hash = replacement_hash;
     dense_observer.code_hash = replacement_hash;
@@ -688,7 +688,7 @@ test "top-level delegated target is a semantic account access" {
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
-                if (std.mem.eql(u8, &fact.address, &self.target)) {
+                if (evmz.Address.eql(fact.address, self.target)) {
                     try std.testing.expect(fact.observation.semantic_access);
                     self.found = true;
                 }
@@ -736,7 +736,7 @@ test "delegated target is observed before insufficient call balance" {
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
                 const fact = accounts.at(index);
-                if (!std.mem.eql(u8, &fact.address, &self.target)) continue;
+                if (!evmz.Address.eql(fact.address, self.target)) continue;
                 try std.testing.expect(fact.observation.semantic_access);
                 try std.testing.expect(fact.observation.code_read);
                 self.found = true;
@@ -1006,11 +1006,11 @@ const CodeObservation = struct {
             const fact = view.accounts.at(index);
             if (!fact.observation.code_read) continue;
             code_reads += 1;
-            if (std.mem.eql(u8, &fact.address, &self.required)) {
+            if (evmz.Address.eql(fact.address, self.required)) {
                 required_found = true;
             }
             if (self.forbidden) |forbidden| {
-                try std.testing.expect(!std.mem.eql(u8, &fact.address, &forbidden));
+                try std.testing.expect(!evmz.Address.eql(fact.address, forbidden));
             }
         }
 
@@ -2009,13 +2009,13 @@ test "executor executes top-level create transaction" {
     const result = (try executor.executeMessage(request.message, request.gas)).expectCreate();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqualSlices(u8, &create_address, &result.address);
+    try std.testing.expectEqual(create_address, result.address);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
     try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create_address));
 }
 
 fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u256) !void {
-    try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &event_log.address);
+    try std.testing.expectEqual(evmz.eth.system_address, event_log.address);
     try std.testing.expectEqual(@as(usize, 3), event_log.topics.len);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, event_log.topics[0]);
     try std.testing.expectEqual(evmz.address.toU256(from), event_log.topics[1]);
@@ -2196,7 +2196,7 @@ test "Amsterdam raises create runtime code size limit" {
         .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas + (default_max_code_size + 1) * evmz.eth.transaction.amsterdam_cost_per_state_byte,
     })).expectCreate();
     try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status());
-    try std.testing.expectEqualSlices(u8, &evmz.address.create(sender, 0), &amsterdam_result.address);
+    try std.testing.expectEqual(evmz.address.create(sender, 0), amsterdam_result.address);
     try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try amsterdam.getCode(amsterdam_result.address)).len);
 
     var amsterdam_over = Amsterdam.Executor.init(std.testing.allocator, .{});
@@ -2375,14 +2375,14 @@ test "exact spec drives precompile warm access" {
     try default_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer default_executor.discardStateTransition();
     var default_host = default_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(precompile_address));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(.fromAddress(precompile_address)));
 
     var custom_executor = NoPrecompile.Executor.init(std.testing.allocator, .{});
     defer custom_executor.deinit();
     try custom_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer custom_executor.discardStateTransition();
     var custom_host = custom_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(precompile_address));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(.fromAddress(precompile_address)));
 }
 
 test "exact spec drives precompile execution" {
@@ -2393,7 +2393,7 @@ test "exact spec drives precompile execution" {
             pub const Entry = enum { custom };
 
             pub fn resolve(target: Address) ?Entry {
-                if (!std.mem.eql(u8, &target, &custom_address)) return null;
+                if (!evmz.Address.eql(target, custom_address)) return null;
                 return .custom;
             }
 
@@ -2581,7 +2581,7 @@ fn createObservesTarget(creator_balance: u256) !bool {
             const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
-                if (std.mem.eql(u8, &accounts.at(index).address, &self.target))
+                if (evmz.Address.eql(accounts.at(index).address, self.target))
                     self.found = true;
             }
         }
@@ -2898,14 +2898,14 @@ test "active precompiles are warm but not existing state accounts" {
     defer executor.deinit();
 
     var host_iface = executor.host();
-    try std.testing.expect(!try host_iface.accountExists(precompile_address));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(precompile_address));
-    try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(precompile_address));
+    try std.testing.expect(!try host_iface.accountExists(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 
     // Alive, so the address is a real state account: an EIP-161-empty one is
     // dead and would still report zero.
     try evmz.t.seedExecutorAccount(&executor, precompile_address, .{ .balance = 1 });
-    try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(precompile_address));
+    try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 }
 
 test "delegated precompile targets are warm" {
@@ -2926,7 +2926,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &code });
 
     var host_iface = executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(authority)).?);
+    try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
 }
 
 test "sealed observations expose storage state without a trace tape" {
@@ -2947,7 +2947,7 @@ test "sealed observations expose storage state without a trace tape" {
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
                 const fact = storage.at(index) orelse continue;
-                if (!std.mem.eql(u8, &fact.address, &self.address) or fact.key != self.key) continue;
+                if (!evmz.Address.eql(fact.address, self.address) or fact.key != self.key) continue;
                 try std.testing.expect(fact.observation.value_read);
                 try std.testing.expect(fact.effect.written);
                 try std.testing.expectEqual(@as(u256, 0), fact.original);

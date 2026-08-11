@@ -4,6 +4,7 @@ const call_runtime_module = @import("./call_runtime.zig");
 const eip7702 = @import("./eip7702.zig");
 
 const Address = evmz.Address;
+const AddressWord = evmz.AddressWord;
 const Host = evmz.Host;
 
 pub fn bind(comptime Executor: type) type {
@@ -43,41 +44,48 @@ pub fn bind(comptime Executor: type) type {
                     return call_runtime.resolveHostCall(self, msg);
                 }
 
-                fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
+                fn accessAccount(ptr: *anyopaque, address: AddressWord) !Host.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     if (nativeContractActive(address)) return .warm;
-                    if (self.state.isAccountWarm(address)) return .warm;
-                    try self.state.warmAccount(address);
-                    return .cold;
-                }
-
-                fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
-                    const self: *Executor = @ptrCast(@alignCast(ptr));
-                    const target = eip7702.delegationTarget(try self.getCode(address)) orelse return null;
-                    if (nativeContractActive(target)) return .warm;
+                    const target = Executor.executionAddress(address);
                     if (self.state.isAccountWarm(target)) return .warm;
                     try self.state.warmAccount(target);
                     return .cold;
                 }
 
+                fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
+                    const self: *Executor = @ptrCast(@alignCast(ptr));
+                    const target = eip7702.delegationTarget(
+                        try self.state.getCode(Executor.executionAddress(address)),
+                    ) orelse return null;
+                    const target_word: AddressWord = .fromAddress(target);
+                    if (nativeContractActive(target_word)) return .warm;
+                    const state_target = Executor.executionAddress(target_word);
+                    if (self.state.isAccountWarm(state_target)) return .warm;
+                    try self.state.warmAccount(state_target);
+                    return .cold;
+                }
+
                 fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
-                    const balance = try getBalance(ptr, address);
+                    const balance = try getBalance(ptr, .fromAddress(address));
                     const call_capture = try call_runtime.beginSelfDestructCapture(
                         self,
                         address,
                         beneficiary,
                         balance,
                     );
-                    const same_address = std.mem.eql(u8, &address, &beneficiary);
-                    const should_refund = !self.state.wasSelfdestructed(address);
+                    const same_address = Address.eql(address, beneficiary);
+                    const state_address = Executor.stateAddress(address);
+                    const state_beneficiary = Executor.stateAddress(beneficiary);
+                    const should_refund = !self.state.wasSelfdestructed(state_address);
                     const policy = spec.self_destruct.policy(.{
                         .same_address = same_address,
-                        .created_in_transaction = self.state.createdInTransaction(address),
+                        .created_in_transaction = self.state.createdInTransaction(state_address),
                     });
                     if (balance > 0) {
                         if (!same_address) {
-                            try self.state.addBalance(beneficiary, balance);
+                            try self.state.addBalance(state_beneficiary, balance);
                             try evmz.executor.transfer_logs.emit(self, .{
                                 .from = address,
                                 .to = beneficiary,
@@ -85,16 +93,16 @@ pub fn bind(comptime Executor: type) type {
                             });
                         }
                         if (policy.clear_balance) {
-                            try self.state.setBalance(address, 0);
+                            try self.state.setBalance(state_address, 0);
                         }
                     } else if (!same_address and spec.self_destruct.touches_beneficiary_on_zero_transfer) {
-                        try self.state.touchAccount(beneficiary);
+                        try self.state.touchAccount(state_beneficiary);
                     }
                     if (policy.reset_nonce) {
-                        try self.state.setNonce(address, 0);
+                        try self.state.setNonce(state_address, 0);
                     }
                     if (policy.mark_selfdestructed) {
-                        try self.state.markSelfdestructed(address);
+                        try self.state.markSelfdestructed(state_address);
                     }
                     if (call_capture) |token| try call_runtime.finishSelfDestructCapture(self, token);
                     return should_refund;
@@ -102,65 +110,66 @@ pub fn bind(comptime Executor: type) type {
             };
         }
 
-        inline fn nativeContractActive(address: Address) bool {
-            return spec.precompile.active(address) or
-                spec.reentrant_native_contract.active(address);
+        inline fn nativeContractActive(address: AddressWord) bool {
+            const canonical = address.address();
+            return spec.precompile.active(canonical) or
+                spec.reentrant_native_contract.active(canonical);
         }
 
-        fn accountExists(ptr: *anyopaque, address: Address) !bool {
+        fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.accountExists(address);
+            return self.state.accountExists(Executor.executionAddress(address));
         }
 
-        fn observeAccountAccess(ptr: *anyopaque, address: Address, depth: u16) !void {
+        fn observeAccountAccess(ptr: *anyopaque, address: AddressWord, depth: u16) !void {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             _ = depth;
-            try self.traceAccountAccess(address);
+            try self.state.observeAccountAccess(Executor.executionAddress(address));
         }
 
-        fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+        fn getBalance(ptr: *anyopaque, address: AddressWord) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.getBalance(address);
+            return self.state.getBalance(Executor.executionAddress(address));
         }
 
-        fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+        fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.getNonce(address);
+            return self.state.getNonce(Executor.executionAddress(address));
         }
 
-        fn hostGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+        fn hostGetStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.getStorage(address, key);
+            return self.state.getStorage(Executor.executionAddress(address), key);
         }
 
-        fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
+        fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.setStorage(address, key, value);
+            return self.state.setStorage(Executor.executionAddress(address), key, value);
         }
 
-        fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+        fn loadStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.StorageLoadResult {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.loadStorage(address, key);
+            return self.state.loadStorage(Executor.executionAddress(address), key);
         }
 
-        fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+        fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.storeStorage(address, key, value);
+            return self.state.storeStorage(Executor.executionAddress(address), key, value);
         }
 
-        fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
+        fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return (try self.getCode(address)).len;
+            return (try self.state.getCode(Executor.executionAddress(address))).len;
         }
 
-        fn getCodeHash(ptr: *anyopaque, address: Address) !u256 {
+        fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.getCodeHash(address);
+            return self.state.getCodeHash(Executor.executionAddress(address));
         }
 
-        fn copyCode(ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+        fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            const code = try self.getCode(address);
+            const code = try self.state.getCode(Executor.executionAddress(address));
             if (code_offset >= code.len) return 0;
             const size = @min(buffer_data.len, code.len - code_offset);
             @memcpy(buffer_data[0..size], code[code_offset .. code_offset + size]);
@@ -183,9 +192,9 @@ pub fn bind(comptime Executor: type) type {
             return (try source.getBlockHash(block_number)) orelse 0;
         }
 
-        fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
+        fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return self.state.accessStorage(address, key);
+            return self.state.accessStorage(Executor.executionAddress(address), key);
         }
 
         fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {

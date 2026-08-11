@@ -430,8 +430,8 @@ test "execution request and scope initialization contain no family policy" {
 }
 
 test "message identity preserves create2 salt" {
-    const sender = [_]u8{0x11} ** 20;
-    const recipient = [_]u8{0x22} ** 20;
+    const sender = Address.fromBytes([_]u8{0x11} ** 20);
+    const recipient = Address.fromBytes([_]u8{0x22} ** 20);
     const message = try Message.init(.{
         .sender = sender,
         .create_recipient = recipient,
@@ -449,6 +449,6 @@ test "message identity preserves create2 salt" {
 
 test "create message construction requires a family-resolved recipient" {
     try std.testing.expectError(error.MissingCreateRecipient, Message.init(.{
-        .sender = [_]u8{0x11} ** 20,
+        .sender = Address.fromBytes([_]u8{0x11} ** 20),
     }));
 }

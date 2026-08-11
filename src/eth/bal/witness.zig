@@ -105,7 +105,7 @@ const ProbeReader = struct {
     fn loadAccount(ptr: *anyopaque, account_address: Address) !?state.Account {
         const self = context(ptr);
         if (self.fail_account) |failed| {
-            if (std.mem.eql(u8, &failed, &account_address)) return error.InvalidWitness;
+            if (Address.eql(failed, account_address)) return error.InvalidWitness;
         }
         self.loaded_accounts[self.loaded_account_count] = account_address;
         self.loaded_account_count += 1;

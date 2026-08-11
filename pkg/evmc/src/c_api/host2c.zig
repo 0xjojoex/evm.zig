@@ -8,6 +8,7 @@ const evmc = common.evmc;
 const log = std.log.scoped(.evmz_host2c);
 const toEvmcAddress = common.toEvmcAddress;
 const fromEvmcAddress = common.fromEvmcAddress;
+const fromEvmcAddressWord = common.fromEvmcAddressWord;
 const fromEvmcBytes32 = common.fromEvmcBytes32;
 const toEvmcBytes32 = common.toEvmcBytes32;
 
@@ -80,12 +81,12 @@ pub fn getInterface() evmc.evmc_host_interface {
 }
 fn accountExists(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u8 {
     const host = HostContext.getHostFromContext(context);
-    return @intFromBool(host.accountExists(fromEvmcAddress(address.*)) catch false);
+    return @intFromBool(host.accountExists(fromEvmcAddressWord(address.*)) catch false);
 }
 
 fn getStorage(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address, key: [*c]const evmc.evmc_bytes32) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)) catch 0);
+    return toEvmcBytes32(host.getStorage(fromEvmcAddressWord(address.*), fromEvmcBytes32(key.*)) catch 0);
 }
 
 fn setStorage(
@@ -95,7 +96,7 @@ fn setStorage(
     value: [*c]const evmc.evmc_bytes32,
 ) callconv(.c) evmc.evmc_storage_status {
     const host = HostContext.getHostFromContext(context);
-    const r = host.setStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*), fromEvmcBytes32(value.*)) catch {
+    const r = host.setStorage(fromEvmcAddressWord(address.*), fromEvmcBytes32(key.*), fromEvmcBytes32(value.*)) catch {
         return 0;
     };
     return @intFromEnum(r);
@@ -103,23 +104,23 @@ fn setStorage(
 
 fn getBalance(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    const b = host.getBalance(fromEvmcAddress(address.*)) catch 0;
+    const b = host.getBalance(fromEvmcAddressWord(address.*)) catch 0;
     return toEvmcBytes32(b);
 }
 
 fn getNonce(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) u64 {
     const host = HostContext.getHostFromContext(context);
-    return host.getNonce(fromEvmcAddress(address.*)) catch 0;
+    return host.getNonce(fromEvmcAddressWord(address.*)) catch 0;
 }
 
 fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) usize {
     const host = HostContext.getHostFromContext(context);
-    return @intCast(host.getCodeSize(fromEvmcAddress(address.*)) catch 0);
+    return @intCast(host.getCodeSize(fromEvmcAddressWord(address.*)) catch 0);
 }
 
 fn getCodeHash(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) evmc.evmc_bytes32 {
     const host = HostContext.getHostFromContext(context);
-    return toEvmcBytes32(host.getCodeHash(fromEvmcAddress(address.*)) catch 0);
+    return toEvmcBytes32(host.getCodeHash(fromEvmcAddressWord(address.*)) catch 0);
 }
 
 fn copyCode(
@@ -130,7 +131,7 @@ fn copyCode(
     buffer_size: usize,
 ) callconv(.c) usize {
     const host = HostContext.getHostFromContext(context);
-    return host.copyCode(fromEvmcAddress(address.*), code_offset, buffer_data[0..buffer_size]) catch 0;
+    return host.copyCode(fromEvmcAddressWord(address.*), code_offset, buffer_data[0..buffer_size]) catch 0;
 }
 
 fn selfDestruct(
@@ -284,7 +285,7 @@ fn emitLog(
 
 fn accessAccount(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) evmc.evmc_access_status {
     const host = HostContext.getHostFromContext(context);
-    return @intFromEnum(host.accessAccount(fromEvmcAddress(address.*)) catch Host.AccessStatus.cold);
+    return @intFromEnum(host.accessAccount(fromEvmcAddressWord(address.*)) catch Host.AccessStatus.cold);
 }
 
 fn accessStorage(
@@ -293,7 +294,7 @@ fn accessStorage(
     key: [*c]const evmc.evmc_bytes32,
 ) callconv(.c) evmc.evmc_access_status {
     const host = HostContext.getHostFromContext(context);
-    return @intFromEnum(host.accessStorage(fromEvmcAddress(address.*), fromEvmcBytes32(key.*)) catch Host.AccessStatus.cold);
+    return @intFromEnum(host.accessStorage(fromEvmcAddressWord(address.*), fromEvmcBytes32(key.*)) catch Host.AccessStatus.cold);
 }
 
 fn getTransientStorage(

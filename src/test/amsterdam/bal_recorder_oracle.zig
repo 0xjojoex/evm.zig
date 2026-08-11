@@ -190,7 +190,7 @@ pub const Recorder = struct {
             for (builders.items) |*builder| builder.deinit(allocator);
             builders.deinit(allocator);
         }
-        var builder_indices = std.AutoHashMap(bal.Address, usize).init(allocator);
+        var builder_indices = bal.Address.HashMap(usize).init(allocator);
         defer builder_indices.deinit();
         try self.collectBuilders(allocator, &builders, &builder_indices);
 
@@ -217,7 +217,7 @@ pub const Recorder = struct {
             for (builders.items) |*builder| builder.deinit(allocator);
             builders.deinit(allocator);
         }
-        var builder_indices = std.AutoHashMap(bal.Address, usize).init(allocator);
+        var builder_indices = bal.Address.HashMap(usize).init(allocator);
         defer builder_indices.deinit();
         try self.collectBuilders(allocator, &builders, &builder_indices);
 
@@ -241,7 +241,7 @@ pub const Recorder = struct {
         self: *Recorder,
         allocator: Allocator,
         builders: *std.ArrayList(AccountBuilder),
-        builder_indices: *std.AutoHashMap(bal.Address, usize),
+        builder_indices: *bal.Address.HashMap(usize),
     ) !void {
         for (self.events.items) |event| {
             switch (event) {
@@ -697,7 +697,7 @@ const AccountBuilder = struct {
 fn accountBuilderFor(
     allocator: Allocator,
     builders: *std.ArrayList(AccountBuilder),
-    indices: *std.AutoHashMap(bal.Address, usize),
+    indices: *bal.Address.HashMap(usize),
     target: bal.Address,
 ) !*AccountBuilder {
     if (indices.get(target)) |index| return &builders.items[index];
@@ -720,7 +720,7 @@ fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void 
 }
 
 fn accountLessThan(_: void, lhs: bal.AccountChanges, rhs: bal.AccountChanges) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
+    return address.Address.order(lhs.address, rhs.address) == .lt;
 }
 
 fn storageWriteLessThan(_: void, lhs: StorageWrite, rhs: StorageWrite) bool {
@@ -758,7 +758,7 @@ fn observationAccountLessThan(
     lhs: observation.AccountObservation,
     rhs: observation.AccountObservation,
 ) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
+    return address.Address.order(lhs.address, rhs.address) == .lt;
 }
 
 fn deinitObservationAccount(allocator: Allocator, account: observation.AccountObservation) void {

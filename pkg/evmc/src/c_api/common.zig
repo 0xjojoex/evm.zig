@@ -10,12 +10,16 @@ comptime {
 
 pub fn toEvmcAddress(addr: ?evmz.Address) evmc.evmc_address {
     return evmc.evmc_address{
-        .bytes = if (addr) |a| a else evmz.addr(0),
+        .bytes = if (addr) |a| a.bytes else evmz.addr(0).bytes,
     };
 }
 
 pub fn fromEvmcAddress(addr: evmc.evmc_address) evmz.Address {
-    return addr.bytes;
+    return .fromBytes(addr.bytes);
+}
+
+pub fn fromEvmcAddressWord(addr: evmc.evmc_address) evmz.AddressWord {
+    return .fromAddress(fromEvmcAddress(addr));
 }
 
 pub fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {

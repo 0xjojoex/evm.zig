@@ -124,7 +124,7 @@ fn emitHeader(fields: anytype, header: *const ExecutionHeader) rlp.EncodeError!v
 
 test "execution header reproduces Ethereum mainnet genesis hash" {
     const zero_hash = [_]u8{0} ** 32;
-    const zero_address = [_]u8{0} ** 20;
+    const zero_address = Address.fromBytes([_]u8{0} ** 20);
     const empty_root = testHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
@@ -154,7 +154,7 @@ test "execution header reproduces Amsterdam EEST genesis hash" {
     const empty_root = testHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
-        .coinbase = [_]u8{0} ** 20,
+        .coinbase = Address.fromBytes([_]u8{0} ** 20),
         .state_root = testHex("d5ef849c559173e07d44d46a906eb95cbe0f1e417bf7aef21109efc88c3cf5fc"),
         .transactions_root = empty_root,
         .receipts_root = empty_root,
@@ -185,7 +185,7 @@ test "execution header rejects fork-inconsistent field presence" {
     const zero_hash = [_]u8{0} ** 32;
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
-        .coinbase = [_]u8{0} ** 20,
+        .coinbase = Address.fromBytes([_]u8{0} ** 20),
         .state_root = zero_hash,
         .transactions_root = zero_hash,
         .receipts_root = zero_hash,
@@ -265,7 +265,7 @@ fn testHeader(revision: Revision) ExecutionHeader {
     const zero_hash = [_]u8{0} ** 32;
     return .{
         .parent_hash = zero_hash,
-        .coinbase = [_]u8{0} ** 20,
+        .coinbase = Address.fromBytes([_]u8{0} ** 20),
         .state_root = zero_hash,
         .transactions_root = zero_hash,
         .receipts_root = zero_hash,

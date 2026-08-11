@@ -235,7 +235,7 @@ fn decodeCode(bytes: []const u8) InitError!Code {
 }
 
 fn compareAccount(context: Address, item: AccountView) std.math.Order {
-    return std.mem.order(u8, &context, &item.claim.address);
+    return Address.order(context, item.claim.address);
 }
 
 fn compareSlotChanges(context: u256, item: bal.SlotChanges) std.math.Order {

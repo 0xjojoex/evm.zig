@@ -7,6 +7,7 @@ const Host = evmz.Host;
 const ExecutionContext = evmz.execution.ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
+const AddressWord = evmz.AddressWord;
 
 /// Fork revisions this test build compiles exact VMs for, resolved from the
 /// `test_forks` preset in build options: `head` = latest, `dev` = the local
@@ -159,9 +160,9 @@ pub const MockHost = struct {
     execution_context: ExecutionContext,
     execution_context_reads: u64,
     original_store: std.AutoHashMap(u256, u256),
-    code: std.AutoHashMap(Address, []u8),
-    local_account: std.AutoHashMap(Address, Host.Account),
-    removed_account: std.AutoHashMap(Address, bool),
+    code: Address.HashMap([]u8),
+    local_account: Address.HashMap(Host.Account),
+    removed_account: Address.HashMap(bool),
     storage_reads: u64,
     access_storage_reads: u64,
     storage_loads: u64,
@@ -177,9 +178,9 @@ pub const MockHost = struct {
             .store = std.AutoHashMap(u256, u256).init(alloc),
             .logs = .empty,
             .original_store = std.AutoHashMap(u256, u256).init(alloc),
-            .local_account = std.AutoHashMap(Address, Host.Account).init(alloc),
-            .removed_account = std.AutoHashMap(Address, bool).init(alloc),
-            .code = std.AutoHashMap(Address, []u8).init(alloc),
+            .local_account = Address.HashMap(Host.Account).init(alloc),
+            .removed_account = Address.HashMap(bool).init(alloc),
+            .code = Address.HashMap([]u8).init(alloc),
             .execution_context_reads = 0,
             .storage_reads = 0,
             .access_storage_reads = 0,
@@ -235,7 +236,7 @@ pub const MockHost = struct {
         });
     }
 
-    fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
+    fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         const original_entry = try self.original_store.getOrPut(key);
@@ -251,14 +252,14 @@ pub const MockHost = struct {
         return status;
     }
 
-    fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+    fn getStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         self.storage_reads += 1;
         return self.store.get(key) orelse 0;
     }
 
-    fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+    fn loadStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.StorageLoadResult {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         self.storage_loads += 1;
@@ -268,7 +269,7 @@ pub const MockHost = struct {
         };
     }
 
-    fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+    fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.storage_stores += 1;
         const access_status: Host.AccessStatus = if (self.store.contains(key)) .warm else .cold;
@@ -302,8 +303,9 @@ pub const MockHost = struct {
         return &.{};
     }
 
-    pub fn copyCode(ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+    pub fn copyCode(ptr: *anyopaque, address_word: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
 
         if (self.removed_account.get(address)) |_| {
             return 0;
@@ -322,8 +324,9 @@ pub const MockHost = struct {
         return 0;
     }
 
-    fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+    fn getBalance(ptr: *anyopaque, address_word: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
 
         const local = self.local_account.get(address);
 
@@ -334,24 +337,26 @@ pub const MockHost = struct {
         return 0;
     }
 
-    fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+    fn getNonce(ptr: *anyopaque, address_word: AddressWord) !u64 {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
         return if (self.local_account.get(address)) |account| account.nonce else 0;
     }
 
-    fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
+    fn getCodeSize(ptr: *anyopaque, address_word: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         var buf: [1024]u8 = undefined;
-        const code = try self.getCodeBuf(address, &buf);
+        const code = try self.getCodeBuf(address_word.address(), &buf);
         return code.len;
     }
 
-    fn getCodeHash(ptr: *anyopaque, address: Address) !u256 {
+    fn getCodeHash(ptr: *anyopaque, address_word: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
         var buf: [1024]u8 = undefined;
         const a = @This();
 
-        const exist = try a.accountExists(self, address);
+        const exist = try a.accountExists(self, address_word);
 
         if (!exist) {
             return 0;
@@ -374,8 +379,8 @@ pub const MockHost = struct {
         const a = @This();
 
         const should_refund = !self.removed_account.contains(address);
-        const destrucing_balance = try a.getBalance(self, address);
-        const recipient_balance = try a.getBalance(self, beneficiary);
+        const destrucing_balance = try a.getBalance(self, .fromAddress(address));
+        const recipient_balance = try a.getBalance(self, .fromAddress(beneficiary));
 
         try self.local_account.put(address, .{
             .balance = 0,
@@ -391,8 +396,9 @@ pub const MockHost = struct {
         return should_refund;
     }
 
-    fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
+    fn accessAccount(ptr: *anyopaque, address_word: AddressWord) !Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
         const local = self.local_account.get(address);
         if (local) |_| {
             return .warm;
@@ -400,7 +406,7 @@ pub const MockHost = struct {
         return .cold;
     }
 
-    fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
+    fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         self.access_storage_reads += 1;
@@ -411,7 +417,7 @@ pub const MockHost = struct {
         return .cold;
     }
 
-    fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
+    fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
         _ = ptr;
         _ = address;
         return null;
@@ -424,8 +430,9 @@ pub const MockHost = struct {
         return self.execution_context;
     }
 
-    fn accountExists(ptr: *anyopaque, address: Address) !bool {
+    fn accountExists(ptr: *anyopaque, address_word: AddressWord) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = address_word.address();
         const local = self.local_account.get(address);
         if (local) |_| {
             return true;

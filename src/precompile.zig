@@ -187,10 +187,10 @@ pub fn contractFromAddress(target: Address) ?Contract {
     // Reject non-precompile targets with native u64 zero tests instead of
     // materializing a u160, which RV64 assembles as a multiword byteswap on
     // every CALL-family target.
-    if (std.mem.readInt(u64, target[0..8], .little) != 0) return null;
-    if (std.mem.readInt(u64, target[8..16], .little) != 0) return null;
-    if (std.mem.readInt(u16, target[16..18], .little) != 0) return null;
-    const contract_id = std.mem.readInt(u16, target[18..20], .big);
+    if (std.mem.readInt(u64, target.bytes[0..8], .little) != 0) return null;
+    if (std.mem.readInt(u64, target.bytes[8..16], .little) != 0) return null;
+    if (std.mem.readInt(u16, target.bytes[16..18], .little) != 0) return null;
+    const contract_id = std.mem.readInt(u16, target.bytes[18..20], .big);
     return switch (contract_id) {
         0x01 => .ecrecover,
         0x02 => .sha256,
@@ -225,18 +225,18 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
     // same selector with each of the 18 high bytes poisoned must reject.
     var selector: u32 = 0;
     while (selector <= std.math.maxInt(u16)) : (selector += 1) {
-        var target: Address = @splat(0);
-        std.mem.writeInt(u16, target[18..20], @intCast(selector), .big);
+        var target = Address.fromBytes(@splat(0));
+        std.mem.writeInt(u16, target.bytes[18..20], @intCast(selector), .big);
         var expected: ?Contract = null;
         inline for (@typeInfo(Contract).@"enum".fields) |field| {
             const contract: Contract = @enumFromInt(field.value);
             const canonical = contract.toAddress();
-            if (std.mem.eql(u8, &target, &canonical)) expected = contract;
+            if (Address.eql(target, canonical)) expected = contract;
         }
         try std.testing.expectEqual(expected, contractFromAddress(target));
         for (0..18) |index| {
             var poisoned = target;
-            poisoned[index] = 0x01;
+            poisoned.bytes[index] = 0x01;
             try std.testing.expectEqual(@as(?Contract, null), contractFromAddress(poisoned));
         }
     }
@@ -246,12 +246,12 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
     const random = prng.random();
     for (0..100_000) |_| {
         var target: Address = undefined;
-        random.bytes(&target);
+        random.bytes(&target.bytes);
         var expected: ?Contract = null;
         inline for (@typeInfo(Contract).@"enum".fields) |field| {
             const contract: Contract = @enumFromInt(field.value);
             const canonical = contract.toAddress();
-            if (std.mem.eql(u8, &target, &canonical)) expected = contract;
+            if (Address.eql(target, canonical)) expected = contract;
         }
         try std.testing.expectEqual(expected, contractFromAddress(target));
     }
@@ -325,7 +325,7 @@ fn ecrecover(call: Call, comptime gas: GasSchedule) Error!Result {
 
     const output = try allocOutput(call, 32);
     @memset(output[0..12], 0);
-    @memcpy(output[12..32], &recovered);
+    @memcpy(output[12..32], recovered.asBytes());
     return successOutput(call, output, gas_left);
 }
 
@@ -779,9 +779,9 @@ fn recoverAddress(input: []const u8) ?Address {
     const public_key = crypto.ecrecoverPublicKey(message_hash, r_bytes, s_bytes, @intCast(v - 27)) orelse return null;
     const hash = crypto.keccak256(&public_key);
 
-    var address_bytes: Address = undefined;
+    var address_bytes: [Address.len]u8 = undefined;
     @memcpy(&address_bytes, hash[12..32]);
-    return address_bytes;
+    return Address.fromBytes(address_bytes);
 }
 
 fn paddedWord(input: []const u8, word_index: usize) [32]u8 {

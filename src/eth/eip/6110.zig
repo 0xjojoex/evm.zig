@@ -22,7 +22,7 @@ const index_offset = 512;
 pub fn appendRequestDataFromLogs(allocator: std.mem.Allocator, out: *std.ArrayList(u8), logs: state.LogBuffer.View) !void {
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);
-        if (!std.mem.eql(u8, &event_log.address, &deposit_contract_address)) continue;
+        if (!address.Address.eql(event_log.address, deposit_contract_address)) continue;
         if (event_log.topics.len == 0 or event_log.topics[0] != deposit_event_signature_hash) continue;
         try appendRequestData(allocator, out, event_log.data);
     }

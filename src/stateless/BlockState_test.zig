@@ -40,33 +40,33 @@ test "sealed dense views retain effects and observations with distinct lifetimes
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expectEqualSlices(u8, &parent_code, try state.getCode(target));
+    try std.testing.expectEqualSlices(u8, &parent_code, try state.getCode(.fromAddress(target)));
 
     const nested = state.checkpoint();
     const replacement_code = [_]u8{0x5f};
-    try state.setCode(target, &replacement_code);
+    try state.setCode(.fromAddress(target), &replacement_code);
     try state.setTransientStorage(target, 8, 12);
     var topics = [_]u256{1};
     var data = [_]u8{ 2, 3 };
     try state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
-    _ = try state.setStorage(target, 7, 9);
+    _ = try state.setStorage(.fromAddress(target), 7, 9);
     state.revertToCheckpoint(nested);
 
-    try std.testing.expectEqualSlices(u8, &parent_code, try state.getCode(target));
+    try std.testing.expectEqualSlices(u8, &parent_code, try state.getCode(.fromAddress(target)));
     try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(target, 8));
     try std.testing.expectEqual(@as(usize, 0), state.logView().len());
-    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     try std.testing.expectEqual(@as(usize, 1), state.observed_accounts.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.observed_storage.items.len);
     try std.testing.expect(!state.observed_accounts.items[0].effect.code_written);
     try std.testing.expect(!state.observed_storage.items[0].effect.written);
 
-    try state.setCode(target, &replacement_code);
+    try state.setCode(.fromAddress(target), &replacement_code);
     try state.setTransientStorage(target, 8, 12);
     try state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
     topics[0] = 9;
     data[0] = 9;
-    _ = try state.setStorage(target, 7, 9);
+    _ = try state.setStorage(.fromAddress(target), 7, 9);
     state.closeScope();
     state.seal(attempt);
 
@@ -122,8 +122,8 @@ test "dense introduced code is reclaimed across rollback and discard" {
     const first_code = [_]u8{ 0x60, 0x01 };
     const first_attempt = state.beginObservedTransaction();
     state.beginScope();
-    try state.markCreatedContract(targets[0]);
-    try state.setCode(targets[0], &first_code);
+    try state.markCreatedContract(.fromAddress(targets[0]));
+    try state.setCode(.fromAddress(targets[0]), &first_code);
     const first_ref = state.accounts[0].code_ref;
     state.closeScope();
     state.seal(first_attempt);
@@ -135,16 +135,16 @@ test "dense introduced code is reclaimed across rollback and discard" {
     const discarded = state.beginObservedTransaction();
     state.beginScope();
     const outer = state.checkpoint();
-    try state.markCreatedContract(targets[1]);
-    try state.setCode(targets[1], &second_code);
+    try state.markCreatedContract(.fromAddress(targets[1]));
+    try state.setCode(.fromAddress(targets[1]), &second_code);
     const second_ref = state.accounts[1].code_ref;
-    try state.markCreatedContract(targets[2]);
-    try state.setCode(targets[2], &second_code);
+    try state.markCreatedContract(.fromAddress(targets[2]));
+    try state.setCode(.fromAddress(targets[2]), &second_code);
     try std.testing.expectEqual(second_ref, state.accounts[2].code_ref);
     try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
 
     const inner = state.checkpoint();
-    try state.setCode(targets[2], &third_code);
+    try state.setCode(.fromAddress(targets[2]), &third_code);
     try std.testing.expectEqual(@as(usize, 3), state.code.introducedLen());
     state.revertToCheckpoint(inner);
     try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
@@ -155,11 +155,11 @@ test "dense introduced code is reclaimed across rollback and discard" {
     try std.testing.expectEqual(first_ref, state.accounts[0].code_ref);
     try std.testing.expectEqualSlices(u8, &first_code, state.code.view(first_ref).?.bytes);
 
-    try state.markCreatedContract(targets[1]);
-    try state.setCode(targets[1], &second_code);
+    try state.markCreatedContract(.fromAddress(targets[1]));
+    try state.setCode(.fromAddress(targets[1]), &second_code);
     try std.testing.expectEqual(second_ref, state.accounts[1].code_ref);
-    try state.markCreatedContract(targets[2]);
-    try state.setCode(targets[2], &second_code);
+    try state.markCreatedContract(.fromAddress(targets[2]));
+    try state.setCode(.fromAddress(targets[2]), &second_code);
     try std.testing.expectEqual(second_ref, state.accounts[2].code_ref);
     try std.testing.expectEqual(@as(usize, 2), state.code.introducedLen());
 
@@ -184,7 +184,7 @@ test "discarding accepted dense state reclaims code for a clean retry" {
     const code_hash = crypto.keccak256(&code);
     const first = state.beginObservedTransaction();
     state.beginScope();
-    try state.setCode(target, &code);
+    try state.setCode(.fromAddress(target), &code);
     state.closeScope();
     state.seal(first);
     state.retain(first);
@@ -196,7 +196,7 @@ test "discarding accepted dense state reclaims code for a clean retry" {
 
     const retry = state.beginObservedTransaction();
     state.beginScope();
-    try state.setCode(target, &code);
+    try state.setCode(.fromAddress(target), &code);
     state.closeScope();
     state.seal(retry);
     state.retain(retry);
@@ -268,14 +268,14 @@ test "introduced code satisfies a later optional witness code read" {
 
     const introduced = state.beginObservedTransaction();
     state.beginScope();
-    try state.setCode(created, &code);
+    try state.setCode(.fromAddress(created), &code);
     state.closeScope();
     state.seal(introduced);
     state.retain(introduced);
 
     const read = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expectEqualSlices(u8, &code, try state.getCode(parent));
+    try std.testing.expectEqualSlices(u8, &code, try state.getCode(.fromAddress(parent)));
     state.closeScope();
     state.discard(read);
 }
@@ -299,11 +299,11 @@ test "dense code reference preserves lazy invalid-witness rejection" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expectError(error.InvalidWitness, state.getCode(target));
-    try state.setBalance(target, 1);
-    try std.testing.expectError(error.InvalidWitness, state.getCode(target));
-    try state.clearCode(target);
-    try std.testing.expectEqual(@as(usize, 0), (try state.getCode(target)).len);
+    try std.testing.expectError(error.InvalidWitness, state.getCode(.fromAddress(target)));
+    try state.setBalance(.fromAddress(target), 1);
+    try std.testing.expectError(error.InvalidWitness, state.getCode(.fromAddress(target)));
+    try state.clearCode(.fromAddress(target));
+    try std.testing.expectEqual(@as(usize, 0), (try state.getCode(.fromAddress(target))).len);
     state.closeScope();
     state.discard(attempt);
 }
@@ -324,9 +324,9 @@ test "sealed storage wipe removes stale point writes" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    _ = try state.setStorage(target, 7, 9);
+    _ = try state.setStorage(.fromAddress(target), 7, 9);
     try state.wipeStorage(@enumFromInt(0));
-    try std.testing.expect(!try state.accountHasStorage(target));
+    try std.testing.expect(!try state.accountHasStorage(.fromAddress(target)));
     state.closeScope();
     state.seal(attempt);
     try std.testing.expectEqual(@as(u32, 0), state.pendingView().changes().storage_writes.len());
@@ -350,7 +350,7 @@ test "sealed discard preserves prior accepted storage projection" {
 
     const accepted_attempt = state.beginObservedTransaction();
     state.beginScope();
-    _ = try state.setStorage(target, 7, 9);
+    _ = try state.setStorage(.fromAddress(target), 7, 9);
     state.closeScope();
     state.seal(accepted_attempt);
     state.retain(accepted_attempt);
@@ -360,15 +360,15 @@ test "sealed discard preserves prior accepted storage projection" {
 
     const account_attempt = state.beginObservedTransaction();
     state.beginScope();
-    try state.setBalance(target, 12);
+    try state.setBalance(.fromAddress(target), 12);
     state.closeScope();
     state.seal(account_attempt);
     state.retain(account_attempt);
 
     const rejected_attempt = state.beginObservedTransaction();
     state.beginScope();
-    _ = try state.setStorage(target, 7, 10);
-    try state.setBalance(target, 13);
+    _ = try state.setStorage(.fromAddress(target), 7, 10);
+    try state.setBalance(.fromAddress(target), 13);
     try state.wipeStorage(@enumFromInt(0));
     state.closeScope();
     state.seal(rejected_attempt);
@@ -463,8 +463,8 @@ test "dense commit reclaims independent storage roots and error scopes" {
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
     const account_ids = [_]StatelessBlockState.AccountId{
-        plan.accountId(targets[0]).?,
-        plan.accountId(targets[1]).?,
+        plan.accountIdWord(.fromAddress(targets[0])).?,
+        plan.accountIdWord(.fromAddress(targets[1])).?,
     };
     const storage_ids = [_]StatelessBlockState.StorageId{
         plan.storageId(account_ids[0], slots[0]).?,
@@ -481,9 +481,9 @@ test "dense commit reclaims independent storage roots and error scopes" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try state.setBalance(targets[0], 10);
+    try state.setBalance(.fromAddress(targets[0]), 10);
     try state.writeStorage(storage_ids[0], 3);
-    try state.setBalance(targets[1], 20);
+    try state.setBalance(.fromAddress(targets[1]), 20);
     try state.writeStorage(storage_ids[1], 5);
     state.closeScope();
     state.seal(attempt);
@@ -570,7 +570,7 @@ fn expectDenseCommitMatches(case: DenseCommitCase) !void {
     const storage_id: StatelessBlockState.StorageId = @enumFromInt(0);
     switch (case) {
         .update => {
-            try state.setBalance(target, 12);
+            try state.setBalance(.fromAddress(target), 12);
             try state.writeStorage(storage_id, 9);
         },
         .delete => try state.writeAccount(account_id, .absent),
@@ -633,7 +633,7 @@ fn denseCommitLeaf(
 
 test "translation memo resolves alternating and evicted addresses to plan ids" {
     // Three declared accounts exercise both memo entries plus round-robin
-    // eviction; every resolution must agree with the plan's binary search.
+    // eviction; every resolution must agree with the plan's linear-probe table.
     const targets = [_]address.Address{ address.addr(0x0a), address.addr(0x0b), address.addr(0x0c) };
     const claims = [_]bal.AccountChanges{
         .{ .address = targets[0] },
@@ -655,20 +655,20 @@ test "translation memo resolves alternating and evicted addresses to plan ids" {
     // revisiting every address after each eviction pattern.
     const sequence = [_]usize{ 0, 1, 0, 1, 0, 1, 2, 0, 1, 2, 2, 1, 0 };
     for (sequence) |index| {
-        const resolved = (try state.resolveAccount(targets[index], .required_observed)).?;
-        try std.testing.expectEqual(plan.accountId(targets[index]).?, resolved);
+        const resolved = (try state.resolveAccount(.fromAddress(targets[index]), .required_observed)).?;
+        try std.testing.expectEqual(plan.accountIdWord(.fromAddress(targets[index])).?, resolved);
     }
     try std.testing.expectEqual(
         @as(?StatelessBlockState.AccountId, null),
-        try state.resolveAccount(address.addr(0xff), .optional_warm_only),
+        try state.resolveAccount(.fromAddress(address.addr(0xff)), .optional_warm_only),
     );
     try std.testing.expectError(
         error.UndeclaredAccount,
-        state.resolveAccount(address.addr(0xff), .required_observed),
+        state.resolveAccount(.fromAddress(address.addr(0xff)), .required_observed),
     );
     // Undeclared misses must not corrupt the remembered entries.
     for (targets) |target| {
-        const resolved = (try state.resolveAccount(target, .required_observed)).?;
-        try std.testing.expectEqual(plan.accountId(target).?, resolved);
+        const resolved = (try state.resolveAccount(.fromAddress(target), .required_observed)).?;
+        try std.testing.expectEqual(plan.accountIdWord(.fromAddress(target)).?, resolved);
     }
 }

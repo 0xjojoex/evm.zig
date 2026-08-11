@@ -17,7 +17,7 @@ const StatefulRuntime = struct {
     fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
         const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
         if (self.service_error) |err| return err;
-        _ = try call.host.setStorage(call.message.recipient, 7, self.tx_kind);
+        _ = try call.host.setStorage(.fromAddress(call.message.recipient), 7, self.tx_kind);
         if (self.invalid_borrow) return .{
             .status = .success,
             .output_data = &self.borrowed,
@@ -106,7 +106,7 @@ const StatefulNativeContract = struct {
     const target = evmz.addr(0x1234);
 
     pub fn active(address: evmz.Address) bool {
-        return std.mem.eql(u8, &address, &target);
+        return evmz.Address.eql(address, target);
     }
 };
 

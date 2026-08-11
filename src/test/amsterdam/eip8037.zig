@@ -98,7 +98,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     defer executed.discardIfCurrent();
     try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(authority).?.nonce);
-    try std.testing.expectEqualSlices(u8, &target, &eip7702.delegationTarget(try executor.getCode(authority)).?);
+    try std.testing.expectEqual(target, eip7702.delegationTarget(try executor.getCode(authority)).?);
 }
 
 test "Amsterdam invalid loaded authorization authority is a semantic access" {
@@ -132,7 +132,7 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     var index: u32 = 0;
     while (index < accounts.len()) : (index += 1) {
         const fact = accounts.at(index);
-        if (!std.mem.eql(u8, &fact.address, &authority)) continue;
+        if (!Address.eql(fact.address, authority)) continue;
         try std.testing.expect(fact.observation.semantic_access);
         try std.testing.expect(!fact.effect.any());
         found = true;
@@ -176,7 +176,7 @@ test "Amsterdam wrong-chain authorization authority is never accessed" {
     const accounts = executed.observations().accounts;
     var index: u32 = 0;
     while (index < accounts.len()) : (index += 1) {
-        try std.testing.expect(!std.mem.eql(u8, &accounts.at(index).address, &authority));
+        try std.testing.expect(!Address.eql(accounts.at(index).address, authority));
     }
 }
 
@@ -355,7 +355,7 @@ const AccountObservation = struct {
         var index: u32 = 0;
         while (index < accounts.len()) : (index += 1) {
             const fact = accounts.at(index);
-            if (std.mem.eql(u8, &fact.address, &self.address)) {
+            if (Address.eql(fact.address, self.address)) {
                 try std.testing.expect(fact.observation.semantic_access);
                 self.found = true;
                 return;

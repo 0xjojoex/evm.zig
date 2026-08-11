@@ -5,6 +5,7 @@ const common = @import("./c_api/common.zig");
 const evmc = common.evmc;
 
 const Address = evmz.Address;
+const AddressWord = evmz.AddressWord;
 
 const log = std.log.scoped(.evmc);
 
@@ -224,12 +225,12 @@ fn setOption(
 
 fn toEvmcAddress(addr: evmz.Address) evmc.evmc_address {
     return evmc.evmc_address{
-        .bytes = addr,
+        .bytes = addr.bytes,
     };
 }
 
 fn fromEvmcAddress(addr: evmc.evmc_address) evmz.Address {
-    return addr.bytes;
+    return .fromBytes(addr.bytes);
 }
 
 fn fromEvmcBytes32(b: evmc.evmc_bytes32) u256 {
@@ -290,23 +291,23 @@ const ToHost = struct {
         };
     }
 
-    fn accountExists(ptr: *anyopaque, address: Address) !bool {
+    fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         return self.host_interfcace.*.account_exists.?(self.context, &evmc_address) != 0;
     }
 
-    fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+    fn getStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         const evmc_key = toEvmcBytes32(key);
         const value = self.host_interfcace.*.get_storage.?(self.context, &evmc_address, &evmc_key);
         return fromEvmcBytes32(value);
     }
 
-    fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !evmz.Host.StorageStatus {
+    fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !evmz.Host.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         const evmc_key = toEvmcBytes32(key);
         const evmc_value = toEvmcBytes32(value);
         const status = self.host_interfcace.*.set_storage.?(self.context, &evmc_address, &evmc_key, &evmc_value);
@@ -314,52 +315,52 @@ const ToHost = struct {
         return storageStatusFromEvmc(status);
     }
 
-    fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !evmz.Host.StorageLoadResult {
+    fn loadStorage(ptr: *anyopaque, address: AddressWord, key: u256) !evmz.Host.StorageLoadResult {
         return .{
             .access_status = try accessStorage(ptr, address, key),
             .value = try getStorage(ptr, address, key),
         };
     }
 
-    fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !evmz.Host.StorageStoreResult {
+    fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !evmz.Host.StorageStoreResult {
         return .{
             .access_status = try accessStorage(ptr, address, key),
             .storage_status = try setStorage(ptr, address, key, value),
         };
     }
 
-    fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+    fn getBalance(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         const balance = self.host_interfcace.*.get_balance.?(self.context, &evmc_address);
         return fromEvmcBytes32(balance);
     }
 
-    fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+    fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         return self.host_interfcace.*.get_nonce.?(self.context, &evmc_address);
     }
 
-    fn observeAccountAccess(ptr: *anyopaque, address: Address, _: u16) !void {
+    fn observeAccountAccess(ptr: *anyopaque, address: AddressWord, _: u16) !void {
         _ = try accessAccount(ptr, address);
     }
 
-    fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
+    fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         return @as(u256, self.host_interfcace.*.get_code_size.?(self.context, &evmc_address));
     }
 
-    fn getCodeHash(ptr: *anyopaque, address: Address) !u256 {
+    fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         return fromEvmcBytes32(self.host_interfcace.*.get_code_hash.?(self.context, &evmc_address));
     }
 
-    fn copyCode(ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+    fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         return self.host_interfcace.*.copy_code.?(self.context, &evmc_address, code_offset, buffer_data.ptr, buffer_data.len);
     }
 
@@ -394,24 +395,24 @@ const ToHost = struct {
         return common.fromEvmcTxContext(context, &self.blob_hashes);
     }
 
-    fn accessAccount(ptr: *anyopaque, address: Address) !evmz.Host.AccessStatus {
+    fn accessAccount(ptr: *anyopaque, address: AddressWord) !evmz.Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         const status = self.host_interfcace.*.access_account.?(self.context, &evmc_address);
         return accessStatusFromEvmc(status);
     }
 
-    fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !evmz.Host.AccessStatus {
+    fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !evmz.Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const evmc_address = toEvmcAddress(address);
+        const evmc_address = toEvmcAddress(address.address());
         const evmc_key = toEvmcBytes32(key);
         const status = self.host_interfcace.*.access_storage.?(self.context, &evmc_address, &evmc_key);
         return accessStatusFromEvmc(status);
     }
 
-    fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?evmz.Host.AccessStatus {
+    fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?evmz.Host.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const target = try self.delegatedCodeTarget(address) orelse return null;
+        const target = try self.delegatedCodeTarget(address.address()) orelse return null;
         const evmc_target = toEvmcAddress(target);
         const status = self.host_interfcace.*.access_account.?(self.context, &evmc_target);
         const access_status = try accessStatusFromEvmc(status);
@@ -616,7 +617,7 @@ test "EVMC ABI 18 nonce callback round-trips through both host adapters" {
     var wrapper = ToHost.init(&interface, bridge.toContext());
     defer wrapper.deinit();
     var round_tripped_host = wrapper.toHost();
-    try std.testing.expectEqual(@as(u64, 7), try round_tripped_host.getNonce(account_address));
+    try std.testing.expectEqual(@as(u64, 7), try round_tripped_host.getNonce(.fromAddress(account_address)));
 }
 
 test "EVMC execute returns owned output through mock host" {
@@ -790,13 +791,14 @@ test "EVMC host wrapper provides required fused storage callbacks" {
     var host = wrapper.toHost();
 
     const address = evmz.addr(0xbeef);
-    const loaded = try host.loadStorage(address, 3);
+    const address_word: AddressWord = .fromAddress(address);
+    const loaded = try host.loadStorage(address_word, 3);
     try std.testing.expectEqual(evmz.Host.AccessStatus.cold, loaded.access_status);
     try std.testing.expectEqual(@as(u256, 7), loaded.value);
     try std.testing.expectEqualSlices(StorageHostContext.Event, &.{ .access, .get }, context.events[0..context.events_len]);
 
     context.events_len = 0;
-    const stored = try host.storeStorage(address, 3, 9);
+    const stored = try host.storeStorage(address_word, 3, 9);
     try std.testing.expectEqual(evmz.Host.AccessStatus.cold, stored.access_status);
     try std.testing.expectEqual(evmz.Host.StorageStatus.modified, stored.storage_status);
     try std.testing.expectEqual(@as(u256, 9), context.value);
@@ -829,7 +831,7 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
         fn getCodeSize(context: ?*evmc.evmc_host_context, address: [*c]const evmc.evmc_address) callconv(.c) usize {
             const self = fromContext(context);
             const requested = fromEvmcAddress(address.*);
-            if (!std.mem.eql(u8, &requested, &self.authority)) return 0;
+            if (!Address.eql(requested, self.authority)) return 0;
             return self.code.len;
         }
 
@@ -842,7 +844,7 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
         ) callconv(.c) usize {
             const self = fromContext(context);
             const requested = fromEvmcAddress(address.*);
-            if (!std.mem.eql(u8, &requested, &self.authority)) return 0;
+            if (!Address.eql(requested, self.authority)) return 0;
             if (code_offset >= self.code.len) return 0;
             const copied = @min(buffer_size, self.code.len - code_offset);
             @memcpy(buffer_data[0..copied], self.code[code_offset..][0..copied]);
@@ -884,9 +886,9 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
     defer wrapper.deinit();
     var host = wrapper.toHost();
 
-    const delegated_access = (try host.accessDelegatedAccount(authority)).?;
+    const delegated_access = (try host.accessDelegatedAccount(.fromAddress(authority))).?;
     try std.testing.expectEqual(evmz.Host.AccessStatus.cold, delegated_access);
-    try std.testing.expectEqualSlices(u8, &target, &context.accessed.?);
+    try std.testing.expectEqual(target, context.accessed.?);
 
     const result = (try host.call(.{
         .depth = 0,
@@ -901,7 +903,7 @@ test "EVMC host wrapper resolves delegated target and owns call output" {
 
     try std.testing.expectEqual(@as(?evmz.execution.FrameHalt, null), result.frame_halt);
     try std.testing.expect(context.last_msg.?.flags & evmc.EVMC_DELEGATED != 0);
-    try std.testing.expectEqualSlices(u8, &target, &fromEvmcAddress(context.last_msg.?.code_address));
+    try std.testing.expectEqual(target, fromEvmcAddress(context.last_msg.?.code_address));
     context.output[0] = 0xcc;
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, result.output_data);
 }

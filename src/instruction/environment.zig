@@ -33,7 +33,7 @@ pub fn bind(comptime spec: ExactSpec) type {
     return struct {
         const Self = @This();
 
-        fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.Address) !bool {
+        fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.AddressWord) !bool {
             if (exact_instructions.codeAccountAccessGas(.warm) == null) return true;
             const access_status = accountAccessStatus(try frame.host.accessAccount(target_address));
             const access_gas = exact_instructions.codeAccountAccessGas(access_status) orelse 0;
@@ -42,7 +42,7 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn balance(frame: *CallFrame) !void {
             const target_address_word = frame.pop() orelse return;
-            const target_address = evmz.address.fromWord(target_address_word);
+            const target_address: evmz.AddressWord = .fromU256(target_address_word);
             if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
                 if (try frame.host.accessAccount(target_address) == .cold) {
                     if (!frame.trackGas(cold_access_gas)) return;
@@ -55,7 +55,7 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn extcodesize(frame: *CallFrame) !void {
             const target_address_word = frame.pop() orelse return;
-            const target_address = evmz.address.fromWord(target_address_word);
+            const target_address: evmz.AddressWord = .fromU256(target_address_word);
             if (!try Self.trackCodeAccountAccessGas(frame, target_address)) return;
             try frame.traceAccountAccess(target_address);
             const size = try frame.host.getCodeSize(target_address);
@@ -64,7 +64,7 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn extcodecopy(frame: *CallFrame) !void {
             const address_word, const dest_offset_word, const offset_word, const size_word = frame.popN(4) orelse return;
-            const target_address = evmz.address.fromWord(address_word);
+            const target_address: evmz.AddressWord = .fromU256(address_word);
             const size = frame.wordToUsizeOrOog(size_word) orelse return;
             const dest_offset = frame.memoryOffsetToUsizeOrOog(dest_offset_word, size) orelse return;
 
@@ -86,7 +86,7 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn extcodehash(frame: *CallFrame) !void {
             const address_word = frame.pop() orelse return;
-            const target_address = evmz.address.fromWord(address_word);
+            const target_address: evmz.AddressWord = .fromU256(address_word);
             if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
                 if (try frame.host.accessAccount(target_address) == .cold) {
                     if (!frame.trackGas(cold_access_gas)) return;
@@ -226,7 +226,7 @@ pub fn codecopy(frame: *CallFrame) !void {
 }
 
 pub fn selfbalance(frame: *CallFrame) !void {
-    const address_balance = try frame.host.getBalance(frame.msg.recipient);
+    const address_balance = try frame.host.getBalance(.fromAddress(frame.msg.recipient));
     _ = frame.push(address_balance);
 }
 

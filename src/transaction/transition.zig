@@ -355,16 +355,16 @@ pub fn ImplType(
         ) !bool {
             if (!authorization_spec.active) return true;
             const allocator = try context.allocator();
-            var written_accounts = std.AutoHashMap(Address, void).init(allocator);
+            var written_accounts = Address.HashMap(void).init(allocator);
             defer written_accounts.deinit();
             try written_accounts.put(message.sender(), {});
             switch (message) {
                 .call => |call| if (call.value != 0) try written_accounts.put(call.recipient, {}),
                 .create => {},
             }
-            var pre_delegated = std.AutoHashMap(Address, bool).init(allocator);
+            var pre_delegated = Address.HashMap(bool).init(allocator);
             defer pre_delegated.deinit();
-            var delegation_set_for = std.AutoHashMap(Address, void).init(allocator);
+            var delegation_set_for = Address.HashMap(void).init(allocator);
             defer delegation_set_for.deinit();
             for (scope.authorization_list) |authorization| {
                 const outcome = try applyAuthorizationTuple(
@@ -386,9 +386,9 @@ pub fn ImplType(
             chain_id: u256,
             tuple: transaction.AuthorizationTuple,
             gas: *PreExecutionGas,
-            written_accounts: *std.AutoHashMap(Address, void),
-            pre_delegated_by_authority: *std.AutoHashMap(Address, bool),
-            delegation_set_for: *std.AutoHashMap(Address, void),
+            written_accounts: *Address.HashMap(void),
+            pre_delegated_by_authority: *Address.HashMap(bool),
+            delegation_set_for: *Address.HashMap(void),
         ) !AuthorizationTupleOutcome {
             const eip7702 = executor.eip7702;
             if (!eip7702.authorizationSignatureShapeValid(
@@ -423,7 +423,7 @@ pub fn ImplType(
                 return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
             }
 
-            const clears_delegation = std.mem.eql(u8, &tuple.target, &address.zero_address);
+            const clears_delegation = Address.eql(tuple.target, address.zero_address);
             const adjustment = authorization_spec.successGasAdjustment(.{
                 .account_exists = account_exists,
                 .account_already_written = written_accounts.contains(tuple.signer),

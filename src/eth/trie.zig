@@ -25,7 +25,7 @@ const StructuralTrie = mpt.Trie(KeccakContext);
 
 const AddressKeyContext = struct {
     pub fn trieKey(_: @This(), target: address.Address) mpt.Root {
-        return crypto.keccak256(&target);
+        return crypto.keccak256(target.asBytes());
     }
 };
 
@@ -234,7 +234,7 @@ const max_rlp_account: Account = .{
 pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
 pub const AccountValueBuffer = [fixedRlpEncodedLen(Account, max_rlp_account)]u8;
 
-pub const AccountFacts = SparseHashMap(address.Address, ?Account);
+pub const AccountFacts = @import("../state/sparse_hash_map.zig").WithContext(address.Address, ?Account, address.Address.HashContext);
 
 pub const Update = mpt.Update;
 
@@ -527,7 +527,7 @@ fn storageRootAfterChangesIndexed(
     var index: u32 = 0;
     while (index < changes.storage_writes.len()) : (index += 1) {
         const write = changes.storage_writes.at(index);
-        if (!std.mem.eql(u8, &write.address, &target)) continue;
+        if (!address.Address.eql(write.address, target)) continue;
 
         const value: ?[]const u8 = if (write.value == 0)
             null
@@ -557,7 +557,7 @@ fn storageRootAfterChangesCatalog(
     var index: u32 = 0;
     while (index < changes.storage_writes.len()) : (index += 1) {
         const write = changes.storage_writes.at(index);
-        if (!std.mem.eql(u8, &write.address, &target)) continue;
+        if (!address.Address.eql(write.address, target)) continue;
         const value: ?[]const u8 = if (write.value == 0)
             null
         else
@@ -909,7 +909,7 @@ fn changesAccount(changes: anytype, target: address.Address) ?@TypeOf(changes.ac
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
-        if (std.mem.eql(u8, &change.address, &target)) return change;
+        if (address.Address.eql(change.address, target)) return change;
     }
     return null;
 }
@@ -923,14 +923,14 @@ fn changesWipeStorage(changes: anytype, target: address.Address) bool {
     var index: u32 = 0;
     while (index < changes.storage_wipes.len()) : (index += 1) {
         const wiped = changes.storage_wipes.at(index);
-        if (std.mem.eql(u8, &wiped, &target)) return true;
+        if (address.Address.eql(wiped, target)) return true;
     }
     return false;
 }
 
 fn appendUniqueAddress(allocator: Allocator, addresses: *std.ArrayList(address.Address), target: address.Address) Allocator.Error!void {
     for (addresses.items) |existing| {
-        if (std.mem.eql(u8, &existing, &target)) return;
+        if (address.Address.eql(existing, target)) return;
     }
     try addresses.append(allocator, target);
 }

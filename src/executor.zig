@@ -27,6 +27,7 @@ const std = @import("std");
 const evmz = @import("./evm.zig");
 pub const errors = @import("./executor/error.zig");
 const Address = evmz.Address;
+const AddressWord = evmz.AddressWord;
 const AccountState = evmz.state.Account;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
@@ -79,9 +80,9 @@ const ScopeRoot = struct {
     }
 
     fn eql(a: ScopeRoot, b: ScopeRoot) bool {
-        if (!std.mem.eql(u8, &a.sender, &b.sender)) return false;
+        if (!Address.eql(a.sender, b.sender)) return false;
         if ((a.recipient == null) != (b.recipient == null)) return false;
-        if (a.recipient) |recipient| return std.mem.eql(u8, &recipient, &b.recipient.?);
+        if (a.recipient) |recipient| return Address.eql(recipient, b.recipient.?);
         return true;
     }
 };
@@ -158,8 +159,17 @@ pub fn ExecutorType(
         pub const specification = spec;
         pub const compile_options = options_value;
         pub const State = StateDomain.State;
+        pub const StateAddress = StateDomain.StateAddress;
         pub const BranchCheckpoint = State.BranchCheckpoint;
         pub const Init = ExecutorInitType(StateDomain);
+
+        pub inline fn stateAddress(value: Address) StateAddress {
+            return StateDomain.stateAddress(value);
+        }
+
+        pub inline fn executionAddress(value: AddressWord) StateAddress {
+            return StateDomain.executionAddress(value);
+        }
 
         allocator: std.mem.Allocator,
         state: State,
@@ -545,7 +555,7 @@ pub fn ExecutorType(
         }
 
         pub fn traceAccountAccess(self: *Self, account_address: Address) !void {
-            try self.state.observeAccountAccess(account_address);
+            try self.state.observeAccountAccess(stateAddress(account_address));
         }
 
         pub fn beginPreparedCodeExecution(self: *Self) void {
@@ -611,9 +621,9 @@ pub fn ExecutorType(
             sender: Address,
             recipient: ?Address,
         ) !void {
-            try self.state.warmAccount(sender);
+            try self.state.warmAccount(stateAddress(sender));
             if (recipient) |address| {
-                try self.state.warmAccount(address);
+                try self.state.warmAccount(stateAddress(address));
             }
             self.scope_root = .{ .sender = sender, .recipient = recipient };
         }
@@ -722,50 +732,66 @@ pub fn ExecutorType(
         /// Mark an account warm in the current transaction scope.
         pub fn warmAccount(self: *Self, address: Address) !void {
             self.requireTransactionScope();
-            try self.state.warmAccount(address);
+            try self.state.warmAccount(stateAddress(address));
         }
 
         /// Mark a storage slot warm in the current transaction scope.
         pub fn warmStorage(self: *Self, address: Address, key: u256) !void {
             self.requireTransactionScope();
-            try self.state.warmStorage(address, key);
+            try self.state.warmStorage(stateAddress(address), key);
         }
 
         /// Return account metadata already present in tracked state.
         pub fn getAccount(self: *const Self, address: Address) ?AccountState {
-            return self.state.getAccount(address);
+            return self.state.getAccount(stateAddress(address));
         }
 
         /// Return account metadata, loading it from the state reader if needed.
         pub fn getAccountOrLoad(self: *Self, address: Address) !?AccountState {
-            return self.state.getAccountOrLoad(address);
+            return self.state.getAccountOrLoad(stateAddress(address));
         }
 
         /// Read storage through tracked state and its canonical reader.
         pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
-            return self.state.getStorage(address, key);
+            return self.state.getStorage(stateAddress(address), key);
         }
 
         /// Read an account balance through tracked state and its canonical reader.
         pub fn getBalance(self: *Self, address: Address) !u256 {
-            return self.state.getBalance(address);
+            return self.state.getBalance(stateAddress(address));
         }
 
         /// Add balance as a direct family/STF state transition.
         pub fn addBalance(self: *Self, address: Address, value: u256) !void {
-            try self.state.addBalance(address, value);
+            try self.state.addBalance(stateAddress(address), value);
+        }
+
+        pub fn subtractBalance(self: *Self, address: Address, value: u256) !bool {
+            return self.state.subtractBalance(stateAddress(address), value);
+        }
+
+        pub fn setNonce(self: *Self, address: Address, nonce: u64) !void {
+            try self.state.setNonce(stateAddress(address), nonce);
+        }
+
+        pub fn touchAccount(self: *Self, address: Address) !void {
+            try self.state.touchAccount(stateAddress(address));
         }
 
         /// Record one semantic account access without changing warmth or
         /// loading account metadata.
         pub fn observeAccountAccess(self: *Self, address_value: Address) !void {
             self.requireTransactionScope();
-            try self.state.observeAccountAccess(address_value);
+            try self.state.observeAccountAccess(stateAddress(address_value));
         }
 
         /// Set account code as a direct family/STF state transition.
         pub fn setCode(self: *Self, address: Address, code: []const u8) !void {
-            try self.state.setCode(address, code);
+            try self.state.setCode(stateAddress(address), code);
+        }
+
+        pub fn clearCode(self: *Self, address: Address) !void {
+            try self.state.clearCode(stateAddress(address));
         }
 
         pub fn logView(self: *const Self) State.LogView {
@@ -956,12 +982,12 @@ pub fn ExecutorType(
 
         /// Read account code through tracked state and its canonical reader.
         pub fn getCode(self: *Self, address: Address) ![]const u8 {
-            return self.state.getCode(address);
+            return self.state.getCode(stateAddress(address));
         }
 
         /// Test code presence from authenticated account metadata.
         pub fn accountHasCode(self: *Self, address: Address) !bool {
-            return self.state.accountHasCode(address);
+            return self.state.accountHasCode(stateAddress(address));
         }
 
         /// Prepare code according to the executor preprocessing configuration.
@@ -1201,8 +1227,8 @@ pub fn ExecutorType(
         /// Transfer value between accounts, returning false on insufficient balance.
         pub fn transferValue(self: *Self, sender: Address, recipient: Address, value: u256) !bool {
             if (value == 0) return true;
-            if (!try self.state.subtractBalance(sender, value)) return false;
-            try self.state.addBalance(recipient, value);
+            if (!try self.state.subtractBalance(stateAddress(sender), value)) return false;
+            try self.state.addBalance(stateAddress(recipient), value);
             try transfer_logs.emit(self, .{
                 .from = sender,
                 .to = recipient,
@@ -1214,7 +1240,7 @@ pub fn ExecutorType(
         /// Increment an account nonce, saturating at `maxInt(u64)`.
         pub fn incrementNonce(self: *Self, address: Address) !void {
             const account = try self.getAccountOrLoad(address) orelse AccountState{};
-            try self.state.setNonce(address, std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
+            try self.state.setNonce(stateAddress(address), std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
         }
 
         /// Return whether an interpreter status should revert execution state.

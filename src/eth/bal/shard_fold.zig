@@ -319,7 +319,7 @@ const CanonicalAccount = struct {
     }
 
     fn matchesClaim(self: *const CanonicalAccount, expected: bal.AccountChanges) bool {
-        if (!std.mem.eql(u8, &self.address, &expected.address) or
+        if (!bal.Address.eql(self.address, expected.address) or
             !self.storageChangesMatch(expected.storage_changes) or
             !self.storageReadsMatch(expected.storage_reads) or
             !bal.changesEql(bal.BalanceChange, expected.balance_changes, self.fold.balance_changes.items) or
@@ -483,7 +483,7 @@ fn rejectDuplicateCodeIndices(changes: []const bal.CodeChange) ShardFold.Error!v
 }
 
 fn accountIndexLessThan(addresses: []const bal.Address, lhs: usize, rhs: usize) bool {
-    return std.mem.order(u8, &addresses[lhs], &addresses[rhs]) == .lt;
+    return bal.Address.order(addresses[lhs], addresses[rhs]) == .lt;
 }
 
 fn storageChangeIndexLessThan(
@@ -525,8 +525,8 @@ fn deinitAccount(allocator: Allocator, account: *const bal.AccountChanges) void 
 
 test "observation append projects reads writes and code at one index" {
     const allocator = std.testing.allocator;
-    var target: bal.Address = @splat(0);
-    target[target.len - 1] = 1;
+    var target = bal.Address.fromBytes(@splat(0));
+    target.bytes[bal.Address.len - 1] = 1;
     const code = [_]u8{ 0x60, 0x00 };
     var storage = [_]observation.StorageObservation{
         .{ .slot = 1, .original = 5, .current = 5 },
@@ -574,8 +574,8 @@ test "large account fold canonicalizes through indirect order" {
     defer fold.deinit();
 
     for (0..32) |index| {
-        var target: bal.Address = @splat(0);
-        target[target.len - 1] = @intCast(32 - index);
+        var target = bal.Address.fromBytes(@splat(0));
+        target.bytes[bal.Address.len - 1] = @intCast(32 - index);
         try fold.appendObservation(.{
             .address = target,
             .balance = .{ .original = 0, .current = 1 },
@@ -586,7 +586,7 @@ test "large account fold canonicalizes through indirect order" {
     defer result.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 32), result.accounts.len);
     for (result.accounts, 1..) |account, expected| {
-        try std.testing.expectEqual(@as(u8, @intCast(expected)), account.address[account.address.len - 1]);
+        try std.testing.expectEqual(@as(u8, @intCast(expected)), account.address.bytes[bal.Address.len - 1]);
     }
 }
 
@@ -595,7 +595,7 @@ test "large storage fold canonicalizes through indirect order" {
     var fold = ShardFold.init(allocator);
     defer fold.deinit();
 
-    const target: bal.Address = @splat(1);
+    const target = bal.Address.fromBytes(@splat(1));
     for (0..32) |index| {
         const slot: u256 = @intCast(32 - index);
         var storage = [_]observation.StorageObservation{.{
@@ -621,7 +621,7 @@ test "large storage fold canonicalizes through indirect order" {
 
 test "claim comparison preserves mismatch materialization" {
     const allocator = std.testing.allocator;
-    const target: bal.Address = @splat(1);
+    const target = bal.Address.fromBytes(@splat(1));
     var storage = [_]observation.StorageObservation{
         .{ .slot = 2, .original = 0, .current = 3 },
         .{ .slot = 1, .original = 4, .current = 4 },

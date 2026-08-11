@@ -59,16 +59,16 @@ pub fn initializeMessageScope(
 
     switch (message) {
         .call => |call| {
-            try executor.state.warmAccount(call.sender);
-            try executor.state.warmAccount(call.recipient);
+            try executor.warmAccount(call.sender);
+            try executor.warmAccount(call.recipient);
         },
-        .create => |create| try executor.state.warmAccount(create.sender),
+        .create => |create| try executor.warmAccount(create.sender),
     }
     for (initial_warm_set.accounts) |address| {
-        try executor.state.warmAccount(address);
+        try executor.warmAccount(address);
     }
     for (initial_warm_set.storage_slots) |slot| {
-        try executor.state.warmStorage(slot.address, slot.key);
+        try executor.warmStorage(slot.address, slot.key);
     }
     executor.scope_root = switch (message) {
         .call => |call| .{

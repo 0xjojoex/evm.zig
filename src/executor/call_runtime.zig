@@ -787,13 +787,14 @@ pub fn bind(comptime Executor: type) type {
         }
 
         fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.execution.DelegatedAccountAccess {
-            const already_warm = self.state.isAccountWarm(target);
+            const state_target = Executor.stateAddress(target);
+            const already_warm = self.state.isAccountWarm(state_target);
             const access = spec.call.topLevelDelegatedAccountAccess(.{
                 .target_is_native_contract = nativeContractActive(target),
                 .already_warm = already_warm,
             }) orelse return null;
             if (access.status == .cold and !already_warm) {
-                try self.state.warmAccount(target);
+                try self.state.warmAccount(state_target);
             }
             return access;
         }
@@ -811,11 +812,11 @@ pub fn bind(comptime Executor: type) type {
             value: u256,
             gas: *ExecutionGas,
         ) !TopFrameStateGasCharge {
-            const same_address = std.mem.eql(u8, &sender, &recipient);
+            const same_address = Address.eql(sender, recipient);
             const creates_account = if (value == 0 or same_address)
                 false
             else
-                !try self.state.accountExists(recipient);
+                !try self.state.accountExists(Executor.stateAddress(recipient));
             const charge_i64 = spec.call.topFrameValueTransferStateGas(.{
                 .value = value,
                 .same_address = same_address,
@@ -831,7 +832,7 @@ pub fn bind(comptime Executor: type) type {
         ) !TopFrameStateGasCharge {
             // The integrated rule compares the pre-transaction account to the
             // empty account value. Storage does not make an account alive.
-            const target_alive = if (try self.state.getAccountOrLoad(options.recipient)) |account|
+            const target_alive = if (try self.state.getAccountOrLoad(Executor.stateAddress(options.recipient))) |account|
                 account.nonce != 0 or
                     account.balance != 0 or
                     !std.mem.eql(u8, &account.code_hash, &evmz.crypto.keccak256_empty)
@@ -1311,11 +1312,11 @@ pub fn bind(comptime Executor: type) type {
 
         fn touchEmptyCallRecipient(self: *Executor, msg: Host.Message) !void {
             if (msg.kind != .call or !spec.call.touches_empty_recipient) return;
-            try self.state.touchAccount(msg.recipient);
+            try self.state.touchAccount(Executor.stateAddress(msg.recipient));
         }
 
         pub fn resolveCode(self: *Executor, address: Address) !ResolvedCode {
-            const original = try self.state.getCodeView(address);
+            const original = try self.state.getCodeView(Executor.stateAddress(address));
             if (eip7702.delegationTarget(original.bytes)) |target| {
                 return .{
                     .address = target,
@@ -1331,12 +1332,12 @@ pub fn bind(comptime Executor: type) type {
         }
 
         pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !State.CodeView {
-            if (resolved.delegated) return self.state.getCodeView(resolved.address);
+            if (resolved.delegated) return self.state.getCodeView(Executor.stateAddress(resolved.address));
             return resolved.original_view;
         }
 
         fn hasBalance(self: *Executor, address: Address, value: u256) !bool {
-            const account = try self.state.getAccountOrLoad(address) orelse return value == 0;
+            const account = try self.state.getAccountOrLoad(Executor.stateAddress(address)) orelse return value == 0;
             return account.balance >= value;
         }
 
@@ -1422,7 +1423,7 @@ pub fn bind(comptime Executor: type) type {
             const next_nonce = std.math.add(u64, caller_nonce, 1) catch
                 return .{ .immediate = createFailureWithCause(self, msg.recipient, msg.gas, msg.gas_reservoir, .invalid, .nonce_overflow) };
             try warmCreatedAddressIfNeeded(self, msg.recipient);
-            try self.state.setNonce(msg.sender, next_nonce);
+            try self.state.setNonce(Executor.stateAddress(msg.sender), next_nonce);
             return beginPreparedCreate(self, msg);
         }
 
@@ -1467,16 +1468,16 @@ pub fn bind(comptime Executor: type) type {
                 ) };
             }
 
-            _ = try self.state.subtractBalance(msg.sender, msg.value);
-            try self.state.addBalance(create_address, msg.value);
+            _ = try self.state.subtractBalance(Executor.stateAddress(msg.sender), msg.value);
+            try self.state.addBalance(Executor.stateAddress(create_address), msg.value);
             try executor_module.transfer_logs.emit(self, .{
                 .from = msg.sender,
                 .to = create_address,
                 .amount = msg.value,
             });
-            try self.state.setNonce(create_address, spec.create.initial_nonce);
-            try self.state.clearCode(create_address);
-            try self.state.markCreatedContract(create_address);
+            try self.state.setNonce(Executor.stateAddress(create_address), spec.create.initial_nonce);
+            try self.state.clearCode(Executor.stateAddress(create_address));
+            try self.state.markCreatedContract(Executor.stateAddress(create_address));
 
             const child_msg = Host.Message{
                 .depth = msg.depth,
@@ -1555,7 +1556,7 @@ pub fn bind(comptime Executor: type) type {
                 return createFailureFromResult(self, child.address, deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
             }
 
-            try self.state.setCode(child.address, output);
+            try self.state.setCode(Executor.stateAddress(child.address), output);
             checkpoint.commit();
 
             return Host.Result.fromCreate(child.address, .fromExecution(deposit_result, false));
@@ -1598,7 +1599,7 @@ pub fn bind(comptime Executor: type) type {
 
         fn createCollision(self: *Executor, address: Address) !bool {
             if (nativeContractActive(address)) return true;
-            if (try self.state.getAccountOrLoad(address)) |account| {
+            if (try self.state.getAccountOrLoad(Executor.stateAddress(address))) |account| {
                 if (account.nonce != 0) return true;
             }
             // EIP-7610 clarifies this rule retroactively for every Ethereum
@@ -1606,8 +1607,8 @@ pub fn bind(comptime Executor: type) type {
             // short-circuit that. EIP-161 deadness ignores storage, so a
             // storage-bearing account reads as absent, yet the state trie keeps
             // its leaf and creating over it would strand the storage.
-            return (try self.state.accountHasCode(address)) or
-                (try self.state.accountHasStorage(address));
+            return (try self.state.accountHasCode(Executor.stateAddress(address))) or
+                (try self.state.accountHasStorage(Executor.stateAddress(address)));
         }
 
         inline fn nativeContractActive(address: Address) bool {

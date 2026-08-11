@@ -135,7 +135,7 @@ pub const BlockBuilder = struct {
 const ObservationFold = struct {
     allocator: Allocator,
     accounts: std.ArrayList(FoldAccount) = .empty,
-    indices: std.AutoHashMap(Address, usize),
+    indices: Address.HashMap(usize),
 
     fn init(allocator: Allocator) ObservationFold {
         return .{
@@ -179,7 +179,7 @@ const ObservationFold = struct {
             const fact = view.storage.at(storage_index) orelse
                 return error.IncompleteStorageObservation;
             if (previous_address == null or
-                !std.mem.eql(u8, &previous_address.?, &fact.address))
+                !Address.eql(previous_address.?, fact.address))
             {
                 previous_address = fact.address;
                 previous_account_index = try self.accountIndexFor(fact.address);
@@ -200,7 +200,7 @@ const ObservationFold = struct {
     fn accountIndexFor(self: *ObservationFold, target: Address) !usize {
         if (self.indices.count() == 0) {
             for (self.accounts.items, 0..) |account, index| {
-                if (std.mem.eql(u8, &account.address, &target)) return index;
+                if (Address.eql(account.address, target)) return index;
             }
             if (self.accounts.items.len == linear_index_limit) {
                 try self.indices.ensureTotalCapacity(linear_index_limit + 1);
@@ -395,7 +395,7 @@ fn accountOrZero(value: anytype) Account {
 }
 
 fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
-    return std.mem.order(u8, &lhs.address, &rhs.address) == .lt;
+    return Address.order(lhs.address, rhs.address) == .lt;
 }
 
 fn storageObservationLessThan(
@@ -464,7 +464,7 @@ test "existence-only semantic access does not require account fields" {
     var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
     defer transition.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), transition.accounts.len);
-    try std.testing.expectEqualSlices(u8, &target, &transition.accounts[0].address);
+    try std.testing.expectEqual(target, transition.accounts[0].address);
     try std.testing.expectEqual(@as(?observation.ValueObservation, null), transition.accounts[0].balance);
     try std.testing.expectEqual(@as(?observation.NonceObservation, null), transition.accounts[0].nonce);
     try std.testing.expectEqual(@as(?observation.CodeObservation, null), transition.accounts[0].code);
@@ -571,7 +571,7 @@ test "block builder coalesces transitions at one access index" {
     defer reference.deinit(allocator);
     try expectEqualEncoded(allocator, reference, result);
     try std.testing.expectEqual(@as(usize, 1), result.accounts.len);
-    try std.testing.expectEqualSlices(u8, &target, &result.accounts[0].address);
+    try std.testing.expectEqual(target, result.accounts[0].address);
     try std.testing.expectEqual(@as(usize, 1), result.accounts[0].balance_changes.len);
     try std.testing.expectEqual(
         @as(bal.BlockAccessIndex, 3),

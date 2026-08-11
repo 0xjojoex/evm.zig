@@ -586,7 +586,7 @@ pub const CallFrame = struct {
         return frame_result;
     }
 
-    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) !void {
+    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.AddressWord) !void {
         try self.host.observeAccountAccess(account_address, self.msg.depth);
     }
 };

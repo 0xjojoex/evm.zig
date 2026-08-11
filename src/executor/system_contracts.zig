@@ -347,7 +347,7 @@ test "before block calls Prague and Cancun system contracts" {
         .parent_beacon_block_root = beacon_root,
     });
     for (calls.slice()) |call| {
-        try std.testing.expectEqualSlices(u8, &ethereum.system_address, &call.sender);
+        try std.testing.expectEqual(ethereum.system_address, call.sender);
         try std.testing.expectEqual(@as(u64, 0), call.state_gas);
     }
 

@@ -447,7 +447,7 @@ fn isFilteredPrecompile(row: call_arena.Row, options: FlatOptions) bool {
     if (options.include_precompiles or row.parent_index == null) return false;
     if (row.kind != .call and row.kind != .staticcall) return false;
     for (options.active_precompiles) |address| {
-        if (std.mem.eql(u8, &address, &row.to)) return true;
+        if (Address.eql(address, row.to)) return true;
     }
     return false;
 }
@@ -485,7 +485,7 @@ fn flatKind(kind: call_arena.Kind) []const u8 {
 }
 
 fn writeAddress(writer: *std.Io.Writer, address: Address) std.Io.Writer.Error!void {
-    try writeBytes(writer, &address);
+    try writeBytes(writer, address.asBytes());
 }
 
 fn writeBytes(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
@@ -510,9 +510,9 @@ test "nested Geth projection preserves tree order and root gas context" {
     const root = try arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0x11),
-        .to = @splat(0x22),
-        .code_address = @splat(0x22),
+        .from = Address.fromBytes(@splat(0x11)),
+        .to = Address.fromBytes(@splat(0x22)),
+        .code_address = Address.fromBytes(@splat(0x22)),
         .value = 3,
         .gas = 100,
         .input = &.{0xaa},
@@ -520,9 +520,9 @@ test "nested Geth projection preserves tree order and root gas context" {
     const child = try arena.start(.{
         .depth = 1,
         .kind = .staticcall,
-        .from = @splat(0x22),
-        .to = @splat(0x33),
-        .code_address = @splat(0x33),
+        .from = Address.fromBytes(@splat(0x22)),
+        .to = Address.fromBytes(@splat(0x33)),
+        .code_address = Address.fromBytes(@splat(0x33)),
         .gas = 40,
         .input = &.{0xbb},
     });
@@ -549,17 +549,17 @@ test "nested Geth projection hides failed create destination and supports only t
     const root = try arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0x11),
-        .to = @splat(0x22),
-        .code_address = @splat(0x22),
+        .from = Address.fromBytes(@splat(0x11)),
+        .to = Address.fromBytes(@splat(0x22)),
+        .code_address = Address.fromBytes(@splat(0x22)),
         .gas = 100,
     });
     const create = try arena.start(.{
         .depth = 1,
         .kind = .create,
-        .from = @splat(0x22),
-        .to = @splat(0x44),
-        .code_address = @splat(0x44),
+        .from = Address.fromBytes(@splat(0x22)),
+        .to = Address.fromBytes(@splat(0x44)),
+        .code_address = Address.fromBytes(@splat(0x44)),
         .gas = 50,
     });
     try arena.finishCall(create, .{ .status = .contract_address_collision, .gas_left = 0 });
@@ -585,34 +585,34 @@ test "flat projection filters precompiles and compresses trace addresses" {
     const root = try arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0x11),
-        .to = @splat(0x22),
-        .code_address = @splat(0x22),
+        .from = Address.fromBytes(@splat(0x11)),
+        .to = Address.fromBytes(@splat(0x22)),
+        .code_address = Address.fromBytes(@splat(0x22)),
         .gas = 100,
     });
     const precompile = try arena.start(.{
         .depth = 1,
         .kind = .call,
-        .from = @splat(0x22),
-        .to = @splat(0x04),
-        .code_address = @splat(0x04),
+        .from = Address.fromBytes(@splat(0x22)),
+        .to = Address.fromBytes(@splat(0x04)),
+        .code_address = Address.fromBytes(@splat(0x04)),
         .gas = 10,
     });
     try arena.finishCall(precompile, .{ .status = .success, .gas_left = 5 });
     const child = try arena.start(.{
         .depth = 1,
         .kind = .call,
-        .from = @splat(0x22),
-        .to = @splat(0x33),
-        .code_address = @splat(0x33),
+        .from = Address.fromBytes(@splat(0x22)),
+        .to = Address.fromBytes(@splat(0x33)),
+        .code_address = Address.fromBytes(@splat(0x33)),
         .gas = 30,
     });
     const selfdestruct = try arena.start(.{
         .depth = 2,
         .kind = .selfdestruct,
-        .from = @splat(0x33),
-        .to = @splat(0x44),
-        .code_address = @splat(0x33),
+        .from = Address.fromBytes(@splat(0x33)),
+        .to = Address.fromBytes(@splat(0x44)),
+        .code_address = Address.fromBytes(@splat(0x33)),
         .value = 9,
     });
     try arena.finishCall(selfdestruct, .{ .status = .success, .gas_left = 0 });
@@ -620,7 +620,7 @@ test "flat projection filters precompiles and compresses trace addresses" {
     try arena.finishCall(root, .{ .status = .success, .gas_left = 20 });
     const span = try arena.finish();
 
-    const active_precompiles = [_]Address{@splat(0x04)};
+    const active_precompiles = [_]Address{Address.fromBytes(@splat(0x04))};
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try writeFlat(std.testing.allocator, &output.writer, span, .{
@@ -649,9 +649,9 @@ test "projection validates the whole span before writing" {
         .child_ordinal = 0,
         .depth = 0,
         .kind = .call,
-        .from = @splat(0),
-        .to = @splat(0),
-        .code_address = @splat(0),
+        .from = Address.fromBytes(@splat(0)),
+        .to = Address.fromBytes(@splat(0)),
+        .code_address = Address.fromBytes(@splat(0)),
         .value = 0,
         .gas = 1,
         .input = .{},
@@ -671,9 +671,9 @@ test "projection validates the whole span before writing" {
             .child_ordinal = 0,
             .depth = 0,
             .kind = .call,
-            .from = @splat(0),
-            .to = @splat(0),
-            .code_address = @splat(0),
+            .from = Address.fromBytes(@splat(0)),
+            .to = Address.fromBytes(@splat(0)),
+            .code_address = Address.fromBytes(@splat(0)),
             .value = 0,
             .gas = 1,
             .input = .{},
@@ -684,9 +684,9 @@ test "projection validates the whole span before writing" {
             .child_ordinal = 0,
             .depth = 2,
             .kind = .call,
-            .from = @splat(0),
-            .to = @splat(0),
-            .code_address = @splat(0),
+            .from = Address.fromBytes(@splat(0)),
+            .to = Address.fromBytes(@splat(0)),
+            .code_address = Address.fromBytes(@splat(0)),
             .value = 0,
             .gas = 1,
             .input = .{},

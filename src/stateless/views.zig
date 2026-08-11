@@ -97,7 +97,7 @@ pub fn ViewType(comptime State: type) type {
                 return @intCast(self.ids().len);
             }
 
-            pub fn at(self: StorageWipes, index: u32) [20]u8 {
+            pub fn at(self: StorageWipes, index: u32) Address {
                 const id = self.ids()[index];
                 return self.state.plan.accountAddress(id);
             }

@@ -78,7 +78,7 @@ test "value transfer log metadata comes from the exact spec" {
 
     try std.testing.expectEqual(@as(usize, 1), executor.state.logs.items.len);
     const event_log = executor.state.logs.items[0];
-    try std.testing.expectEqualSlices(u8, &evmz.addr(0x77), &event_log.address);
+    try std.testing.expectEqual(evmz.addr(0x77), event_log.address);
     try std.testing.expectEqual(@as(usize, 3), event_log.topics.len);
     try std.testing.expectEqual(@as(u256, 0x1234), event_log.topics[0]);
     try std.testing.expectEqual(evmz.address.toU256(evmz.addr(1)), event_log.topics[1]);

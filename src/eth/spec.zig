@@ -471,7 +471,7 @@ const semantics = struct {
     }
 
     fn amsterdamValueTransferLog(input: execution.ValueTransferInput) ?execution.ValueTransferLog {
-        if (input.amount == 0 or std.mem.eql(u8, &input.from, &input.to)) return null;
+        if (input.amount == 0 or Address.eql(input.from, input.to)) return null;
         return .{ .address = eth_system.system_address, .topic = eth_system.value_transfer_log_topic };
     }
 };

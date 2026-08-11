@@ -201,6 +201,7 @@ fn runZigHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize) 
     defer counting_host.deinit();
     try counting_host.seedStorage(common.contract_address, 0, 1);
     var host = makeHost(&counting_host);
+    const contract_word: evmz.AddressWord = .fromAddress(common.contract_address);
     var code_buffer: [32]u8 = undefined;
     var msg = Host.Message{
         .depth = 1,
@@ -218,14 +219,14 @@ fn runZigHostOp(allocator: std.mem.Allocator, op: Operation, iterations: usize) 
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         switch (op) {
-            .host_storage_read => std.mem.doNotOptimizeAway(host.getStorage(common.contract_address, 0)),
-            .host_storage_write => std.mem.doNotOptimizeAway(try host.setStorage(common.contract_address, 0, 1)),
-            .host_access_storage => std.mem.doNotOptimizeAway(try host.accessStorage(common.contract_address, 0)),
-            .host_account_exists => std.mem.doNotOptimizeAway(try host.accountExists(common.contract_address)),
-            .host_balance => std.mem.doNotOptimizeAway(try host.getBalance(common.contract_address)),
-            .host_code_size => std.mem.doNotOptimizeAway(try host.getCodeSize(common.contract_address)),
-            .host_code_hash => std.mem.doNotOptimizeAway(try host.getCodeHash(common.contract_address)),
-            .host_copy_code => std.mem.doNotOptimizeAway(try host.copyCode(common.contract_address, 0, &code_buffer)),
+            .host_storage_read => std.mem.doNotOptimizeAway(host.getStorage(contract_word, 0)),
+            .host_storage_write => std.mem.doNotOptimizeAway(try host.setStorage(contract_word, 0, 1)),
+            .host_access_storage => std.mem.doNotOptimizeAway(try host.accessStorage(contract_word, 0)),
+            .host_account_exists => std.mem.doNotOptimizeAway(try host.accountExists(contract_word)),
+            .host_balance => std.mem.doNotOptimizeAway(try host.getBalance(contract_word)),
+            .host_code_size => std.mem.doNotOptimizeAway(try host.getCodeSize(contract_word)),
+            .host_code_hash => std.mem.doNotOptimizeAway(try host.getCodeHash(contract_word)),
+            .host_copy_code => std.mem.doNotOptimizeAway(try host.copyCode(contract_word, 0, &code_buffer)),
             .host_execution_context => std.mem.doNotOptimizeAway(try host.getExecutionContext()),
             .host_call => {
                 msg.gas = common.max_gas - @as(i64, @intCast(i & 0xff));

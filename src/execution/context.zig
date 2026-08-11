@@ -94,7 +94,7 @@ test "execution context equality compares borrowed blob values" {
     var b_hashes = [_]u256{ 41, 43 };
     const a: ExecutionContext = .{
         .chain = .{ .chain_id = 7 },
-        .transaction = .{ .origin = [_]u8{0x11} ** 20, .blob_hashes = &a_hashes },
+        .transaction = .{ .origin = Address.fromBytes([_]u8{0x11} ** 20), .blob_hashes = &a_hashes },
     };
     var b = a;
     b.transaction.blob_hashes = &b_hashes;

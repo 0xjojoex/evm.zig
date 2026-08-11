@@ -3,6 +3,7 @@ const evmz = @import("evmz");
 const cli = @import("cli.zig");
 
 pub const Address = evmz.Address;
+pub const AddressWord = evmz.AddressWord;
 pub const Host = evmz.Host;
 
 pub const caller_address = evmz.addr(0x1000000000000000000000000000000000000001);
@@ -23,7 +24,7 @@ pub fn benchmarkAllocator(init: std.process.Init) !std.mem.Allocator {
 }
 
 const StorageKey = struct {
-    address: Address,
+    address: AddressWord,
     key: u256,
 };
 
@@ -105,7 +106,7 @@ pub const CountingHost = struct {
     }
 
     pub fn seedStorage(self: *CountingHost, address: Address, key: u256, value: u256) !void {
-        try self.storage.put(.{ .address = address, .key = key }, .{ .value = value });
+        try self.storage.put(.{ .address = .fromAddress(address), .key = key }, .{ .value = value });
     }
 
     pub fn host(self: *CountingHost) Host {
@@ -133,28 +134,28 @@ pub const CountingHost = struct {
         } };
     }
 
-    noinline fn accountExists(ptr: *anyopaque, address: Address) !bool {
+    noinline fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.account_exists += 1;
         return false;
     }
 
-    noinline fn getBalance(ptr: *anyopaque, address: Address) !u256 {
+    noinline fn getBalance(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.balance += 1;
         return 0;
     }
 
-    noinline fn getNonce(ptr: *anyopaque, address: Address) !u64 {
+    noinline fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.nonce += 1;
         return 0;
     }
 
-    noinline fn copyCode(ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+    noinline fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         _ = code_offset;
@@ -163,28 +164,28 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn getCodeSize(ptr: *anyopaque, address: Address) !u256 {
+    noinline fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.code_size += 1;
         return 0;
     }
 
-    noinline fn getCodeHash(ptr: *anyopaque, address: Address) !u256 {
+    noinline fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.code_hash += 1;
         return 0;
     }
 
-    noinline fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+    noinline fn getStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_read += 1;
         const slot = self.storage.get(.{ .address = address, .key = key }) orelse return 0;
         return slot.value;
     }
 
-    noinline fn setStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStatus {
+    noinline fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_write += 1;
 
@@ -199,7 +200,7 @@ pub const CountingHost = struct {
         return .modified;
     }
 
-    noinline fn loadStorage(ptr: *anyopaque, address: Address, key: u256) !Host.StorageLoadResult {
+    noinline fn loadStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.StorageLoadResult {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_load += 1;
         const result = try self.storage.getOrPut(.{ .address = address, .key = key });
@@ -212,7 +213,7 @@ pub const CountingHost = struct {
         };
     }
 
-    noinline fn storeStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+    noinline fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_store += 1;
 
@@ -258,14 +259,14 @@ pub const CountingHost = struct {
         return self.execution_context;
     }
 
-    noinline fn accessAccount(ptr: *anyopaque, address: Address) !Host.AccessStatus {
+    noinline fn accessAccount(ptr: *anyopaque, address: AddressWord) !Host.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.access_account += 1;
         return .cold;
     }
 
-    noinline fn accessStorage(ptr: *anyopaque, address: Address, key: u256) !Host.AccessStatus {
+    noinline fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.access_storage += 1;
         const result = try self.storage.getOrPut(.{ .address = address, .key = key });
@@ -275,7 +276,7 @@ pub const CountingHost = struct {
         return if (was_warm) .warm else .cold;
     }
 
-    noinline fn accessDelegatedAccount(ptr: *anyopaque, address: Address) !?Host.AccessStatus {
+    noinline fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.access_delegated_account += 1;
@@ -322,12 +323,13 @@ test "counting host classifies same-value storage writes as assigned" {
     var counting_host = CountingHost.init(std.testing.allocator, .mock);
     defer counting_host.deinit();
     var host = counting_host.host();
+    const contract_word: AddressWord = .fromAddress(contract_address);
 
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 0));
-    try std.testing.expectEqual(Host.StorageStatus.added, try host.setStorage(contract_address, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.deleted, try host.setStorage(contract_address, 0, 0));
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_address, 0, 0));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
+    try std.testing.expectEqual(Host.StorageStatus.added, try host.setStorage(contract_word, 0, 1));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 1));
+    try std.testing.expectEqual(Host.StorageStatus.deleted, try host.setStorage(contract_word, 0, 0));
+    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
 }
 
 test "counting host tracks storage warmth independently from values" {
@@ -336,14 +338,16 @@ test "counting host tracks storage warmth independently from values" {
     try counting_host.seedStorage(contract_address, 0, 1);
     var host = counting_host.host();
     const other_address = evmz.addr(0x3000000000000000000000000000000000000003);
+    const contract_word: AddressWord = .fromAddress(contract_address);
+    const other_word: AddressWord = .fromAddress(other_address);
 
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 0));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_address, 0));
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 1));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_address, 1));
-    _ = try host.setStorage(contract_address, 2, 1);
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_address, 2));
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(other_address, 0));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 0));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_word, 0));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 1));
+    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_word, 1));
+    _ = try host.setStorage(contract_word, 2, 1);
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 2));
+    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(other_word, 0));
 }
 
 pub fn monotonicNowNs() !u64 {

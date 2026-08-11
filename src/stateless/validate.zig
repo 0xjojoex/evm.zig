@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+const address = @import("../address.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const Spec = @import("../spec.zig").Spec;
 const BlockPreparedCode = @import("../eth/BlockPreparedCode.zig");
@@ -396,7 +397,7 @@ fn parseHeader(encoded_header: []const u8) Error!ParsedHeader {
 test "normalized stateless block shape uses actual fields" {
     const base = input_mod.Block{
         .parent_hash = [_]u8{0} ** 32,
-        .fee_recipient = [_]u8{0} ** 20,
+        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
         .state_root = [_]u8{0} ** 32,
         .receipts_root = [_]u8{0} ** 32,
         .logs_bloom = [_]u8{0} ** 256,
@@ -416,7 +417,7 @@ test "normalized stateless block shape uses actual fields" {
     inactive_withdrawals.withdrawals = &.{.{
         .index = 0,
         .validator_index = 0,
-        .address = [_]u8{0} ** 20,
+        .address = address.Address.fromBytes([_]u8{0} ** 20),
         .amount = 0,
     }};
     try std.testing.expect(!blockShapeValid(.merge, inactive_withdrawals));

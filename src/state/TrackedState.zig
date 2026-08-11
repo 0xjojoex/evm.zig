@@ -17,21 +17,21 @@ const Account = @import("./Account.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
 const StateReader = @import("./Reader.zig");
 const storage = @import("./storage.zig");
-const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
+const sparse_hash_map = @import("./sparse_hash_map.zig");
 
 const TrackedState = @This();
 const StorageKey = storage.Key;
 const CodeHash = [32]u8;
 
-const AddressSet = SparseHashMap(Address, void);
-const CodeHashSet = SparseHashMap(CodeHash, void);
-const AcceptedAccountMap = SparseHashMap(Address, AcceptedAccountRow);
-const AcceptedStorageMap = SparseHashMap(StorageKey, AcceptedStorageRow);
-const TransactionAccountMap = SparseHashMap(Address, AccountRow);
-const TransactionStorageMap = SparseHashMap(StorageKey, StorageRow);
-const ScopeStorageMap = SparseHashMap(StorageKey, ScopeStorage);
-const TransientStorageMap = SparseHashMap(StorageKey, u256);
-const CodeMap = SparseHashMap(CodeHash, CodeEntry);
+const AddressSet = sparse_hash_map.WithContext(Address, void, Address.HashContext);
+const CodeHashSet = sparse_hash_map.Auto(CodeHash, void);
+const AcceptedAccountMap = sparse_hash_map.WithContext(Address, AcceptedAccountRow, Address.HashContext);
+const AcceptedStorageMap = sparse_hash_map.Auto(StorageKey, AcceptedStorageRow);
+const TransactionAccountMap = sparse_hash_map.WithContext(Address, AccountRow, Address.HashContext);
+const TransactionStorageMap = sparse_hash_map.Auto(StorageKey, StorageRow);
+const ScopeStorageMap = sparse_hash_map.Auto(StorageKey, ScopeStorage);
+const TransientStorageMap = sparse_hash_map.Auto(StorageKey, u256);
+const CodeMap = sparse_hash_map.Auto(CodeHash, CodeEntry);
 const minimum_code_chunk_bytes = 4096;
 
 pub const AccountId = TransactionAccountMap.EntryId;
@@ -1173,7 +1173,7 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
     defer old_keys.deinit(self.allocator);
     var accepted_it = self.accepted.storage.keyIterator();
     while (accepted_it.next()) |key| {
-        if (std.mem.eql(u8, &key.address, &address)) try old_keys.append(self.allocator, key.*);
+        if (Address.eql(key.address, address)) try old_keys.append(self.allocator, key.*);
     }
     for (old_keys.items) |key| {
         _ = self.accepted.storage.remove(key);
@@ -1901,7 +1901,7 @@ fn storagePresence(self: *TrackedState, address: Address) !StoragePresence {
         if (transactionStorageWiped(tx, address)) return .empty;
         var tx_it = tx.storage.iterator();
         while (tx_it.next()) |entry| {
-            if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+            if (!Address.eql(entry.key_ptr.address, address)) continue;
             const current = entry.value_ptr.current orelse continue;
             if (current != 0) return .nonempty;
             const accepted_row = self.accepted.storage.get(entry.key_ptr.*);
@@ -1916,7 +1916,7 @@ fn storagePresence(self: *TrackedState, address: Address) !StoragePresence {
     const accepted_wiped = acceptedStorageWiped(&self.accepted, address);
     var accepted_it = self.accepted.storage.iterator();
     while (accepted_it.next()) |entry| {
-        if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+        if (!Address.eql(entry.key_ptr.address, address)) continue;
         if (self.tx) |*tx| {
             if (transactionShadowsStorage(tx, entry.key_ptr.*)) continue;
         }
@@ -2406,7 +2406,7 @@ fn wipeTransactionStorage(self: *TrackedState, address: Address) !void {
     const tx = &self.tx.?;
     var it = tx.storage.iterator();
     while (it.next()) |entry| {
-        if (!std.mem.eql(u8, &entry.key_ptr.address, &address)) continue;
+        if (!Address.eql(entry.key_ptr.address, address)) continue;
         try self.appendStorageUndo(entry.entry_id, entry.value_ptr);
         entry.value_ptr.current = 0;
         entry.value_ptr.mutation.dirty = true;
@@ -2443,7 +2443,7 @@ fn compactAcceptedStorageChanges(accepted: *Accepted, address: Address) void {
     var write_index: usize = 0;
     for (accepted.changed_storage.items) |storage_id| {
         const key = accepted.storage.keyById(storage_id).*;
-        if (std.mem.eql(u8, &key.address, &address)) {
+        if (Address.eql(key.address, address)) {
             accepted.storage.valuePtrById(storage_id).changed = false;
             continue;
         }
